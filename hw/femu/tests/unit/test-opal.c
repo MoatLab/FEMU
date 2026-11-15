@@ -191,7 +191,7 @@ static void test_level0(void)
         g_assert_cmpuint(b[d[i].off + 3], ==, d[i].len);
     }
     g_assert_cmpuint(b[52], ==, 0x11);          /* Sync, Streaming */
-    g_assert_cmpuint(b[68], ==, 0x08);          /* not Locking Supported */
+    g_assert_cmpuint(b[68], ==, 0x09);          /* Supported, encryption */
     g_assert_cmpuint(be32(b + 92), ==, 4096);   /* LogicalBlockSize */
     g_assert_cmpuint(b[116], ==, 0x20);         /* SIIS 1.20 */
     g_assert_cmpuint(be16(b + 132), ==, FEMU_OPAL_COMID);
@@ -722,6 +722,9 @@ static uint64_t reply_status(int n)
     return rt[n - 4].val;
 }
 
+/* the Write parameter of the next StartSession calls */
+static int start_write = 1;
+
 /* StartSession to @sp as @auth (0: Anybody); sets *tsn, returns status */
 static uint64_t start(FemuOpal *o, uint64_t sp, uint64_t auth,
                       const char *pin, uint32_t *tsn)
@@ -732,7 +735,7 @@ static uint64_t start(FemuOpal *o, uint64_t sp, uint64_t auth,
     tb_call(&t, U_SMUID, U_START);
     tb_u(&t, HSN);
     tb_uid(&t, sp);
-    tb_u(&t, 1);
+    tb_u(&t, start_write);
     if (pin) {
         tb_c(&t, 0xF2);
         tb_u(&t, 0);
@@ -1485,6 +1488,1130 @@ static void test_s2_interface(void)
     g_free(o);
 }
 
+/* ---- S3a: the Locking SP ---- */
+
+#define U_LOCK(r)   ((r) ? 0x0000080200030000ull + (r) : 0x0000080200000001ull)
+#define U_KAES(r)   ((r) ? 0x0000080600030000ull + (r) : 0x0000080600000001ull)
+#define U_T_LOCK    0x0000080200000000ull
+#define U_MBRCTL    0x0000080300000001ull
+#define U_T_MBR     0x0000080400000000ull
+#define U_T_DS      0x0000100100000000ull
+#define U_USER(i)   (0x0000000900030001ull + (i))
+#define U_USERS     0x0000000900030000ull
+#define U_LCPIN_USER(i) (0x0000000B00030001ull + (i))
+#define U_ACE_RDLOCKED(r) (0x000000080003E000ull + (r))
+#define U_ACE_WRLOCKED(r) (0x000000080003E800ull + (r))
+#define U_ACE_GLOBAL_SET  0x000000080003F000ull
+#define U_ACE_RANGE_SET   0x000000080003F001ull
+#define U_ACE_ADMINS_CN   0x0000000800000004ull
+#define U_ACE_CPIN_USER(i) (0x000000080003A801ull + (i))
+#define M_GENKEY    0x0000000600000010ull
+#define M_REVERTSP  0x0000000600000011ull
+#define NLBAS       1000
+
+/* the erases the engine asked for */
+static struct {
+    int n;
+    uint64_t slba[32];
+    uint64_t nlb[32];
+} er;
+
+static void erase_cb(void *opaque, uint64_t slba, uint64_t nlb)
+{
+    g_assert_cmpint(er.n, <, 32);
+    er.slba[er.n] = slba;
+    er.nlb[er.n] = nlb;
+    er.n++;
+}
+
+/* exactly the erases @want, as (slba, nlb) pairs, then the log is cleared */
+static void erased(int n, const uint64_t *want)
+{
+    int i;
+
+    g_assert_cmpint(er.n, ==, n);
+    for (i = 0; i < n; i++) {
+        g_assert_cmpuint(er.slba[i], ==, want[2 * i]);
+        g_assert_cmpuint(er.nlb[i], ==, want[2 * i + 1]);
+    }
+    er.n = 0;
+}
+
+/* an active Locking SP and an Admin1 session to it */
+static FemuOpal *s3_init(uint32_t *tsn)
+{
+    FemuOpal *o = g_new(FemuOpal, 1);
+    FemuOpalCfg c = cfg;
+    uint32_t t;
+
+    c.msid.len = 6;
+    memcpy(c.msid.v, "MSID-1", 6);
+    c.nlbas = NLBAS;
+    c.erase = erase_cb;
+    femu_opal_init(o, &c);
+    g_assert_cmpuint(start(o, U_ADMINSP, U_SID, "MSID-1", &t), ==, 0);
+    g_assert_cmpuint(call0(o, t, U_LOCKINGSP, M_ACTIVATE), ==, 0);
+    eos(o, t);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", tsn), ==, 0);
+    er.n = 0;
+    return o;
+}
+
+/* Set uint columns @cols[i] = @vals[i] of @obj; -1 ends the list */
+static uint64_t lset(FemuOpal *o, uint32_t tsn, uint64_t obj, const int *cols,
+                     const uint64_t *vals, bool txn)
+{
+    Tb t = { .n = 0 };
+    int i;
+
+    if (txn) {
+        tb_c(&t, 0xFB);
+        tb_u(&t, 0);
+    }
+    tb_call(&t, obj, M_SET);
+    tb_c(&t, 0xF2);
+    tb_u(&t, 1);
+    tb_c(&t, 0xF0);
+    for (i = 0; cols[i] >= 0; i++) {
+        tb_c(&t, 0xF2);
+        tb_u(&t, cols[i]);
+        tb_u(&t, vals[i]);
+        tb_c(&t, 0xF3);
+    }
+    tb_c(&t, 0xF1);
+    tb_c(&t, 0xF3);
+    tb_end(&t);
+    return reply_status(xfer(o, &t, tsn));
+}
+
+static uint64_t range_set(FemuOpal *o, uint32_t tsn, int r, uint64_t start,
+                          uint64_t len)
+{
+    static const int cols[] = { 3, 4, -1 };
+    uint64_t vals[] = { start, len };
+
+    return lset(o, tsn, U_LOCK(r), cols, vals, false);
+}
+
+/* LockEnabled and Locked for both directions of range @r */
+static uint64_t range_lock(FemuOpal *o, uint32_t tsn, int r, bool lock)
+{
+    static const int cols[] = { 5, 6, 7, 8, -1 };
+    uint64_t vals[] = { 1, 1, lock, lock };
+
+    return lset(o, tsn, U_LOCK(r), cols, vals, false);
+}
+
+/* Set a reset_types list column of @obj */
+static uint64_t resets_set(FemuOpal *o, uint32_t tsn, uint64_t obj, int col,
+                           const int *types)
+{
+    Tb t = { .n = 0 };
+    int i;
+
+    tb_call(&t, obj, M_SET);
+    tb_c(&t, 0xF2);
+    tb_u(&t, 1);
+    tb_c(&t, 0xF0);
+    tb_c(&t, 0xF2);
+    tb_u(&t, col);
+    tb_c(&t, 0xF0);
+    for (i = 0; types[i] >= 0; i++) {
+        tb_u(&t, types[i]);
+    }
+    tb_c(&t, 0xF1);
+    tb_c(&t, 0xF3);
+    tb_c(&t, 0xF1);
+    tb_c(&t, 0xF3);
+    tb_end(&t);
+    return reply_status(xfer(o, &t, tsn));
+}
+
+/* Set the BooleanExpr of ACE @ace to @uids joined by @op (1: OR) */
+static uint64_t expr_set(FemuOpal *o, uint32_t tsn, uint64_t ace,
+                         const uint64_t *uids, int n, int op)
+{
+    static const uint8_t au_ref[] = { 0, 0, 0x0C, 0x05 };
+    static const uint8_t bool_ace[] = { 0, 0, 0x04, 0x0E };
+    Tb t = { .n = 0 };
+    int i;
+
+    tb_call(&t, ace, M_SET);
+    tb_c(&t, 0xF2);
+    tb_u(&t, 1);
+    tb_c(&t, 0xF0);
+    tb_c(&t, 0xF2);
+    tb_u(&t, 3);
+    tb_c(&t, 0xF0);
+    for (i = 0; i < n; i++) {
+        tb_c(&t, 0xF2);
+        tb_s(&t, au_ref, 4);
+        tb_uid(&t, uids[i]);
+        tb_c(&t, 0xF3);
+        if (i) {
+            tb_c(&t, 0xF2);
+            tb_s(&t, bool_ace, 4);
+            tb_u(&t, op);
+            tb_c(&t, 0xF3);
+        }
+    }
+    tb_c(&t, 0xF1);
+    tb_c(&t, 0xF3);
+    tb_c(&t, 0xF1);
+    tb_c(&t, 0xF3);
+    tb_end(&t);
+    return reply_status(xfer(o, &t, tsn));
+}
+
+/* Set[Where, Values] on a byte table */
+static uint64_t bytes_set(FemuOpal *o, uint32_t tsn, uint64_t table,
+                          uint64_t off, const char *s, bool txn)
+{
+    Tb t = { .n = 0 };
+
+    if (txn) {
+        tb_c(&t, 0xFB);
+        tb_u(&t, 0);
+    }
+    tb_call(&t, table, M_SET);
+    tb_c(&t, 0xF2);
+    tb_u(&t, 0);
+    tb_u(&t, off);
+    tb_c(&t, 0xF3);
+    tb_c(&t, 0xF2);
+    tb_u(&t, 1);
+    tb_s(&t, s, strlen(s));
+    tb_c(&t, 0xF3);
+    tb_end(&t);
+    return reply_status(xfer(o, &t, tsn));
+}
+
+/* Get[startRow, endRow] on a byte table; the bytes are rt[1] */
+static int bytes_get(FemuOpal *o, uint32_t tsn, uint64_t table,
+                     uint64_t first, uint64_t last)
+{
+    Tb t = { .n = 0 };
+
+    tb_call(&t, table, M_GET);
+    tb_c(&t, 0xF0);
+    tb_c(&t, 0xF2);
+    tb_u(&t, 1);
+    tb_u(&t, first);
+    tb_c(&t, 0xF3);
+    tb_c(&t, 0xF2);
+    tb_u(&t, 2);
+    tb_u(&t, last);
+    tb_c(&t, 0xF3);
+    tb_c(&t, 0xF1);
+    tb_end(&t);
+    return xfer(o, &t, tsn);
+}
+
+static void et(FemuOpal *o, uint32_t tsn, int abort)
+{
+    Tb t = { .n = 0 };
+
+    tb_c(&t, 0xFC);
+    tb_u(&t, abort);
+    g_assert_cmpint(xfer(o, &t, tsn), ==, 2);
+    g_assert_cmpuint(rt[1].val, ==, abort);
+}
+
+static FemuOpalAccess check(FemuOpal *o, FemuOpalOp op, uint64_t slba,
+                            uint64_t nlb)
+{
+    FemuOpalView v;
+
+    femu_opal_view(o, &v);
+    return femu_opal_access(&v, op, slba, nlb);
+}
+
+static uint8_t l0_locking(FemuOpal *o)
+{
+    uint8_t b[256];
+
+    femu_opal_level0(o, b, sizeof(b));
+    return b[68];
+}
+
+/* RevertSP with KeepGlobalRangeKey = @keep (-1: no parameter) */
+static uint64_t revertsp(FemuOpal *o, uint32_t tsn, int keep)
+{
+    Tb t = { .n = 0 };
+
+    tb_call(&t, U_THISSP, M_REVERTSP);
+    if (keep >= 0) {
+        tb_c(&t, 0xF2);
+        tb_u(&t, 0x060000);
+        tb_u(&t, keep);
+        tb_c(&t, 0xF3);
+    }
+    tb_end(&t);
+    return reply_status(xfer(o, &t, tsn));
+}
+
+static void test_s3_ranges(void)
+{
+    static const uint64_t r1[] = { 100, 50 };
+    static const uint64_t back[] = { 100, 50 };
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    int n;
+
+    /* Activate keeps the data: no erase so far */
+    g_assert_cmpint(er.n, ==, 0);
+    g_assert_cmpuint(l0_locking(o), ==, 0x0B);
+    /* Range1 takes LBAs 100..149 from Global: they are erased */
+    g_assert_cmpuint(range_set(o, tsn, 1, 100, 50), ==, 0);
+    erased(1, r1);
+    n = get(o, tsn, U_LOCK(1), 3, 4);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpuint(rt[4].val, ==, 100);
+    g_assert_cmpuint(rt[8].val, ==, 50);
+    /* overlap, past the end, wrap: INVALID_PARAMETER, no change */
+    g_assert_cmpuint(range_set(o, tsn, 2, 140, 20), ==, 0x0C);
+    g_assert_cmpuint(range_set(o, tsn, 2, 990, 20), ==, 0x0C);
+    g_assert_cmpuint(range_set(o, tsn, 2, ~0ull - 5, 10), ==, 0x0C);
+    g_assert_cmpint(er.n, ==, 0);
+    /* an adjacent range is fine */
+    g_assert_cmpuint(range_set(o, tsn, 2, 150, 10), ==, 0);
+    er.n = 0;
+    /* Global has no start or length to set */
+    g_assert_cmpuint(range_set(o, tsn, 0, 0, 10), ==, 0x01);
+    /* a range set to its own extent erases nothing */
+    g_assert_cmpuint(range_set(o, tsn, 1, 100, 50), ==, 0);
+    g_assert_cmpint(er.n, ==, 0);
+    /* back to length 0: the LBAs return to Global and are erased */
+    g_assert_cmpuint(range_set(o, tsn, 1, 100, 0), ==, 0);
+    erased(1, back);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+static void test_s3_locks(void)
+{
+    static const int lor03[] = { 0, 3, -1 };
+    static const int lor3[] = { 3, -1 };
+    static const int lor00[] = { 0, 0, -1 };
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    uint8_t z[8] = { 0 };
+
+    g_assert_cmpuint(range_set(o, tsn, 1, 100, 50), ==, 0);
+    g_assert_cmpuint(range_lock(o, tsn, 1, true), ==, 0);
+    g_assert_cmpuint(l0_locking(o) & 0x04, ==, 0x04);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_WRITE, 149, 1), ==, FEMU_OPAL_DENY);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 99, 1), ==, FEMU_OPAL_MEDIA);
+    /* one locked LBA in the command denies all of it */
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_COPY_SRC, 90, 20), ==,
+                    FEMU_OPAL_DENY);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_WRITE, 150, 10), ==,
+                    FEMU_OPAL_MEDIA);
+    /* unlock: the next power cycle locks again (LockOnReset {0}) */
+    g_assert_cmpuint(range_lock(o, tsn, 1, false), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+    g_assert_cmpuint(l0_locking(o) & 0x04, ==, 0);
+    femu_opal_power_cycle(o);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    /* Global is locked now too, but its lock is not enabled */
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 0, 1), ==, FEMU_OPAL_MEDIA);
+    /* LockOnReset takes {0} or {0, 3} only */
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(resets_set(o, tsn, U_LOCK(1), 9, lor3), ==, 0x0C);
+    g_assert_cmpuint(resets_set(o, tsn, U_LOCK(1), 9, lor00), ==, 0x0C);
+    g_assert_cmpuint(resets_set(o, tsn, U_LOCK(1), 9, lor03), ==, 0);
+    g_assert_cmpuint(range_lock(o, tsn, 1, false), ==, 0);
+    /* Global: lock enabled, unlocked, LockOnReset {0} */
+    g_assert_cmpuint(range_lock(o, tsn, 0, false), ==, 0);
+    eos(o, tsn);
+    /* TPER_RESET is type 3, once ProgrammaticResetEnable is on */
+    g_assert_cmpuint(start(o, U_ADMINSP, U_SID, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(set(o, tsn, U_TPERINFO, 8, NULL, 1, false), ==, 0);
+    eos(o, tsn);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+    g_assert_cmpint(femu_opal_send(o, 2, 4, z, 8), ==, FEMU_OPAL_IF_GOOD);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    /* Global keeps {0}: still unlocked after TPER_RESET */
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 0, 1), ==, FEMU_OPAL_MEDIA);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+static void test_s3_genkey(void)
+{
+    static const uint64_t r1[] = { 100, 50 };
+    static const uint64_t glob[] = { 0, 100, 150, NLBAS - 150 };
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+
+    g_assert_cmpuint(range_set(o, tsn, 1, 100, 50), ==, 0);
+    er.n = 0;
+    g_assert_cmpuint(call0(o, tsn, U_KAES(1), M_GENKEY), ==, 0);
+    erased(1, r1);
+    g_assert_cmpuint(call0(o, tsn, U_KAES(0), M_GENKEY), ==, 0);
+    erased(2, glob);
+    /* a GenKey for an empty range erases nothing */
+    g_assert_cmpuint(call0(o, tsn, U_KAES(2), M_GENKEY), ==, 0);
+    g_assert_cmpint(er.n, ==, 0);
+    /* not a key row */
+    g_assert_cmpuint(call0(o, tsn, U_LOCK(1), M_GENKEY), ==, 0x01);
+    eos(o, tsn);
+    /* Anybody may not */
+    g_assert_cmpuint(start(o, U_LOCKINGSP, 0, NULL, &tsn), ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_KAES(1), M_GENKEY), ==, 0x01);
+    g_assert_cmpint(er.n, ==, 0);
+    eos(o, tsn);
+    /* a read-only session changes nothing, even as Admin1 */
+    start_write = 0;
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    start_write = 1;
+    g_assert_cmpuint(call0(o, tsn, U_KAES(1), M_GENKEY), ==, 0x01);
+    g_assert_cmpuint(range_set(o, tsn, 2, 300, 10), ==, 0x01);
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_DS, 0, "x", false), ==, 0x01);
+    g_assert_cmpuint(revertsp(o, tsn, -1), ==, 0x01);
+    g_assert_cmpint(er.n, ==, 0);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+static void test_s3_users(void)
+{
+    static const int rl[] = { 7, -1 };
+    static const int wl[] = { 8, -1 };
+    static const uint64_t zero[] = { 0 };
+    uint64_t u1[] = { U_USER(0) };
+    uint64_t adm_u1[] = { U_ADMINS, U_USER(0) };
+    uint64_t adm_u2[] = { U_ADMINS, U_USER(1) };
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+
+    g_assert_cmpuint(range_set(o, tsn, 1, 100, 50), ==, 0);
+    g_assert_cmpuint(range_lock(o, tsn, 1, true), ==, 0);
+    /* a disabled user cannot start a session */
+    g_assert_cmpuint(set(o, tsn, U_LCPIN_USER(0), 3, "u1", 0, false), ==, 0);
+    eos(o, tsn);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_USER(0), "u1", &tsn), ==, 0x01);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(set(o, tsn, U_USER(0), 5, NULL, 1, false), ==, 0);
+    /* RdLocked of Range1 by User1 alone; AND is not supported */
+    g_assert_cmpuint(expr_set(o, tsn, U_ACE_RDLOCKED(1), u1, 1, 1), ==, 0);
+    g_assert_cmpuint(expr_set(o, tsn, U_ACE_WRLOCKED(1), adm_u1, 2, 0),
+                     ==, 0x0C);
+    /* C_PIN_User1 Set takes Admins, or Admins OR User1 only */
+    g_assert_cmpuint(expr_set(o, tsn, U_ACE_CPIN_USER(0), adm_u2, 2, 1),
+                     ==, 0x0C);
+    g_assert_cmpuint(expr_set(o, tsn, U_ACE_CPIN_USER(0), adm_u1, 2, 1),
+                     ==, 0);
+    /* the ACE reads back as Admin bits joined by OR */
+    g_assert_cmpuint(reply_status(get(o, tsn, U_ACE_RDLOCKED(1), 3, 3)),
+                     ==, 0);
+    eos(o, tsn);
+
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_USER(0), "u1", &tsn), ==, 0);
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), rl, zero, false), ==, 0);
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), wl, zero, false), ==, 0x01);
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(2), rl, zero, false), ==, 0x01);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_WRITE, 100, 1), ==, FEMU_OPAL_DENY);
+    /* User1 may now change its own PIN, never User2's */
+    g_assert_cmpuint(set(o, tsn, U_LCPIN_USER(0), 3, "u1b", 0, false), ==, 0);
+    g_assert_cmpuint(set(o, tsn, U_LCPIN_USER(1), 3, "x", 0, false), ==, 0x01);
+    /* users cannot read the ACE table */
+    g_assert_cmpuint(reply_status(get(o, tsn, U_ACE_RDLOCKED(1), 3, 3)),
+                     ==, 0x01);
+    eos(o, tsn);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_USER(0), "u1b", &tsn), ==, 0);
+    eos(o, tsn);
+    /* by default, User2 sets its own PIN */
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(set(o, tsn, U_USER(1), 5, NULL, 1, false), ==, 0);
+    g_assert_cmpuint(set(o, tsn, U_LCPIN_USER(1), 3, "u2", 0, false), ==, 0);
+    eos(o, tsn);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_USER(1), "u2", &tsn), ==, 0);
+    g_assert_cmpuint(set(o, tsn, U_LCPIN_USER(1), 3, "u2b", 0, false), ==, 0);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+static void test_s3_mbr(void)
+{
+    static const int enable[] = { 1, -1 };
+    static const int done[] = { 2, -1 };
+    static const uint64_t one[] = { 1 };
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    uint64_t mbr_lbas = FEMU_OPAL_MBR_SIZE / 4096;
+    char b[8];
+    int n;
+
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, 4090, "hello", false), ==, 0);
+    femu_opal_mbr_read(o, 4090, b, 5);
+    g_assert(!memcmp(b, "hello", 5));
+    n = bytes_get(o, tsn, U_T_MBR, 4091, 4093);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpuint(rt[1].len, ==, 3);
+    g_assert(!memcmp(rt[1].p, "ell", 3));
+    /* an untouched chunk reads as zeros */
+    femu_opal_mbr_read(o, 1 << 20, b, 4);
+    g_assert_cmpuint(b[0] | b[1] | b[2] | b[3], ==, 0);
+    /* past the end, a reply too large: INVALID_PARAMETER */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, FEMU_OPAL_MBR_SIZE - 2, "abc",
+                               false), ==, 0x0C);
+    g_assert_cmpuint(reply_status(bytes_get(o, tsn, U_T_MBR, 0, 4095)),
+                     ==, 0x0C);
+
+    g_assert_cmpuint(lset(o, tsn, U_MBRCTL, enable, one, false), ==, 0);
+    g_assert_cmpuint(l0_locking(o) & 0x30, ==, 0x10);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 0, 8), ==, FEMU_OPAL_SHADOW);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_VERIFY, 0, 8), ==,
+                    FEMU_OPAL_SHADOW);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_WRITE, 0, 8), ==, FEMU_OPAL_DENY);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, mbr_lbas - 1, 2), ==,
+                    FEMU_OPAL_DENY);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, mbr_lbas, 2), ==,
+                    FEMU_OPAL_MEDIA);
+    /* outside the shadow, an all read-locked Read returns zeros */
+    g_assert_cmpuint(range_lock(o, tsn, 0, true), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, mbr_lbas, 2), ==,
+                    FEMU_OPAL_ZEROS);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_VERIFY, mbr_lbas, 2), ==,
+                    FEMU_OPAL_DENY);
+    g_assert_cmpuint(range_lock(o, tsn, 0, false), ==, 0);
+    /* Done hides the shadow until the next power cycle (DoneOnReset {0}) */
+    g_assert_cmpuint(lset(o, tsn, U_MBRCTL, done, one, false), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 0, 8), ==, FEMU_OPAL_MEDIA);
+    eos(o, tsn);
+    femu_opal_power_cycle(o);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 0, 8), ==, FEMU_OPAL_SHADOW);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+static void test_s3_txn(void)
+{
+    static const int cols[] = { 3, 4, -1 };
+    static const uint64_t vals[] = { 100, 50 };
+    static const uint64_t r1[] = { 100, 50 };
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    char b[4];
+
+    /* an aborted transaction erases nothing and keeps the bytes */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_DS, 0, "abc", false), ==, 0);
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), cols, vals, true), ==, 0);
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_DS, 1, "XY", false), ==, 0);
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, 0, "Z", false), ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_KAES(0), M_GENKEY), ==, 0);
+    g_assert_cmpint(er.n, ==, 0);
+    et(o, tsn, 1);
+    g_assert_cmpint(er.n, ==, 0);
+    g_assert_cmpuint(reply_status(bytes_get(o, tsn, U_T_DS, 0, 2)), ==, 0);
+    g_assert(!memcmp(rt[1].p, "abc", 3));
+    femu_opal_mbr_read(o, 0, b, 1);
+    g_assert_cmpuint(b[0], ==, 0);
+    /* the lock view shows committed state only */
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), cols, vals, true), ==, 0);
+    g_assert_cmpuint(range_lock(o, tsn, 1, true), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+    g_assert_cmpint(er.n, ==, 0);
+    /* commit: the erase happens at ET 0 */
+    et(o, tsn, 0);
+    erased(1, r1);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    /* EOS inside a transaction rolls the bytes back too */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_DS, 0, "q", true), ==, 0);
+    eos(o, tsn);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    bytes_get(o, tsn, U_T_DS, 0, 0);
+    g_assert_cmpuint(rt[1].p[0], ==, 'a');
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+static void test_s3_revertsp(void)
+{
+    static const uint64_t r1[] = { 100, 50 };
+    static const uint64_t all[] = { 0, NLBAS };
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    char b[4];
+
+    g_assert_cmpuint(range_set(o, tsn, 1, 100, 50), ==, 0);
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, 0, "m", false), ==, 0);
+    er.n = 0;
+    /* Keep with a fully locked Global range fails */
+    g_assert_cmpuint(range_lock(o, tsn, 0, true), ==, 0);
+    g_assert_cmpuint(revertsp(o, tsn, 1), ==, 0x3F);
+    g_assert_cmpuint(range_lock(o, tsn, 0, false), ==, 0);
+    /* Keep: only Range1 changes owner and key */
+    g_assert_cmpuint(revertsp(o, tsn, 1), ==, 0);
+    erased(1, r1);
+    g_assert(session_gone(o, tsn));
+    femu_opal_mbr_read(o, 0, b, 1);
+    g_assert_cmpuint(b[0], ==, 0);
+    g_assert_cmpuint(l0_locking(o), ==, 0x09);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, 0, NULL, &tsn), ==, 0x3F);
+
+    /* again, without Keep: every LBA */
+    g_assert_cmpuint(start(o, U_ADMINSP, U_SID, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_LOCKINGSP, M_ACTIVATE), ==, 0);
+    eos(o, tsn);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(revertsp(o, tsn, -1), ==, 0);
+    erased(1, all);
+
+    /* Revert of the Locking SP from the Admin SP erases too */
+    g_assert_cmpuint(start(o, U_ADMINSP, U_SID, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_LOCKINGSP, M_ACTIVATE), ==, 0);
+    g_assert_cmpint(er.n, ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_LOCKINGSP, M_REVERT), ==, 0);
+    erased(1, all);
+    /* while inactive, a revert keeps the data */
+    g_assert_cmpuint(call0(o, tsn, U_LOCKINGSP, M_REVERT), ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_ADMINSP, M_REVERT), ==, 0);
+    g_assert_cmpint(er.n, ==, 0);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+static void test_s3_tables(void)
+{
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    Tb t = { .n = 0 };
+    int n;
+
+    /* Next on the Locking table: Global, then Range1 to Range8 */
+    tb_call(&t, U_T_LOCK, M_NEXT);
+    tb_end(&t);
+    n = xfer(o, &t, tsn);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpint(n, ==, 4 + 9 + 6);
+    g_assert_cmpuint(uid_of(&rt[2]), ==, U_LOCK(0));
+    g_assert_cmpuint(uid_of(&rt[10]), ==, U_LOCK(8));
+    /* GetACL of Set on Range1 */
+    n = getacl(o, tsn, U_LOCK(1), M_SET);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpint(n, ==, 4 + 4 + 6);
+    g_assert_cmpuint(uid_of(&rt[2]), ==, U_ACE_RANGE_SET);
+    g_assert_cmpuint(uid_of(&rt[3]), ==, U_ACE_RDLOCKED(1));
+    g_assert_cmpuint(uid_of(&rt[4]), ==, U_ACE_WRLOCKED(1));
+    g_assert_cmpuint(uid_of(&rt[5]), ==, U_ACE_ADMINS_CN);
+    n = getacl(o, tsn, U_LOCK(0), M_SET);
+    g_assert_cmpuint(uid_of(&rt[2]), ==, U_ACE_GLOBAL_SET);
+    /* the K_AES Key column and the C_PIN PIN never show */
+    n = get(o, tsn, U_KAES(1), 3, 3);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpint(n, ==, 4 + 6);
+    n = get(o, tsn, U_LCPIN_USER(0), 3, 3);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpint(n, ==, 4 + 6);
+    /* the Admin SP methods do not exist here */
+    g_assert_cmpuint(call0(o, tsn, U_LOCKINGSP, M_ACTIVATE), ==, 0x01);
+    eos(o, tsn);
+    /* Anybody reads the range CommonName only */
+    g_assert_cmpuint(start(o, U_LOCKINGSP, 0, NULL, &tsn), ==, 0);
+    n = get(o, tsn, U_LOCK(1), 0, 10);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpint(n, ==, 4 + 2 * 4 + 6);
+    g_assert_cmpuint(rt[3].val, ==, 0);
+    g_assert_cmpuint(rt[7].val, ==, 2);
+    g_assert_cmpuint(reply_status(get(o, tsn, U_T_DS, 0, 0)), ==, 0x01);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* the access table on hand-built views (Core Tables 230 and 231) */
+static void test_s3_check(void)
+{
+    FemuOpalView v = { .enabled = true, .mbr_lbas = 10 };
+
+    v.r[1].start = 20;
+    v.r[1].len = 10;
+    v.r[1].rlocked = true;
+    v.r[2].start = 40;
+    v.r[2].len = 10;
+    v.r[2].wlocked = true;
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_READ, 15, 10), ==,
+                    FEMU_OPAL_DENY);
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_WRITE, 15, 10), ==,
+                    FEMU_OPAL_MEDIA);
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_READ, 40, 10), ==,
+                    FEMU_OPAL_MEDIA);
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_WRITE, 49, 2), ==,
+                    FEMU_OPAL_DENY);
+    /* shadow on: a fully read-locked Read outside it reads zeros */
+    v.shadow = true;
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_READ, 20, 10), ==,
+                    FEMU_OPAL_ZEROS);
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_READ, 15, 10), ==,
+                    FEMU_OPAL_DENY);
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_READ, 9, 2), ==,
+                    FEMU_OPAL_DENY);
+    /* inside the shadow: Read ignores locks, Verify and Copy do not */
+    v.r[0].rlocked = true;
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_READ, 0, 4), ==,
+                    FEMU_OPAL_SHADOW);
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_VERIFY, 0, 4), ==,
+                    FEMU_OPAL_DENY);
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_COPY_SRC, 0, 4), ==,
+                    FEMU_OPAL_DENY);
+    v.r[0].rlocked = false;
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_VERIFY, 0, 4), ==,
+                    FEMU_OPAL_SHADOW);
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_COPY_SRC, 0, 4), ==,
+                    FEMU_OPAL_SHADOW);
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_WRITE, 0, 4), ==,
+                    FEMU_OPAL_DENY);
+    /* an inactive Locking SP never blocks */
+    v.enabled = false;
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_WRITE, 0, 100), ==,
+                    FEMU_OPAL_MEDIA);
+}
+
+#define U_T_ACE     0x0000000800000000ull
+#define U_T_TABLE   0x0000000100000000ull
+#define U_T_TMPL    0x0000000300000000ull
+#define U_T_METHOD  0x0000000600000000ull
+#define U_T_SECRET  0x0000001D00000000ull
+#define U_LOCKINFO  0x0000080100000001ull
+#define U_ACE_ANYBODY 0x0000000800000001ull
+#define U_ACE_SET_BE  0x0000000800038001ull
+#define U_ACE_KAES_MODE 0x000000080003BFFFull
+#define U_ACE_DS_SET  0x000000080003FC01ull
+
+/* Next on @table with no parameters; returns the row count */
+static int next_rows(FemuOpal *o, uint32_t tsn, uint64_t table)
+{
+    Tb t = { .n = 0 };
+    int n;
+
+    tb_call(&t, table, M_NEXT);
+    tb_end(&t);
+    n = xfer(o, &t, tsn);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    return n - 4 - 6;
+}
+
+/* the value token of column @col in a Get reply of @n tokens, or NULL */
+static const FemuOpalTok *col_of(int n, uint64_t col)
+{
+    int i;
+
+    for (i = 2; i + 2 < n; i++) {
+        if (rt[i].type == FEMU_OPAL_TOK_CTRL && rt[i].val == 0xF2 &&
+            rt[i + 1].type == FEMU_OPAL_TOK_UINT && rt[i + 1].val == col) {
+            return &rt[i + 2];
+        }
+    }
+    return NULL;
+}
+
+static bool tok_str(const FemuOpalTok *k, const char *s)
+{
+    return k && k->type == FEMU_OPAL_TOK_BYTES && k->len == strlen(s) &&
+           !memcmp(k->p, s, k->len);
+}
+
+/* only the ACEs of Opal Table 38 take a new BooleanExpr */
+static void test_s3_ace_set(void)
+{
+    static const uint64_t fixed[] = {
+        U_ACE_ANYBODY, U_ACE_SET_BE, U_ACE_KAES_MODE, U_ACE_GLOBAL_SET,
+        U_ACE_RANGE_SET, U_ACE_ADMINS_CN, 0x0000000800000002ull,
+        0x0000000800000003ull, 0x0000000800039001ull,
+        0x000000080003A000ull, 0x000000080003A001ull,
+        0x000000080003F800ull,
+    };
+    uint64_t adm[] = { U_ADMINS };
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    int i;
+    int n;
+
+    for (i = 0; i < ARRAY_SIZE(fixed); i++) {
+        g_assert_cmpuint(expr_set(o, tsn, fixed[i], adm, 1, 1), ==, 0x01);
+        g_assert_cmpint(getacl(o, tsn, fixed[i], M_SET), >, 0);
+        g_assert_cmpuint(reply_status(getacl(o, tsn, fixed[i], M_SET)),
+                         ==, 0x01);
+    }
+    g_assert_cmpuint(expr_set(o, tsn, U_ACE_DS_SET, adm, 1, 1), ==, 0);
+    g_assert_cmpuint(expr_set(o, tsn, 0x000000080003B801ull, adm, 1, 1),
+                     ==, 0);
+    g_assert_cmpuint(expr_set(o, tsn, 0x000000080003D001ull, adm, 1, 1),
+                     ==, 0);
+    n = getacl(o, tsn, U_ACE_DS_SET, M_SET);
+    g_assert_cmpuint(uid_of(&rt[2]), ==, U_ACE_SET_BE);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    /* every ACE has its Name */
+    n = get(o, tsn, 0x000000080003D001ull, 1, 1);
+    g_assert(tok_str(col_of(n, 1),
+                     "ACE_Locking_Range1_Get_RangeStartToActiveKey"));
+    n = get(o, tsn, 0x000000080003B800ull, 1, 1);
+    g_assert(tok_str(col_of(n, 1), "ACE_K_AES_256_GlobalRange_GenKey"));
+    n = get(o, tsn, U_ACE_DS_SET, 1, 1);
+    g_assert(tok_str(col_of(n, 1), "ACE_DataStore_Set_All"));
+    /* Next walks all 69 ACEs */
+    g_assert_cmpint(next_rows(o, tsn, U_T_ACE), ==, FEMU_OPAL_ACE_COUNT);
+    g_assert_cmpuint(uid_of(&rt[2 + FEMU_OPAL_ACE_COUNT - 1]), ==,
+                     0x000000080003FC01ull);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* BooleanExpr reads back in full, postfix OR included */
+static void test_s3_expr_encoding(void)
+{
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    int n;
+
+    /* default of C_PIN_User1_Set_PIN: Admins OR User1 */
+    n = get(o, tsn, U_ACE_CPIN_USER(0), 3, 3);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    /* SL SL SN 3 SL {SN half uid EN} x2 {SN half 1 EN} EL EN EL EL */
+    g_assert_cmpint(n, ==, 4 + 1 + 12 + 1 + 1 + 2 + 6);
+    g_assert_cmpuint(rt[3].val, ==, 3);
+    g_assert_cmpuint(rt[6].len, ==, 4);
+    g_assert(!memcmp(rt[6].p, "\x00\x00\x0c\x05", 4));
+    g_assert_cmpuint(uid_of(&rt[7]), ==, U_ADMINS);
+    g_assert(!memcmp(rt[10].p, "\x00\x00\x0c\x05", 4));
+    g_assert_cmpuint(uid_of(&rt[11]), ==, U_USER(0));
+    g_assert(!memcmp(rt[14].p, "\x00\x00\x04\x0e", 4));
+    g_assert_cmpuint(rt[15].val, ==, 1);
+    g_assert_cmpuint(rt[16].val, ==, 0xF3);
+    g_assert_cmpuint(rt[17].val, ==, 0xF1);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* the discovery tables (Opal Tables 35 to 37, 42) and fixed columns */
+static void test_s3_discovery(void)
+{
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    const FemuOpalTok *k;
+    int n;
+
+    g_assert_cmpuint(start(o, U_LOCKINGSP, 0, NULL, &tsn), ==, 0x07);
+    eos(o, tsn);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, 0, NULL, &tsn), ==, 0);
+    g_assert_cmpint(next_rows(o, tsn, U_T_TABLE), ==, 15);
+    g_assert_cmpint(next_rows(o, tsn, U_T_TMPL), ==, 2);
+    g_assert_cmpint(next_rows(o, tsn, U_T_METHOD), ==, 8);
+    g_assert_cmpint(next_rows(o, tsn, U_T_SECRET), ==, 1);
+    /* GetACL names the same rights */
+    g_assert_cmpuint(reply_status(getacl(o, tsn, U_T_TABLE, M_NEXT)), ==, 0);
+    g_assert_cmpuint(uid_of(&rt[2]), ==, U_ACE_ANYBODY);
+    g_assert_cmpuint(reply_status(getacl(o, tsn, U_T_METHOD, M_NEXT)), ==,
+                     0);
+    g_assert_cmpuint(reply_status(getacl(o, tsn, 0x0000000100000804ull,
+                                         M_GET)), ==, 0);
+    /* the MBR descriptor: a byte table of 128 MiB, granularity 1 */
+    n = get(o, tsn, 0x0000000100000804ull, 0, 14);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert(tok_str(col_of(n, 1), "MBR"));
+    g_assert_cmpuint(col_of(n, 4)->val, ==, 2);
+    g_assert_cmpuint(col_of(n, 7)->val, ==, FEMU_OPAL_MBR_SIZE);
+    g_assert_cmpuint(col_of(n, 13)->val, ==, 1);
+    g_assert_cmpuint(col_of(n, 14)->val, ==, 1);
+    n = get(o, tsn, 0x0000000100001001ull, 7, 7);
+    g_assert_cmpuint(col_of(n, 7)->val, ==, FEMU_OPAL_DS_SIZE);
+    n = get(o, tsn, 0x0000000100000802ull, 4, 13);
+    g_assert_cmpuint(col_of(n, 4)->val, ==, 1);
+    g_assert_cmpuint(col_of(n, 13)->val, ==, 0);
+    g_assert_null(col_of(n, 7));
+    n = get(o, tsn, 0x0000000300000002ull, 1, 2);
+    g_assert_cmpuint(uid_of(col_of(n, 1)), ==, 0x0000020400000006ull);
+    g_assert(tok_str(col_of(n, 2), "Locking"));
+    n = get(o, tsn, 0x0000000600000011ull, 1, 1);
+    g_assert(tok_str(col_of(n, 1), "RevertSP"));
+    n = get(o, tsn, 0x0000001D0000001Eull, 1, 2);
+    g_assert_cmpuint(uid_of(col_of(n, 1)), ==, 0x0000000100000806ull);
+    g_assert_cmpuint(col_of(n, 2)->val, ==, 3);
+    /* LockingInfo, every column */
+    n = get(o, tsn, U_LOCKINFO, 0, 10);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpuint(col_of(n, 2)->val, ==, 1);
+    g_assert_cmpuint(col_of(n, 3)->val, ==, 1);
+    g_assert_cmpuint(col_of(n, 4)->val, ==, 8);
+    g_assert_cmpuint(col_of(n, 5)->val, ==, 0);
+    g_assert_cmpuint(col_of(n, 7)->val, ==, 0);
+    g_assert_cmpuint(col_of(n, 8)->val, ==, 4096);
+    g_assert_cmpuint(col_of(n, 9)->val, ==, 1);
+    g_assert_cmpuint(col_of(n, 10)->val, ==, 0);
+    eos(o, tsn);
+
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    /* Authority columns 6 to 8, 11 and 12 */
+    n = get(o, tsn, U_USER(0), 6, 12);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpuint(col_of(n, 6)->val, ==, 0);
+    g_assert_cmpuint(col_of(n, 7)->val, ==, 0);
+    g_assert_cmpuint(col_of(n, 8)->val, ==, 0);
+    g_assert_cmpuint(uid_of(col_of(n, 11)), ==, 0);
+    g_assert_cmpuint(uid_of(col_of(n, 12)), ==, 0);
+    /* C_PIN: UID, CharSet, TryLimit, Tries, Persistence (Table 39) */
+    n = get(o, tsn, U_LCPIN_USER(0), 0, 7);
+    g_assert_null(col_of(n, 1));
+    g_assert_null(col_of(n, 3));
+    g_assert_cmpuint(uid_of(col_of(n, 4)), ==, 0);
+    g_assert_cmpuint(col_of(n, 5)->val, ==, 0);
+    g_assert_cmpuint(col_of(n, 6)->val, ==, 0);
+    k = col_of(n, 7);
+    g_assert_nonnull(k);
+    g_assert_cmpuint(k->val, ==, 0);
+    /* K_AES_256 Mode: Media Encryption */
+    n = get(o, tsn, U_KAES(1), 4, 4);
+    g_assert_cmpuint(col_of(n, 4)->val, ==, 23);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* the MBR reader: bounds, committed bytes, chunk edges */
+static void test_s3_mbr_reader(void)
+{
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    char b[8];
+    int n;
+
+    /* across a 64 KiB chunk edge */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, FEMU_OPAL_CHUNK - 2,
+                               "edge", false), ==, 0);
+    g_assert(femu_opal_mbr_read(o, FEMU_OPAL_CHUNK - 2, b, 4));
+    g_assert(!memcmp(b, "edge", 4));
+    n = bytes_get(o, tsn, U_T_MBR, FEMU_OPAL_CHUNK - 2, FEMU_OPAL_CHUNK + 1);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert(!memcmp(rt[1].p, "edge", 4));
+    /* the DataStore is not past the MBR end */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_DS, 0, "secret", false), ==, 0);
+    memset(b, 'x', sizeof(b));
+    g_assert(!femu_opal_mbr_read(o, FEMU_OPAL_MBR_SIZE, b, 6));
+    g_assert(!femu_opal_mbr_read(o, FEMU_OPAL_MBR_SIZE - 2, b, 4));
+    g_assert(!femu_opal_mbr_read(o, UINT64_MAX, b, 1));
+    g_assert_cmpuint(b[0], ==, 'x');
+    g_assert(femu_opal_mbr_read(o, FEMU_OPAL_MBR_SIZE - 2, b, 2));
+    g_assert(femu_opal_mbr_read(o, FEMU_OPAL_MBR_SIZE, b, 0));
+    /* a transaction's MBR writes stay out of the shadow until ET 0 */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, 0, "old", false), ==, 0);
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, 0, "new", true), ==, 0);
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, 1, "EW", false), ==, 0);
+    g_assert(femu_opal_mbr_read(o, 0, b, 3));
+    g_assert(!memcmp(b, "old", 3));
+    /* in-session Get sees the open transaction */
+    bytes_get(o, tsn, U_T_MBR, 0, 2);
+    g_assert(!memcmp(rt[1].p, "nEW", 3));
+    et(o, tsn, 1);
+    g_assert(femu_opal_mbr_read(o, 0, b, 3));
+    g_assert(!memcmp(b, "old", 3));
+    /* commit: kept after the session ends */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, 0, "new", true), ==, 0);
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, 1, "EW", false), ==, 0);
+    et(o, tsn, 0);
+    eos(o, tsn);
+    g_assert(femu_opal_mbr_read(o, 0, b, 3));
+    g_assert(!memcmp(b, "nEW", 3));
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    bytes_get(o, tsn, U_T_MBR, 0, 2);
+    g_assert(!memcmp(rt[1].p, "nEW", 3));
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* the undo copies of one transaction have a limit */
+static void test_s3_undo_budget(void)
+{
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    char b[2];
+    int i;
+
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, 0, "a", true), ==, 0);
+    /* the same chunk again costs nothing */
+    for (i = 0; i < 300; i++) {
+        g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR, i, "b", false), ==, 0);
+    }
+    for (i = 1; i < FEMU_OPAL_UNDO_CHUNKS; i++) {
+        g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR,
+                                   (uint64_t)i * FEMU_OPAL_CHUNK, "c", false),
+                         ==, 0);
+    }
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR,
+                               (uint64_t)i * FEMU_OPAL_CHUNK, "d", false),
+                     ==, 0x3F);
+    et(o, tsn, 1);
+    g_assert(femu_opal_mbr_read(o, 0, b, 1));
+    g_assert_cmpuint(b[0], ==, 0);
+    g_assert(femu_opal_mbr_read(o, (uint64_t)5 * FEMU_OPAL_CHUNK, b, 1));
+    g_assert_cmpuint(b[0], ==, 0);
+    /* after the transaction the budget is free again */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_MBR,
+                               (uint64_t)i * FEMU_OPAL_CHUNK, "d", true),
+                     ==, 0);
+    et(o, tsn, 0);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* resets relock writes too, and DoneOnReset {0, 3} follows TPER_RESET */
+static void test_s3_resets(void)
+{
+    static const int enable[] = { 1, 2, -1 };
+    static const uint64_t on[] = { 1, 1 };
+    static const int lor03[] = { 0, 3, -1 };
+    static const int lor0[] = { 0, -1 };
+    static const int unlock[] = { 7, 8, -1 };
+    static const uint64_t off[] = { 0, 0 };
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    uint8_t z[8] = { 0 };
+    FemuOpalView v;
+
+    g_assert_cmpuint(range_set(o, tsn, 1, 100, 50), ==, 0);
+    g_assert_cmpuint(range_lock(o, tsn, 1, false), ==, 0);
+    g_assert_cmpuint(resets_set(o, tsn, U_MBRCTL, 3, lor03), ==, 0);
+    g_assert_cmpuint(lset(o, tsn, U_MBRCTL, enable, on, false), ==, 0);
+    g_assert_cmpuint(l0_locking(o) & 0x30, ==, 0x30);
+    eos(o, tsn);
+    femu_opal_power_cycle(o);
+    femu_opal_view(o, &v);
+    g_assert(v.r[1].wlocked && v.r[1].rlocked);
+    g_assert_cmpuint(l0_locking(o) & 0x30, ==, 0x10);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), unlock, off, false), ==, 0);
+    g_assert_cmpuint(lset(o, tsn, U_MBRCTL, enable, on, false), ==, 0);
+    eos(o, tsn);
+    g_assert_cmpuint(start(o, U_ADMINSP, U_SID, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(set(o, tsn, U_TPERINFO, 8, NULL, 1, false), ==, 0);
+    eos(o, tsn);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 0, 1), ==, FEMU_OPAL_MEDIA);
+    g_assert_cmpint(femu_opal_send(o, 2, 4, z, 8), ==, FEMU_OPAL_IF_GOOD);
+    /* Done cleared: the shadow is back; Range1 keeps {0}: still open */
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 0, 1), ==, FEMU_OPAL_SHADOW);
+    femu_opal_view(o, &v);
+    g_assert(!v.r[1].wlocked && !v.r[1].rlocked);
+    /* DoneOnReset {0}: TPER_RESET keeps Done */
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(resets_set(o, tsn, U_MBRCTL, 3, lor0), ==, 0);
+    g_assert_cmpuint(lset(o, tsn, U_MBRCTL, enable, on, false), ==, 0);
+    eos(o, tsn);
+    g_assert_cmpint(femu_opal_send(o, 2, 4, z, 8), ==, FEMU_OPAL_IF_GOOD);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 0, 1), ==, FEMU_OPAL_MEDIA);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* edge cases of Level 0, GenKey parameters, key reuse, wide extents */
+static void test_s3_edges(void)
+{
+    static const int done[] = { 2, -1 };
+    static const uint64_t one[] = { 1 };
+    static const uint64_t r1[] = { 100, 50 };
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    FemuOpalView v = { .enabled = true };
+    Tb t = { .n = 0 };
+
+    /* Done without Enable: MBR Done stays 0 in Level 0 */
+    g_assert_cmpuint(lset(o, tsn, U_MBRCTL, done, one, false), ==, 0);
+    g_assert_cmpuint(l0_locking(o), ==, 0x0B);
+    /* GenKey takes no parameters on a K_AES row */
+    tb_call(&t, U_KAES(0), M_GENKEY);
+    tb_c(&t, 0xF2);
+    tb_u(&t, 0);
+    tb_u(&t, 65537);
+    tb_c(&t, 0xF3);
+    tb_end(&t);
+    g_assert_cmpuint(reply_status(xfer(o, &t, tsn)), ==, 0x0C);
+    g_assert_cmpint(er.n, ==, 0);
+    /* a new owner erases even if the key numbers matched */
+    o->sp.range[1].key = o->sp.range[0].key;
+    g_assert_cmpuint(range_set(o, tsn, 1, 100, 50), ==, 0);
+    erased(1, r1);
+    eos(o, tsn);
+    /* an extent that wraps the LBA space is denied */
+    v.r[1].start = UINT64_MAX - 10;
+    v.r[1].len = 10;
+    v.r[1].rlocked = true;
+    g_assert_cmpint(femu_opal_access(&v, FEMU_OPAL_OP_READ, UINT64_MAX - 5,
+                                    10), ==, FEMU_OPAL_DENY);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* a Format that shrinks the LBA count keeps far ranges; other Sets work */
+static void test_s3_far_ranges(void)
+{
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+
+    g_assert_cmpuint(range_set(o, tsn, 1, 800, 100), ==, 0);
+    g_assert_cmpuint(range_set(o, tsn, 2, 900, 100), ==, 0);
+    o->cfg.nlbas = 500;
+    g_assert_cmpuint(range_lock(o, tsn, 1, true), ==, 0);
+    g_assert_cmpuint(set(o, tsn, U_LCPIN_USER(0), 3, "x", 0, false), ==, 0);
+    /* a moved range must fit the new size and miss the far ones */
+    g_assert_cmpuint(range_set(o, tsn, 1, 800, 50), ==, 0x0C);
+    g_assert_cmpuint(range_set(o, tsn, 3, 450, 100), ==, 0x0C);
+    g_assert_cmpuint(range_set(o, tsn, 1, 400, 100), ==, 0);
+    g_assert_cmpuint(range_set(o, tsn, 3, 0, 100), ==, 0);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* a Hardware Reset keeps locks and Tries; Block SID clears on request */
+static void test_s3_hw_reset(void)
+{
+    static const int lor03[] = { 0, 3, -1 };
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    FemuOpal *b = g_new(FemuOpal, 1);
+    uint8_t hw[2] = { 1, 0 };
+    uint8_t keep[2] = { 0, 0 };
+
+    g_assert_cmpuint(range_set(o, tsn, 1, 100, 50), ==, 0);
+    g_assert_cmpuint(range_lock(o, tsn, 1, false), ==, 0);
+    g_assert_cmpuint(resets_set(o, tsn, U_LOCK(1), 9, lor03), ==, 0);
+    femu_opal_hw_reset(o);
+    g_assert(session_gone(o, tsn));
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+    o->tries[FEMU_OPAL_AU_LSP_ADMIN1] = 2;
+    femu_opal_hw_reset(o);
+    g_assert_cmpuint(o->tries[FEMU_OPAL_AU_LSP_ADMIN1], ==, 2);
+    femu_opal_power_cycle(o);
+    g_assert_cmpuint(o->tries[FEMU_OPAL_AU_LSP_ADMIN1], ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    femu_opal_cleanup(o);
+    g_free(o);
+
+    /* Block SID needs the MSID PIN in C_PIN_SID */
+    s2_init(b);
+    g_assert_cmpint(femu_opal_send(b, 2, 5, keep, 2), ==, FEMU_OPAL_IF_GOOD);
+    femu_opal_hw_reset(b);
+    g_assert_cmpuint(l0_block_sid(b, 4), ==, 0x02);
+    femu_opal_power_cycle(b);
+    g_assert_cmpuint(l0_block_sid(b, 4), ==, 0);
+    g_assert_cmpint(femu_opal_send(b, 2, 5, hw, 2), ==, FEMU_OPAL_IF_GOOD);
+    g_assert_cmpuint(l0_block_sid(b, 4), ==, 0x02);
+    femu_opal_hw_reset(b);
+    g_assert_cmpuint(l0_block_sid(b, 4), ==, 0);
+    femu_opal_cleanup(b);
+    g_free(b);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -1515,5 +2642,23 @@ int main(int argc, char **argv)
     g_test_add_func("/femu/opal/s2-tables", test_s2_tables);
     g_test_add_func("/femu/opal/s2-getacl", test_s2_getacl);
     g_test_add_func("/femu/opal/s2-interface", test_s2_interface);
+    g_test_add_func("/femu/opal/s3-ranges", test_s3_ranges);
+    g_test_add_func("/femu/opal/s3-locks", test_s3_locks);
+    g_test_add_func("/femu/opal/s3-genkey", test_s3_genkey);
+    g_test_add_func("/femu/opal/s3-users", test_s3_users);
+    g_test_add_func("/femu/opal/s3-mbr", test_s3_mbr);
+    g_test_add_func("/femu/opal/s3-txn", test_s3_txn);
+    g_test_add_func("/femu/opal/s3-revertsp", test_s3_revertsp);
+    g_test_add_func("/femu/opal/s3-tables", test_s3_tables);
+    g_test_add_func("/femu/opal/s3-check", test_s3_check);
+    g_test_add_func("/femu/opal/s3-ace-set", test_s3_ace_set);
+    g_test_add_func("/femu/opal/s3-expr-encoding", test_s3_expr_encoding);
+    g_test_add_func("/femu/opal/s3-discovery", test_s3_discovery);
+    g_test_add_func("/femu/opal/s3-mbr-reader", test_s3_mbr_reader);
+    g_test_add_func("/femu/opal/s3-undo-budget", test_s3_undo_budget);
+    g_test_add_func("/femu/opal/s3-resets", test_s3_resets);
+    g_test_add_func("/femu/opal/s3-edges", test_s3_edges);
+    g_test_add_func("/femu/opal/s3-far-ranges", test_s3_far_ranges);
+    g_test_add_func("/femu/opal/s3-hw-reset", test_s3_hw_reset);
     return g_test_run();
 }

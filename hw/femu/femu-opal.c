@@ -17,6 +17,12 @@ enum {
     TOK_ST = 0xFB, TOK_ET = 0xFC, TOK_EMPTY = 0xFF,
 };
 
+/* Locking SP helpers in femu-opal-locking.c.inc */
+static void lsp_factory_tables(FemuOpal *o, bool keep_global);
+static void lsp_bytes_clear(FemuOpal *o);
+static void lsp_undo_finish(FemuOpal *o, bool rollback);
+static int lsp_rows(uint64_t table, uint64_t *rows);
+
 /* frame header sizes (Core 3.2.3, Tables 17, 18 and 20) */
 #define COMPKT_HDR      20
 #define PKT_HDR         24
@@ -81,8 +87,11 @@ static void femu_opal_stack_reset(FemuOpal *o)
     o->host = host_min;
 }
 
-/* the Admin SP and Locking SP as they leave the factory */
-static void femu_opal_factory_lsp(FemuOpal *o)
+/*
+ * The Locking SP as it leaves the factory. Every key is new except the
+ * Global key when @keep_global is true; a new key erases its LBAs.
+ */
+static void femu_opal_factory_lsp(FemuOpal *o, bool keep_global)
 {
     int i;
 
@@ -92,18 +101,28 @@ static void femu_opal_factory_lsp(FemuOpal *o)
     }
     o->sp.au[FEMU_OPAL_AU_LSP_ADMIN1].enabled = true;
     o->sp.lsp_life = FEMU_OPAL_LIFE_INACTIVE;
+    lsp_factory_tables(o, keep_global);
+    lsp_bytes_clear(o);
 }
 
+/*
+ * The whole TPer as it leaves the factory. User data survives only when
+ * the Locking SP was never active (Opal 5.1.2).
+ */
 static void femu_opal_factory(FemuOpal *o)
 {
+    bool active = o->sp.lsp_life == FEMU_OPAL_LIFE_MANUFACTURED;
+    uint64_t global_key = o->sp.range[0].key;
+
     memset(&o->sp, 0, sizeof(o->sp));
+    o->sp.range[0].key = global_key;
     memset(o->tries, 0, sizeof(o->tries));
     o->sp.au[FEMU_OPAL_AU_ANYBODY].enabled = true;
     o->sp.au[FEMU_OPAL_AU_SID].enabled = true;
     o->sp.au[FEMU_OPAL_AU_SID].pin = o->cfg.msid;
     o->sp.au[FEMU_OPAL_AU_PSID].enabled = true;
     o->sp.au[FEMU_OPAL_AU_PSID].pin = o->cfg.psid;
-    femu_opal_factory_lsp(o);
+    femu_opal_factory_lsp(o, !active);
 }
 
 void femu_opal_init(FemuOpal *o, const FemuOpalCfg *cfg)
@@ -111,6 +130,7 @@ void femu_opal_init(FemuOpal *o, const FemuOpalCfg *cfg)
     memset(o, 0, sizeof(*o));
     o->cfg = *cfg;
     o->next_tsn = 0x1000;
+    o->next_key = 1;
     femu_opal_stack_reset(o);
     femu_opal_factory(o);
 }
@@ -301,10 +321,33 @@ static const FemuOpalSp *committed(const FemuOpal *o)
     return o->s.open && o->s.txn ? &o->s.txn_sp : &o->sp;
 }
 
+/* the Locking feature bits of Level 0 (Opal 3.1.1.3) */
+static uint8_t level0_locking(const FemuOpal *o)
+{
+    const FemuOpalSp *sp = committed(o);
+    uint8_t b = 0x01 | 0x08;            /* Supported, Media Encryption */
+    int r;
+
+    if (sp->lsp_life != FEMU_OPAL_LIFE_MANUFACTURED) {
+        return b;
+    }
+    b |= 0x02;
+    for (r = 0; r <= FEMU_OPAL_RANGES; r++) {
+        if ((sp->range[r].rle && sp->range[r].rl) ||
+            (sp->range[r].wle && sp->range[r].wl)) {
+            b |= 0x04;
+        }
+    }
+    /* MBR Done is 0 while MBR Enabled is 0 (Core 3.3.6.5.6) */
+    if (sp->mbr_enable) {
+        b |= 0x10 | (sp->mbr_done ? 0x20 : 0);
+    }
+    return b;
+}
+
 /*
  * Level 0 discovery (Opal 3.1.1): header, then descriptors in increasing
- * feature code order. Locking Supported stays 0 until the Locking SP
- * exists.
+ * feature code order.
  */
 uint32_t femu_opal_level0(const FemuOpal *o, uint8_t *buf, uint32_t cap)
 {
@@ -321,11 +364,11 @@ uint32_t femu_opal_level0(const FemuOpal *o, uint8_t *buf, uint32_t cap)
     p[4] = 0x11;
     p += 16;
 
-    /* Locking 0002h: Media Encryption */
+    /* Locking 0002h */
     put16(p, 0x0002);
     p[2] = 0x30;
     p[3] = 0x0c;
-    p[4] = 0x08;
+    p[4] = level0_locking(o);
     p += 16;
 
     /* Geometry Reporting 0003h: no alignment requirement */
@@ -788,6 +831,7 @@ static void femu_opal_close(FemuOpal *o)
 {
     if (o->s.open && o->s.txn) {
         o->sp = o->s.txn_sp;
+        lsp_undo_finish(o, true);
     }
     memset(&o->s, 0, sizeof(o->s));
 }
@@ -811,6 +855,8 @@ typedef struct FemuOpalReply {
     FemuOpalEnc e;
     uint8_t status;
 } FemuOpalReply;
+
+#include "femu-opal-locking.c.inc"
 
 /*
  * One column of an Admin SP object for Get. Returns false when the object
@@ -1232,6 +1278,7 @@ static void femu_opal_next(FemuOpal *o, uint64_t table, const FemuOpalTok *t,
     };
     static const uint64_t sp[] = { UID_SP_ADMIN, UID_SP_LOCKING };
     static const uint64_t spinfo[] = { UID_SPINFO };
+    uint64_t lrows[FEMU_OPAL_ACE_COUNT];
     const uint64_t *rows;
     uint64_t where = 0;
     uint64_t count = ~0ull;
@@ -1240,29 +1287,34 @@ static void femu_opal_next(FemuOpal *o, uint64_t table, const FemuOpalTok *t,
     int k = 0;
 
     if (o->s.locking) {
-        r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
-        return;
-    }
-    switch (table) {
-    case UID_T_AUTHORITY:
-        rows = au;
-        nrows = ARRAY_SIZE(au);
-        break;
-    case UID_T_CPIN:
-        rows = cpin;
-        nrows = ARRAY_SIZE(cpin);
-        break;
-    case UID_T_SP:
-        rows = sp;
-        nrows = ARRAY_SIZE(sp);
-        break;
-    case UID_T_SPINFO:
-        rows = spinfo;
-        nrows = ARRAY_SIZE(spinfo);
-        break;
-    default:
-        r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
-        return;
+        rows = lrows;
+        nrows = lsp_rows(table, lrows);
+        if (!nrows) {
+            r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
+            return;
+        }
+    } else {
+        switch (table) {
+        case UID_T_AUTHORITY:
+            rows = au;
+            nrows = ARRAY_SIZE(au);
+            break;
+        case UID_T_CPIN:
+            rows = cpin;
+            nrows = ARRAY_SIZE(cpin);
+            break;
+        case UID_T_SP:
+            rows = sp;
+            nrows = ARRAY_SIZE(sp);
+            break;
+        case UID_T_SPINFO:
+            rows = spinfo;
+            nrows = ARRAY_SIZE(spinfo);
+            break;
+        default:
+            r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
+            return;
+        }
     }
     for (i = 0; i < n; i += 4) {
         uint64_t name = ~0ull;
@@ -1419,7 +1471,7 @@ static bool femu_opal_revert(FemuOpal *o, uint64_t uid, int n,
     femu_opal_enc_ctrl(&r->e, TOK_SL);
     femu_opal_enc_ctrl(&r->e, TOK_EL);
     if (uid == UID_SP_LOCKING) {
-        femu_opal_factory_lsp(o);
+        femu_opal_factory_lsp(o, o->sp.lsp_life != FEMU_OPAL_LIFE_MANUFACTURED);
         return false;
     }
     femu_opal_factory(o);
@@ -1486,6 +1538,32 @@ static int femu_opal_method(FemuOpal *o, const FemuOpalTok *t, int n,
     }
     t += 4;
     n = end - 4;
+    if (o->s.locking) {
+        switch (m) {
+        case UID_M_GET:
+            lsp_get(o, obj, t, n, r);
+            return METHOD_DONE;
+        case UID_M_SET:
+            lsp_set(o, obj, t, n, r);
+            return METHOD_DONE;
+        case UID_M_GETACL:
+            if (obj != UID_T_ACCESSCONTROL) {
+                r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
+            } else {
+                lsp_getacl(o, t, n, r);
+            }
+            return METHOD_DONE;
+        case UID_M_GENKEY:
+            lsp_genkey(o, obj, n, r);
+            return METHOD_DONE;
+        case UID_M_REVERTSP:
+            if (obj != UID_THISSP) {
+                r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
+                return METHOD_DONE;
+            }
+            return lsp_revertsp(o, t, n, r) ? METHOD_END : METHOD_DONE;
+        }
+    }
     switch (m) {
     case UID_M_GET:
         femu_opal_get(o, obj, t, n, r);
@@ -1562,6 +1640,7 @@ static void femu_opal_session_packet(FemuOpal *o, const FemuOpalTok *t, int n)
     };
     uint32_t hsn = o->s.hsn;
     uint32_t tsn = o->s.tsn;
+    FemuOpalSp before;
     int rc = METHOD_DONE;
     int i = 0;
 
@@ -1587,9 +1666,13 @@ static void femu_opal_session_packet(FemuOpal *o, const FemuOpalTok *t, int n)
         if (k + 6 > n) {
             goto abort;
         }
+        before = o->sp;
         rc = femu_opal_method(o, t + i, k + 6 - i, &r);
         if (rc == METHOD_ABORT) {
             goto abort;
+        }
+        if (!o->s.txn) {
+            femu_opal_effects(o, &before);
         }
         reply_status(&r, mark);
         i = k + 6;
@@ -1605,7 +1688,10 @@ static void femu_opal_session_packet(FemuOpal *o, const FemuOpalTok *t, int n)
             o->sp = o->s.txn_sp;
             o->s.auth = o->s.txn_auth;
             st = 1;
+        } else {
+            femu_opal_effects(o, &o->s.txn_sp);
         }
+        lsp_undo_finish(o, st);
         o->s.txn = false;
         femu_opal_enc_ctrl(&r.e, TOK_ET);
         femu_opal_enc_uint(&r.e, st);
@@ -1652,8 +1738,8 @@ static FemuOpalIf femu_opal_block_sid(FemuOpal *o, const uint8_t *buf,
 
 /*
  * TPER_RESET (Opal 3.2.3): a Programmatic reset when
- * ProgrammaticResetEnable is True. It ends the session and resets the
- * stack. Locking comes with the Locking SP.
+ * ProgrammaticResetEnable is True. It ends the session, resets the stack
+ * and applies LockOnReset and DoneOnReset of type 3.
  */
 static FemuOpalIf femu_opal_tper_reset(FemuOpal *o)
 {
@@ -1663,7 +1749,25 @@ static FemuOpalIf femu_opal_tper_reset(FemuOpal *o)
     femu_opal_close(o);
     femu_opal_stack_reset(o);
     o->mgmt_req = 0;
+    lsp_reset(o, FEMU_OPAL_RESET_PROG);
     return FEMU_OPAL_IF_GOOD;
+}
+
+/*
+ * A TCG Hardware Reset (SIIS Table 20: a PCIe warm reset). The session and
+ * the host properties end; Block SID clears only when it asked for it.
+ * Tries stays (Core 5.3.2.12.8). No range takes reset type 1, so nothing
+ * locks.
+ */
+void femu_opal_hw_reset(FemuOpal *o)
+{
+    femu_opal_close(o);
+    femu_opal_stack_reset(o);
+    o->mgmt_req = 0;
+    if (o->sid_block_hw) {
+        o->sid_blocked = false;
+        o->sid_block_hw = false;
+    }
 }
 
 void femu_opal_power_cycle(FemuOpal *o)
@@ -1675,6 +1779,7 @@ void femu_opal_power_cycle(FemuOpal *o)
     memset(o->tries, 0, sizeof(o->tries));
     o->sid_blocked = false;
     o->sid_block_hw = false;
+    lsp_reset(o, FEMU_OPAL_RESET_POWER);
 }
 
 /*

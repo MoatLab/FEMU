@@ -3648,7 +3648,7 @@ static void femu_realize_undo(FemuCtrl *n)
     g_clear_pointer(&n->vwc_timer, timer_free);
     g_clear_pointer(&n->plp_timer, timer_free);
     g_clear_pointer(&n->wrr_tried, g_free);
-    g_clear_pointer(&n->opal_tper, g_free);
+    g_clear_pointer(&n->opal_tper, femu_opal_free);
     if (!n->shared_storage) {
         femu_exit_extensions(n);
     }
@@ -5370,7 +5370,7 @@ static void femu_exit(PCIDevice *pci_dev)
     nvme_destroy_poller(n);
     /* the pollers are gone: no grant can read it any more */
     g_clear_pointer(&n->wrr_tried, g_free);
-    g_clear_pointer(&n->opal_tper, g_free);
+    g_clear_pointer(&n->opal_tper, femu_opal_free);
     /* the pollers are gone, so nothing can wake the bottom half any more */
     qemu_bh_delete(n->aer_bh);
     n->aer_bh = NULL;

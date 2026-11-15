@@ -46,6 +46,19 @@
 
 #define FEMU_OPAL_PIN_MAX               32
 
+/* Locking SP sizes (Opal 4.3.5.4, 4.3.8.1, Table 44) */
+#define FEMU_OPAL_RANGES        8
+#define FEMU_OPAL_MBR_SIZE      (128u << 20)
+#define FEMU_OPAL_DS_SIZE       (10u << 20)
+#define FEMU_OPAL_CHUNK         (64u << 10)
+#define FEMU_OPAL_ACE_COUNT     69
+/* byte-table chunks one transaction may change (16 MiB) */
+#define FEMU_OPAL_UNDO_CHUNKS   256
+
+/* reset_types (Opal Table 16), one bit each in LockOnReset and DoneOnReset */
+#define FEMU_OPAL_RESET_POWER   0
+#define FEMU_OPAL_RESET_PROG    3
+
 /*
  * Authorities, one bit each in a session's authenticated set. Admin SP:
  * Anybody, SID, PSID, Admin1. Locking SP: Anybody, Admin1 to 4, User1 to 8.
@@ -72,14 +85,33 @@ typedef struct FemuOpalAuth {
     uint32_t try_limit;
 } FemuOpalAuth;
 
+/* one row of the Locking table; row 0 is the Global range */
+typedef struct FemuOpalRange {
+    uint64_t start;
+    uint64_t len;
+    bool rle;                   /* ReadLockEnabled */
+    bool wle;                   /* WriteLockEnabled */
+    bool rl;                    /* ReadLocked */
+    bool wl;                    /* WriteLocked */
+    uint8_t lor;                /* LockOnReset, one bit per reset type */
+    uint64_t key;               /* key generation; a new one erases */
+    FemuOpalPin cn;             /* CommonName */
+} FemuOpalRange;
+
 /*
  * The personalization a transaction can roll back. Tries stays outside it:
  * a TPer update to Tries survives an abort (Core 5.3.4.1.1.2).
  */
 typedef struct FemuOpalSp {
     FemuOpalAuth au[FEMU_OPAL_AU_COUNT];
+    FemuOpalPin au_cn[FEMU_OPAL_AU_COUNT];  /* Authority CommonName */
     uint8_t lsp_life;
     bool pre;                   /* TPerInfo ProgrammaticResetEnable */
+    FemuOpalRange range[FEMU_OPAL_RANGES + 1];
+    bool mbr_enable;
+    bool mbr_done;
+    uint8_t mbr_dor;            /* DoneOnReset */
+    uint32_t ace[FEMU_OPAL_ACE_COUNT];      /* BooleanExpr: OR of bits */
 } FemuOpalSp;
 
 /* the one session (MaxSessions 1) */
@@ -129,8 +161,14 @@ typedef struct FemuOpalEnc {
     bool overflow;
 } FemuOpalEnc;
 
+/* erase @nlb LBAs at @slba: their old data must not come back */
+typedef void FemuOpalEraseFn(void *opaque, uint64_t slba, uint64_t nlb);
+
 typedef struct FemuOpalCfg {
     uint32_t lba_size;
+    uint64_t nlbas;             /* user LBAs of the namespace */
+    FemuOpalEraseFn *erase;
+    void *opaque;
     uint16_t admins;            /* Locking SP admin authorities */
     uint16_t users;             /* Locking SP user authorities */
     bool crypto_erase;          /* GenKey, Revert and RevertSP erase */
@@ -167,10 +205,53 @@ typedef struct FemuOpal {
     /* Block SID Authentication (Block SID 4.2) */
     bool sid_blocked;
     bool sid_block_hw;          /* a Hardware Reset clears it too */
+    /* byte tables, sparse: a missing chunk reads as zeros */
+    uint8_t *mbr[FEMU_OPAL_MBR_SIZE / FEMU_OPAL_CHUNK];
+    uint8_t *ds[FEMU_OPAL_DS_SIZE / FEMU_OPAL_CHUNK];
+    void *undo;                 /* chunks a transaction changed: the old */
+    uint64_t next_key;          /* 64 bits: never wraps */
     FemuOpalTok toks[FEMU_OPAL_MAX_TOKS];
 } FemuOpal;
 
 void femu_opal_init(FemuOpal *o, const FemuOpalCfg *cfg);
+void femu_opal_cleanup(FemuOpal *o);
+/* femu_opal_cleanup(), then free the g_new() allocation */
+void femu_opal_free(FemuOpal *o);
+
+/* how a command class may touch user LBAs (Core Tables 230, 231) */
+typedef enum FemuOpalOp {
+    FEMU_OPAL_OP_READ,
+    FEMU_OPAL_OP_VERIFY,        /* Verify and Compare */
+    FEMU_OPAL_OP_COPY_SRC,
+    FEMU_OPAL_OP_WRITE,         /* every class that changes LBAs */
+} FemuOpalOp;
+
+typedef enum FemuOpalAccess {
+    FEMU_OPAL_MEDIA,            /* the normal path */
+    FEMU_OPAL_SHADOW,           /* MBR table bytes */
+    FEMU_OPAL_ZEROS,            /* zeros, no media access */
+    FEMU_OPAL_DENY,             /* Data Protection Error */
+} FemuOpalAccess;
+
+/* the committed lock state, copied for the I/O path */
+typedef struct FemuOpalView {
+    bool enabled;               /* the Locking SP is active */
+    bool shadow;                /* MBR Enable and not Done */
+    uint64_t mbr_lbas;
+    struct {
+        uint64_t start;
+        uint64_t len;           /* Global: 0 */
+        bool rlocked;
+        bool wlocked;
+    } r[FEMU_OPAL_RANGES + 1];
+} FemuOpalView;
+
+void femu_opal_view(const FemuOpal *o, FemuOpalView *v);
+FemuOpalAccess femu_opal_access(const FemuOpalView *v, FemuOpalOp op,
+                               uint64_t slba, uint64_t nlb);
+/* committed MBR bytes; false (and nothing read) outside the table */
+bool femu_opal_mbr_read(const FemuOpal *o, uint64_t off, void *buf,
+                        uint32_t len);
 
 /*
  * The checks of a Security Send that need no data: the caller runs them
@@ -197,6 +278,7 @@ void femu_opal_consume(FemuOpal *o);
 
 /* a TCG Power Cycle: the state a device has when it comes up */
 void femu_opal_power_cycle(FemuOpal *o);
+void femu_opal_hw_reset(FemuOpal *o);
 
 /* Level 0 discovery data; returns the full length, copies at most @cap */
 uint32_t femu_opal_level0(const FemuOpal *o, uint8_t *buf, uint32_t cap);
