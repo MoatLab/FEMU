@@ -676,6 +676,11 @@ static uint64_t ssd_read_ranges(FemuCtrl *n, struct ssd *ssd, NvmeRequest *req)
         }
         req->slba = le64_to_cpu(req->dsm_ranges[i].slba);
         req->nlb = le32_to_cpu(req->dsm_ranges[i].nlb);
+        /* x-opal: a source the MBR shadow served reads no media */
+        if (!req->nlb) {
+            req->ns = dns;
+            continue;
+        }
         failed = req->status != NVME_SUCCESS;
         lat = ssd_read(from, req);
         req->ns = dns;

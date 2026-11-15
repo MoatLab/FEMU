@@ -354,11 +354,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "TCG Opal security, experimental and not yet conformant: Security Send "
       "(81h) and Receive (82h), OACS bit 0, Level 0 discovery, ComID 1000h "
       "with STACK_RESET, Admin SP sessions with MSID, SID, PSID, Activate, "
-      "Revert and transactions, Block SID and TPER_RESET; MSID and PSID are "
-      "FEMU-MSID- and FEMU-PSID- plus the serial; locking ranges come "
-      "later; one NoSSD or page-mapped bbssd "
-      "namespace without metadata, not with a femu-subsys, CXL, ns_mgmt, "
-      "power_loss, sanitize_ns, ns_wp or persist_file; off (default)" },
+      "Revert and transactions, Block SID and TPER_RESET; the Locking SP "
+      "with 8 ranges, GenKey erase, an MBR shadow and the DataStore, "
+      "checked on every I/O command ([TCG Opal](../features/tcg-opal.md)); "
+      "MSID and PSID are FEMU-MSID- and FEMU-PSID- plus the serial; one "
+      "NoSSD or page-mapped bbssd namespace without metadata, not with a "
+      "femu-subsys, CXL, CSD, ns_mgmt, power_loss, sanitize_ns, ns_wp or "
+      "persist_file; off (default)" },
     { "hmb_mb",
       "bbssd with mapping=dftl: ask the host for a Host Memory Buffer of "
       "this many MiB (Identify HMPRE and HMMIN). While the host has it "

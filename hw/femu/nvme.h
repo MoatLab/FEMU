@@ -2042,6 +2042,8 @@ typedef struct NvmeRequest {
     int64_t                 wake_ns;    /* PS3 exit latency first */
     /* the write paid its host-link transfer before the media */
     bool                    link_early;
+    /* x-opal: served from the MBR shadow or as zeros, not the media */
+    bool                    opal_synth;
     /* io_stages: when the poller handed it to the FTL ring, and got it back */
     int64_t                 t_handoff;
     int64_t                 t_return;
@@ -2978,6 +2980,7 @@ typedef struct FemuCtrl {
     /* TCG Opal TPer behind Security Send and Receive (x-opal) */
     bool            opal;
     struct FemuOpal *opal_tper;
+    struct FemuOpalView *opal_view;     /* the pollers' copy */
     /* Reservations: the host, its notices (log 80h) and their masks */
     bool            reservations;
     uint8_t         pif;            /* PI guard: 0 16-bit, 2 64-bit */
@@ -4195,6 +4198,7 @@ static inline void nvme_note_user_write(FemuCtrl *n)
     }
 }
 void bbssd_deallocate_all(NvmeNamespace *ns);
+void bbssd_deallocate_lbas(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
 bool bbssd_power_loss(NvmeNamespace *ns);
 uint16_t bbssd_flush_all(FemuCtrl *n);
 uint16_t bbssd_drain_namespace(NvmeNamespace *ns, uint64_t stime, int64_t *lat);

@@ -2,7 +2,7 @@
 #include "./bbssd/ftl.h"
 #include "./kvssd/kvssd.h"
 #include "./ocssd/oc-timing.h"
-#include "./femu-opal.h"
+#include "./nvme-opal.h"
 #include "system/qtest.h"
 #include "trace.h"
 
@@ -4675,9 +4675,14 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     uint8_t sanact = dw10 & 0x7;
     bool emvs = dw10 & (1 << 10);
     uint8_t ev[16] = { 0 };
+    bool resume = false;
 
     if (!nvme_can_sanitize(n)) {
         return NVME_INVALID_OPCODE | NVME_DNR;
+    }
+    /* x-opal: refused while the Locking SP is active (SIIS 6.7.4) */
+    if (femu_opal_owned(n)) {
+        return NVME_ACCESS_DENIED | NVME_DNR;
     }
     /* only Exit Media Verification runs while one is in progress */
     if (nvme_sanitize_busy(n) && sanact != 0x5) {
@@ -4716,6 +4721,13 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     if (femu_wp_scope(n, NVME_NSID_BROADCAST)) {
         return NVME_NS_WRITE_PROTECTED | NVME_DNR;
     }
+    /*
+     * x-opal drains the I/O taken before the start, so none runs after the
+     * erase; from the start on, the sanitize refuses new I/O.
+     */
+    if (n->opal_tper && !femu_opal_quiet(n, &resume)) {
+        return NVME_CMD_SEQ_ERROR | NVME_DNR;
+    }
     /* Sanitize Start (Figure 247): the whole subsystem is the target */
     stl_le_p(ev, le32_to_cpu(n->id_ctrl.sanicap));
     stl_le_p(ev + 4, dw10);
@@ -4736,7 +4748,12 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     sanitize->cdw10 = dw10;
     sanitize->cdw11 = le32_to_cpu(cmd->cdw11);
     if (!n->sanitize_ms) {
-        return nvme_sanitize_finish(n);
+        uint16_t status = nvme_sanitize_finish(n);
+
+        if (n->opal_tper) {
+            femu_opal_loud(n, resume);
+        }
+        return status;
     }
     /* in the background: SSTAT 010b, I/O and most admin commands refused */
     sanitize->start_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
@@ -4744,6 +4761,9 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
                 (qatomic_read(&sanitize->sstat) & NVME_SSTAT_GDE) | 0x2);
     qatomic_set(&sanitize->active, true);
     timer_mod(n->san_timer, sanitize->start_ms + n->sanitize_ms);
+    if (n->opal_tper) {
+        femu_opal_loud(n, resume);
+    }
     return NVME_SUCCESS;
 }
 
@@ -5620,6 +5640,11 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
         }
     }
 
+    /* x-opal: no write-locked LBA is formatted (SIIS 6.7.3) */
+    if (n->opal_tper && !femu_opal_format_ok(n)) {
+        return NVME_INVALID_FORMAT | NVME_DNR;
+    }
+
     if (nsid == NVME_NSID_BROADCAST && n->subsys &&
         n->subsys->endgrp.fdp.enabled) {
         prep = nvme_format_prepare(n, lba_idx);
@@ -5631,9 +5656,17 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     /*
      * The bitmaps about to be replaced are indexed by every read and write, so
      * no poller may be inside a sweep while they are swapped and the backing
-     * store is cleared.
+     * store is cleared. x-opal also drains the I/O taken, so none runs in
+     * the new format, and publishes the new geometry before I/O resumes.
      */
-    resume = nvme_pause_pollers(n);
+    if (n->opal_tper) {
+        if (!femu_opal_quiet(n, &resume)) {
+            nvme_format_prep_free(n, prep);
+            return NVME_CMD_SEQ_ERROR | NVME_DNR;
+        }
+    } else {
+        resume = nvme_pause_pollers(n);
+    }
 
     /*
      * A write admitted against the end-of-life reserve was costed in the LBA
@@ -5643,6 +5676,9 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
      */
     if (nvme_eol_busy(n)) {
         nvme_resume_pollers(n, resume);
+        if (n->opal_tper) {
+            nvme_thaw(n);
+        }
         nvme_format_prep_free(n, prep);
         return NVME_CMD_SEQ_ERROR | NVME_DNR;
     }
@@ -5692,7 +5728,12 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
         femu_pel_log(n, NVME_PEL_FORMAT_COMPLETION, 2, ev, 12);
     }
 
-    nvme_resume_pollers(n, resume);
+    if (n->opal_tper) {
+        femu_opal_publish(n);
+        femu_opal_loud(n, resume);
+    } else {
+        nvme_resume_pollers(n, resume);
+    }
 
     /* what a namespace that failed first did not take */
     nvme_format_prep_free(n, prep);
@@ -6271,17 +6312,13 @@ static uint16_t nvme_security(FemuCtrl *n, NvmeCmd *cmd, bool send)
     uint32_t len = le32_to_cpu(cmd->cdw11);
     uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
     uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
-    NvmeNamespace *ns = nvme_ns_allocated(n, 1);
     g_autofree uint8_t *buf = NULL;
+    bool timeout;
     FemuOpalIf r;
     uint16_t status;
 
     if (len > FEMU_OPAL_XFER_MAX) {
         return NVME_INVALID_FIELD | NVME_DNR;
-    }
-    /* Geometry Reporting follows a Format NVM */
-    if (ns) {
-        n->opal_tper->cfg.lba_size = NVME_ID_NS_LBADS_BYTES(ns);
     }
     buf = g_malloc0(MAX(len, FEMU_OPAL_BUF));
     if (send) {
@@ -6295,8 +6332,11 @@ static uint16_t nvme_security(FemuCtrl *n, NvmeCmd *cmd, bool send)
                 return status;
             }
         }
-        return nvme_security_status(femu_opal_send(n->opal_tper, secp, spsp,
-                                                   buf, len));
+        r = femu_opal_quiet_send(n, secp, spsp, buf, len, &timeout);
+        if (timeout) {
+            return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
+        }
+        return nvme_security_status(r);
     }
     r = femu_opal_recv(n->opal_tper, secp, spsp, buf, len);
     if (r) {

@@ -546,7 +546,7 @@ void nvme_caps_id_ctrl(FemuCtrl *n, NvmeIdCtrl *id)
     id->oacs = cpu_to_le16(a);
     id->oncs = cpu_to_le16(o);
     /* descriptor formats 0 and 2 (the latter names a source namespace) */
-    id->ocfs = cpu_to_le16(o & NVME_ONCS_COPY ? 0x5 : 0);
+    id->ocfs = cpu_to_le16(o & NVME_ONCS_COPY ? (n->opal ? 0x1 : 0x5) : 0);
     /*
      * Memory Copy takes formats 2h and 4h whatever ONCS says, and with it a
      * Copy may read the memory namespace through format 4h.

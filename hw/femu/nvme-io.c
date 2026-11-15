@@ -1,5 +1,6 @@
 #include "./nvme.h"
 #include "nvme-pi.h"
+#include "nvme-opal.h"
 #include "csd/csd.h"
 #include "kvssd/kvssd.h"
 #include "trace.h"
@@ -601,6 +602,7 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
             req->expire_time = req->stime = fetched + req->wake_ns;
         }
         req->link_early = false;
+        req->opal_synth = false;
         req->t_handoff = 0;
         req->t_return = 0;
         req->cqe.cid = cmd.cid;
@@ -1956,6 +1958,17 @@ static uint16_t nvme_dsm(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
         total_blocks += nlb;
     }
+    /* x-opal: a write-locked range refuses the whole command */
+    for (i = 0; n->opal_tper && i < nr_ranges; i++) {
+        uint32_t nlb = le32_to_cpu(ranges[i].nlb);
+
+        if (nlb && femu_opal_access(n->opal_view, FEMU_OPAL_OP_WRITE,
+                                    le64_to_cpu(ranges[i].slba), nlb) ==
+                   FEMU_OPAL_DENY) {
+            g_free(ranges);
+            return NVME_ACCESS_DENIED | NVME_DNR;
+        }
+    }
 
     if (n->power_loss && !total_blocks) {
         g_free(ranges);
@@ -2145,6 +2158,7 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     g_autofree uint8_t *mstage = NULL;
     uint16_t ms;
     g_autofree NvmeDsmRange *src = NULL;
+    g_autofree bool *shadow = NULL;
     uint8_t *base;
     uint64_t total = 0;
     uint64_t done = 0;
@@ -2158,6 +2172,10 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     ms = nvme_ns_ms(ns);
     /* durable_at_done keeps the before-images of data bytes only */
     if (n->durable_at_done && (ms || femu_pi_type(ns))) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* x-opal: formats 0h only (OCFS), one namespace */
+    if (n->opal_tper && fmt) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     /* format 4h reads the memory namespace, once the host enabled it */
@@ -2227,6 +2245,30 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (sdlba >= nsze || total > nsze - sdlba) {
         return NVME_LBA_RANGE | NVME_DNR;
     }
+    /*
+     * x-opal: the destination is written and each source is read (SIIS
+     * 6.7.11), checked before any media check. A source in the MBR shadow
+     * reads the MBR bytes.
+     */
+    if (n->opal_tper) {
+        if (femu_opal_access(n->opal_view, FEMU_OPAL_OP_WRITE, sdlba,
+                             total) == FEMU_OPAL_DENY) {
+            return NVME_ACCESS_DENIED | NVME_DNR;
+        }
+        shadow = g_new0(bool, nr);
+        for (i = 0; i < nr; i++) {
+            FemuOpalAccess a;
+
+            a = femu_opal_access(n->opal_view, FEMU_OPAL_OP_COPY_SRC,
+                                 le64_to_cpu(ranges[i].slba),
+                                 le16_to_cpu(ranges[i].nlb) + 1);
+            if (a == FEMU_OPAL_DENY) {
+                req->cqe.n.result = cpu_to_le32(i);
+                return NVME_ACCESS_DENIED | NVME_DNR;
+            }
+            shadow[i] = a == FEMU_OPAL_SHADOW;
+        }
+    }
     for (i = 0; i < nr; i++) {
         uint64_t slba = le64_to_cpu(ranges[i].slba);
         uint32_t nlb = le16_to_cpu(ranges[i].nlb) + 1;
@@ -2235,6 +2277,9 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         /* only a range in the destination namespace can overlap it */
         if (sns[i] == ns && slba < sdlba + total && sdlba < elba) {
             return NVME_CMD_OVERLAP_IO_RANGE | NVME_DNR;
+        }
+        if (shadow && shadow[i]) {
+            continue;
         }
         /* Dword 0 names the source range that failed */
         if (femu_lba_bad(sns[i], slba, elba, &bad)) {
@@ -2277,6 +2322,9 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             if (mbuf) {
                 memcpy(mbuf, smeta, (size_t)nlb * ms);
             }
+        } else if (shadow && shadow[i]) {
+            femu_opal_mbr_read(n->opal_tper, slba << lbads, dbuf,
+                               (uint64_t)nlb << lbads);
         } else {
             if (sms) {
                 qemu_mutex_lock(&s->mdata_lock);
@@ -2305,10 +2353,13 @@ static uint16_t nvme_copy(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
             }
         }
         done += nlb;
-        /* the FTL charges each read to the namespace it comes from */
+        /*
+         * The FTL charges each read to the namespace it comes from. A
+         * source from the MBR shadow reads no NAND, so it gets no blocks.
+         */
         src[i].cattr = cpu_to_le32(s->id);
         src[i].slba = cpu_to_le64(slba);
-        src[i].nlb = cpu_to_le32(nlb);
+        src[i].nlb = cpu_to_le32(shadow && shadow[i] ? 0 : nlb);
     }
 write:
     status = bbssd_drain_namespace(ns, req->stime, &req->reqlat);
@@ -3332,6 +3383,14 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         }
         status = nvme_resv_cmd_check(n, ns, cmd->opcode);
         if (status) {
+            return status;
+        }
+    }
+    /* x-opal: the locking ranges and the MBR shadow (SIIS 6.7) */
+    if (unlikely(n->opal_tper)) {
+        uint16_t status;
+
+        if (femu_opal_io(n, ns, cmd, req, &status)) {
             return status;
         }
     }

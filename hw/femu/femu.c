@@ -18,7 +18,7 @@
 #include "./nand/nand-profile.h"
 #include "./femu-props.h"
 #include "./femu-query.h"
-#include "./femu-opal.h"
+#include "./nvme-opal.h"
 
 /*
  * Base 2.1: FEMU already reports fields 2.0 reserves (ONCS bit 9, Copy format
@@ -3147,6 +3147,10 @@ static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
     if (!ns) {
         return 0;
     }
+    /* x-opal: the data came from the MBR shadow or was zeros */
+    if (unlikely(req->opal_synth)) {
+        return femu_opal_synth_lat(req);
+    }
 
     /* The medium's own worker uses the same FTL; it serializes both. */
     if (n->cxl_media && ns->ssd_borrowed) {
@@ -3648,7 +3652,7 @@ static void femu_realize_undo(FemuCtrl *n)
     g_clear_pointer(&n->vwc_timer, timer_free);
     g_clear_pointer(&n->plp_timer, timer_free);
     g_clear_pointer(&n->wrr_tried, g_free);
-    g_clear_pointer(&n->opal_tper, femu_opal_free);
+    femu_opal_stop(n);
     if (!n->shared_storage) {
         femu_exit_extensions(n);
     }
@@ -4607,7 +4611,7 @@ static void femu_opal_pin(FemuOpalPin *pin, const char *tag,
     memcpy(pin->v, s, pin->len);
 }
 
-static bool femu_opal_check(FemuCtrl *n, Error **errp)
+static bool femu_opal_config_check(FemuCtrl *n, Error **errp)
 {
     const char *map = n->bb_params.mapping_scheme;
     NvmeNamespace *ns = nvme_ns_allocated(n, 1);
@@ -4617,8 +4621,8 @@ static bool femu_opal_check(FemuCtrl *n, Error **errp)
         why = "more than one namespace";
     } else if (n->namespace_modes) {
         why = "namespace_modes";
-    } else if (ns->femu_mode != FEMU_NOSSD_MODE &&
-               ns->femu_mode != FEMU_BBSSD_MODE) {
+    } else if (CSD(n) || (ns->femu_mode != FEMU_NOSSD_MODE &&
+                          ns->femu_mode != FEMU_BBSSD_MODE)) {
         why = "a mode other than NoSSD or bbssd";
     } else if (ns->femu_mode == FEMU_BBSSD_MODE && map &&
                strcmp(map, "page")) {
@@ -4987,14 +4991,13 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
             .users = 8,
         };
 
-        if (!femu_opal_check(n, errp)) {
+        if (!femu_opal_config_check(n, errp)) {
             femu_realize_undo(n);
             return;
         }
         femu_opal_pin(&cfg.msid, "MSID", n->serial);
         femu_opal_pin(&cfg.psid, "PSID", n->serial);
-        n->opal_tper = g_new(FemuOpal, 1);
-        femu_opal_init(n->opal_tper, &cfg);
+        femu_opal_start(n, &cfg);
     }
     /* reservations and ANA work on the namespaces that now exist */
     nvme_resv_realize(n);
@@ -5370,7 +5373,7 @@ static void femu_exit(PCIDevice *pci_dev)
     nvme_destroy_poller(n);
     /* the pollers are gone: no grant can read it any more */
     g_clear_pointer(&n->wrr_tried, g_free);
-    g_clear_pointer(&n->opal_tper, femu_opal_free);
+    femu_opal_stop(n);
     /* the pollers are gone, so nothing can wake the bottom half any more */
     qemu_bh_delete(n->aer_bh);
     n->aer_bh = NULL;

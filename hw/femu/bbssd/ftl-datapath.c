@@ -1763,6 +1763,30 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
 }
 
 /*
+ * Drop the mappings of the NAND pages [slba, slba + nlb) of @ns covers in
+ * full, as a TCG erase needs (nvme-opal.c). A page it covers in part keeps
+ * its mapping for the other LBAs. The caller has the dataplane and the FTL
+ * thread stopped.
+ */
+void bbssd_deallocate_lbas(NvmeNamespace *ns, uint64_t slba, uint64_t nlb)
+{
+    struct ssd *ssd = ns->ssd;
+    NvmeRequest req = { .ns = ns };
+    uint64_t start_lpn;
+    uint64_t end_lpn;
+    int already_invalid = 0;
+
+    if (!ssd || !ssd->sp.tt_pgs || !nlb ||
+        !ssd_lpn_range_full(ssd, &req, slba, nlb, &start_lpn, &end_lpn) ||
+        start_lpn >= ssd->sp.tt_pgs) {
+        return;
+    }
+    ssd_deallocate_lpns(ssd, start_lpn,
+                        MIN(end_lpn, (uint64_t)ssd->sp.tt_pgs - 1),
+                        &already_invalid);
+}
+
+/*
  * Drop every mapping the namespace's FTL holds, as Format erases it. The host's
  * data is gone, so the pages it occupied are invalid: left mapped, garbage
  * collection would keep relocating data nobody can read any more. The caller

@@ -22248,6 +22248,441 @@ static void femu_test_opal_session(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+static void femu_tb_u(FemuTb *t, uint64_t v)
+{
+    int len = 0;
+    int i;
+
+    if (v < 64) {
+        t->b[t->n++] = v;
+        return;
+    }
+    for (i = 0; i < 8; i++) {
+        if (v >> (8 * i)) {
+            len = i + 1;
+        }
+    }
+    t->b[t->n++] = 0x80 | len;
+    for (i = len - 1; i >= 0; i--) {
+        t->b[t->n++] = v >> (8 * i);
+    }
+}
+
+/* the method status of a reply: CALL ... EOD SL status 0 0 EL */
+static uint8_t femu_opal_run(FemuCtrlState *c, QTestState *qts, uint64_t buf,
+                             FemuTb *t, uint32_t tsn)
+{
+    uint8_t r[2048];
+    uint32_t n;
+
+    femu_tb_end(t);
+    n = femu_opal_xfer(c, qts, buf, t, tsn, r);
+    g_assert_cmpuint(n, >, 4);
+    return r[56 + n - 4];
+}
+
+/* StartSession to @sp as @auth with @pin; returns the status */
+static uint8_t femu_opal_open(FemuCtrlState *c, QTestState *qts, uint64_t buf,
+                              uint64_t sp, uint64_t auth, const char *pin,
+                              uint32_t *tsn)
+{
+    FemuTb t = { .n = 0 };
+    uint8_t r[2048];
+    uint32_t n;
+
+    femu_tb_call(&t, 0xFF, 0xFF02);
+    femu_tb_u(&t, 0x42);
+    femu_tb_uid(&t, sp);
+    t.b[t.n++] = 1;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 0;
+    femu_tb_bytes(&t, (const uint8_t *)pin, strlen(pin));
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 3;
+    femu_tb_uid(&t, auth);
+    t.b[t.n++] = 0xF3;
+    femu_tb_end(&t);
+    n = femu_opal_xfer(c, qts, buf, &t, 0, r);
+    g_assert_cmpuint(n, >, 6);
+    if (!r[56 + n - 4]) {
+        g_assert_cmphex(r[56 + 22], ==, 0x82);
+        *tsn = r[56 + 23] << 8 | r[56 + 24];
+    }
+    return r[56 + n - 4];
+}
+
+static void femu_opal_eos(FemuCtrlState *c, QTestState *qts, uint64_t buf,
+                          uint32_t tsn)
+{
+    FemuTb t = { .n = 0 };
+    uint8_t r[2048];
+
+    t.b[t.n++] = 0xFA;
+    g_assert_cmpuint(femu_opal_xfer(c, qts, buf, &t, tsn, r), ==, 1);
+}
+
+/* Set uint columns of one row; @cols ends with -1 */
+static uint8_t femu_opal_lset(FemuCtrlState *c, QTestState *qts,
+                              uint64_t buf, uint32_t tsn, uint64_t obj,
+                              const int *cols, const uint64_t *vals)
+{
+    FemuTb t = { .n = 0 };
+    int i;
+
+    femu_tb_call(&t, obj, 0x0000000600000017ull);
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 1;
+    t.b[t.n++] = 0xF0;
+    for (i = 0; cols[i] >= 0; i++) {
+        t.b[t.n++] = 0xF2;
+        femu_tb_u(&t, cols[i]);
+        femu_tb_u(&t, vals[i]);
+        t.b[t.n++] = 0xF3;
+    }
+    t.b[t.n++] = 0xF1;
+    t.b[t.n++] = 0xF3;
+    return femu_opal_run(c, qts, buf, &t, tsn);
+}
+
+#define FEMU_OPAL_LOCKING_SP    0x0000020500000002ull
+#define FEMU_OPAL_LOCK1         0x0000080200030001ull
+#define FEMU_OPAL_MBRCTL        0x0000080300000001ull
+
+/* one 4 KiB command at @slba; SC only, and a refusal carries DNR */
+static uint16_t femu_opal_rw(FemuCtrlState *c, uint8_t opc, uint64_t slba,
+                             uint64_t data)
+{
+    uint16_t status = femu_rw(c, opc, slba, data);
+
+    if (FEMU_SC(status) == NVME_ACCESS_DENIED) {
+        g_assert_cmphex(status & NVME_DNR, ==, NVME_DNR);
+    }
+    return FEMU_SC(status);
+}
+
+/* an I/O command of @nlb blocks at @slba with data at @prp; as above */
+static uint16_t femu_opal_cmd(FemuCtrlState *c, uint8_t opc, uint64_t slba,
+                              uint32_t nlb, uint32_t dw11, uint64_t prp)
+{
+    NvmeCmd cmd = { 0 };
+    uint16_t sc;
+
+    cmd.opcode = opc;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(prp);
+    cmd.cdw10 = cpu_to_le32((uint32_t)slba);
+    cmd.cdw11 = cpu_to_le32(dw11 ? dw11 : (uint32_t)(slba >> 32));
+    cmd.cdw12 = cpu_to_le32(nlb - 1);
+    sc = femu_io(c, &cmd);
+    if (sc == NVME_ACCESS_DENIED) {
+        g_assert_cmphex(femu_io_status & NVME_DNR, ==, NVME_DNR);
+    }
+    return sc;
+}
+
+/*
+ * x-opal locking over NVMe (SIIS 6.7): a locked range refuses Read and
+ * Write, GenKey erases it, Format and Sanitize are refused, and an MBR
+ * shadow serves Reads until Done. The 128 MiB MBR covers this whole
+ * namespace, so the shadow comes last.
+ */
+static void femu_test_opal_locking(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    static const char pin[] = "FEMU-MSID-opal-lock";
+    static const int range[] = { 3, 4, 5, 6, 7, 8, -1 };
+    static const uint64_t locked[] = { 64, 64, 1, 1, 1, 1 };
+    static const int rw[] = { 7, 8, -1 };
+    static const uint64_t open[] = { 0, 0 };
+    static const uint64_t wlock[] = { 0, 1 };
+    static const int en[] = { 1, -1 };
+    static const int done[] = { 2, -1 };
+    static const uint64_t one[] = { 1 };
+    static const char mbr[] = "FEMU-MBR-SHADOW";
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint64_t io = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint8_t got[FEMU_DATA_SIZE];
+    uint8_t want[FEMU_DATA_SIZE];
+    FemuTb t = { .n = 0 };
+    NvmeCmd cmd = { 0 };
+    uint32_t tsn = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    /* SID activates the Locking SP; Admin1 takes the MSID PIN */
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, 0x0000020500000001ull,
+                                    0x0000000900000006ull, pin, &tsn), ==, 0);
+    femu_tb_call(&t, FEMU_OPAL_LOCKING_SP, 0x0000000600000203ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    femu_opal_eos(&c, qts, buf, tsn);
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
+                                    0x0000000900010001ull, pin, &tsn), ==, 0);
+
+    /* Range1 = LBAs 64..127, read and write locked */
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    range, locked), ==, 0);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 60, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 56, io), ==,
+                    NVME_SUCCESS);
+
+    /* unlocked: data goes in and comes back */
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    rw, open), ==, 0);
+    memset(want, 0x5A, sizeof(want));
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 64, io), ==,
+                    NVME_SUCCESS);
+    qtest_memset(qts, io, 0, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 64, io), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, io, got, sizeof(got));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+
+    /* GenKey on K_AES_256_Range1 erases the range */
+    t.n = 0;
+    femu_tb_call(&t, 0x0000080600030001ull, 0x0000000600000010ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    qtest_memset(qts, io, 0xFF, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 64, io), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, io, got, sizeof(got));
+    memset(want, 0, sizeof(want));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+
+    /* Format: refused while an LBA is write locked; Sanitize: owned */
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    rw, wlock), ==, 0);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==,
+                    NVME_INVALID_FORMAT);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    rw, open), ==, 0);
+    cmd.opcode = FEMU_ADM_SANITIZE;
+    cmd.cdw10 = cpu_to_le32(2);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_ACCESS_DENIED);
+
+    /* MBR shadow: Reads get the MBR bytes, Writes are refused */
+    memset(want, 0xA5, sizeof(want));
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 0, io), ==,
+                    NVME_SUCCESS);
+    t.n = 0;
+    femu_tb_call(&t, 0x0000080400000000ull, 0x0000000600000017ull);
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 0;
+    t.b[t.n++] = 0;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 1;
+    femu_tb_bytes(&t, (const uint8_t *)mbr, strlen(mbr));
+    t.b[t.n++] = 0xF3;
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_MBRCTL,
+                                    en, one), ==, 0);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 0, io), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, io, got, sizeof(got));
+    memset(want, 0, sizeof(want));
+    memcpy(want, mbr, strlen(mbr));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 0, io), ==,
+                    NVME_ACCESS_DENIED);
+    /* Done: the media again */
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_MBRCTL,
+                                    done, one), ==, 0);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 0, io), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, io, got, sizeof(got));
+    memset(want, 0xA5, sizeof(want));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    femu_opal_eos(&c, qts, buf, tsn);
+
+    femu_disable(&c);
+    guest_free(alloc, io);
+    guest_free(alloc, buf);
+}
+
+/*
+ * x-opal on a 256 MiB bbssd namespace, so the 128 MiB MBR (LBAs below
+ * 262144) ends inside it: the shadow end, zeros outside the shadow,
+ * Compare and a Copy source in the shadow, DSM, Write Zeroes and Write
+ * Uncorrectable on a locked range, the Copy formats, and a system reset,
+ * which is a TCG Hardware Reset.
+ */
+static void femu_test_opal_shadow(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    static const char pin[] = "FEMU-MSID-opal-mbr";
+    static const char mbr[] = "SHADOW-AT-LBA-8";
+    static const int range[] = { 3, 4, 5, 6, 7, 8, -1 };
+    static const uint64_t locked[] = { 262144, 64, 1, 1, 1, 1 };
+    static const int rw[] = { 7, 8, -1 };
+    static const uint64_t open[] = { 0, 0 };
+    static const int en[] = { 1, -1 };
+    static const int done[] = { 2, -1 };
+    static const uint64_t one[] = { 1 };
+    const uint64_t far = 300000;
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=om,addr=5,devsz_mb=256,"
+        "femu_mode=1,oncs=415,x-opal=on,serial=opal-mbr");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t io;
+    uint64_t desc;
+    uint8_t got[FEMU_DATA_SIZE];
+    uint8_t want[FEMU_DATA_SIZE];
+    uint8_t d[32] = { 0 };
+    uint8_t r[256];
+    uint8_t hw[2] = { 1, 0 };
+    FemuTb t = { .n = 0 };
+    uint32_t tsn = 0;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(&qs->alloc, 8192);
+    io = guest_alloc(&qs->alloc, FEMU_DATA_SIZE);
+    desc = guest_alloc(&qs->alloc, 4096);
+
+    /* data in and out of the shadow before any lock */
+    memset(want, 0x3C, sizeof(want));
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 8, io), ==, 0);
+    memset(want, 0xC3, sizeof(want));
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 262144, io), ==, 0);
+
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, 0x0000020500000001ull,
+                                    0x0000000900000006ull, pin, &tsn), ==, 0);
+    femu_tb_call(&t, FEMU_OPAL_LOCKING_SP, 0x0000000600000203ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    femu_opal_eos(&c, qts, buf, tsn);
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
+                                    0x0000000900010001ull, pin, &tsn), ==, 0);
+    /* Range1 is the 64 LBAs just past the shadow; MBR bytes at LBA 8 */
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    range, locked), ==, 0);
+    t.n = 0;
+    femu_tb_call(&t, 0x0000080400000000ull, 0x0000000600000017ull);
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 0;
+    femu_tb_u(&t, 8 * 512);
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 1;
+    femu_tb_bytes(&t, (const uint8_t *)mbr, strlen(mbr));
+    t.b[t.n++] = 0xF3;
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_MBRCTL,
+                                    en, one), ==, 0);
+
+    /* inside: the MBR bytes of that LBA, not the media */
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 8, io), ==, 0);
+    qtest_memread(qts, io, got, sizeof(got));
+    memset(want, 0, sizeof(want));
+    memcpy(want, mbr, strlen(mbr));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    /* Compare against the MBR bytes: equal, then one byte off */
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_COMPARE, 8, 8, 0, io), ==, 0);
+    want[0] ^= 1;
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_COMPARE, 8, 8, 0, io), ==,
+                    NVME_CMP_FAILURE);
+    want[0] ^= 1;
+    /* across the shadow end: refused; past it, read locked: zeros */
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 262140, io), ==,
+                    NVME_ACCESS_DENIED);
+    qtest_memset(qts, io, 0xFF, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 262144, io), ==, 0);
+    qtest_memread(qts, io, got, sizeof(got));
+    memset(want, 0, sizeof(want));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_VERIFY, 262144, 8, 0, 0), ==,
+                    NVME_ACCESS_DENIED);
+    /* every write class on the locked range is refused */
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 262144, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_WRITE_ZEROES, 262150, 1, 0,
+                                  0), ==, NVME_ACCESS_DENIED);
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_WRITE_UNCOR, 262150, 1, 0,
+                                  0), ==, NVME_ACCESS_DENIED);
+    memset(d, 0, sizeof(d));
+    stl_le_p(d + 4, 4);
+    stq_le_p(d + 8, 262200);
+    qtest_memwrite(qts, desc, d, 16);
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_DSM, 0, 1, 1 << 2, desc), ==,
+                    NVME_ACCESS_DENIED);
+
+    /* Copy: format 2 refused; a shadow source copies the MBR bytes */
+    memset(d, 0, sizeof(d));
+    stq_le_p(d + 8, 8);
+    stw_le_p(d + 16, 7);
+    qtest_memwrite(qts, desc, d, 32);
+    /* CDW12 holds NR - 1 and the format in bits 11:8 */
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_COPY, far, (2 << 8) + 1, 0,
+                                  desc), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_COPY, 262144, 1, 0, desc),
+                    ==, NVME_ACCESS_DENIED);
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_COPY, far, 1, 0, desc), ==, 0);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_MBRCTL,
+                                    done, one), ==, 0);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, far, io), ==, 0);
+    qtest_memread(qts, io, got, sizeof(got));
+    memcpy(want, mbr, strlen(mbr));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    /* Done: LBA 8 is the media again */
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 8, io), ==, 0);
+    qtest_memread(qts, io, got, sizeof(got));
+    memset(want, 0x3C, sizeof(want));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+
+    /* unlock, then Block SID asks to clear on a Hardware Reset */
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    rw, open), ==, 0);
+    memset(want, 0x77, sizeof(want));
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 262144, io), ==, 0);
+    qtest_memwrite(qts, buf, hw, sizeof(hw));
+    g_assert_cmphex(femu_sec(&c, true, 2, 0x0005, buf, 512), ==, 0);
+    qtest_memset(qts, buf, 0, 2048);
+    g_assert_cmphex(femu_sec(&c, false, 1, 1, buf, 2048), ==, 0);
+    qtest_memread(qts, buf, r, sizeof(r));
+    g_assert_cmphex(r[152], ==, 0x02);
+
+    /* system reset: Block SID clears; LockOnReset {0} does not lock */
+    qtest_qmp_assert_success(qts, "{'execute':'system_reset'}");
+    qtest_qmp_eventwait(qts, "RESET");
+    qpci_device_enable(pdev);
+    c.bar = qpci_iomap(pdev, 0, NULL);
+    qtest_memset(qts, buf, 0, 2048);
+    g_assert_cmphex(femu_sec(&c, false, 1, 1, buf, 2048), ==, 0);
+    qtest_memread(qts, buf, r, sizeof(r));
+    g_assert_cmphex(r[152], ==, 0);
+    /* no lock and no shadow came back: the media, not zeros */
+    qtest_memset(qts, io, 0, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 262144, io), ==, 0);
+    qtest_memread(qts, io, got, sizeof(got));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    /* the old session is gone: a new one opens */
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
+                                    0x0000000900010001ull, pin, &tsn), ==, 0);
+    femu_opal_eos(&c, qts, buf, tsn);
+
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
 static void femu_test_opal_off(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -63364,6 +63799,11 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "x-opal=on,serial=opal-session",
     });
+    qos_add_test("opal-locking", "femu", femu_test_opal_locking,
+                 &(QOSGraphTestOptions){
+        .edge.extra_device_opts = "x-opal=on,serial=opal-lock",
+    });
+    qos_add_test("opal-shadow", "femu", femu_test_opal_shadow, NULL);
     qos_add_test("opal-off", "femu", femu_test_opal_off, NULL);
     qos_add_test("opal-refused", "femu", femu_test_opal_refused, NULL);
     qos_add_test("telemetry-ctrl", "femu", femu_test_telemetry_ctrl,
