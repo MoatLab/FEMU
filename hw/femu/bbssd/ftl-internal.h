@@ -176,9 +176,20 @@ static inline int ssd_rain_usable_lines(struct ssd *ssd)
     struct ssdparams *spp = &ssd->sp;
     int open = 1 + (spp->hot_cold_sep ? 1 : 0) + (spp->gc_frontier ? 1 : 0);
 
-    return spp->tt_lines - bb_gc_forced_lines(ssd->n) - open -
-           ssd->eol_reserve_lines - ssd->lm.retired_line_cnt;
+    /* spare pool lines only replace worn-out blocks: no data */
+    return spp->tt_lines - ssd->spare_lines - bb_gc_forced_lines(ssd->n) -
+           open - ssd->eol_reserve_lines - ssd->lm.retired_line_cnt;
 }
+
+/* rain_parity: LUN @ch/@lun failed for good (rain_fidx), not OCP 0016h */
+static inline bool ssd_rain_lun_failed(struct ssd *ssd, int ch, int lun)
+{
+    return ssd->sp.rain_parity &&
+           ssd->sp.rain_fidx[lun * ssd->sp.nchs + ch] != INT_MAX;
+}
+
+int ssd_wear_floor(struct ssd *ssd, int nfail);
+uint8_t ssd_spare_locked(struct ssd *ssd);
 
 uint8_t ssd_rain_spare_at(struct ssd *ssd, int nfail);
 

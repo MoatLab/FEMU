@@ -21,4 +21,3 @@ tier_pslc_pe_cycles no test yet
 fw_write_ns         no test yet
 zns_cross_zone_read no test yet
 lmax_sec_per_rq     no test yet: OCSSD 1.2 Identify field
-mpsmin              no test yet: CAP.MPSMIN field only

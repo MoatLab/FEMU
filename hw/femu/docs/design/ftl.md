@@ -1126,21 +1126,49 @@ default), such a failure is refused.
   dies fail down to two members. So the writes admitted before a failure
   always find room.
 - The failure check and Available Spare count the same lines: all lines
-  less the forced GC lines, the open pointers, the reserve and the
-  retired lines.
+  less the spare pool, the forced GC lines, the open pointers, the
+  reserve and the retired lines.
 - Critical Warning reads 0Dh: bit 2 for the failure, bit 3 for
   read-only, bit 0 for no spare. Available Spare reads 0.
 - Each old line keeps one lost member, so every page still reads.
 - The default MDTS (4 MiB) needs a reserve larger than small devices
   have, so the property is opt-in. It needs `eol_read_only=on`; it does
-  not work with `blk_pe_limit`, the write buffer or `iu_pages` above 1,
-  whose writes the admission does not count.
+  not work with the write buffer or `iu_pages` above 1, whose writes the
+  admission does not count.
 - A device whose `failed_die` leaves no spare at start is refused.
 - A `cxl_ssd` link is refused too: the CXL device makes that FTL,
   without the reserve.
 - With the property on, the FTL thread reports the spare, reliability
   and read-only bits to the Persistent Event Log as they change, as with
   the wear model.
+
+### RAIN with the wear model (blk_pe_limit)
+
+`rain_parity` works with `blk_pe_limit`, `blk_pe_spread`, `spare_lines`
+and `erase_fail_ppm`. A die failure changes the wear model in four ways.
+
+```text
+ die d fails (x-rain-fail or failed_die)
+   erase of a line : live dies erase; d frees its pages, no count, no time
+   wear-out check  : d is out; no erase failure, no spare, no retirement
+   floor           : lines the namespace needs at the new line size,
+                     + forced GC lines + 2 (+1 with gc_frontier)
+   Available Spare : min(wear spare, RAIN spare)
+```
+
+- A failed die keeps its erase counts. Its worn-out blocks leave the
+  count of blocks in service; the grown bad and sacrificed totals stay.
+- The wear spare is the retirement room left against the room at
+  realization. The floor rises at a failure, so the room falls with it.
+- With an end of life (`eol_read_only` or `rain_read_only`), a spare of
+  0 after a failure, a spare swap or a retirement sends the media
+  read-only.
+- The end-of-life reserve is sized for a line of two dies whenever an
+  end of life is on.
+- Spare pool lines (`spare_lines`) hold no data, so the failure check and
+  the RAIN spare leave them out.
+- OCP 0016h offline injection is not a failure here: that die erases and
+  wears as before.
 
 ### Data loss at a second failure (rain_loss)
 

@@ -57,13 +57,14 @@ uint64_t bb_line_data_pgs(const BbCtrlParams *p)
 
 /*
  * The data pages of the line the end-of-life reserve is sized by. With
- * rain_read_only, dies fail down to two members, so a line opened after
- * the last of them holds one data page a row; the reserve must hold the
- * admitted writes at every failure count.
+ * rain_parity, dies fail down to two members, so a line opened after the
+ * last of them holds one data page a row; the reserve must hold the
+ * admitted writes at every failure count, for the RAIN and the wear end
+ * of life alike. Without EOL admission there is no reserve.
  */
 uint64_t bb_eol_line_pgs(const BbCtrlParams *p)
 {
-    if (p->rain_parity && p->rain_read_only) {
+    if (p->rain_parity) {
         return (uint64_t)p->pls_per_lun * p->pgs_per_blk;
     }
     return bb_line_data_pgs(p);
@@ -416,20 +417,19 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         (p->rain_parity &&
          (p->die_parity || p->prog_pass2_ns || p->wl_spread ||
           p->pd_open_close_sec || n->streams || n->durable_at_done ||
-          p->gc_pace || n->blk_pe_limit ||
+          p->gc_pace ||
           (p->failed_die >= 0 && p->nchs * p->luns_per_ch < 3) ||
           p->nchs * p->luns_per_ch > 1024 ||
           (p->tier_mode && strcmp(p->tier_mode, "off"))))) {
         /*
-         * gc_pace and blk_pe_limit (with its read-only end of life) size
-         * their budgets by one line size; after a die failure lines have
-         * two sizes.
+         * gc_pace sizes its budget by one line size; after a die failure
+         * lines have two sizes.
          */
         error_setg(errp, "FEMU bbssd: rain_parity is 0 or 1, and does not "
                    "work with die_parity, prog_pass2_ns, wl_spread, "
-                   "pd_open_close_sec, Streams, durable_at_done, gc_pace, "
-                   "blk_pe_limit or the pSLC tier; with failed_die it needs "
-                   "three dies, and it takes at most 1024 dies");
+                   "pd_open_close_sec, Streams, durable_at_done, gc_pace "
+                   "or the pSLC tier; with failed_die it needs three dies, "
+                   "and it takes at most 1024 dies");
         return -1;
     }
     /* the die that OCP event 0016h (NAND Die Offline) takes offline */

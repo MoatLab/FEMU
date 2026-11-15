@@ -677,6 +677,31 @@ bool ssd_rain_fail_ok(struct ssd *ssd, int die, Error **errp)
 }
 
 /*
+ * rain_parity with blk_pe_limit: die @ch/@lun failed. Retirement keeps the
+ * lines of the new epoch, and the die's worn-out blocks leave the count of
+ * blocks in service. Erase counts and the bad block totals stay as they
+ * are. The caller has paused the FTL.
+ */
+static void ssd_rain_wear_commit(struct ssd *ssd, int ch, int lun)
+{
+    struct ssdparams *spp = &ssd->sp;
+
+    qemu_mutex_lock(&ssd->wear_lock);
+    ssd->wear_floor_lines = ssd_wear_floor(ssd, spp->rain_nfail);
+    for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+        struct nand_plane *plane = &ssd->ch[ch].lun[lun].pl[pl];
+
+        for (int b = 0; b < spp->blks_per_pl; b++) {
+            if (plane->blk[b].overworn) {
+                plane->blk[b].overworn = false;
+                ssd->overworn_blocks--;
+            }
+        }
+    }
+    qemu_mutex_unlock(&ssd->wear_lock);
+}
+
+/*
  * rain_parity: die @die (ch * luns_per_ch + lun) fails. One parity page
  * per stripe takes one failure in a row, so a new failure needs every
  * live page on lines opened since the last one (the rebuild, rain_rebuild,
@@ -710,6 +735,8 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
     if (spp->rain_fidx[t] != INT_MAX) {
         return true;
     }
+    /* the spare before any change, for the spare event at the end */
+    spare = ssd_available_spare(ssd);
     s = ssd_rain_members(spp, spp->rain_nfail);
     loss = ssd_rain_old_data(ssd);
     if (loss && !ssd->n->bb_params.rain_loss) {
@@ -737,18 +764,20 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
                    "namespace and keep room for GC", die);
         return false;
     }
-    /*
-     * rain_read_only: a failure past the spare ends the life of the media.
-     * Zero spare means read-only (OCP 2.7 EOL-5), so a writable device
-     * keeps 1% at least.
-     */
-    if (ssd->n->bb_params.rain_read_only &&
-        !ssd_rain_spare_at(ssd, spp->rain_nfail + 1)) {
-        ro = true;
-    }
-    spare = ssd_available_spare(ssd);
     ssd_rain_append(spp, t);
     ssd->rain_cursor = 0;
+    if (ssd->wear_on) {
+        ssd_rain_wear_commit(ssd, die / spp->luns_per_ch,
+                             die % spp->luns_per_ch);
+    }
+    /*
+     * EOL admission (rain_read_only, or the wear end of life): a failure
+     * that leaves the spare, RAIN or wear, at 0 ends the life of the media
+     * (OCP 2.7 EOL-5), so a writable device keeps 1% at least.
+     */
+    if (ssd->eol_ro_mode && !ssd_available_spare(ssd)) {
+        ro = true;
+    }
     for (int i = 0; i < ARRAY_SIZE(ptrs); i++) {
         if (ptrs[i]->curline) {
             ssd_pd_close_pointer(ssd, ptrs[i], false, ssd_now(ssd));
@@ -1608,6 +1637,10 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
 
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            /* a failed die took no erase: nothing to sample or replace */
+            if (ssd_rain_lun_failed(ssd, ch, lun)) {
+                continue;
+            }
             for (int pl = 0; pl < spp->pls_per_lun; pl++) {
                 struct nand_plane *plane = &ssd->ch[ch].lun[lun].pl[pl];
                 struct nand_block *blk = &plane->blk[line->id];
@@ -1636,6 +1669,9 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
     if (spares) {
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+                if (ssd_rain_lun_failed(ssd, ch, lun)) {
+                    continue;
+                }
                 for (int pl = 0; pl < spp->pls_per_lun; pl++) {
                     struct nand_plane *plane = &ssd->ch[ch].lun[lun].pl[pl];
                     struct nand_block *blk = &plane->blk[line->id];
@@ -1689,6 +1725,10 @@ static bool ssd_wear_out_line(struct ssd *ssd, struct line *line,
 
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+            /* a failed die counts as neither grown bad nor sacrificed */
+            if (ssd_rain_lun_failed(ssd, ch, lun)) {
+                continue;
+            }
             for (int pl = 0; pl < spp->pls_per_lun; pl++) {
                 struct nand_block *blk =
                     &ssd->ch[ch].lun[lun].pl[pl].blk[line->id];
@@ -1763,19 +1803,10 @@ void ssd_pel_wear(struct ssd *ssd)
  * has, and collection, refresh, levelling, pacing and padding all stop, so
  * they finish without another erase. Reads go on as before.
  */
-void ssd_enter_read_only(struct ssd *ssd)
+static void ssd_read_only_locked(struct ssd *ssd)
 {
     struct line_mgmt *lm = &ssd->lm;
-    uint8_t spare;
-    uint32_t bits = NVME_SMART_MEDIA_READ_ONLY;
 
-    if (!ssd->eol_ro_mode || ssd->media_ro) {
-        return;
-    }
-    spare = ssd_available_spare(ssd);
-
-    /* under the lock, so SMART sees read-only and no spare together */
-    qemu_mutex_lock(&ssd->wear_lock);
     qatomic_or(&ssd->eol_word, 1ULL << 63);
     ssd->media_ro = true;
     for (int i = 0; i < lm->tt_lines; i++) {
@@ -1791,7 +1822,13 @@ void ssd_enter_read_only(struct ssd *ssd)
     if (ssd->fdp_enabled) {
         ssd_fdp_release_eol_reserve(ssd);
     }
-    qemu_mutex_unlock(&ssd->wear_lock);
+}
+
+/* after ssd_read_only_locked(): @spare is the spare just before it */
+static void ssd_read_only_done(struct ssd *ssd, uint8_t spare)
+{
+    uint32_t bits = NVME_SMART_MEDIA_READ_ONLY;
+
     /* the frontier may have run dry: take a reserve line */
     if (!ssd->fdp_enabled) {
         ssd_out_of_lines(ssd);
@@ -1805,6 +1842,21 @@ void ssd_enter_read_only(struct ssd *ssd)
     qatomic_or(&ssd->n->health_pending, bits);
     qatomic_or(&ssd->n->tel_req, bits);
     qemu_bh_schedule(ssd->n->aer_bh);
+}
+
+void ssd_enter_read_only(struct ssd *ssd)
+{
+    uint8_t spare;
+
+    if (!ssd->eol_ro_mode || ssd->media_ro) {
+        return;
+    }
+    spare = ssd_available_spare(ssd);
+    /* under the lock, so SMART sees read-only and no spare together */
+    qemu_mutex_lock(&ssd->wear_lock);
+    ssd_read_only_locked(ssd);
+    qemu_mutex_unlock(&ssd->wear_lock);
+    ssd_read_only_done(ssd, spare);
 }
 
 /*
@@ -2084,8 +2136,31 @@ static bool reclaim_line_moves(struct ssd *ssd, struct line *victim_line,
 }
 
 /*
- * Erase an emptied line on every LUN, then free it, or retire it if a block
- * wore out. Each LUN erases its own block, so the LUNs erase in parallel.
+ * rain_parity: the block of a die that failed for good, in an emptied
+ * line. A dead die takes no erase, so no erase count and no time; its
+ * pages only go back to free, so the reused line holds no stale state.
+ */
+static void ssd_reset_lun_block(struct ssd *ssd, int ch, int lun, int blk)
+{
+    struct ssdparams *spp = &ssd->sp;
+
+    for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+        struct nand_block *b = &ssd->ch[ch].lun[lun].pl[pl].blk[blk];
+
+        for (int i = 0; i < spp->pgs_per_blk; i++) {
+            b->pg[i].status = PG_FREE;
+        }
+        b->ipc = 0;
+        b->vpc = 0;
+        b->wp = 0;
+        b->read_cnt = 0;
+    }
+}
+
+/*
+ * Erase an emptied line on every live LUN, then free it, or retire it if a
+ * block wore out. Each LUN erases its own block, so the LUNs erase in
+ * parallel.
  */
 static void reclaim_line_tail(struct ssd *ssd, struct line *victim_line)
 {
@@ -2098,6 +2173,10 @@ static void reclaim_line_tail(struct ssd *ssd, struct line *victim_line)
     ppa.g.blk = victim_line->id;
     for (ch = 0; ch < spp->nchs; ch++) {
         for (lun = 0; lun < spp->luns_per_ch; lun++) {
+            if (ssd_rain_lun_failed(ssd, ch, lun)) {
+                ssd_reset_lun_block(ssd, ch, lun, ppa.g.blk);
+                continue;
+            }
             ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk, spp->enable_gc_delay,
                                 0);
         }
@@ -2106,15 +2185,30 @@ static void reclaim_line_tail(struct ssd *ssd, struct line *victim_line)
         uint8_t spare = ssd_available_spare(ssd);
         uint64_t overworn = ssd->overworn_blocks;
         bool read_only = false;
+        bool published = false;
+        uint8_t now = 0;
         bool retired;
 
         qemu_mutex_lock(&ssd->wear_lock);
         retired = ssd_wear_out_line(ssd, victim_line, &read_only);
+        /*
+         * rain_parity with EOL admission: a spare swap or a retirement that
+         * leaves the spare at 0 ends the life of the media (OCP 2.7 EOL-5).
+         * Read-only goes out in the same lock, so SMART never reads a zero
+         * spare on writable media.
+         */
+        if (ssd->eol_ro_mode && !ssd->media_ro) {
+            now = ssd_spare_locked(ssd);
+            if (read_only || (spp->rain_parity && !now)) {
+                ssd_read_only_locked(ssd);
+                published = true;
+            }
+        }
         qemu_mutex_unlock(&ssd->wear_lock);
 
         ssd_wear_events(ssd, spare, overworn);
-        if (read_only) {
-            ssd_enter_read_only(ssd);
+        if (published) {
+            ssd_read_only_done(ssd, now);
         }
         if (retired) {
             return;

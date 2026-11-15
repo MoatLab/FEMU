@@ -844,6 +844,7 @@ struct ssd {
     uint64_t sacrificed_blocks;     /* good blocks retired with their line */
     /* usable lines retirement keeps; under FDP, units of each group */
     int wear_floor_lines;
+    int wear_start_lines;   /* retirement room at realization */
     int spare_lines;                /* lines held back as spare blocks */
     bool wear_on;                   /* blk_pe_limit set */
     /*

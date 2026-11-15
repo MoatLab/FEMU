@@ -4018,8 +4018,6 @@ static bool femu_check_rain_ro_props(FemuCtrl *n, Error **errp)
     } else if (n->cxl_dev) {
         /* the linked device made the FTL, without the reserve */
         why = "cxl_ssd";
-    } else if (n->blk_pe_limit) {
-        why = "blk_pe_limit";
     } else if (bp->buffer_size > 0) {
         /* power_loss needs a buffer, so this refuses it too */
         why = "buffer_size";

@@ -124,15 +124,35 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
         return;
     }
     /*
-     * Retirement keeps the lines the namespace needs, the free lines forced
-     * collection keeps, the data write pointer's line and one more, and the
-     * collection write pointer's line with gc_frontier.
+     * rain_parity: failed_die is in rain_nfail already. The spare is the
+     * room left against the room at realization.
      */
-    ssd->wear_floor_lines =
-        DIV_ROUND_UP(DIV_ROUND_UP(bb_ftl_bytes(n, ns), (uint64_t)spp->secsz *
-                                            spp->secs_per_pg),
-                     spp->line_data_pgs) + bb_gc_forced_lines(n) + 2 +
-        (spp->gc_frontier ? 1 : 0) + bb_tp_reserve_lines(n, ns);
+    ssd->wear_floor_lines = ssd_wear_floor(ssd, spp->rain_nfail);
+    ssd->wear_start_lines = spp->tt_lines - ssd->spare_lines -
+                            ssd->eol_reserve_lines - ssd->wear_floor_lines;
+}
+
+/*
+ * The lines retirement keeps after @nfail die failures: the lines the
+ * namespace needs at the line size of that epoch (rain_parity), the free
+ * lines forced collection keeps, the data write pointer's line and one
+ * more, and the collection write pointer's line with gc_frontier.
+ *
+ *   rain_parity: data pages a line = rows * (members(nfail) - 1)
+ */
+int ssd_wear_floor(struct ssd *ssd, int nfail)
+{
+    struct ssdparams *spp = &ssd->sp;
+    uint64_t page = (uint64_t)spp->secsz * spp->secs_per_pg;
+    uint64_t data = spp->line_data_pgs;
+
+    if (spp->rain_parity) {
+        data = (uint64_t)spp->pls_per_lun * spp->pgs_per_blk *
+               (ssd_rain_members(spp, nfail) - 1);
+    }
+    return DIV_ROUND_UP(DIV_ROUND_UP(bb_ftl_bytes(ssd->n, ssd->ns), page),
+                        data) + bb_gc_forced_lines(ssd->n) + 2 +
+           (spp->gc_frontier ? 1 : 0) + bb_tp_reserve_lines(ssd->n, ssd->ns);
 }
 
 /*
@@ -489,9 +509,13 @@ void ssd_ocp_blocks(struct ssd *ssd, FemuOcpBlocks *o)
 
                     hi = MAX(hi, ec);
                     sum += ec;
-                    /* a block of a retired line, or worn out, is bad */
+                    /*
+                     * a block of a retired line, or worn out, is bad; a
+                     * failed die is out of service but keeps its history
+                     */
                     if (b < ssd->lm.tt_lines &&
-                        !qatomic_read(&ssd->lm.lines[b].retired) && !worn) {
+                        !qatomic_read(&ssd->lm.lines[b].retired) && !worn &&
+                        !ssd_rain_lun_failed(ssd, ch, lun)) {
                         lo = MIN(lo, ec);
                     }
                 }
@@ -999,9 +1023,11 @@ static uint8_t ssd_wear_spare(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
-    int start = lm->tt_lines - ssd->spare_lines - ssd->eol_reserve_lines -
-                ssd->wear_floor_lines;
-    int left = start - lm->retired_line_cnt;
+    int64_t start = ssd->wear_start_lines;
+    /* the floor rises at a die failure, so the room falls with it */
+    int64_t left = (int64_t)lm->tt_lines - ssd->spare_lines -
+                   ssd->eol_reserve_lines - ssd->wear_floor_lines -
+                   lm->retired_line_cnt;
     int fewest = ssd->spare_lines;
 
     /* the media went read-only because nothing could replace a block */
@@ -1014,6 +1040,10 @@ static uint8_t ssd_wear_spare(struct ssd *ssd)
     if (ssd->spare_lines) {
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
+                /* a failed die needs no spare block again */
+                if (ssd_rain_lun_failed(ssd, ch, lun)) {
+                    continue;
+                }
                 for (int pl = 0; pl < spp->pls_per_lun; pl++) {
                     fewest = MIN(fewest, ssd->spare_lines -
                                  ssd->ch[ch].lun[lun].pl[pl].spares_used);
@@ -1022,7 +1052,7 @@ static uint8_t ssd_wear_spare(struct ssd *ssd)
         }
         return fewest * 100 / ssd->spare_lines;
     }
-    return start > 0 ? MAX(left, 0) * 100 / start : 100;
+    return start > 0 ? MIN(MAX(left, 0), start) * 100 / start : 100;
 }
 
 /* rain_parity: the spare space left after @nfail die failures */
@@ -1037,6 +1067,20 @@ uint8_t ssd_rain_spare_at(struct ssd *ssd, int nfail)
                          DIV_ROUND_UP(bb_ftl_bytes(ssd->n, ssd->ns), page));
 }
 
+/*
+ * The wear spare, capped by the RAIN spare with rain_parity. The caller
+ * holds wear_lock: retirement changes both parts under it.
+ */
+uint8_t ssd_spare_locked(struct ssd *ssd)
+{
+    uint8_t spare = ssd_wear_spare(ssd);
+
+    if (ssd->sp.rain_parity) {
+        spare = MIN(spare, ssd_rain_spare_at(ssd, ssd->sp.rain_nfail));
+    }
+    return spare;
+}
+
 uint8_t ssd_available_spare(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
@@ -1047,16 +1091,15 @@ uint8_t ssd_available_spare(struct ssd *ssd)
     if (spp->rain_parity && ssd_media_read_only(ssd)) {
         return 0;
     }
-    rain = spp->rain_parity ? ssd_rain_spare_at(ssd, spp->rain_nfail) : 100;
-
     if (ssd->wear_on) {
         uint8_t spare;
 
         qemu_mutex_lock(&ssd->wear_lock);
-        spare = ssd_wear_spare(ssd);
+        spare = ssd_spare_locked(ssd);
         qemu_mutex_unlock(&ssd->wear_lock);
         return spare;
     }
+    rain = spp->rain_parity ? ssd_rain_spare_at(ssd, spp->rain_nfail) : 100;
     if (ssd->bad_blocks == 0 || spp->tt_blks <= 0) {
         return rain;
     }
@@ -1084,7 +1127,7 @@ void ssd_wear_health(struct ssd *ssd, FemuWearHealth *h)
         return;
     }
     qemu_mutex_lock(&ssd->wear_lock);
-    h->spare = ssd_wear_spare(ssd);
+    h->spare = ssd_spare_locked(ssd);
     h->media_ro = ssd->media_ro;
     h->overworn = ssd->overworn_blocks;
     h->grown_bad = ssd->grown_bad_blocks;

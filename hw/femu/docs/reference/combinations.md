@@ -50,7 +50,6 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `blk_pe_limit`
 
-- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
 - femu: %s is not supported with FDP and blk_pe_limit
 - femu: %s needs blk_pe_limit
 - femu: spare_lines needs blk_pe_limit
@@ -61,7 +60,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `blks_per_pl`
 
-- FEMU bbssd: with rain_read_only, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
+- FEMU bbssd: with a read-only end of life, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
 - femu: spare_lines (%u) must be below blks_per_pl (%d)
 
 ## `buffer_low_pcent`
@@ -172,7 +171,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `devsz_mb`
 
-- FEMU bbssd: with rain_read_only, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
+- FEMU bbssd: with a read-only end of life, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
 - devsz_mb must be unset or %
 
 ## `did`
@@ -185,7 +184,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `die_parity`
 
 - FEMU bbssd: die_parity and rain_parity need two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
-- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
+- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
 
 ## `die_slow`
 
@@ -217,7 +216,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `durable_at_done`
 
-- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
+- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
 - durable_at_done is not supported with %s
 - durable_at_done needs power_loss=on
 
@@ -267,8 +266,8 @@ own description allows. A message keeps its format directives (`%s`,
 ## `failed_die`
 
 - FEMU bbssd: die_parity and rain_parity need two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
-- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
-- FEMU bbssd: with rain_read_only, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
+- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
+- FEMU bbssd: with a read-only end of life, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
 
 ## `fdm_size`
 
@@ -349,7 +348,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `gc_pace`
 
-- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
+- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
 
 ## `gc_policy`
 
@@ -818,7 +817,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `pd_open_close_sec`
 
-- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
+- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
 - femu: pd_open_read_limit and pd_open_close_sec are not supported with mapping=%s
 - femu: pd_open_read_limit and pd_open_close_sec must not be negative
 - femu: pd_open_read_limit and pd_open_close_sec need bbssd or CSD namespaces; namespace %u is KV
@@ -976,7 +975,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `prog_pass2_ns`
 
 - FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
-- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
+- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
 
 ## `ps_max_watts`
 
@@ -999,7 +998,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `rain_parity`
 
 - FEMU bbssd: die_parity and rain_parity need two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
-- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
+- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
 - FEMU bbssd: rain_rebuild needs rain_parity
 - femu: rain_read_only needs rain_parity=1 and eol_read_only=on
 - rain_parity is off or die %d is out of range
@@ -1007,7 +1006,6 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `rain_read_only`
 
-- FEMU bbssd: with rain_read_only, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
 - femu: rain_loss needs rain_read_only and bbssd
 - femu: rain_read_only is not supported with %s
 - femu: rain_read_only needs rain_parity=1 and eol_read_only=on
@@ -1260,7 +1258,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `wl_spread`
 
-- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace, blk_pe_limit or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
+- FEMU bbssd: rain_parity is 0 or 1, and does not work with die_parity, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, durable_at_done, gc_pace or the pSLC tier; with failed_die it needs three dies, and it takes at most 1024 dies
 - FEMU bbssd: wl_spread must not be negative
 
 ## `wrr`

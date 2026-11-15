@@ -10362,6 +10362,244 @@ static void femu_test_rain_fail(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
+/* the erase counts of die @die (ch * luns_per_ch + lun), summed */
+static uint64_t femu_die_erases(QTestState *qts, int die, int luns_per_ch)
+{
+    uint64_t sum = 0;
+    uint32_t offset = 0;
+    bool more = true;
+
+    while (more) {
+        g_autofree char *args = g_strdup_printf(
+            "'kind':'blocks','offset':%u,'limit':4096", offset);
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, args, &rsp);
+        QListEntry *e;
+
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(ns, "blocks"), e) {
+            QDict *b = qobject_to(QDict, qlist_entry_obj(e));
+
+            if (qdict_get_int(b, "channel") * luns_per_ch +
+                qdict_get_int(b, "lun") == die) {
+                sum += qdict_get_int(b, "erase-count");
+            }
+        }
+        more = qdict_haskey(ns, "next-offset");
+        if (more) {
+            offset = qdict_get_int(ns, "next-offset");
+        }
+        qobject_unref(rsp);
+    }
+    return sum;
+}
+
+/*
+ * rain_parity with or without the wear model: die 1 of 2 x 2 fails after
+ * the fill. A failed die takes no erase, so its erase counts stay; the
+ * live dies erase. With wear (blk_pe_limit), blocks wear out on the live
+ * dies only, and no data is lost. The C0h counters and the spare are
+ * printed for the record.
+ */
+static void femu_test_rain_wear(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans;
+    uint64_t d1, e0, e2, e3;
+    uint32_t seed = 1;
+    uint8_t page[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    for (int i = 0; i < 256; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 64, buf, list,
+                                                        -1)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_true(femu_rain_fail(qts, 1));
+    d1 = femu_die_erases(qts, 1, 2);
+    e0 = femu_die_erases(qts, 0, 2);
+    e2 = femu_die_erases(qts, 2, 2);
+    e3 = femu_die_erases(qts, 3, 2);
+    for (int i = 0; i < 600; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, (seed >> 8) %
+                                                        (256 - npages + 1),
+                                                        npages, buf, list,
+                                                        -1)), ==,
+                        NVME_SUCCESS);
+    }
+
+    g_assert_cmpuint(femu_die_erases(qts, 1, 2), ==, d1);
+    g_assert_cmpuint(femu_die_erases(qts, 0, 2), >, e0);
+    g_assert_cmpuint(femu_die_erases(qts, 2, 2), >, e2);
+    g_assert_cmpuint(femu_die_erases(qts, 3, 2), >, e3);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_test_message("overworn %" PRIu64 " grown bad %" PRIu64 " retired lines %"
+                   PRIu64, ldq_le_p(page + 112), ldq_le_p(page + 120),
+                   ldq_le_p(page + 128));
+    if (data) {
+        g_assert_cmpuint(ldq_le_p(page + 120), >, 0);
+    }
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_test_message("available spare %u percentage used %u", page[3], page[5]);
+    g_assert_cmpuint(page[3], <=, 100);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Fixture W: 2 x 2 dies, 64 lines, a 1 MiB namespace, wear EOL. One die
+ * failure and no retirement: the wear floor goes 27 --> 32, so the wear
+ * spare is 29 of 34 lines (85); the RAIN spare is 56. SMART reports the
+ * minimum, and the media stays writable.
+ *
+ *   spare = min(wear 85, RAIN 56) = 56
+ */
+static void femu_test_rain_wear_spare(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t log = guest_alloc(alloc, 512);
+    uint8_t page[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_test_message("available spare before the failure %u", page[3]);
+    g_assert_true(femu_rain_fail(qts, 1));
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpuint(page[3], ==, 56);
+    g_assert_cmpuint(page[0] & NVME_SMART_MEDIA_READ_ONLY, ==, 0);
+    guest_free(alloc, log);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Fixture W with blk_pe_limit=20 (spread 50, so lines retire one by one)
+ * and wear EOL: die 1 fails after the fill,
+ * then one-page writes wear the 3 live dies out. The media goes read-only
+ * with the spare at 0, writes fail with Write to RO, and no data is lost.
+ *
+ *   fill --> fail die 1 --> writes ... --> Write to RO
+ *   then: SMART read-only bit, spare 0, 256 pages mapped, none lost
+ */
+static void femu_test_rain_wear_eol(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans;
+    uint32_t seed = 7;
+    uint16_t st = NVME_SUCCESS;
+    uint8_t page[512];
+    uint64_t r = 0;
+    int seen = 0;
+    int n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 64 * 4096);
+    /* mdts=4: 16 pages a write at most */
+    for (int i = 0; i < 256; i += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 16, buf, list,
+                                                        -1)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_true(femu_rain_fail(qts, 1));
+    for (n = 0; n < 200000 && st == NVME_SUCCESS; n++) {
+        seed = seed * 1103515245 + 12345;
+        st = FEMU_SC(femu_write_pages_placed(&c, (seed >> 8) % 256, 1, buf,
+                                             list, -1));
+        /*
+         * The wear spare against the room at start (34 lines), with 29
+         * after the failure: 27 retired --> 2/34 = 5, 28 --> 1/34 = 2.
+         * The RAIN spare is higher there, so SMART shows the wear part.
+         */
+        /* every 8th write, then every write from 26 retired lines */
+        if (st == NVME_SUCCESS && (n % 8 == 0 || r >= 26)) {
+            uint64_t was = r;
+
+            r = femu_c0h_field(&c, log, 128);
+            if (r != was && r >= 26) {
+                g_test_message("write %d: %" PRIu64 " retired lines", n, r);
+            }
+
+            if (r == 27 || r == 28) {
+                g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO,
+                                                     log, sizeof(page), 0)),
+                                ==, NVME_SUCCESS);
+                qtest_memread(qts, log, page, sizeof(page));
+                g_assert_cmpuint(page[3], ==, r == 27 ? 5 : 2);
+                seen++;
+            }
+        }
+    }
+    g_assert_cmphex(st, ==, NVME_WRITE_TO_RO);
+    g_assert_cmpint(seen, >, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_test_message("read-only after %d writes: overworn %" PRIu64
+                   " grown bad %" PRIu64 " retired lines %" PRIu64, n,
+                   ldq_le_p(page + 112), ldq_le_p(page + 120),
+                   ldq_le_p(page + 128));
+    /*
+     * Floor 32, room 34 at start, 29 after the failure: retirement 29
+     * leaves a wear spare of 0, so read-only comes with it, not later.
+     */
+    g_assert_cmpuint(ldq_le_p(page + 128), ==, 29);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmphex(page[0] & NVME_SMART_MEDIA_READ_ONLY, ==,
+                    NVME_SMART_MEDIA_READ_ONLY);
+    g_assert_cmpuint(page[3], ==, 0);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /*
  * rain_parity, 3 dies, FIFO GC, 40 lines, forced reserve 2. Old lines hold
  * 16 data pages, lines after die 1 fails hold 8. Lines 0 to 2 are the
@@ -10424,7 +10662,8 @@ static void femu_test_rain_fifo_fit(void *obj, void *data,
     g_assert_cmpuint(lost, ==, 0);
     g_assert_cmpuint(orphans, ==, 0);
     g_assert_cmpuint(femu_rain_trace(qts, 4) - gc0, ==, 45);
-    g_assert_cmpuint(femu_rain_trace(qts, 5) - er0, ==, 18);
+    /* a failed die takes no erase: 2 live dies, not 3 */
+    g_assert_cmpuint(femu_rain_trace(qts, 5) - er0, ==, 12);
     ns = femu_query_ns(qts, "'kind':'lines','limit':4096", &rsp);
     g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "line-counts"),
                                    "free"), ==, 3);
@@ -43692,6 +43931,7 @@ static void femu_test_rain_ro_refused(void *obj, void *data,
         const char *opts;
         const char *msg;
         const char *mode;
+        const char *ro;
     } cases[] = {
         { "'rain_parity':1,'mdts':4,'blks_per_pl':44", NULL },
         /* NoSSD: no FTL holds the reserve */
@@ -43704,25 +43944,33 @@ static void femu_test_rain_ro_refused(void *obj, void *data,
           "not supported with buffer_size" },
         { "'rain_parity':1,'mdts':4,'iu_pages':4,'blks_per_pl':44",
           "iu_pages above 1" },
-        { "'rain_parity':1,'mdts':4,'blk_pe_limit':9,'blks_per_pl':44",
-          "blk_pe_limit" },
+        /* the wear model works with RAIN */
+        { "'rain_parity':1,'mdts':4,'blk_pe_limit':9,'blks_per_pl':44", NULL },
         { "'rain_parity':1,'mdts':0,'blks_per_pl':44",
           "rain_read_only needs mdts" },
         { "'rain_parity':1,'mdts':4,'failed_die':1,'blks_per_pl':21",
           "failed_die leaves no spare" },
         { "'rain_parity':1,'mdts':4,'failed_die':1,'blks_per_pl':22", NULL },
+        /* the wear end of life alone keeps the start check */
+        { "'rain_parity':1,'mdts':4,'failed_die':1,'blk_pe_limit':9,"
+          "'blks_per_pl':21",
+          "failed_die leaves no spare", NULL, "false" },
+        { "'rain_parity':1,'mdts':4,'failed_die':1,'blk_pe_limit':9,"
+          "'blks_per_pl':22",
+          NULL, NULL, "false" },
     };
     QDict *rsp;
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
         const char *mode = cases[i].mode;
+        const char *ro = cases[i].ro;
         g_autofree char *cmd = g_strdup_printf(
             "{'execute':'device_add','arguments':{"
             "'driver':'femu','id':'rro%d','addr':'%d','devsz_mb':1,"
             "'femu_mode':%s,'secsz':512,'secs_per_pg':8,'pgs_per_blk':8,"
             "'luns_per_ch':2,'nchs':2,'pls_per_lun':1,"
-            "'rain_read_only':true,%s}}", i, 5 + i, mode ?: "1",
-            cases[i].opts);
+            "'rain_read_only':%s,%s}}", i, 5 + i, mode ?: "1",
+            ro ? ro : "true", cases[i].opts);
 
         rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
         if (!cases[i].msg) {
@@ -61525,6 +61773,38 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
             "blks_per_pl=44,pls_per_lun=1"
+    });
+    qos_add_test("rain-erase-failed", "femu", femu_test_rain_wear,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=44,pls_per_lun=1"
+    });
+    qos_add_test("rain-wear-erase", "femu", femu_test_rain_wear,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"wear",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=44,pls_per_lun=1,blk_pe_limit=6,eol_read_only=off"
+    });
+    qos_add_test("rain-wear-spare", "femu", femu_test_rain_wear_spare,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,pls_per_lun=1,"
+            "blks_per_pl=64,rain_parity=1,blk_pe_limit=1000,mdts=4,"
+            "op_pcent=0,mpsmin=0,gc_frontier=off,gc_thres_pcent_high=78"
+    });
+    qos_add_test("rain-wear-eol", "femu", femu_test_rain_wear_eol,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,pls_per_lun=1,"
+            "blks_per_pl=64,rain_parity=1,blk_pe_limit=20,mdts=4,"
+            "blk_pe_spread=50,blk_pe_seed=3,"
+            "op_pcent=0,mpsmin=0,gc_frontier=off,gc_thres_pcent_high=78"
     });
     qos_add_test("rain-fifo-fit", "femu", femu_test_rain_fifo_fit,
                  &(QOSGraphTestOptions) {

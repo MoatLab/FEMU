@@ -286,17 +286,17 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     exposed_pgs = DIV_ROUND_UP(bb_ftl_bytes(n, ns), page_bytes);
 
     /*
-     * rain_read_only with a die failed from the start: Available Spare 0
-     * means read-only (OCP 2.7 EOL-5), so such a device would start at the
-     * end of its life.
+     * EOL admission (rain_read_only, or blk_pe_limit with eol_read_only)
+     * with a die failed from the start: Available Spare 0 means read-only
+     * (OCP 2.7 EOL-5), so such a device would start at the end of its life.
      */
-    if (p->rain_parity && p->rain_read_only && p->failed_die >= 0 &&
+    if (p->rain_parity && n->eol_admit && p->failed_die >= 0 &&
         !bb_rain_spare(tt_lines - reserve_lines,
                        (int64_t)p->pls_per_lun * p->pgs_per_blk,
                        p->nchs * p->luns_per_ch, 1, exposed_pgs)) {
-        error_setg(errp, "FEMU bbssd: with rain_read_only, failed_die leaves "
-                   "no spare, so the media would start read-only; lower "
-                   "devsz_mb or raise blks_per_pl");
+        error_setg(errp, "FEMU bbssd: with a read-only end of life, "
+                   "failed_die leaves no spare, so the media would start "
+                   "read-only; lower devsz_mb or raise blks_per_pl");
         return -1;
     }
 

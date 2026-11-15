@@ -661,8 +661,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "members left. Needs two to 1024 dies (three with "
       "failed_die) and mapping=page; not with die_parity or what it "
       "refuses, prog_pass2_ns, wl_spread, pd_open_close_sec, Streams, "
-      "durable_at_done, gc_pace, blk_pe_limit, persist_ftl or the pSLC "
-      "tier. 0 (default) is off" },
+      "durable_at_done, gc_pace, persist_ftl or the pSLC tier. With "
+      "blk_pe_limit, a failed die takes no erase and leaves the wear "
+      "counts, and Available Spare is the lower of the wear and RAIN "
+      "spare. 0 (default) is off" },
     { "rain_rebuild",
       "bbssd, CSD: with rain_parity, each write moves at most one line "
       "opened before the last die failure into a line without that die, "
@@ -673,8 +675,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "media goes read-only, as at the end of life; no new die fails after "
       "that. The end-of-life reserve is sized for a line of two dies. Needs "
       "eol_read_only=on and its mdts and queue bounds; not with "
-      "blk_pe_limit, buffer_size, iu_pages above 1, nand_bad_blocks, cxl_ssd "
-      "or more than one namespace. Off (default): such a failure is refused" },
+      "buffer_size, iu_pages above 1, nand_bad_blocks, cxl_ssd or more than "
+      "one namespace. Off (default): such a failure is refused" },
     { "rain_loss",
       "bbssd: with rain_read_only, a die failure is accepted while lines "
       "from before the last one still hold data. A stripe that then has two "
@@ -806,7 +808,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD, also FDP: mean program/erase cycles a block survives "
       "before it wears out; 0 (default) turns wear-out off. When no block "
       "can replace a worn-out one, the media goes read-only (eol_read_only). "
-      "Under FDP a worn-out block retires its reclaim unit" },
+      "Under FDP a worn-out block retires its reclaim unit. With "
+      "rain_parity, retirement keeps the lines the namespace needs at the "
+      "line size after the last die failure" },
     { "blk_pe_spread",
       "bbssd, CSD, also FDP: how far each block's limit varies from "
       "blk_pe_limit, in percent, 0 to 90" },
