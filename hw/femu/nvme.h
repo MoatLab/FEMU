@@ -2975,6 +2975,9 @@ typedef struct FemuCtrl {
     bool            lockdown;
     DECLARE_BITMAP(lock_opc, 256);
     DECLARE_BITMAP(lock_fid, 256);
+    /* TCG Opal TPer behind Security Send and Receive (x-opal) */
+    bool            opal;
+    struct FemuOpal *opal_tper;
     /* Reservations: the host, its notices (log 80h) and their masks */
     bool            reservations;
     uint8_t         pif;            /* PI guard: 0 16-bit, 2 64-bit */

@@ -191,6 +191,9 @@ uint32_t nvme_admin_effects(FemuCtrl *n, uint8_t opc)
         return n->fw_slots > 1 ? NVME_CMD_EFF_CSUPP : 0;
     case NVME_ADM_CMD_LOCKDOWN:
         return n->lockdown ? NVME_CMD_EFF_CSUPP : 0;
+    case NVME_ADM_CMD_SECURITY_SEND:
+    case NVME_ADM_CMD_SECURITY_RECV:
+        return n->opal ? NVME_CMD_EFF_CSUPP : 0;
     case NVME_ADM_CMD_ACTIVATE_FW:
         /* an activation changes FR in Identify Controller */
         return n->fw_slots > 1 ? NVME_CMD_EFF_CSUPP | NVME_CMD_EFF_CCC : 0;

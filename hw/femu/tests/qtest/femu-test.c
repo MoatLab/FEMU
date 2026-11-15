@@ -21891,6 +21891,243 @@ static void femu_test_lockdown_off(void *obj, void *data,
     guest_free(alloc, buf);
 }
 
+/* Security Send (81h) or Receive (82h) of @len bytes at @buf */
+static uint16_t femu_sec(FemuCtrlState *c, bool send, uint8_t secp,
+                         uint16_t spsp, uint64_t buf, uint32_t len)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = send ? 0x81 : 0x82;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32((uint32_t)secp << 24 | (uint32_t)spsp << 8);
+    cmd.cdw11 = cpu_to_le32(len);
+    return femu_admin(c, &cmd);
+}
+
+static uint32_t femu_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+}
+
+/*
+ * x-opal: OACS bit 0, both commands in log 00h, Level 0, the ComID state
+ * machine around a Session Manager Properties call, and STACK_RESET. The
+ * ComPacket is built here from Core 2.01 Tables 17, 18 and 20.
+ */
+static void femu_test_opal(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    /* CALL SMUID Properties SL EL EOD SL 0 0 0 EL */
+    static const uint8_t call[] = {
+        0xF8,
+        0xA8, 0, 0, 0, 0, 0, 0, 0, 0xFF,
+        0xA8, 0, 0, 0, 0, 0, 0, 0xFF, 0x01,
+        0xF0, 0xF1,
+        0xF9, 0xF0, 0x00, 0x00, 0x00, 0xF1,
+    };
+    uint8_t pkt[2048] = { 0 };
+    uint8_t r[2048];
+    uint32_t need;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 256) & 1, ==, 1);
+    /* log 05h, Commands Supported and Effects: CSUPP for 81h and 82h */
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 0x81 * 4), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, buf + 0x82 * 4), ==, 1);
+
+    /* Level 0: the header, TPer first, Opal V2 names ComID 1000h */
+    qtest_memset(qts, buf, 0, 2048);
+    g_assert_cmphex(femu_sec(&c, false, 1, 1, buf, 2048), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, r, sizeof(r));
+    g_assert_cmpuint(femu_be32(r), ==, 180);
+    g_assert_cmphex(r[48] << 8 | r[49], ==, 0x0001);
+    g_assert_cmphex(r[52] & 1, ==, 1);
+    g_assert_cmphex(r[128] << 8 | r[129], ==, 0x0203);
+    g_assert_cmphex(r[132] << 8 | r[133], ==, 0x1000);
+
+    /* the Properties call */
+    pkt[4] = 0x10;
+    pkt[19] = 24 + 12 + sizeof(call) + 1;
+    pkt[43] = 12 + sizeof(call) + 1;
+    pkt[55] = sizeof(call);
+    memcpy(pkt + 56, call, sizeof(call));
+    qtest_memwrite(qts, buf, pkt, sizeof(pkt));
+    g_assert_cmphex(femu_sec(&c, true, 1, 0x1000, buf, 2048), ==,
+                    NVME_SUCCESS);
+    /* a second Send before the Receive */
+    g_assert_cmphex(femu_sec(&c, true, 1, 0x1000, buf, 2048), ==,
+                    0x00c | NVME_DNR);
+
+    /* a short Receive: Length 0 and the size a full one needs */
+    qtest_memset(qts, buf + 4096, 0, 2048);
+    g_assert_cmphex(femu_sec(&c, false, 1, 0x1000, buf + 4096, 20), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf + 4096, r, 20);
+    need = femu_be32(r + 8);
+    g_assert_cmpuint(need, >, 56);
+    g_assert_cmpuint(femu_be32(r + 12), ==, need);
+    g_assert_cmpuint(femu_be32(r + 16), ==, 0);
+    /* then the response */
+    g_assert_cmphex(femu_sec(&c, false, 1, 0x1000, buf + 4096, 2048), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf + 4096, r, sizeof(r));
+    g_assert_cmpuint(femu_be32(r + 8), ==, 0);
+    g_assert_cmpuint(femu_be32(r + 16) + 20, ==, need);
+    g_assert_cmphex(r[56], ==, 0xF8);
+    g_assert_cmpmem(r + 57, 18, call + 1, 18);
+    /* taken: the next Receive finds the ComID idle */
+    g_assert_cmphex(femu_sec(&c, false, 1, 0x1000, buf + 4096, 2048), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf + 4096, r, 20);
+    g_assert_cmpuint(femu_be32(r + 16), ==, 0);
+    g_assert_cmpuint(femu_be32(r + 8), ==, 0);
+
+    /* a host status of 1 aborts the method: the reply carries status 1 */
+    pkt[56 + 23] = 0x01;
+    qtest_memwrite(qts, buf, pkt, sizeof(pkt));
+    g_assert_cmphex(femu_sec(&c, true, 1, 0x1000, buf, 2048), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_sec(&c, false, 1, 0x1000, buf + 4096, 2048), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf + 4096, r, 128);
+    g_assert_cmpuint(femu_be32(r + 52), ==, sizeof(call));
+    g_assert_cmphex(r[56 + 23], ==, 0x01);
+    pkt[56 + 23] = 0x00;
+
+    /* STACK_RESET drops a waiting response (Core 3.3.4.7.5) */
+    qtest_memwrite(qts, buf, pkt, sizeof(pkt));
+    g_assert_cmphex(femu_sec(&c, true, 1, 0x1000, buf, 2048), ==,
+                    NVME_SUCCESS);
+    memset(pkt, 0, 16);
+    pkt[0] = 0x10;
+    pkt[7] = 2;
+    qtest_memwrite(qts, buf, pkt, 16);
+    g_assert_cmphex(femu_sec(&c, true, 2, 0x1000, buf, 2048), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_sec(&c, false, 2, 0x1000, buf + 4096, 2048), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf + 4096, r, 16);
+    g_assert_cmpuint(femu_be32(r + 4), ==, 2);
+    g_assert_cmphex(r[10] << 8 | r[11], ==, 4);
+    g_assert_cmpuint(femu_be32(r + 12), ==, 0);
+    g_assert_cmphex(femu_sec(&c, false, 1, 0x1000, buf + 4096, 2048), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf + 4096, r, 20);
+    g_assert_cmpuint(femu_be32(r + 8), ==, 0);
+    g_assert_cmpuint(femu_be32(r + 16), ==, 0);
+
+    /* interface errors carry DNR (SIIS 6.5) */
+    g_assert_cmphex(femu_sec(&c, false, 5, 0, buf, 512), ==,
+                    NVME_INVALID_FIELD | NVME_DNR);
+    g_assert_cmphex(femu_sec(&c, true, 1, 0x1001, buf, 512), ==,
+                    NVME_INVALID_FIELD | NVME_DNR);
+    g_assert_cmphex(femu_sec(&c, true, 1, 0x1000, buf, 2049), ==,
+                    NVME_INVALID_FIELD | NVME_DNR);
+    /* TPER_RESET while ProgrammaticResetEnable is False */
+    g_assert_cmphex(femu_sec(&c, true, 2, 0x0004, buf, 512), ==,
+                    NVME_INVALID_FIELD | NVME_DNR);
+    /* the protocol list: 00h 01h 02h */
+    g_assert_cmphex(femu_sec(&c, false, 0, 0, buf, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, r, 16);
+    g_assert_cmphex(r[7], ==, 3);
+    g_assert_cmphex(r[10], ==, 2);
+    /* every byte the host names moves: AL 4096 pads with zeros */
+    qtest_memset(qts, buf, 0xAA, 4096);
+    g_assert_cmphex(femu_sec(&c, false, 0, 0, buf, 4096), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 2048), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, buf + 4095), ==, 0);
+    /* a Level 0 Send of any length is read and discarded */
+    g_assert_cmphex(femu_sec(&c, true, 1, 1, buf, 4096), ==, NVME_SUCCESS);
+    /* above the 64 KiB transfer limit */
+    g_assert_cmphex(femu_sec(&c, false, 1, 1, buf, 65537), ==,
+                    NVME_INVALID_FIELD | NVME_DNR);
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+static void femu_test_opal_off(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 256) & 1, ==, 0);
+    /* log 05h, Commands Supported and Effects: CSUPP for 81h and 82h */
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 0x81 * 4), ==, 0);
+    g_assert_cmphex(femu_sec(&c, false, 1, 1, buf, 2048), ==,
+                    NVME_INVALID_OPCODE | NVME_DNR);
+    g_assert_cmphex(femu_sec(&c, true, 1, 0x1000, buf, 2048), ==,
+                    NVME_INVALID_OPCODE | NVME_DNR);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* x-opal accepts one NoSSD or page-mapped bbssd namespace, nothing else */
+static void femu_test_opal_refused(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const char bb[] = "'femu_mode':1,'secsz':512,'secs_per_pg':8,"
+                             "'pgs_per_blk':8,'luns_per_ch':2,'nchs':2,"
+                             "'pls_per_lun':1,'blks_per_pl':32";
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':2", NULL },
+        { bb, NULL },
+        { "'femu_mode':2,'namespaces':2", "more than one namespace" },
+        { "'femu_mode':2,'namespace_modes':'nossd'", "namespace_modes" },
+        { "'femu_mode':2,'ns_wp':true", "ns_wp" },
+        { "'femu_mode':2,'sanitize_ns':true", "sanitize_ns" },
+        { "'femu_mode':2,'ns_mgmt':true", "ns_mgmt" },
+        { "MAP:hybrid", "a bbssd mapping other than page" },
+    };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *opts = NULL;
+        g_autofree char *cmd = NULL;
+
+        if (g_str_has_prefix(cases[i].opts, "MAP:")) {
+            opts = g_strdup_printf("%s,'mapping':'%s'", bb,
+                                   cases[i].opts + 4);
+        } else {
+            opts = g_strdup(cases[i].opts);
+        }
+        cmd = g_strdup_printf("{'execute':'device_add','arguments':{"
+                              "'driver':'femu','id':'opr%d','addr':'%d',"
+                              "'devsz_mb':2,'x-opal':true,%s}}",
+                              i, 5 + i, opts);
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        if (!cases[i].msg) {
+            g_assert_false(qdict_haskey(rsp, "error"));
+        } else {
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("%s: %s", cases[i].opts, desc);
+            g_assert_nonnull(strstr(desc, cases[i].msg));
+        }
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 /* a reservation command on namespace 1; @data is 16 bytes in @buf */
 static uint16_t femu_resv(FemuCtrlState *c, uint8_t opc, uint32_t dw10,
                           uint32_t dw11, uint64_t buf, uint64_t k1,
@@ -62923,6 +63160,12 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "lockdown=on",
     });
     qos_add_test("lockdown-off", "femu", femu_test_lockdown_off, NULL);
+    qos_add_test("opal-transport", "femu", femu_test_opal,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "x-opal=on",
+    });
+    qos_add_test("opal-off", "femu", femu_test_opal_off, NULL);
+    qos_add_test("opal-refused", "femu", femu_test_opal_refused, NULL);
     qos_add_test("telemetry-ctrl", "femu", femu_test_telemetry_ctrl,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=telc,femu_mode=1,devsz_mb=64",

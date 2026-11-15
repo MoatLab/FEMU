@@ -350,6 +350,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "and OACS bit 10; the host can prohibit most admin commands and "
       "changeable Feature Identifiers on the admin queue until QEMU stops; "
       "not with a femu-subsys; off (default)" },
+    { "x-opal",
+      "TCG Opal security, experimental and not yet conformant: Security Send "
+      "(81h) and Receive (82h), OACS bit 0, Level 0 discovery, ComID 1000h "
+      "with STACK_RESET and the Session Manager Properties method; the "
+      "Admin and Locking SPs come later; one NoSSD or page-mapped bbssd "
+      "namespace without metadata, not with a femu-subsys, CXL, ns_mgmt, "
+      "power_loss, sanitize_ns, ns_wp or persist_file; off (default)" },
     { "hmb_mb",
       "bbssd with mapping=dftl: ask the host for a Host Memory Buffer of "
       "this many MiB (Identify HMPRE and HMMIN). While the host has it "

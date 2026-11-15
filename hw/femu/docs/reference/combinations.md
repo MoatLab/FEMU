@@ -1160,6 +1160,7 @@ own description allows. A message keeps its format directives (`%s`,
 - reservations must be the same on every controller of a femu-subsys
 - sanitize_ms does not work with a femu-subsys yet
 - shared_ftl is not supported with a femu-subsys (FDP shares its FTL already)
+- x-opal does not work with a femu-subsys or a CXL device yet
 
 ## `telemetry_da4`
 

@@ -2,6 +2,7 @@
 #include "./bbssd/ftl.h"
 #include "./kvssd/kvssd.h"
 #include "./ocssd/oc-timing.h"
+#include "./femu-opal.h"
 #include "system/qtest.h"
 #include "trace.h"
 
@@ -6240,6 +6241,77 @@ static uint16_t nvme_sanns_admin_check(FemuCtrl *n, NvmeCmd *cmd)
     }
 }
 
+/* the longest Security Send or Receive transfer the controller takes */
+#define FEMU_OPAL_XFER_MAX  (64 * 1024)
+
+static uint16_t nvme_security_status(FemuOpalIf r)
+{
+    switch (r) {
+    case FEMU_OPAL_IF_GOOD:
+        return NVME_SUCCESS;
+    case FEMU_OPAL_IF_SEQUENCE:
+        return NVME_CMD_SEQ_ERROR | NVME_DNR;
+    default:
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+}
+
+/*
+ * Security Send (81h) and Security Receive (82h), Base 2.3 5.2.23 and
+ * 5.2.25. Every byte the host names moves: a Receive pads with zeros, and
+ * a discarded Send is still read. An interface error moves nothing and
+ * carries DNR (SIIS 6.5, Table 25). A response leaves the TPer only once
+ * the host has it, so a failed transfer keeps it for the next Receive.
+ */
+static uint16_t nvme_security(FemuCtrl *n, NvmeCmd *cmd, bool send)
+{
+    uint32_t dw10 = le32_to_cpu(cmd->cdw10);
+    uint8_t secp = dw10 >> 24;
+    uint16_t spsp = (dw10 >> 8) & 0xffff;
+    uint32_t len = le32_to_cpu(cmd->cdw11);
+    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
+    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
+    NvmeNamespace *ns = nvme_ns_allocated(n, 1);
+    g_autofree uint8_t *buf = NULL;
+    FemuOpalIf r;
+    uint16_t status;
+
+    if (len > FEMU_OPAL_XFER_MAX) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* Geometry Reporting follows a Format NVM */
+    if (ns) {
+        n->opal_tper->cfg.lba_size = NVME_ID_NS_LBADS_BYTES(ns);
+    }
+    buf = g_malloc0(MAX(len, FEMU_OPAL_BUF));
+    if (send) {
+        r = femu_opal_send_check(n->opal_tper, secp, spsp, len);
+        if (r) {
+            return nvme_security_status(r);
+        }
+        if (len) {
+            status = dma_write_prp(n, buf, len, prp1, prp2);
+            if (status) {
+                return status;
+            }
+        }
+        return nvme_security_status(femu_opal_send(n->opal_tper, secp, spsp,
+                                                   buf, len));
+    }
+    r = femu_opal_recv(n->opal_tper, secp, spsp, buf, len);
+    if (r) {
+        return nvme_security_status(r);
+    }
+    if (len) {
+        status = dma_read_prp(n, buf, len, prp1, prp2);
+        if (status) {
+            return status;
+        }
+    }
+    femu_opal_consume(n->opal_tper);
+    return NVME_SUCCESS;
+}
+
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     trace_femu_admin_cmd(cmd->cid, cmd->opcode);
@@ -6367,7 +6439,11 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return NVME_INVALID_OPCODE | NVME_DNR;
     case NVME_ADM_CMD_SECURITY_SEND:
     case NVME_ADM_CMD_SECURITY_RECV:
-        return NVME_INVALID_OPCODE | NVME_DNR;
+        if (!n->opal) {
+            return NVME_INVALID_OPCODE | NVME_DNR;
+        }
+        return nvme_security(n, cmd,
+                             cmd->opcode == NVME_ADM_CMD_SECURITY_SEND);
     default:
         if (n->ext_ops.admin_cmd_cqe) {
             return n->ext_ops.admin_cmd_cqe(n, cmd, cqe);

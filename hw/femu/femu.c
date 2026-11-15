@@ -18,6 +18,7 @@
 #include "./nand/nand-profile.h"
 #include "./femu-props.h"
 #include "./femu-query.h"
+#include "./femu-opal.h"
 
 /*
  * Base 2.1: FEMU already reports fields 2.0 reserves (ONCS bit 9, Copy format
@@ -3647,6 +3648,7 @@ static void femu_realize_undo(FemuCtrl *n)
     g_clear_pointer(&n->vwc_timer, timer_free);
     g_clear_pointer(&n->plp_timer, timer_free);
     g_clear_pointer(&n->wrr_tried, g_free);
+    g_clear_pointer(&n->opal_tper, g_free);
     if (!n->shared_storage) {
         femu_exit_extensions(n);
     }
@@ -4521,6 +4523,12 @@ static bool femu_fw_resolve(FemuCtrl *n, Error **errp)
         error_setg(errp, "lockdown does not work with a femu-subsys yet");
         return false;
     }
+    /* one TPer per controller; a subsystem would need one per subsystem */
+    if (n->opal && (n->subsys || n->cxl_dev)) {
+        error_setg(errp, "x-opal does not work with a femu-subsys or a CXL "
+                   "device yet");
+        return false;
+    }
     if (n->fw_slots > 1 && (n->subsys || n->cxl_dev)) {
         error_setg(errp, "fw_slots above 1%s does not work with a femu-subsys "
                    "or a CXL device yet", n->ocp ? " (ocp needs 3)" : "");
@@ -4578,6 +4586,48 @@ static bool femu_ocp_resolve(FemuCtrl *n, Error **errp)
     /* DP-CFG-7: B requires Write Uncorrectable, A leaves it optional */
     if (nvme_ocp_choice(n->ocp_profile, 7) == 'B') {
         n->oncs |= NVME_ONCS_WRITE_UNCORR;
+    }
+    return true;
+}
+
+/*
+ * The configurations Opal supports: one NoSSD or page-mapped bbssd
+ * namespace with no metadata, and no feature with its own path to the
+ * media or its own copy of the map. Checked on the resolved namespaces,
+ * after namespace_modes; plp, sdc and awupf_lbas need power_loss.
+ */
+static bool femu_opal_check(FemuCtrl *n, Error **errp)
+{
+    const char *map = n->bb_params.mapping_scheme;
+    NvmeNamespace *ns = nvme_ns_allocated(n, 1);
+    const char *why = NULL;
+
+    if (n->num_namespaces != 1 || !ns) {
+        why = "more than one namespace";
+    } else if (n->namespace_modes) {
+        why = "namespace_modes";
+    } else if (ns->femu_mode != FEMU_NOSSD_MODE &&
+               ns->femu_mode != FEMU_BBSSD_MODE) {
+        why = "a mode other than NoSSD or bbssd";
+    } else if (ns->femu_mode == FEMU_BBSSD_MODE && map &&
+               strcmp(map, "page")) {
+        why = "a bbssd mapping other than page";
+    } else if (NVME_ID_NS_MS(ns) || n->pi) {
+        why = "metadata or protection information";
+    } else if (n->ns_mgmt) {
+        why = "ns_mgmt";
+    } else if (n->power_loss || n->durable_at_done) {
+        why = "power_loss";
+    } else if (n->sanitize_ns) {
+        why = "sanitize_ns";
+    } else if (n->ns_wp) {
+        why = "ns_wp";
+    } else if (n->persist_file) {
+        why = "persist_file";
+    }
+    if (why) {
+        error_setg(errp, "x-opal does not work with %s yet", why);
+        return false;
     }
     return true;
 }
@@ -4918,6 +4968,21 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      * shared storage object copies these fields.
      */
     nvme_caps_id_ctrl(n, &n->id_ctrl);
+    if (n->opal) {
+        NvmeNamespace *ns = nvme_ns_allocated(n, 1);
+        FemuOpalCfg cfg = {
+            .lba_size = ns ? NVME_ID_NS_LBADS_BYTES(ns) : 512,
+            .admins = 4,
+            .users = 8,
+        };
+
+        if (!femu_opal_check(n, errp)) {
+            femu_realize_undo(n);
+            return;
+        }
+        n->opal_tper = g_new(FemuOpal, 1);
+        femu_opal_init(n->opal_tper, &cfg);
+    }
     /* reservations and ANA work on the namespaces that now exist */
     nvme_resv_realize(n);
     nvme_ana_id(n, &n->id_ctrl);
@@ -5292,6 +5357,7 @@ static void femu_exit(PCIDevice *pci_dev)
     nvme_destroy_poller(n);
     /* the pollers are gone: no grant can read it any more */
     g_clear_pointer(&n->wrr_tried, g_free);
+    g_clear_pointer(&n->opal_tper, g_free);
     /* the pollers are gone, so nothing can wake the bottom half any more */
     qemu_bh_delete(n->aer_bh);
     n->aer_bh = NULL;
@@ -5409,6 +5475,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("hmb_ns", FemuCtrl, hmb_ns, 1000),
     DEFINE_PROP_UINT8("fw_slots", FemuCtrl, fw_slots, 0),
     DEFINE_PROP_BOOL("lockdown", FemuCtrl, lockdown, false),
+    DEFINE_PROP_BOOL("x-opal", FemuCtrl, opal, false),
     DEFINE_PROP_BOOL("reservations", FemuCtrl, reservations, false),
     DEFINE_PROP_BOOL("power_states", FemuCtrl, power_states, false),
     DEFINE_PROP_BOOL("ana", FemuCtrl, ana, false),

@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 311 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 312 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -100,6 +100,7 @@ Devices:
 | `sanitize_ns` | `bool` | `off` | bbssd, NoSSD with sanitize_ops: Sanitize Namespace (8Ch, Base 2.3 5.2.23), a crypto erase of one namespace while other namespaces keep their data, one at a time; log 81h by NSID; not with a femu-subsys, ns_mgmt, cxl_ssd or persist_file; off (default) |
 | `cancel` | `bool` | `off` | bbssd, NoSSD: Cancel (I/O 18h, Base 2.3 7.1) aborts commands of its own submission queue, one by CID or all of a namespace; commands past the FTL step abort at once (CMDA), the others when the step ends (CEDA); needs mapping=page; not with buffer_size, cxl_ssd, ocp, power_loss or a femu-subsys; off (default) |
 | `shared_ftl` | `bool` | `off` | bbssd: the namespaces share the FTL and NAND array of namespace 1, each in its own slice of the logical pages, so writes and GC of one slow the I/O of another; sizes in whole NAND pages; needs mapping=page; not with a femu-subsys, ns_mgmt, power_loss, persist_ftl, ns_wp, sanitize_ns or telemetry_da4; off (default) |
+| `x-opal` | `bool` | `off` | TCG Opal security, experimental and not yet conformant: Security Send (81h) and Receive (82h), OACS bit 0, Level 0 discovery, ComID 1000h with STACK_RESET and the Session Manager Properties method; the Admin and Locking SPs come later; one NoSSD or page-mapped bbssd namespace without metadata, not with a femu-subsys, CXL, ns_mgmt, power_loss, sanitize_ns, ns_wp or persist_file; off (default) |
 
 ### LBA formats, metadata and protection
 

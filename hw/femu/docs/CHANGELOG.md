@@ -111,6 +111,7 @@ listed one by one.
 - `query-femu` reports the NAND bus timing of each namespace in a `media` member. It gives the page transfer and the command, status and burst phases after their fallbacks. It also gives the multi-plane gaps, the ONFI mode and the ordering rules. CSD, KV and OCSSD namespaces now report this member only ([reference](reference/query-femu.md#media-timing)).
 - `query-femu` also reports FDP namespaces: the reclaim group geometry, unit counts per state, and the host and media bytes of each reclaim unit handle. Kind `reclaim-units` lists the state, handle, valid pages and wear of each unit. The handle byte counters sum to the FDP Statistics log.
 - Opt-in power loss model (`power_loss`) that drops data still held in the volatile write buffer and records the event in SMART and the event log (46602b0e7, 303c77aef, 7679c443d).
+- TCG Opal groundwork (`x-opal=on`, experimental, off by default): Security Send (81h) and Receive (82h), with OACS bit 0. It answers Level 0 discovery and the protocol list. ComID 1000h has its state machine, STACK_RESET and the Session Manager Properties method. The Admin and Locking SPs come in later steps.
 
 #### ZNS
 
