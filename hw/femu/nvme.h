@@ -2315,6 +2315,9 @@ typedef struct NvmeNamespace {
     uint32_t        san_cdw10;
     unsigned long   *util;
     unsigned long   *uncorrectable;
+    /* rain_loss: the tracked blocks a media loss marked, a subset */
+    unsigned long   *lost;
+    uint64_t        lost_errs;      /* reads that failed on a lost block */
     uint64_t        lsi_inc;        /* identity across delete and create */
     uint64_t        lsi_add_ver;    /* steps when a tracked block is added */
     uint64_t        lsi_media_ver;  /* steps on each tracked-block change */
@@ -2597,6 +2600,7 @@ typedef struct BbCtrlParams {
     int rain_parity;          /* in-line parity pages per stripe (RAIN) */
     bool rain_rebuild;        /* move old lines off failed dies (RAIN) */
     bool rain_read_only;      /* a failure past the spare: read-only (RAIN) */
+    bool rain_loss;           /* a second failure in a stripe loses data */
     int parity_xor_ns;        /* controller time per parity page */
     int failed_die;           /* die read through its stripe; -1 = none */
     int inject_die;           /* die that OCP event 0016h takes offline */
@@ -3403,6 +3407,22 @@ typedef struct FemuCtrl {
     uint32_t        test_ftl_hold;
     uint32_t        test_fetch_hold;    /* pollers take no SQE */
     /*
+     * Admission freeze: pollers take no SQE while adm_freeze is nonzero,
+     * and each stores the value it saw in adm_freeze_ack[poller] at the end
+     * of a sweep. A drain waits on the acks, then on the to_ftl rings.
+     */
+    uint32_t        adm_freeze;
+    uint32_t        adm_freeze_seq;
+    uint32_t        *adm_freeze_ack;
+    /*
+     * x-ftl-hold handshake: each change of test_ftl_hold takes a new
+     * test_ftl_hold_req, and the FTL stores the last one it took in
+     * test_ftl_hold_seen, before it decides with the hold it read after it.
+     */
+    uint32_t        test_ftl_hold_req;
+    uint32_t        test_ftl_hold_seen;
+    uint64_t        test_probe_lpn;     /* x-ftl-probe: the LPN to read */
+    /*
      * qtest only (x-cpl-hold): 1, the pollers leave the requests the FTL
      * returned in their ring; 2, they leave them in pq. Backlogs post.
      */
@@ -3871,6 +3891,7 @@ uint64_t femu_lsi_incarnation(void);
 void femu_lsi_changed(NvmeNamespace *ns, uint64_t added, uint64_t gone);
 void femu_lsi_mark(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
 void femu_lsi_clear(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
+void femu_lost_clear(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
 void femu_lsi_zeroed(NvmeNamespace *ns);
 void femu_lsi_loaded(NvmeNamespace *ns);
 void femu_lsi_restore(NvmeNamespace *ns, uint64_t lba, bool on,
@@ -3960,6 +3981,7 @@ enum {
 bool femu_sdc_init(FemuCtrl *n, Error **errp);
 bool femu_sdc_ns_alloc(NvmeNamespace *ns, uint64_t blks);
 void femu_sdc_clear(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
+void femu_lost_read(NvmeNamespace *ns, uint64_t slba, uint64_t elba);
 bool femu_lba_bad(NvmeNamespace *ns, uint64_t slba, uint64_t elba,
                   uint64_t *bad);
 int femu_sdc_fault(NvmeNamespace *ns, uint64_t slba, uint64_t elba,
@@ -4000,6 +4022,11 @@ uint8_t nvme_sq_empty(NvmeSQueue *sq);
 void nvme_start_dataplane(FemuCtrl *n);
 void nvme_wrr_reset(FemuCtrl *n);
 bool nvme_pause_pollers(FemuCtrl *n);
+bool nvme_pause_by(FemuCtrl *n, int64_t deadline, bool *resume);
+bool nvme_freeze_drain(FemuCtrl *n, int64_t deadline, bool *resume,
+                       Error **errp);
+uint32_t femu_ftl_hold_put(FemuCtrl *n, uint32_t hold);
+void nvme_thaw(FemuCtrl *n);
 void nvme_ns_refresh_fdp(NvmeNamespace *ns);
 void nvme_ns_refresh_hints(FemuCtrl *n, NvmeNamespace *ns);
 int nvme_streams_open(NvmeNamespace *ns, NvmeCmd *cmd);
@@ -4312,6 +4339,7 @@ void ssd_ocp_blocks(struct ssd *ssd, FemuOcpBlocks *b);
 void ssd_rber_counters(struct ssd *ssd, uint64_t out[4]);
 uint64_t ssd_tp_moves(struct ssd *ssd);
 uint64_t ssd_tp_pending_count(struct ssd *ssd);
+char *ssd_probe_lpn(struct ssd *ssd, uint64_t lpn);
 void ssd_check_mapping(struct ssd *ssd, uint64_t *mapped, uint64_t *lost,
                        uint64_t *orphans, uint64_t *tp_pages, uint64_t *tp_bad);
 /* reclaim units not held by exactly one list, heap or frontier; 0 is right */

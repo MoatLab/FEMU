@@ -101,6 +101,18 @@ void femu_sdc_clear(NvmeNamespace *ns, uint64_t slba, uint64_t nlb)
 }
 
 /*
+ * A read of [@slba, @elba) failed on the tracked map. A lost block in it
+ * (rain_loss) makes it a media error; Write Uncorrectable alone does not,
+ * as the host made those blocks fail.
+ */
+void femu_lost_read(NvmeNamespace *ns, uint64_t slba, uint64_t elba)
+{
+    if (ns->lost && find_next_bit(ns->lost, elba, slba) < elba) {
+        qatomic_inc(&ns->lost_errs);
+    }
+}
+
+/*
  * A read of [@slba, @elba) fails: a block is uncorrectable, or the check
  * finds a spoiled one, the first of which goes to *@bad. Every read path
  * asks here (Read, Verify, Compare, Copy sources). Only the FTL thread
@@ -115,6 +127,7 @@ bool femu_lba_bad(NvmeNamespace *ns, uint64_t slba, uint64_t elba,
 
     if (b < elba) {
         *bad = b;
+        femu_lost_read(ns, slba, elba);
         return true;
     }
     if (!ns->sdc || !n->e2e_check) {

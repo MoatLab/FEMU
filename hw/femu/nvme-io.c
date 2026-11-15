@@ -1320,6 +1320,7 @@ void *nvme_poller(void *arg)
     FemuCtrl *n = ((NvmePollerThreadArgument *)arg)->n;
     int index = ((NvmePollerThreadArgument *)arg)->index;
     uint32_t burst;
+    uint32_t fz;
     int i;
 
     /* the log trace backend reads its file under RCU */
@@ -1357,7 +1358,9 @@ void *nvme_poller(void *arg)
              * nr_pollers == nr_io_queues and the loop runs once for q == index
              * -- identical to the original one-queue-per-poller behavior.
              */
-            burst = qatomic_read(&n->test_fetch_hold) ? 0 : nvme_arb_burst(n);
+            fz = qatomic_load_acquire(&n->adm_freeze);
+            burst = fz || qatomic_read(&n->test_fetch_hold) ? 0 :
+                    nvme_arb_burst(n);
             if (burst && nvme_wrr_on(n)) {
                 nvme_wrr_grant(n, index);
                 burst = 0;
@@ -1382,6 +1385,10 @@ void *nvme_poller(void *arg)
                 }
             }
             nvme_process_cq_cpl(n, index);
+            if (unlikely(fz)) {
+                /* this sweep took no SQE: the drain may count on it */
+                qatomic_store_release(&n->adm_freeze_ack[index], fz);
+            }
             /* release: queue / eventidx writes in this sweep must be globally
              * visible before clear_ctrl can observe in_sweep==false and free */
             smp_mb();
@@ -1410,7 +1417,9 @@ void *nvme_poller(void *arg)
              * may share one completion queue, so the queue to check is the one
              * this submission queue names, not the one with the same number.
              */
-            burst = qatomic_read(&n->test_fetch_hold) ? 0 : nvme_arb_burst(n);
+            fz = qatomic_load_acquire(&n->adm_freeze);
+            burst = fz || qatomic_read(&n->test_fetch_hold) ? 0 :
+                    nvme_arb_burst(n);
             if (burst && nvme_wrr_on(n)) {
                 nvme_wrr_grant(n, index);
                 burst = 0;
@@ -1426,6 +1435,10 @@ void *nvme_poller(void *arg)
                 }
             }
             nvme_process_cq_cpl(n, index);
+            if (unlikely(fz)) {
+                /* this sweep took no SQE: the drain may count on it */
+                qatomic_store_release(&n->adm_freeze_ack[index], fz);
+            }
             /* release: queue / eventidx writes in this sweep must be globally
              * visible before clear_ctrl can observe in_sweep==false and free */
             smp_mb();

@@ -43,6 +43,7 @@ void nvme_mark_uncorrectable(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
         bitmap_set_atomic(ns->util, slba, nlb);
     }
     femu_lsi_wu_stop(ns);
+    femu_lost_clear(ns, slba, nlb);
     femu_lsi_mark(ns, slba, nlb);
     femu_sdc_clear(ns, slba, nlb);
 }
@@ -127,18 +128,14 @@ int nvme_check_cqid(FemuCtrl *n, uint16_t cqid)
  * Callers run on the vCPU thread, where the admin queue is processed. Returns
  * whether the data plane was running, which nvme_resume_pollers() takes back.
  */
-static bool nvme_pause_controller(FemuCtrl *n)
+/*
+ * Wait until no poller and no FTL pass is in flight. False when the
+ * host monotonic clock passes @deadline (us; 0 waits for ever).
+ */
+static bool nvme_pause_wait(FemuCtrl *n, int64_t deadline)
 {
-    bool was_started = n->dataplane_started;
     int p;
     bool busy;
-
-    if (!was_started) {
-        return false;
-    }
-
-    n->dataplane_started = false;
-    smp_mb();   /* publish the flag before reading anyone's sweep state */
 
     do {
         busy = false;
@@ -159,10 +156,26 @@ static bool nvme_pause_controller(FemuCtrl *n)
             busy = true;
         }
         if (busy) {
+            if (deadline && g_get_monotonic_time() > deadline) {
+                return false;
+            }
             usleep(100);
         }
     } while (busy);
+    return true;
+}
 
+static bool nvme_pause_controller(FemuCtrl *n)
+{
+    bool was_started = n->dataplane_started;
+
+    if (!was_started) {
+        return false;
+    }
+
+    n->dataplane_started = false;
+    smp_mb();   /* publish the flag before reading anyone's sweep state */
+    nvme_pause_wait(n, 0);
     return was_started;
 }
 
@@ -194,6 +207,116 @@ bool nvme_pause_pollers(FemuCtrl *n)
         subsys->ns_resume[i] = ctrl && nvme_pause_controller(ctrl);
     }
     return true;
+}
+
+/*
+ * nvme_pause_pollers() with a deadline (us, host monotonic clock). On a
+ * timeout the data plane runs again and the result is false. A controller
+ * with shared namespaces pauses with no deadline.
+ */
+bool nvme_pause_by(FemuCtrl *n, int64_t deadline, bool *resume)
+{
+    if (nvme_ns_shared(n) || !n->dataplane_started) {
+        *resume = nvme_pause_pollers(n);
+        return true;
+    }
+    n->dataplane_started = false;
+    smp_mb();   /* publish the flag before reading anyone's sweep state */
+    if (!nvme_pause_wait(n, deadline)) {
+        nvme_resume_controller(n, true);
+        *resume = false;
+        return false;
+    }
+    *resume = true;
+    return true;
+}
+
+/*
+ * Change x-ftl-hold. Each change takes a new request number, which the
+ * FTL thread stores back once a pass reads the new value. Under BQL.
+ */
+uint32_t femu_ftl_hold_put(FemuCtrl *n, uint32_t hold)
+{
+    uint32_t req = n->test_ftl_hold_req + 1;
+
+    qatomic_set(&n->test_ftl_hold, hold);
+    qatomic_store_release(&n->test_ftl_hold_req, req);
+    return req;
+}
+
+/*
+ * Admission freeze, then drain, then pause, under the caller's deadline
+ * (us, host monotonic clock), so a
+ * change after it sees every request the frontend took already done by
+ * the FTL. The pollers keep posting completions, so the drain never waits
+ * on the guest. A mode-2 x-ftl-hold ends once no poller takes an SQE. On
+ * a timeout each step undoes its own part, the hold comes back, and the
+ * caller changes nothing.
+ * Only for a controller whose namespaces are its own.
+ *
+ *   freeze --> each poller acks --> to_ftl rings empty --> pause
+ */
+bool nvme_freeze_drain(FemuCtrl *n, int64_t deadline, bool *resume,
+                       Error **errp)
+{
+    bool held = qatomic_read(&n->test_ftl_hold) == 2;
+    uint32_t seq;
+
+    assert(!nvme_ns_shared(n));
+    *resume = false;
+    if (!n->dataplane_started || !n->poller_on || !n->adm_freeze_ack) {
+        if (held) {
+            femu_ftl_hold_put(n, 0);
+        }
+        *resume = nvme_pause_controller(n);
+        return true;
+    }
+    seq = ++n->adm_freeze_seq;
+    if (!seq) {
+        seq = ++n->adm_freeze_seq;
+    }
+    qatomic_store_release(&n->adm_freeze, seq);
+    for (int p = 1; p <= (int)n->nr_pollers; p++) {
+        while (qatomic_load_acquire(&n->adm_freeze_ack[p]) != seq) {
+            if (g_get_monotonic_time() > deadline) {
+                goto thaw;
+            }
+            usleep(100);
+        }
+    }
+    if (held) {
+        femu_ftl_hold_put(n, 0);
+    }
+    for (int p = 1; p <= (int)n->nr_pollers; p++) {
+        while (n->to_ftl && n->to_ftl[p] && femu_ring_count(n->to_ftl[p])) {
+            if (g_get_monotonic_time() > deadline) {
+                goto thaw;
+            }
+            usleep(100);
+        }
+    }
+    n->dataplane_started = false;
+    smp_mb();   /* publish the flag before reading anyone's sweep state */
+    if (!nvme_pause_wait(n, deadline)) {
+        nvme_resume_controller(n, true);
+        goto thaw;
+    }
+    *resume = true;
+    return true;
+
+thaw:
+    if (held) {
+        femu_ftl_hold_put(n, 2);
+    }
+    nvme_thaw(n);
+    error_setg(errp, "the FTL queues did not drain in 10 s");
+    return false;
+}
+
+/* end an admission freeze: the pollers take SQEs again */
+void nvme_thaw(FemuCtrl *n)
+{
+    qatomic_store_release(&n->adm_freeze, 0);
 }
 
 void nvme_resume_pollers(FemuCtrl *n, bool was_started)

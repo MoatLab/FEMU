@@ -102,6 +102,8 @@ typedef struct FemuQueryNs {
     uint64_t rain_failed;
     uint64_t rain_left;
     uint64_t rain_pages;
+    uint64_t rain_lost_pages;
+    uint64_t rain_lost_blocks;
     uint64_t map_pages;
     uint64_t map_reads;
     bool tp_on;                 /* translation pages on flash */

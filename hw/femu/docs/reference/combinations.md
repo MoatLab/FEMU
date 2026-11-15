@@ -177,7 +177,10 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `did`
 
+- the FTL did not pause in 10 s
+- the FTL queues did not drain in 10 s
 - the FTL thread did not take the query; the controller may be paused or disabled
+- the FTL thread did not take x-ftl-hold in 5 s
 
 ## `die_parity`
 
@@ -674,6 +677,7 @@ own description allows. A message keeps its format directives (`%s`,
 - power_states works with bbssd or CSD namespaces only
 - shared namespaces require homogeneous NoSSD or bbssd without Streams or default protection
 - streams requires NVM namespaces
+- the loss scan needs a controller whose namespaces are its own
 - zoned namespaces need a logical block of 4 KiB or less; lba_index selects %u bytes
 
 ## `nand_cell_type`
@@ -855,6 +859,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `persist_file`
 
 - FEMU: rrl is not supported with persist_file
+- femu: rain_loss is not supported with persist_file
 - io_trace: '%s' is a persist_file, pel_file or io_trace of a device
 - persist_file '%s' cannot be read in full
 - persist_file '%s' does not match this device: the mode, the backend size (%
@@ -982,7 +987,14 @@ own description allows. A message keeps its format directives (`%s`,
 - femu: %s needs queues x (entries + 1) of at most %d
 - multipoller_enabled must be 0 (one poller for all queues) or 1 (each poller owns poller_ratio queues)
 - queues must be in [1, %d]
+- the FTL queues did not drain in 10 s
 - wrr needs one poller: multipoller_enabled=0, or poller_ratio of at least queues
+- x-ftl-hold holds the FTL: the loss scan needs its queues drained
+
+## `rain_loss`
+
+- femu: rain_loss is not supported with persist_file
+- femu: rain_loss needs rain_read_only and bbssd
 
 ## `rain_parity`
 
@@ -996,6 +1008,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `rain_read_only`
 
 - FEMU bbssd: with rain_read_only, failed_die leaves no spare, so the media would start read-only; lower devsz_mb or raise blks_per_pl
+- femu: rain_loss needs rain_read_only and bbssd
 - femu: rain_read_only is not supported with %s
 - femu: rain_read_only needs rain_parity=1 and eol_read_only=on
 

@@ -768,6 +768,10 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
         ctr->rebuild_lines_left = q->rain_left;
         ctr->has_rebuild_pages = true;
         ctr->rebuild_pages = q->rain_pages;
+        ctr->has_lost_pages = true;
+        ctr->lost_pages = q->rain_lost_pages;
+        ctr->has_lost_blocks = true;
+        ctr->lost_blocks = q->rain_lost_blocks;
     }
     if (q->host_pages) {
         ctr->has_waf = true;

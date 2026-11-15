@@ -661,6 +661,9 @@ static void nvme_init_poller(FemuCtrl *n)
     if (!n->poller_in_sweep) {
         n->poller_in_sweep = g_malloc0(sizeof(bool) * (n->nr_pollers + 1));
     }
+    if (!n->adm_freeze_ack) {
+        n->adm_freeze_ack = g_new0(uint32_t, n->nr_pollers + 1);
+    }
 
     /*
      * per-poller I/O counters, cacheline-isolated (1-based); see FemuPollerCtr.
@@ -3139,7 +3142,8 @@ static void nvme_collect_media_stats_ns(FemuCtrl *n, FemuMediaStats *st,
         if (!ns->allocated || (only >= 0 && i != only)) {
             continue;
         }
-        st->media_errors += zns_media_errors(ns);
+        st->media_errors += zns_media_errors(ns) +
+                            qatomic_read(&ns->lost_errs);
         used = zns_percentage_used(ns);
         if (used > st->percentage_used) {
             st->percentage_used = used;
@@ -4509,7 +4513,9 @@ static uint16_t nvme_get_lba_status(FemuCtrl *n, NvmeCmd *cmd)
         d = buf + 8 + 16 * (uint64_t)nlsd;
         stq_le_p(d, first);
         stl_le_p(d + 8, last - first - 1);
-        d[13] = lbars;
+        /* 011b only when Write Uncorrectable was the last write of each */
+        d[13] = map == ns->uncorrectable && ns->lost &&
+                find_next_bit(ns->lost, last, first) < last ? 0x1 : lbars;
         nlsd++;
         lba = last;
     }
@@ -4561,6 +4567,9 @@ static void nvme_sanitize_apply(FemuCtrl *n, uint32_t dw10, uint32_t dw11)
             for (uint64_t b = 0; data && b + 4 <= ns->extent_size; b += 4) {
                 stl_le_p(data + b, pat);
             }
+            if (ns->lost) {
+                bitmap_zero(ns->lost, ns->ns_blks);
+            }
             bitmap_zero(ns->uncorrectable, ns->ns_blks);
             femu_lsi_zeroed(ns);
             if (ns->mdata) {
@@ -4572,6 +4581,9 @@ static void nvme_sanitize_apply(FemuCtrl *n, uint32_t dw10, uint32_t dw11)
             memset(data, 0, ns->extent_size);
         }
         bitmap_zero(ns->util, ns->ns_blks);
+        if (ns->lost) {
+            bitmap_zero(ns->lost, ns->ns_blks);
+        }
         bitmap_zero(ns->uncorrectable, ns->ns_blks);
         femu_lsi_zeroed(ns);
         if (ns->mdata) {
@@ -5196,34 +5208,43 @@ static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
  * Give @ns bitmaps for @blks blocks: @prep, taken before any namespace
  * changed, or new ones.
  */
+/* the per-block maps of a namespace: util, uncorrectable, lost */
+#define NVME_FMT_MAPS   3
+
 static uint16_t nvme_format_resize(NvmeNamespace *ns, uint64_t blks,
                                    unsigned long **prep)
 {
-    unsigned long *util, *uncorrectable;
+    bool loss = ns->ctrl->bb_params.rain_loss;
+    unsigned long *util, *uncorrectable, *lost;
     unsigned long *sdc = NULL;
 
     /* fallible, so Format and Create refuse rather than abort on no memory */
     util = prep ? prep[0] : bitmap_try_new(blks);
     uncorrectable = prep ? prep[1] : bitmap_try_new(blks);
+    lost = prep ? prep[2] : (loss ? bitmap_try_new(blks) : NULL);
     if (prep) {
-        prep[0] = prep[1] = NULL;
+        prep[0] = prep[1] = prep[2] = NULL;
     }
     /* a new format holds no spoiled block (sdc) */
     if (ns->ctrl->sdc) {
         sdc = bitmap_try_new(blks);
     }
-    if (!util || !uncorrectable || (ns->ctrl->sdc && blks && !sdc)) {
+    if (!util || !uncorrectable || (loss && blks && !lost) ||
+        (ns->ctrl->sdc && blks && !sdc)) {
         g_free(util);
         g_free(uncorrectable);
+        g_free(lost);
         g_free(sdc);
         return NVME_INTERNAL_DEV_ERROR | NVME_DNR;
     }
 
     g_free(ns->util);
     g_free(ns->uncorrectable);
+    g_free(ns->lost);
     g_free(ns->sdc);
     ns->util = util;
     ns->uncorrectable = uncorrectable;
+    ns->lost = lost;
     ns->sdc = sdc;
     femu_lsi_zeroed(ns);
 
@@ -5471,7 +5492,8 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
  */
 static unsigned long **nvme_format_prepare(FemuCtrl *n, uint8_t lba_idx)
 {
-    unsigned long **prep = g_new0(unsigned long *, 2 * n->namespace_limit);
+    unsigned long **prep = g_new0(unsigned long *,
+                                  NVME_FMT_MAPS * n->namespace_limit);
 
     for (uint32_t i = 0; i < n->namespace_limit; i++) {
         NvmeNamespace *ns = nvme_ns(n, i + 1);
@@ -5481,10 +5503,15 @@ static unsigned long **nvme_format_prepare(FemuCtrl *n, uint8_t lba_idx)
             continue;
         }
         blks = ns->size >> ns->id_ns.lbaf[lba_idx].lbads;
-        prep[2 * i] = bitmap_try_new(blks);
-        prep[2 * i + 1] = bitmap_try_new(blks);
-        if (!prep[2 * i] || !prep[2 * i + 1]) {
-            for (uint32_t j = 0; j <= 2 * i + 1; j++) {
+        unsigned long **p = prep + NVME_FMT_MAPS * i;
+
+        p[0] = bitmap_try_new(blks);
+        p[1] = bitmap_try_new(blks);
+        if (n->bb_params.rain_loss) {
+            p[2] = bitmap_try_new(blks);
+        }
+        if (!p[0] || !p[1] || (n->bb_params.rain_loss && blks && !p[2])) {
+            for (uint32_t j = 0; j < NVME_FMT_MAPS * (i + 1); j++) {
                 g_free(prep[j]);
             }
             g_free(prep);
@@ -5492,6 +5519,14 @@ static unsigned long **nvme_format_prepare(FemuCtrl *n, uint8_t lba_idx)
         }
     }
     return prep;
+}
+
+static void nvme_format_prep_free(FemuCtrl *n, unsigned long **prep)
+{
+    for (uint32_t i = 0; prep && i < NVME_FMT_MAPS * n->namespace_limit; i++) {
+        g_free(prep[i]);
+    }
+    g_free(prep);
 }
 
 /* an end-of-life admitted write the FTL has not finished, on any namespace */
@@ -5607,10 +5642,7 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
      */
     if (nvme_eol_busy(n)) {
         nvme_resume_pollers(n, resume);
-        for (uint32_t i = 0; prep && i < 2 * n->namespace_limit; i++) {
-            g_free(prep[i]);
-        }
-        g_free(prep);
+        nvme_format_prep_free(n, prep);
         return NVME_CMD_SEQ_ERROR | NVME_DNR;
     }
 
@@ -5628,8 +5660,8 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
                 continue;
             }
             status = nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi,
-                                           sec_erase,
-                                           prep ? prep + 2 * i : NULL);
+                                           sec_erase, prep ?
+                                           prep + NVME_FMT_MAPS * i : NULL);
             if (status != NVME_SUCCESS) {
                 break;
             }
@@ -5662,10 +5694,7 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     nvme_resume_pollers(n, resume);
 
     /* what a namespace that failed first did not take */
-    for (uint32_t i = 0; prep && i < 2 * n->namespace_limit; i++) {
-        g_free(prep[i]);
-    }
-    g_free(prep);
+    nvme_format_prep_free(n, prep);
 
     return status;
 }

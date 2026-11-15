@@ -226,6 +226,13 @@
 #     from before a failure, over the device's life; GC and read
 #     reclaim moves do not count.  Present only with rain_parity.
 #
+# @lost-pages: data pages a second die failure in their stripe removed
+#     (rain_loss), over the device's life.  Present only with
+#     rain_parity.
+#
+# @lost-blocks: blocks those removals marked lost; a rewrite does not
+#     lower it.  Present only with rain_parity.
+#
 # @idle-reclaims: read reclaims done in idle time.  Present only with
 #     maint_idle.
 #
@@ -246,6 +253,7 @@
             '*map-read-pages': 'uint64', '*parity-write-pages': 'uint64',
             '*degraded-reads': 'uint64', '*failed-dies': 'uint64',
             '*rebuild-lines-left': 'uint64', '*rebuild-pages': 'uint64',
+            '*lost-pages': 'uint64', '*lost-blocks': 'uint64',
             '*idle-reclaims': 'uint64',
             '*idle-refreshes': 'uint64', '*waf': 'number' } }
 

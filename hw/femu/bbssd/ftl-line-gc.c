@@ -466,6 +466,147 @@ static bool ssd_rain_old_data(struct ssd *ssd)
 }
 
 /*
+ * rain_loss: the data page at @lpn is lost. Its allocated blocks become
+ * tracked (Unrecovered Read Error until a write) and lost; a block the
+ * host deallocated holds no data, so it loses nothing. The blocks are the
+ * byte range of the page in the current LBA format, so an LBA larger than
+ * a page counts once.
+ */
+static void ssd_rain_loss_mark(struct ssd *ssd, uint64_t lpn)
+{
+    NvmeNamespace *ns = ssd->ns;
+    uint64_t page = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
+    uint8_t shift = ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas)]
+                        .lbads;
+    uint64_t nsze = le64_to_cpu(ns->id_ns.nsze);
+    uint64_t off;
+    uint64_t end;
+
+    if (!ns->lost || lpn * page < ns->backend_offset) {
+        return;
+    }
+    off = lpn * page - ns->backend_offset;
+    end = MIN(((off + page - 1) >> shift) + 1, nsze);
+    for (uint64_t b = off >> shift; b < end; ) {
+        uint64_t s = find_next_bit(ns->util, end, b);
+        uint64_t z;
+
+        if (s >= end) {
+            break;
+        }
+        z = find_next_zero_bit(ns->util, end, s);
+        /* tracked first, then lost: lost stays a subset */
+        femu_lsi_mark(ns, s, z - s);
+        for (uint64_t x = s; x < z; x++) {
+            ssd->rain_lost_blocks += !test_and_set_bit(x, ns->lost);
+        }
+        b = z;
+    }
+}
+
+/*
+ * rain_loss: after die failure F, remove the data pages that no longer
+ * read. A row of a line keeps its data while at most one member that it
+ * programmed has failed; a programmed page counts even when invalid now,
+ * as its old data is still in the parity. With two or more, each valid
+ * data page on a failed die is lost: it leaves the map, so GC, the
+ * rebuild and read reclaim never read it. The caller has drained and
+ * paused the FTL.
+ *
+ *   member(t)  = rain_fidx[t] >= epoch(L)    failed(t) = rain_fidx[t] < F
+ *   missing(r) = members failed with page r programmed (pg < blk->wp)
+ *   missing(r) >= 2 --> valid data pages of row r on failed dies: lost
+ */
+static void ssd_rain_loss_scan(struct ssd *ssd)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int nf = spp->rain_nfail;
+    int dies = spp->tt_luns;
+
+    for (int i = 0; i < spp->tt_lines; i++) {
+        struct line *l = &ssd->lm.lines[i];
+        int failed = 0;
+
+        for (int t = 0; t < dies; t++) {
+            failed += spp->rain_fidx[t] >= l->rain_epoch &&
+                      spp->rain_fidx[t] < nf;
+        }
+        if (failed < 2) {
+            continue;
+        }
+        for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
+            for (int pl = 0; pl < spp->pls_per_lun; pl++) {
+                struct ppa ppa = { .ppa = 0 };
+                int missing = 0;
+
+                ppa.g.blk = i;
+                ppa.g.pl = pl;
+                ppa.g.pg = pg;
+                for (int t = 0; t < dies; t++) {
+                    if (spp->rain_fidx[t] < l->rain_epoch ||
+                        spp->rain_fidx[t] >= nf) {
+                        continue;
+                    }
+                    ppa.g.ch = t % spp->nchs;
+                    ppa.g.lun = t / spp->nchs;
+                    missing += pg < get_blk(ssd, &ppa)->wp;
+                }
+                if (missing < 2) {
+                    continue;
+                }
+                for (int t = 0; t < dies; t++) {
+                    struct ppa unmapped = { .ppa = UNMAPPED_PPA };
+                    struct ppa cur;
+                    uint64_t lpn;
+
+                    if (spp->rain_fidx[t] < l->rain_epoch ||
+                        spp->rain_fidx[t] >= nf) {
+                        continue;
+                    }
+                    ppa.g.ch = t % spp->nchs;
+                    ppa.g.lun = t / spp->nchs;
+                    if (get_pg(ssd, &ppa)->status != PG_VALID) {
+                        continue;
+                    }
+                    lpn = get_rmap_ent(ssd, &ppa);
+                    if (lpn >= spp->tt_pgs) {
+                        continue;
+                    }
+                    cur = get_maptbl_ent(ssd, lpn);
+                    if (cur.ppa != ppa.ppa) {
+                        continue;
+                    }
+                    mark_page_invalid(ssd, &ppa);
+                    set_rmap_ent(ssd, INVALID_LPN, &ppa);
+                    set_maptbl_ent(ssd, lpn, &unmapped);
+                    rcache_invalidate(ssd, lpn);
+                    ssd->rain_lost_pages++;
+                    ssd_rain_loss_mark(ssd, lpn);
+                }
+            }
+        }
+    }
+}
+
+/*
+ * rain_loss: a failure of die @die (ch * luns_per_ch + lun) would run
+ * the loss scan, as lines from before the last failure hold data. The
+ * caller has paused the FTL.
+ */
+bool ssd_rain_loss_due(struct ssd *ssd, int die)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int t;
+
+    if (!ssd->n->bb_params.rain_loss || !spp->rain_parity || die < 0 ||
+        die >= spp->tt_luns) {
+        return false;
+    }
+    t = (die % spp->luns_per_ch) * spp->nchs + die / spp->luns_per_ch;
+    return spp->rain_fidx[t] == INT_MAX && ssd_rain_old_data(ssd);
+}
+
+/*
  * rain_parity: whether OCP event 0016h may take die @die (ch * luns_per_ch +
  * lun) offline. Every live stripe must keep one lost member at most, so the
  * offline die is never needed as a source: a die that already failed can
@@ -491,29 +632,13 @@ bool ssd_rain_inject_ok(struct ssd *ssd, int die)
 }
 
 /*
- * rain_parity: die @die (ch * luns_per_ch + lun) fails. One parity page
- * per stripe takes one failure in a row, so a new failure needs every
- * live page on lines opened since the last one (the rebuild, rain_rebuild,
- * moves the old ones). The open lines close with their own layout, and
- * the next ones leave the die out. The caller has paused the FTL.
- *
- *   epoch 0: t0 t1 t2 t3 --fail t1--> epoch 1: t0 x t2 t3
- *   rebuild moves the epoch 0 data --fail t0--> epoch 2: x x t2 t3
+ * rain_parity: the refusals of ssd_rain_fail() that do not read the
+ * data, so a caller can check them before it drains the FTL queues. A
+ * die that already failed is no refusal. The caller has paused the FTL.
  */
-bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
+bool ssd_rain_fail_ok(struct ssd *ssd, int die, Error **errp)
 {
     struct ssdparams *spp = &ssd->sp;
-    struct write_pointer *ptrs[] = { &ssd->wp, &ssd->hot_wp, &ssd->gc_wp };
-    uint64_t page = (uint64_t)spp->secsz * spp->secs_per_pg;
-    uint64_t need;
-    uint32_t bits;
-    uint8_t spare;
-    bool ro;
-    int victim;
-    int lines;
-    int rows;
-    int open;
-    int s;
     int t;
 
     if (!spp->rain_parity || die < 0 || die >= spp->tt_luns) {
@@ -544,12 +669,50 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
                    ssd->n->bb_params.inject_die);
         return false;
     }
-    s = ssd_rain_members(spp, spp->rain_nfail);
-    if (s - 1 < 2) {
+    if (ssd_rain_members(spp, spp->rain_nfail) - 1 < 2) {
         error_setg(errp, "rain_parity keeps two members at least");
         return false;
     }
-    if (ssd_rain_old_data(ssd)) {
+    return true;
+}
+
+/*
+ * rain_parity: die @die (ch * luns_per_ch + lun) fails. One parity page
+ * per stripe takes one failure in a row, so a new failure needs every
+ * live page on lines opened since the last one (the rebuild, rain_rebuild,
+ * moves the old ones). The open lines close with their own layout, and
+ * the next ones leave the die out. The caller has paused the FTL.
+ *
+ *   epoch 0: t0 t1 t2 t3 --fail t1--> epoch 1: t0 x t2 t3
+ *   rebuild moves the epoch 0 data --fail t0--> epoch 2: x x t2 t3
+ */
+bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct write_pointer *ptrs[] = { &ssd->wp, &ssd->hot_wp, &ssd->gc_wp };
+    uint64_t page = (uint64_t)spp->secsz * spp->secs_per_pg;
+    uint64_t need;
+    uint32_t bits;
+    uint8_t spare;
+    bool loss;
+    bool ro;
+    int victim;
+    int lines;
+    int rows;
+    int open;
+    int s;
+    int t;
+
+    if (!ssd_rain_fail_ok(ssd, die, errp)) {
+        return false;
+    }
+    t = (die % spp->luns_per_ch) * spp->nchs + die / spp->luns_per_ch;
+    if (spp->rain_fidx[t] != INT_MAX) {
+        return true;
+    }
+    s = ssd_rain_members(spp, spp->rain_nfail);
+    loss = ssd_rain_old_data(ssd);
+    if (loss && !ssd->n->bb_params.rain_loss) {
         error_setg(errp, "lines from before the last failure still hold "
                    "data: a second failure there could lose it");
         return false;
@@ -590,6 +753,11 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
         if (ptrs[i]->curline) {
             ssd_pd_close_pointer(ssd, ptrs[i], false, ssd_now(ssd));
         }
+    }
+    /* rain_loss: the caller drained the FTL queues for this */
+    if (loss) {
+        ssd_rain_loss_scan(ssd);
+        femu_lsi_component(ssd->n, ssd->ns);
     }
     /* the reserve takes the admitted writes; it raises bits 3 and 0 */
     if (ro) {

@@ -501,6 +501,7 @@ uint16_t femu_pi_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if (find_next_bit(ns->uncorrectable, slba + nlb, slba) < slba + nlb) {
+        femu_lost_read(ns, slba, slba + nlb);
         return NVME_UNRECOVERED_READ | NVME_DNR;
     }
     data = g_malloc(len);

@@ -82,6 +82,9 @@ static void femu_sanns_erase(FemuCtrl *n, NvmeNamespace *ns)
         backend_unlock_range(n->mbe, ns->backend_offset, ns->extent_size);
     }
     bitmap_zero(ns->util, ns->ns_blks);
+    if (ns->lost) {
+        bitmap_zero(ns->lost, ns->ns_blks);
+    }
     bitmap_zero(ns->uncorrectable, ns->ns_blks);
     femu_lsi_zeroed(ns);
     if (ns->mdata) {

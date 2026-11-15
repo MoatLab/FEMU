@@ -882,6 +882,8 @@ struct ssd {
     uint64_t parity_pages;          /* die parity programs (die_parity) */
     int rain_cursor;                /* next line the rebuild looks at */
     uint64_t rain_rebuild_pages;    /* pages the rebuild moved */
+    uint64_t rain_lost_pages;       /* pages the loss scans removed */
+    uint64_t rain_lost_blocks;      /* blocks the loss scans marked lost */
     uint64_t degraded_reads;        /* reads of the failed die (atomic) */
     /*
      * The offline die now, plus one, so that a zeroed FTL has none; atomic.
@@ -1034,7 +1036,9 @@ void ssd_durable_drop_all(struct ssd *ssd);
 void ssd_durable_retire(struct ssd *ssd, int64_t now);
 bool ssd_durable_room(struct ssd *ssd);
 void ssd_rain_close(struct ssd *ssd, struct write_pointer *wp);
+bool ssd_rain_fail_ok(struct ssd *ssd, int die, Error **errp);
 bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp);
+bool ssd_rain_loss_due(struct ssd *ssd, int die);
 void ssd_rain_init(struct ssd *ssd);
 void ssd_rain_free(struct ssd *ssd);
 void ssd_rain_rebuild_step(struct ssd *ssd);

@@ -135,9 +135,21 @@ void femu_lsi_mark(NvmeNamespace *ns, uint64_t slba, uint64_t nlb)
     femu_lsi_changed(ns, lsi_test_and_set(ns->uncorrectable, slba, nlb), 0);
 }
 
+/*
+ * A host write reached the blocks: a media loss (rain_loss) no longer
+ * explains them. Lost bits go first, so lost stays a subset.
+ */
+void femu_lost_clear(NvmeNamespace *ns, uint64_t slba, uint64_t nlb)
+{
+    if (ns->lost) {
+        lsi_test_and_clear(ns->lost, slba, nlb);
+    }
+}
+
 /* blocks read back again: they are no longer tracked */
 void femu_lsi_clear(NvmeNamespace *ns, uint64_t slba, uint64_t nlb)
 {
+    femu_lost_clear(ns, slba, nlb);
     if (ns->uncorrectable) {
         femu_lsi_changed(ns, 0,
                          lsi_test_and_clear(ns->uncorrectable, slba, nlb));

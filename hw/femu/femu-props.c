@@ -675,6 +675,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "eol_read_only=on and its mdts and queue bounds; not with "
       "blk_pe_limit, buffer_size, iu_pages above 1, nand_bad_blocks, cxl_ssd "
       "or more than one namespace. Off (default): such a failure is refused" },
+    { "rain_loss",
+      "bbssd: with rain_read_only, a die failure is accepted while lines "
+      "from before the last one still hold data. A stripe that then has two "
+      "failed members loses its data pages on the failed dies: their "
+      "allocated blocks read Unrecovered Read Error until a write, Get LBA "
+      "Status lists them, and each failed read adds a media error. Not with "
+      "persist_file. Off (default): such a failure is refused" },
     { "parity_xor_ns",
       "bbssd, CSD: with die_parity or rain_parity, controller time in ns "
       "before each "

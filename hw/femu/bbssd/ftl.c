@@ -534,6 +534,25 @@ uint64_t ssd_tp_pending_count(struct ssd *ssd)
 }
 
 /*
+ * The mapping of @lpn: "ch lun pl blk pg", "unmapped", or "range" past
+ * the logical pages. The caller has paused the FTL.
+ */
+char *ssd_probe_lpn(struct ssd *ssd, uint64_t lpn)
+{
+    struct ppa ppa;
+
+    if (lpn >= ssd->sp.tt_pgs) {
+        return g_strdup("range");
+    }
+    ppa = get_maptbl_ent(ssd, lpn);
+    if (!mapped_ppa(&ppa)) {
+        return g_strdup("unmapped");
+    }
+    return g_strdup_printf("%d %d %d %d %d", (int)ppa.g.ch, (int)ppa.g.lun,
+                           (int)ppa.g.pl, (int)ppa.g.blk, (int)ppa.g.pg);
+}
+
+/*
  * Check the mapping against the media. @lost counts logical pages whose
  * mapping names a page that does not hold them: one not valid, or one the
  * reverse map gives to another page. @orphans counts valid data pages that

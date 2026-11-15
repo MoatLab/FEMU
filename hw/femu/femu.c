@@ -1820,6 +1820,7 @@ static void nvme_ns_release(FemuCtrl *n, NvmeNamespace *ns)
     }
     g_free(ns->util);
     g_free(ns->uncorrectable);
+    g_free(ns->lost);
     g_clear_pointer(&ns->sdc, g_free);
     g_free(ns->mdata);
     nvme_ns_detach_fdp(n, ns);
@@ -1858,7 +1859,11 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
     ns->util = g_try_new0(unsigned long, BITS_TO_LONGS(num_blks));
     ns->uncorrectable = g_try_new0(unsigned long, BITS_TO_LONGS(num_blks));
-    if ((num_blks && (!ns->util || !ns->uncorrectable)) ||
+    if (n->bb_params.rain_loss) {
+        ns->lost = g_try_new0(unsigned long, BITS_TO_LONGS(num_blks));
+    }
+    if ((num_blks && (!ns->util || !ns->uncorrectable ||
+                      (n->bb_params.rain_loss && !ns->lost))) ||
         !femu_sdc_ns_alloc(ns, num_blks)) {
         error_setg(errp, "cannot allocate namespace bitmaps");
         return -1;
@@ -3183,6 +3188,8 @@ static void *femu_ftl_thread(void *arg)
     NvmeRequest *req = NULL;
     uint64_t lat;
     bool busy;
+    uint32_t hold_req;
+    uint32_t hold;
     int rc, i;
 
     while (!n->dataplane_started) {
@@ -3222,8 +3229,18 @@ static void *femu_ftl_thread(void *arg)
             n->ftl_in_sweep = false;
         }
 
-        /* a test holds the requests where they are; queries still run */
-        if (unlikely(qatomic_read(&n->test_ftl_hold))) {
+        /*
+         * A test holds the requests where they are; queries still run. The
+         * request number goes back to the setter before the pass decides
+         * with the hold read after it, so a hold is in place when the Set
+         * returns.
+         */
+        hold_req = qatomic_load_acquire(&n->test_ftl_hold_req);
+        hold = qatomic_read(&n->test_ftl_hold);
+        if (unlikely(hold_req != qatomic_read(&n->test_ftl_hold_seen))) {
+            qatomic_store_release(&n->test_ftl_hold_seen, hold_req);
+        }
+        if (unlikely(hold)) {
             usleep(100);
             continue;
         }
@@ -3243,6 +3260,14 @@ static void *femu_ftl_thread(void *arg)
             n->ftl_in_sweep = true;
             smp_mb();   /* publish the flag before re-reading the pause state */
             if (!n->dataplane_started) {
+                n->ftl_in_sweep = false;
+                break;
+            }
+            /*
+             * x-ftl-hold changed since this pass read it: take no more
+             * requests, so none admitted after a restored hold runs.
+             */
+            if (unlikely(qatomic_read(&n->test_ftl_hold_req) != hold_req)) {
                 n->ftl_in_sweep = false;
                 break;
             }
@@ -3971,6 +3996,15 @@ static bool femu_check_rain_ro_props(FemuCtrl *n, Error **errp)
     const BbCtrlParams *bp = &n->bb_params;
     const char *why = NULL;
 
+    if (bp->rain_loss && (!bp->rain_read_only || !BBSSD(n))) {
+        error_setg(errp, "femu: rain_loss needs rain_read_only and bbssd");
+        return false;
+    }
+    if (bp->rain_loss && n->persist_file) {
+        /* the file keeps no lost map, so a loss would read as a WU */
+        error_setg(errp, "femu: rain_loss is not supported with persist_file");
+        return false;
+    }
     if (!bp->rain_read_only) {
         return true;
     }
@@ -5113,6 +5147,7 @@ static void nvme_destroy_poller(FemuCtrl *n)
     g_free(n->cpl_backlog);
     g_free((void *)n->poller_in_sweep);
     n->poller_in_sweep = NULL;
+    g_clear_pointer(&n->adm_freeze_ack, g_free);
     qemu_vfree(n->poller_ctr);   /* allocated with qemu_memalign */
     n->poller_ctr = NULL;
     g_free(n->stage_sets);
@@ -5589,6 +5624,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("rain_rebuild", FemuCtrl, bb_params.rain_rebuild, false),
     DEFINE_PROP_BOOL("rain_read_only", FemuCtrl, bb_params.rain_read_only,
                      false),
+    DEFINE_PROP_BOOL("rain_loss", FemuCtrl, bb_params.rain_loss, false),
     DEFINE_PROP_INT32("parity_xor_ns", FemuCtrl, bb_params.parity_xor_ns, 0),
     DEFINE_PROP_INT32("failed_die", FemuCtrl, bb_params.failed_die, -1),
     DEFINE_PROP_INT32("inject_die", FemuCtrl, bb_params.inject_die, 0),
@@ -5827,17 +5863,67 @@ static char *femu_test_rain_check(Object *obj, Error **errp)
                            pages);
 }
 
+static void femu_test_ftl_hold_get(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    uint32_t hold = qatomic_read(&FEMU(obj)->test_ftl_hold);
+
+    visit_type_uint32(v, name, &hold, errp);
+}
+
+/*
+ * x-ftl-hold: 1 holds the FTL; 2 holds it until an admission-freeze drain
+ * ends it. The Set returns once the running FTL thread has taken the new
+ * request number, so no request slips past a new hold. After 5 s the Set
+ * fails and the value stays for the FTL to take later.
+ */
+static void femu_test_ftl_hold_set(Object *obj, Visitor *v, const char *name,
+                                   void *opaque, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    int64_t deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+    uint32_t hold;
+    uint32_t req;
+
+    if (!visit_type_uint32(v, name, &hold, errp)) {
+        return;
+    }
+    if (hold > 2) {
+        error_setg(errp, "x-ftl-hold takes 0, 1 or 2");
+        return;
+    }
+    req = femu_ftl_hold_put(n, hold);
+    while (n->ftl_thread_running && n->dataplane_started &&
+           qatomic_load_acquire(&n->test_ftl_hold_seen) != req) {
+        if (g_get_monotonic_time() > deadline) {
+            error_setg(errp, "the FTL thread did not take x-ftl-hold in 5 s");
+            return;
+        }
+        usleep(100);
+    }
+}
+
 /*
  * rain_parity: die @value (ch * luns_per_ch + lun) of namespace 1 fails
  * now. The FTL is paused, so the failure is in place when this returns
- * and no request sees half of it.
+ * and no request sees half of it. With rain_loss, a failure that loses
+ * data first freezes admission and drains the FTL queues, so every write
+ * the frontend took has its new mapping before the loss scan. All of it
+ * runs under one 10 s deadline, and a refused failure keeps a mode-2
+ * x-ftl-hold.
+ *
+ *   pause --> due? --no--> fail --> resume
+ *               | yes: refusals --> resume --> drain --> fail --> resume
  */
 static void femu_test_rain_fail(Object *obj, const char *value, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
     NvmeNamespace *ns = nvme_ns(n, 1);
+    int64_t deadline = g_get_monotonic_time() + 10 * G_USEC_PER_SEC;
     int64_t die;
     bool resume;
+    bool held;
+    bool due;
 
     if (!ns || !NS_BBSSD(ns) || !ns->ssd) {
         error_setg(errp, "the RAIN failure needs a bbssd namespace 1");
@@ -5847,9 +5933,40 @@ static void femu_test_rain_fail(Object *obj, const char *value, Error **errp)
         error_setg(errp, "x-rain-fail takes a die number");
         return;
     }
-    resume = nvme_pause_pollers(n);
-    ssd_rain_fail(ns->ssd, (int)die, errp);
+    if (!nvme_pause_by(n, deadline, &resume)) {
+        error_setg(errp, "the FTL did not pause in 10 s");
+        return;
+    }
+    due = ssd_rain_loss_due(ns->ssd, (int)die);
+    if (!due) {
+        ssd_rain_fail(ns->ssd, (int)die, errp);
+        nvme_resume_pollers(n, resume);
+        return;
+    }
+    if (!ssd_rain_fail_ok(ns->ssd, (int)die, errp)) {
+        nvme_resume_pollers(n, resume);
+        return;
+    }
     nvme_resume_pollers(n, resume);
+    if (nvme_ns_shared(n)) {
+        error_setg(errp, "the loss scan needs a controller whose "
+                   "namespaces are its own");
+        return;
+    }
+    if (qatomic_read(&n->test_ftl_hold) == 1) {
+        error_setg(errp, "x-ftl-hold holds the FTL: the loss scan needs "
+                   "its queues drained");
+        return;
+    }
+    held = qatomic_read(&n->test_ftl_hold) == 2;
+    if (!nvme_freeze_drain(n, deadline, &resume, errp)) {
+        return;
+    }
+    if (!ssd_rain_fail(ns->ssd, (int)die, errp) && held) {
+        femu_ftl_hold_put(n, 2);
+    }
+    nvme_resume_pollers(n, resume);
+    nvme_thaw(n);
 }
 
 /*
@@ -5876,6 +5993,36 @@ static char *femu_test_durable_check(Object *obj, Error **errp)
     nvme_resume_pollers(n, resume);
     return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64,
                            lpns, gens, ended, waits);
+}
+
+/* x-ftl-probe: Set an LPN of namespace 1, then Get its mapping */
+static void femu_test_ftl_probe_set(Object *obj, const char *value,
+                                    Error **errp)
+{
+    uint64_t lpn;
+
+    if (qemu_strtou64(value, NULL, 0, &lpn)) {
+        error_setg(errp, "x-ftl-probe takes an LPN");
+        return;
+    }
+    FEMU(obj)->test_probe_lpn = lpn;
+}
+
+static char *femu_test_ftl_probe_get(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    char *s;
+    bool resume;
+
+    if (!ns || !NS_BBSSD(ns) || !ns->ssd) {
+        error_setg(errp, "the FTL probe needs a bbssd namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    s = ssd_probe_lpn(ns->ssd, n->test_probe_lpn);
+    nvme_resume_pollers(n, resume);
+    return s;
 }
 
 /*
@@ -6660,6 +6807,8 @@ static void femu_instance_init(Object *obj)
         femu_sdc_add_props(obj);
         femu_lsi_add_props(obj);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
+        object_property_add_str(obj, "x-ftl-probe", femu_test_ftl_probe_get,
+                                femu_test_ftl_probe_set);
         object_property_add_str(obj, "x-durable-check",
                                 femu_test_durable_check, NULL);
         object_property_add_str(obj, "x-rain-fail", NULL,
@@ -6699,9 +6848,9 @@ static void femu_instance_init(Object *obj)
         object_property_add_uint32_ptr(obj, "x-query-delay-ms",
                                        &FEMU(obj)->test_query_delay_ms,
                                        OBJ_PROP_FLAG_READWRITE);
-        object_property_add_uint32_ptr(obj, "x-ftl-hold",
-                                       &FEMU(obj)->test_ftl_hold,
-                                       OBJ_PROP_FLAG_READWRITE);
+        object_property_add(obj, "x-ftl-hold", "uint32",
+                            femu_test_ftl_hold_get, femu_test_ftl_hold_set,
+                            NULL, NULL);
         object_property_add_bool(obj, "x-fetch-hold",
                                  femu_test_fetch_hold_get,
                                  femu_test_fetch_hold_set);

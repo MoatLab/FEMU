@@ -43740,6 +43740,438 @@ static void femu_test_rain_ro_refused(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/* the mapping of LPN @lpn of device gc-test (x-ftl-probe) */
+static char *femu_rain_probe(QTestState *qts, uint64_t lpn)
+{
+    g_autofree char *v = g_strdup_printf("%" PRIu64, lpn);
+    QDict *rsp;
+    char *s;
+
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/gc-test',"
+                             "'property':'x-ftl-probe','value':%s}}", v);
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-ftl-probe'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    s = g_strdup(qdict_get_str(rsp, "return"));
+    qobject_unref(rsp);
+    return s;
+}
+
+/* query-femu lost-pages and lost-blocks */
+static void femu_rain_lost(QTestState *qts, uint64_t *pages, uint64_t *blocks)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *ctr = qdict_get_qdict(ns, "counters");
+
+    *pages = qdict_get_int(ctr, "lost-pages");
+    *blocks = qdict_get_int(ctr, "lost-blocks");
+    qobject_unref(rsp);
+}
+
+/* SMART Media and Data Integrity Errors */
+static uint64_t femu_rain_media(FemuCtrlState *c, uint64_t log)
+{
+    g_assert_cmphex(FEMU_SC(femu_get_log(c, NVME_LOG_SMART_INFO, log, 512,
+                                         0)), ==, NVME_SUCCESS);
+    return qtest_readq(c->pdev->bus->qts, log + 160);
+}
+
+/* Get LBA Status 10h of namespace 1: blocks in 001b runs and in 011b runs */
+static void femu_rain_gls(FemuCtrlState *c, uint64_t buf, uint64_t *lost,
+                          uint64_t *wu)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint32_t nlsd;
+
+    g_assert_cmphex(femu_get_lba_status(c, buf, 0, 1023, 0x10, 0), ==,
+                    NVME_SUCCESS);
+    nlsd = qtest_readl(qts, buf);
+    g_assert_cmphex(qtest_readb(qts, buf + 4), ==, 0x2);
+    *lost = *wu = 0;
+    for (uint32_t i = 0; i < nlsd; i++) {
+        uint64_t d = buf + 8 + 16 * (uint64_t)i;
+        uint64_t nb = (uint64_t)qtest_readl(qts, d + 8) + 1;
+        uint8_t st = qtest_readb(qts, d + 13);
+
+        g_assert_true(st == 1 || st == 3);
+        *(st == 1 ? lost : wu) += nb;
+    }
+}
+
+/* a Read of one 512-byte block */
+static uint16_t femu_rain_read_blk(FemuCtrlState *c, uint64_t slba,
+                                   uint64_t buf)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(slba);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    return femu_io(c, (NvmeCmd *)&rw);
+}
+
+/* Dataset Management deallocate of @nlb blocks at @slba */
+static void femu_rain_trim(FemuCtrlState *c, uint64_t buf, uint64_t slba,
+                           uint32_t nlb)
+{
+    uint8_t range[16] = { 0 };
+    NvmeCmd cmd = { 0 };
+
+    stl_le_p(range + 4, nlb);
+    stq_le_p(range + 8, slba);
+    qtest_memwrite(c->pdev->bus->qts, buf, range, sizeof(range));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    g_assert_cmphex(femu_io(c, &cmd), ==, NVME_SUCCESS);
+}
+
+/*
+ * rain_loss (design R2b), 4 dies (2 channels, 2 LUNs), one plane, 8-page
+ * blocks, 64 lines, high 78: the second failure leaves the media
+ * writable. 48 page writes fill lines 0 and 1 at epoch 0. Die 1 fails
+ * (no rebuild, so the lines keep their data), then die 0. A full row has
+ * both dies programmed (data or parity), so every data page on die 0 or 1
+ * is lost: 12 of the 24 of a line. The oracle is x-ftl-probe before the
+ * failures. @data:
+ *   "base":    reads, SMART media errors, lost-pages and lost-blocks, GLS
+ *              (001b), Notice 05h, x-ftl-check; a rewrite repairs
+ *   "partial": one page: row 0 has one failed member programmed, so none
+ *   "wu":      WU before the scan on a lost and a kept page: 001b and 011b
+ *              runs; WU after it on a lost block: a read of that block
+ *              adds no media error, a read of its neighbour adds one
+ *   "trim":    half of a lost page deallocated first: only the other half
+ *   "hold":    x-ftl-hold=1 with a scan due: refused, no change; then the
+ *              failure goes through
+ *   "off":     rain_loss=off: refused, no change
+ */
+static bool femu_eol_state(QTestState *qts, bool *ro, uint64_t *cap,
+                           uint64_t *pages, uint64_t *reqs);
+static void femu_eol_wait_held(QTestState *qts, uint64_t want);
+
+/*
+ * Set a mode-2 x-ftl-hold, then write page @p with @pat. The poller takes
+ * the write, and it holds credits in the FTL ring when this returns.
+ */
+static void femu_rain_held_write(FemuCtrlState *c, uint64_t buf, int p,
+                                 uint8_t pat)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeRwCmd rw = { 0 };
+    QDict *rsp;
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-ftl-hold','value':2}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qtest_memset(qts, buf, pat, 4096);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(p * 8);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    femu_eol_wait_held(qts, 1);
+}
+
+/*
+ * A failure that the drain would refuse keeps a mode-2 x-ftl-hold, and
+ * the write held in front of the FTL stays there.
+ *
+ *   hold 2 --> write waits --> fail die 2: refused --> hold still 2,
+ *   same mapping, credits held --> hold 0 --> the write completes
+ */
+static void femu_rain_refuse_held(FemuCtrlState *c, uint64_t buf, int p)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    g_autofree char *was = femu_rain_probe(qts, p);
+    g_autofree char *now = NULL;
+    uint64_t cap, pages, reqs;
+    NvmeCqe cqe;
+    QDict *rsp;
+    bool ro;
+
+    femu_rain_held_write(c, buf, p, 0x33);
+    /* three members fail at most of four: refused before the drain */
+    g_assert_false(femu_rain_fail(qts, 2));
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-ftl-hold'}}");
+    g_assert_cmpint(qdict_get_int(rsp, "return"), ==, 2);
+    qobject_unref(rsp);
+    /* a drained write would have a new page and no credits */
+    now = femu_rain_probe(qts, p);
+    g_assert_cmpstr(now, ==, was);
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_cmpuint(reqs, ==, 1);
+    qtest_memread(qts, c->io.cq_addr + c->io.cq_head * sizeof(cqe), &cqe,
+                  sizeof(cqe));
+    g_assert_cmpint(le16_to_cpu(cqe.status) & 1, !=, c->io.phase);
+    femu_zns_ftl_hold(qts, false);
+    g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+}
+
+static void femu_test_rain_loss(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *kind = data;
+    bool partial = !strcmp(kind, "partial");
+    bool hold = !strcmp(kind, "hold");
+    bool wu = !strcmp(kind, "wu");
+    bool trim = !strcmp(kind, "trim");
+    int np = partial ? 1 : 48;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    char *map[48] = { NULL };
+    bool gone[48] = { false };
+    uint64_t nfail, left, moved, lp, lb, glost, gwu;
+    uint64_t mapped, lost, orphans, media;
+    uint16_t want;
+    int nlost = 0;
+    int kept = -1;
+    int l0 = -1;
+    int l1 = -1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    for (int p = 0; p < np; p++) {
+        qtest_memset(qts, buf, 0x80 | p, 4096);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, p * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    for (int p = 0; p < np; p++) {
+        int ch;
+        int lun;
+
+        map[p] = femu_rain_probe(qts, p);
+        g_assert_cmpint(sscanf(map[p], "%d %d", &ch, &lun), ==, 2);
+        gone[p] = !partial && ch * 2 + lun < 2;
+        nlost += gone[p];
+        if (!gone[p]) {
+            kept = kept < 0 ? p : kept;
+        } else if (l0 < 0) {
+            l0 = p;
+        } else if (l1 < 0) {
+            l1 = p;
+        }
+    }
+    g_assert_cmpint(nlost, ==, partial ? 0 : 24);
+    if (wu) {
+        femu_mark_uncor(&c, l0 * 8 + 2, 1);
+        femu_mark_uncor(&c, kept * 8 + 3, 1);
+    }
+    if (trim) {
+        femu_rain_trim(&c, buf, l0 * 8, 4);
+    }
+    g_assert_true(femu_rain_fail(qts, 1));
+    femu_rain_check(qts, &nfail, &left, &moved);
+    g_assert_cmpuint(nfail, ==, 1);
+    g_assert_cmpuint(left, ==, partial ? 1 : 2);
+    media = femu_rain_media(&c, log);
+
+    if (hold || !strcmp(kind, "off")) {
+        if (hold) {
+            femu_zns_ftl_hold(qts, true);
+        }
+        g_assert_false(femu_rain_fail(qts, 0));
+        femu_rain_check(qts, &nfail, &left, &moved);
+        g_assert_cmpuint(nfail, ==, 1);
+        for (int p = 0; p < np; p++) {
+            g_autofree char *now = femu_rain_probe(qts, p);
+
+            g_assert_cmpstr(now, ==, map[p]);
+        }
+        femu_rain_lost(qts, &lp, &lb);
+        g_assert_cmpuint(lp, ==, 0);
+        if (!hold) {
+            goto out;
+        }
+        /*
+         * Mode 2: the drain ends the hold and lands the held rewrite of
+         * page l0 before the scan. Its new page is on a live line, so it
+         * stays.
+         */
+        femu_zns_ftl_hold(qts, false);
+        femu_rain_held_write(&c, buf, l0, 0x44);
+        g_assert_true(femu_rain_fail(qts, 0));
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+        for (int p = 0; p < np; p++) {
+            g_autofree char *now = femu_rain_probe(qts, p);
+
+            if (p == l0) {
+                g_assert_cmpstr(now, !=, "unmapped");
+            } else {
+                g_assert_cmpstr(now, ==, gone[p] ? "unmapped" : map[p]);
+            }
+        }
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l0 * 8, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf + 7), ==, 0x44);
+        femu_rain_lost(qts, &lp, &lb);
+        g_assert_cmpuint(lp, ==, nlost - 1);
+        goto out;
+    }
+
+    want = femu_aer(&c);
+    g_assert_true(femu_rain_fail(qts, 0));
+    /* the component failure: Notice 05h at once */
+    g_assert_true(femu_lsi_after(&c, 1000));
+    femu_lsi_alert(&c, want);
+    femu_rain_check(qts, &nfail, &left, &moved);
+    g_assert_cmpuint(nfail, ==, 2);
+    for (int p = 0; p < np; p++) {
+        g_autofree char *now = femu_rain_probe(qts, p);
+        uint16_t st = FEMU_SC(femu_rw(&c, NVME_CMD_READ, p * 8, buf));
+
+        g_assert_cmpstr(now, ==, gone[p] ? "unmapped" : map[p]);
+        if (gone[p] || (wu && p == kept)) {
+            g_assert_cmphex(st, ==, NVME_UNRECOVERED_READ);
+        } else {
+            g_assert_cmphex(st, ==, NVME_SUCCESS);
+            g_assert_cmphex(qtest_readb(qts, buf), ==, 0x80 | p);
+            g_assert_cmphex(qtest_readb(qts, buf + 4095), ==, 0x80 | p);
+        }
+    }
+    /* a WU-only failure is the host's: no media error for page kept */
+    g_assert_cmpuint(femu_rain_media(&c, log), ==, media + nlost);
+    femu_rain_lost(qts, &lp, &lb);
+    g_assert_cmpuint(lp, ==, nlost);
+    g_assert_cmpuint(lb, ==, nlost * 8 - (trim ? 4 : 0));
+    femu_rain_gls(&c, buf, &glost, &gwu);
+    g_assert_cmpuint(glost, ==, lb);
+    g_assert_cmpuint(gwu, ==, wu ? 1 : 0);
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, np - nlost);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    if (partial) {
+        goto out;
+    }
+
+    /* a rewrite clears the mark and maps a new page */
+    qtest_memset(qts, buf, 0x55, 4096);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, l1 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l1 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 100), ==, 0x55);
+    femu_rain_gls(&c, buf, &glost, &gwu);
+    g_assert_cmpuint(glost, ==, lb - 8);
+    femu_rain_lost(qts, &lp, &lb);
+    g_assert_cmpuint(lp, ==, nlost);
+    if (!strcmp(kind, "base")) {
+        /*
+         * Subset rule: the rewrite cleared the lost bits of page l1. A
+         * read of the page that fails on a new WU block 0 adds no media
+         * error, as blocks 1 to 7 hold no stale lost bit.
+         */
+        femu_mark_uncor(&c, l1 * 8, 1);
+        media = femu_rain_media(&c, log);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l1 * 8, buf)), ==,
+                        NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media);
+    }
+    if (wu) {
+        int l2 = -1;
+
+        for (int p = l1 + 1; p < np && l2 < 0; p++) {
+            l2 = gone[p] ? p : -1;
+        }
+        /* the last write of block 0 is WU now; blocks 1 to 7 stay lost */
+        femu_mark_uncor(&c, l2 * 8, 1);
+        media = femu_rain_media(&c, log);
+        g_assert_cmphex(femu_rain_read_blk(&c, l2 * 8, buf), ==,
+                        NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media);
+        g_assert_cmphex(femu_rain_read_blk(&c, l2 * 8 + 1, buf), ==,
+                        NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media + 1);
+    }
+    if (!strcmp(kind, "base")) {
+        femu_rain_refuse_held(&c, buf, kept);
+        /*
+         * Format gives new maps: no lost block stays. A read of page l0
+         * that fails on a new WU block 0 adds no media error.
+         */
+        g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+        femu_rain_gls(&c, buf, &glost, &gwu);
+        g_assert_cmpuint(glost, ==, 0);
+        femu_mark_uncor(&c, l0 * 8, 1);
+        media = femu_rain_media(&c, log);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l0 * 8, buf)), ==,
+                        NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media);
+    }
+
+out:
+    for (int p = 0; p < np; p++) {
+        g_free(map[p]);
+    }
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* rain_loss refusals, each against a device that realizes without it */
+static void femu_test_rain_loss_props(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *dir = g_dir_make_tmp("femu-rl-XXXXXX", NULL);
+    g_autofree char *file = g_build_filename(dir, "data", NULL);
+    g_autofree char *lock = g_strconcat(file, ".lock", NULL);
+    g_autofree char *pf = g_strdup_printf(
+        "'rain_read_only':true,'persist_file':'%s'", file);
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'rain_read_only':true", NULL },
+        { "'rain_read_only':false", "rain_loss needs rain_read_only" },
+        { pf, "rain_loss is not supported with persist_file" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'rl%d','addr':'%d','devsz_mb':1,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':8,"
+            "'luns_per_ch':2,'nchs':2,'pls_per_lun':1,'rain_parity':1,"
+            "'mdts':4,'blks_per_pl':64,'rain_loss':true,%s}}", i, 5 + i,
+            cases[i].opts);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        if (!cases[i].msg) {
+            g_assert_false(qdict_haskey(rsp, "error"));
+        } else {
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("%s: %s", cases[i].opts, desc);
+            g_assert_nonnull(strstr(desc, cases[i].msg));
+        }
+        qobject_unref(rsp);
+    }
+    unlink(lock);
+    unlink(file);
+    rmdir(dir);
+    qos_invalidate_command_line();
+}
+
 /*
  * OCP event 0016h, NAND Die Offline, takes die inject_die=3 offline. Four
  * dies, two channels of two LUNs; LBA page 3 sits on channel 1, LUN 1,
@@ -65786,6 +66218,62 @@ static void femu_register_nodes(void)
             "gc_thres_pcent_high=100,rain_read_only=on"
     });
     qos_add_test("rain-ro-refused", "femu", femu_test_rain_ro_refused, NULL);
+    qos_add_test("rain-loss-base", "femu", femu_test_rain_loss,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"base",
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "luns_per_ch=2,nchs=2,pls_per_lun=1,rain_parity=1,mdts=4,"
+            "devsz_mb=1,blks_per_pl=64,gc_thres_pcent_high=78,oncs=415,"
+            "rain_read_only=on,rain_loss=on"
+    });
+    qos_add_test("rain-loss-partial", "femu", femu_test_rain_loss,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"partial",
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "luns_per_ch=2,nchs=2,pls_per_lun=1,rain_parity=1,mdts=4,"
+            "devsz_mb=1,blks_per_pl=64,gc_thres_pcent_high=78,oncs=415,"
+            "rain_read_only=on,rain_loss=on"
+    });
+    qos_add_test("rain-loss-wu", "femu", femu_test_rain_loss,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"wu",
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "luns_per_ch=2,nchs=2,pls_per_lun=1,rain_parity=1,mdts=4,"
+            "devsz_mb=1,blks_per_pl=64,gc_thres_pcent_high=78,oncs=415,"
+            "rain_read_only=on,rain_loss=on"
+    });
+    qos_add_test("rain-loss-trim", "femu", femu_test_rain_loss,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"trim",
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "luns_per_ch=2,nchs=2,pls_per_lun=1,rain_parity=1,mdts=4,"
+            "devsz_mb=1,blks_per_pl=64,gc_thres_pcent_high=78,oncs=415,"
+            "rain_read_only=on,rain_loss=on"
+    });
+    qos_add_test("rain-loss-hold", "femu", femu_test_rain_loss,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"hold",
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "luns_per_ch=2,nchs=2,pls_per_lun=1,rain_parity=1,mdts=4,"
+            "devsz_mb=1,blks_per_pl=64,gc_thres_pcent_high=78,oncs=415,"
+            "rain_read_only=on,rain_loss=on"
+    });
+    qos_add_test("rain-loss-off", "femu", femu_test_rain_loss,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "luns_per_ch=2,nchs=2,pls_per_lun=1,rain_parity=1,mdts=4,"
+            "devsz_mb=1,blks_per_pl=64,gc_thres_pcent_high=78,oncs=415,"
+            "rain_read_only=on"
+    });
+    qos_add_test("rain-loss-props", "femu", femu_test_rain_loss_props,
+                 NULL);
     qos_add_test("rain-inject-base", "femu", femu_test_rain_inject,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"base",
