@@ -16,6 +16,7 @@
 #define FEMU_OPAL_COMID         0x1000
 #define FEMU_OPAL_COMID_L0      0x0001
 #define FEMU_OPAL_COMID_TPER_RESET 0x0004
+#define FEMU_OPAL_COMID_BLOCK_SID 0x0005
 /* VERIFY_COMID_VALID state of the static ComID with no session */
 #define FEMU_OPAL_COMID_ISSUED  2
 /* MaxComPacketSize and MaxResponseComPacketSize (Opal Table 17) */
@@ -32,7 +33,67 @@
 
 /* method status codes (Core Table 166) */
 #define FEMU_OPAL_ST_SUCCESS            0x00
+#define FEMU_OPAL_ST_NOT_AUTHORIZED     0x01
+#define FEMU_OPAL_ST_SP_BUSY            0x03
+#define FEMU_OPAL_ST_NO_SESSIONS        0x07
 #define FEMU_OPAL_ST_INVALID_PARAMETER  0x0C
+#define FEMU_OPAL_ST_LOCKED_OUT         0x12
+#define FEMU_OPAL_ST_FAIL               0x3F
+
+/* Locking SP life cycle states (Core Table 241) */
+#define FEMU_OPAL_LIFE_INACTIVE         0x08
+#define FEMU_OPAL_LIFE_MANUFACTURED     0x09
+
+#define FEMU_OPAL_PIN_MAX               32
+
+/*
+ * Authorities, one bit each in a session's authenticated set. Admin SP:
+ * Anybody, SID, PSID, Admin1. Locking SP: Anybody, Admin1 to 4, User1 to 8.
+ */
+enum {
+    FEMU_OPAL_AU_ANYBODY = 0,
+    FEMU_OPAL_AU_SID,
+    FEMU_OPAL_AU_PSID,
+    FEMU_OPAL_AU_ASP_ADMIN1,
+    FEMU_OPAL_AU_LSP_ADMIN1,
+    FEMU_OPAL_AU_LSP_USER1 = FEMU_OPAL_AU_LSP_ADMIN1 + 4,
+    FEMU_OPAL_AU_COUNT = FEMU_OPAL_AU_LSP_USER1 + 8,
+};
+
+typedef struct FemuOpalPin {
+    uint8_t len;
+    uint8_t v[FEMU_OPAL_PIN_MAX];
+} FemuOpalPin;
+
+/* one authority with its C_PIN row */
+typedef struct FemuOpalAuth {
+    bool enabled;
+    FemuOpalPin pin;
+    uint32_t try_limit;
+} FemuOpalAuth;
+
+/*
+ * The personalization a transaction can roll back. Tries stays outside it:
+ * a TPer update to Tries survives an abort (Core 5.3.4.1.1.2).
+ */
+typedef struct FemuOpalSp {
+    FemuOpalAuth au[FEMU_OPAL_AU_COUNT];
+    uint8_t lsp_life;
+    bool pre;                   /* TPerInfo ProgrammaticResetEnable */
+} FemuOpalSp;
+
+/* the one session (MaxSessions 1) */
+typedef struct FemuOpalSession {
+    bool open;
+    bool locking;               /* the Locking SP, else the Admin SP */
+    bool write;
+    uint32_t hsn;
+    uint32_t tsn;
+    uint32_t auth;              /* authenticated authorities, by bit */
+    bool txn;                   /* a transaction is open */
+    uint32_t txn_auth;
+    FemuOpalSp txn_sp;
+} FemuOpalSession;
 
 /*
  * The TPer errors of SIIS 6.5 Table 25 that S1 can raise. The caller maps
@@ -73,6 +134,8 @@ typedef struct FemuOpalCfg {
     uint16_t admins;            /* Locking SP admin authorities */
     uint16_t users;             /* Locking SP user authorities */
     bool crypto_erase;          /* GenKey, Revert and RevertSP erase */
+    FemuOpalPin msid;           /* C_PIN_MSID */
+    FemuOpalPin psid;           /* C_PIN_PSID */
 } FemuOpalCfg;
 
 /* communication properties a host may set (Core 5.2.2.4) */
@@ -97,6 +160,13 @@ typedef struct FemuOpal {
     uint32_t mgmt_ext;          /* the Extended ComID VERIFY asked about */
     /* what the last Receive returned, taken by femu_opal_consume() */
     uint8_t consume;
+    FemuOpalSp sp;
+    uint32_t tries[FEMU_OPAL_AU_COUNT];
+    FemuOpalSession s;
+    uint32_t next_tsn;
+    /* Block SID Authentication (Block SID 4.2) */
+    bool sid_blocked;
+    bool sid_block_hw;          /* a Hardware Reset clears it too */
     FemuOpalTok toks[FEMU_OPAL_MAX_TOKS];
 } FemuOpal;
 
@@ -124,6 +194,9 @@ FemuOpalIf femu_opal_send(FemuOpal *o, uint8_t secp, uint16_t spsp,
 FemuOpalIf femu_opal_recv(FemuOpal *o, uint8_t secp, uint16_t spsp,
                           uint8_t *buf, uint32_t al);
 void femu_opal_consume(FemuOpal *o);
+
+/* a TCG Power Cycle: the state a device has when it comes up */
+void femu_opal_power_cycle(FemuOpal *o);
 
 /* Level 0 discovery data; returns the full length, copies at most @cap */
 uint32_t femu_opal_level0(const FemuOpal *o, uint8_t *buf, uint32_t cap);

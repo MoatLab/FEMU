@@ -353,8 +353,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "x-opal",
       "TCG Opal security, experimental and not yet conformant: Security Send "
       "(81h) and Receive (82h), OACS bit 0, Level 0 discovery, ComID 1000h "
-      "with STACK_RESET and the Session Manager Properties method; the "
-      "Admin and Locking SPs come later; one NoSSD or page-mapped bbssd "
+      "with STACK_RESET, Admin SP sessions with MSID, SID, PSID, Activate, "
+      "Revert and transactions, Block SID and TPER_RESET; MSID and PSID are "
+      "FEMU-MSID- and FEMU-PSID- plus the serial; locking ranges come "
+      "later; one NoSSD or page-mapped bbssd "
       "namespace without metadata, not with a femu-subsys, CXL, ns_mgmt, "
       "power_loss, sanitize_ns, ns_wp or persist_file; off (default)" },
     { "hmb_mb",

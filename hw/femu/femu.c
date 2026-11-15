@@ -4596,6 +4596,17 @@ static bool femu_ocp_resolve(FemuCtrl *n, Error **errp)
  * media or its own copy of the map. Checked on the resolved namespaces,
  * after namespace_modes; plp, sdc and awupf_lbas need power_loss.
  */
+/* C_PIN_MSID and C_PIN_PSID derive from the serial, as a label would */
+static void femu_opal_pin(FemuOpalPin *pin, const char *tag,
+                          const char *serial)
+{
+    g_autofree char *s = g_strdup_printf("FEMU-%s-%s", tag,
+                                         serial ? serial : "");
+
+    pin->len = MIN(strlen(s), FEMU_OPAL_PIN_MAX);
+    memcpy(pin->v, s, pin->len);
+}
+
 static bool femu_opal_check(FemuCtrl *n, Error **errp)
 {
     const char *map = n->bb_params.mapping_scheme;
@@ -4980,6 +4991,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
             femu_realize_undo(n);
             return;
         }
+        femu_opal_pin(&cfg.msid, "MSID", n->serial);
+        femu_opal_pin(&cfg.psid, "PSID", n->serial);
         n->opal_tper = g_new(FemuOpal, 1);
         femu_opal_init(n->opal_tper, &cfg);
     }

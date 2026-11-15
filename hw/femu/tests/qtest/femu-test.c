@@ -21945,7 +21945,7 @@ static void femu_test_opal(void *obj, void *data, QGuestAllocator *alloc)
     qtest_memset(qts, buf, 0, 2048);
     g_assert_cmphex(femu_sec(&c, false, 1, 1, buf, 2048), ==, NVME_SUCCESS);
     qtest_memread(qts, buf, r, sizeof(r));
-    g_assert_cmpuint(femu_be32(r), ==, 180);
+    g_assert_cmpuint(femu_be32(r), ==, 196);
     g_assert_cmphex(r[48] << 8 | r[49], ==, 0x0001);
     g_assert_cmphex(r[52] & 1, ==, 1);
     g_assert_cmphex(r[128] << 8 | r[129], ==, 0x0203);
@@ -22047,6 +22047,202 @@ static void femu_test_opal(void *obj, void *data, QGuestAllocator *alloc)
     /* above the 64 KiB transfer limit */
     g_assert_cmphex(femu_sec(&c, false, 1, 1, buf, 65537), ==,
                     NVME_INVALID_FIELD | NVME_DNR);
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* a small TCG token writer for the session qtest (Core 3.2.2.3) */
+typedef struct FemuTb {
+    uint8_t b[2048];
+    uint32_t n;
+} FemuTb;
+
+static void femu_tb_uid(FemuTb *t, uint64_t uid)
+{
+    int i;
+
+    t->b[t->n++] = 0xA8;
+    for (i = 7; i >= 0; i--) {
+        t->b[t->n++] = uid >> (8 * i);
+    }
+}
+
+static void femu_tb_bytes(FemuTb *t, const uint8_t *p, uint32_t len)
+{
+    g_assert_cmpuint(len, <, 2048);
+    if (len < 16) {
+        t->b[t->n++] = 0xA0 | len;
+    } else {
+        t->b[t->n++] = 0xD0 | len >> 8;
+        t->b[t->n++] = len;
+    }
+    memcpy(t->b + t->n, p, len);
+    t->n += len;
+}
+
+static void femu_tb_call(FemuTb *t, uint64_t obj, uint64_t method)
+{
+    t->b[t->n++] = 0xF8;
+    femu_tb_uid(t, obj);
+    femu_tb_uid(t, method);
+    t->b[t->n++] = 0xF0;
+}
+
+static void femu_tb_end(FemuTb *t)
+{
+    static const uint8_t e[] = { 0xF1, 0xF9, 0xF0, 0, 0, 0, 0xF1 };
+
+    memcpy(t->b + t->n, e, sizeof(e));
+    t->n += sizeof(e);
+}
+
+/*
+ * Send @t for session @tsn (HSN 0x42) and read the reply into @r. Returns
+ * the Subpacket length, 0 when no reply waits.
+ */
+static uint32_t femu_opal_xfer(FemuCtrlState *c, QTestState *qts,
+                               uint64_t buf, FemuTb *t, uint32_t tsn,
+                               uint8_t *r)
+{
+    uint8_t pkt[2048] = { 0 };
+    uint32_t pad = -t->n & 3;
+
+    pkt[4] = 0x10;
+    stl_be_p(pkt + 16, 24 + 12 + t->n + pad);
+    stl_be_p(pkt + 20, tsn);
+    stl_be_p(pkt + 24, tsn ? 0x42 : 0);
+    stl_be_p(pkt + 40, 12 + t->n + pad);
+    stl_be_p(pkt + 52, t->n);
+    memcpy(pkt + 56, t->b, t->n);
+    qtest_memwrite(qts, buf, pkt, sizeof(pkt));
+    g_assert_cmphex(femu_sec(c, true, 1, 0x1000, buf, 2048), ==,
+                    NVME_SUCCESS);
+    qtest_memset(qts, buf + 4096, 0, 2048);
+    g_assert_cmphex(femu_sec(c, false, 1, 0x1000, buf + 4096, 2048), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf + 4096, r, 2048);
+    return femu_be32(r + 16) ? femu_be32(r + 52) : 0;
+}
+
+/* StartSession to the Admin SP; returns the status, sets *tsn */
+static uint8_t femu_opal_start(FemuCtrlState *c, QTestState *qts,
+                               uint64_t buf, const uint8_t *pin,
+                               uint32_t pinlen, uint32_t *tsn)
+{
+    FemuTb t = { .n = 0 };
+    uint8_t r[2048];
+    uint32_t n;
+
+    femu_tb_call(&t, 0xFF, 0xFF02);
+    t.b[t.n++] = 0x81;                  /* HostSessionID 42h */
+    t.b[t.n++] = 0x42;
+    femu_tb_uid(&t, 0x0000020500000001ull);
+    t.b[t.n++] = 1;                     /* Write */
+    if (pin) {
+        t.b[t.n++] = 0xF2;
+        t.b[t.n++] = 0;
+        femu_tb_bytes(&t, pin, pinlen);
+        t.b[t.n++] = 0xF3;
+        t.b[t.n++] = 0xF2;
+        t.b[t.n++] = 3;
+        femu_tb_uid(&t, 0x0000000900000006ull);     /* SID */
+        t.b[t.n++] = 0xF3;
+    }
+    femu_tb_end(&t);
+    n = femu_opal_xfer(c, qts, buf, &t, 0, r);
+    g_assert_cmpuint(n, >, 6);
+    /* CALL SMUID SyncSession SL HSN TSN EL ...: both are short atoms */
+    g_assert_cmphex(r[56 + 19], ==, 0xF0);
+    g_assert_cmphex(r[56 + 20], ==, 0x81);
+    g_assert_cmphex(r[56 + 21], ==, 0x42);
+    if (!r[56 + n - 4]) {
+        g_assert_cmphex(r[56 + 22], ==, 0x82);
+        *tsn = r[56 + 23] << 8 | r[56 + 24];
+    }
+    return r[56 + n - 4];
+}
+
+/*
+ * x-opal sessions over NVMe: read C_PIN_MSID as Anybody, open a SID
+ * session with it, Activate the Locking SP, then Block SID shuts SID out.
+ */
+static void femu_test_opal_session(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint8_t r[2048];
+    uint8_t msid[32];
+    uint32_t mlen;
+    uint32_t tsn = 0;
+    uint32_t n;
+    FemuTb t = { .n = 0 };
+    uint8_t blk[2] = { 0, 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpuint(femu_opal_start(&c, qts, buf, NULL, 0, &tsn), ==, 0);
+    g_assert_cmpuint(tsn, >=, 0x1000);
+
+    /* Get C_PIN_MSID columns 3 to 3: SL SL SN 3 PIN EN EL EL */
+    femu_tb_call(&t, 0x0000000B00008402ull, 0x0000000600000016ull);
+    memcpy(t.b + t.n, (uint8_t[]){ 0xF0, 0xF2, 3, 3, 0xF3,
+                                   0xF2, 4, 3, 0xF3, 0xF1 }, 10);
+    t.n += 10;
+    femu_tb_end(&t);
+    n = femu_opal_xfer(&c, qts, buf, &t, tsn, r);
+    g_assert_cmpuint(n, >, 0);
+    g_assert_cmpuint(femu_be32(r + 20), ==, tsn);
+    /* a medium atom: the PIN is "FEMU-MSID-" and the serial */
+    g_assert_cmphex(r[56 + 4] & 0xF8, ==, 0xD0);
+    mlen = (r[56 + 4] & 7) << 8 | r[56 + 5];
+    g_assert_cmpmem(r + 56 + 6, mlen, "FEMU-MSID-opal-session", 22);
+    memcpy(msid, r + 56 + 6, mlen);
+    g_assert_cmphex(r[56 + n - 4], ==, 0);
+
+    /* End of Session */
+    t.n = 0;
+    t.b[t.n++] = 0xFA;
+    g_assert_cmpuint(femu_opal_xfer(&c, qts, buf, &t, tsn, r), ==, 1);
+    g_assert_cmphex(r[56], ==, 0xFA);
+
+    /* SID with the MSID PIN: Activate the Locking SP */
+    g_assert_cmpuint(femu_opal_start(&c, qts, buf, msid, mlen, &tsn), ==, 0);
+    t.n = 0;
+    femu_tb_call(&t, 0x0000020500000002ull, 0x0000000600000203ull);
+    femu_tb_end(&t);
+    n = femu_opal_xfer(&c, qts, buf, &t, tsn, r);
+    g_assert_cmpuint(n, >, 6);
+    g_assert_cmphex(r[56 + n - 4], ==, 0);
+    /* the Locking SP LifeCycleState (column 6) is now Manufactured */
+    t.n = 0;
+    femu_tb_call(&t, 0x0000020500000002ull, 0x0000000600000016ull);
+    memcpy(t.b + t.n, (uint8_t[]){ 0xF0, 0xF2, 3, 6, 0xF3,
+                                   0xF2, 4, 6, 0xF3, 0xF1 }, 10);
+    t.n += 10;
+    femu_tb_end(&t);
+    n = femu_opal_xfer(&c, qts, buf, &t, tsn, r);
+    g_assert_cmpuint(n, >, 6);
+    g_assert_cmphex(r[56 + 4], ==, 0x09);
+    g_assert_cmphex(r[56 + n - 4], ==, 0);
+    t.n = 0;
+    t.b[t.n++] = 0xFA;
+    femu_opal_xfer(&c, qts, buf, &t, tsn, r);
+
+    /* Block SID (ComID 0005h): SID still has the MSID PIN, so it blocks */
+    qtest_memwrite(qts, buf, blk, sizeof(blk));
+    g_assert_cmphex(femu_sec(&c, true, 2, 0x0005, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_sec(&c, true, 2, 0x0005, buf, 512), ==,
+                    NVME_INVALID_FIELD | NVME_DNR);
+    qtest_memset(qts, buf, 0, 2048);
+    g_assert_cmphex(femu_sec(&c, false, 1, 1, buf, 2048), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, r, 256);
+    g_assert_cmphex(r[148] << 8 | r[149], ==, 0x0402);
+    g_assert_cmphex(r[152], ==, 0x02);
+    g_assert_cmpuint(femu_opal_start(&c, qts, buf, msid, mlen, &tsn), ==, 1);
 
     femu_disable(&c);
     guest_free(alloc, buf);
@@ -63163,6 +63359,10 @@ static void femu_register_nodes(void)
     qos_add_test("opal-transport", "femu", femu_test_opal,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "x-opal=on",
+    });
+    qos_add_test("opal-session", "femu", femu_test_opal_session,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "x-opal=on,serial=opal-session",
     });
     qos_add_test("opal-off", "femu", femu_test_opal_off, NULL);
     qos_add_test("opal-refused", "femu", femu_test_opal_refused, NULL);
