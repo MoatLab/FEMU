@@ -83,12 +83,68 @@ MBR Done to read the media again.
 - TPER_RESET applies the programmatic reset type to LockOnReset and
   DoneOnReset.
 
+## MEK Multiparty Authorization (x-opal-mpa)
+
+`x-opal-mpa=on`, with `x-opal=on`, adds the TCG MEK Multiparty
+Authorization feature set 1.00 to the Locking SP. A range key then needs
+the access keys of one or two parties. The feature is experimental and
+off by default.
+
+```
+ host party A, B
+   Get Certificate1 (KEM key), check its signature with Certificate2
+   HPKE Seal(KEM key, info = method UID || AC UID, access key)
+     --> InitializeAccessCondition, EnableAccess, TestAccessKey,
+         ChangeAccessKey, DisableAccess on AccessCondition1 to 4
+   Set PendingAccessConditions of K_AES_256 row r, then GenKey r
+     --> ActiveAccessConditions of r = the new list, old data erased
+ range r: read and write only while every AC in its Active list is enabled
+```
+
+- The HPKE suite is DHKEM(X25519, HKDF-SHA256), HKDF-SHA256 and
+  ChaCha20-Poly1305. The HPKEIdentifiers extension of Certificate1 names
+  it.
+- Certificate1 holds the KEM key. It is X.509 v3 DER, signed by the
+  Ed25519 key of Certificate2. Each Activate, each Certificate1 GenKey
+  and each power cycle make a new KEM key.
+- Certificate1 has keyUsage keyEncipherment and keyAgreement. MPA asks
+  for the first and RFC 8410 for the second.
+- The CertificateData UID of Certificate2 follows MPA Table 12. MPA
+  Table 11 gives another UID for the same row.
+- Level 0 feature 040Ch reports 4 AccessConditions, 2 per key and an
+  Access Key Length of 48 bytes. The 48 bytes are the 32-byte key plus
+  the AEAD tag.
+- The TPer keeps no access key. A random AC secret is sealed under it,
+  and EnableAccess checks the key by opening that seal.
+
+Lock rules:
+
+| Event | Effect on a range r that names the AC in its Active list |
+| --- | --- |
+| DisableAccess, or a reset in DisableAccessOnReset | ReadLocked and WriteLocked set; they stay set |
+| EnableAccess | no unlock; the host must Set ReadLocked and WriteLocked to False |
+| Set ReadLocked or WriteLocked to False | NOT_AUTHORIZED while an AC in the list is disabled |
+| Set ReadLockEnabled or WriteLockEnabled to False | FAIL |
+| GenKey with an AC disabled | the old data goes; no access until every AC is enabled |
+| a power cycle | every AC disabled, ranges locked, a new KEM key; the seals stay |
+| Format crypto erase, Sanitize Crypto Erase | new keys; the lists and the AC state stay |
+
+- The methods read and change the working image of a transaction. An
+  abort restores the AC state too.
+- A wrong access key in EnableAccess gives FAIL. MPA also allows
+  INVALID_PARAMETER there.
+- RevertSP with KeepGlobalRangeKey fails with INVALID_PARAMETER while the
+  Global key has an Active list.
+- This crypto is for emulation only. It is not constant time, and the
+  identity key has no vendor root.
+
 ## Limits
 
 x-opal works with one NoSSD or page-mapped BlackBox namespace without
 metadata. These properties refuse it: a femu-subsys, CXL, CSD, `ns_mgmt`,
 `power_loss`, `sanitize_ns`, `ns_wp` and `persist_file` settings. The
-state lives in memory, so it ends with QEMU.
+state lives in memory, so it ends with QEMU. `x-opal-mpa` needs
+`x-opal`.
 
 ## Example
 

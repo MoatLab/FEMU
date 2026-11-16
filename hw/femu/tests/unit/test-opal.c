@@ -8,7 +8,9 @@
  */
 
 #include "qemu/osdep.h"
+#include <glib/gstdio.h>
 #include "hw/femu/femu-opal.h"
+#include "hw/femu/femu-hpke.h"
 
 static const FemuOpalCfg cfg = { .lba_size = 4096, .admins = 4, .users = 8 };
 
@@ -2677,6 +2679,978 @@ static void test_s3_hw_reset(void)
     g_free(b);
 }
 
+/* ---- MEK Multiparty Authorization (TCG MEK-MPA 1.00) ---- */
+
+#define U_AC(x)         (0x0000170100000000ull + (x))
+#define U_T_ACS         0x0000170100000000ull
+#define U_CERT(c)       (0x0000000A00000400ull + (c))
+#define U_T_CERTS       0x0000000A00000000ull
+#define U_CERTDATA(c)   (0x0000180000000000ull + ((uint64_t)(c) << 32))
+#define U_TABLE_ROW(t)  (0x0000000100000000ull | (t))
+#define M_MPA(m)        (0x0000000600000B00ull + (m))
+#define MPA_INIT        1
+#define MPA_TEST        2
+#define MPA_CHANGE      3
+#define MPA_ENABLE      4
+#define MPA_DISABLE     5
+
+/* bytes of any length: a short atom below 16, else a medium atom */
+static void tb_b(Tb *t, const void *p, uint32_t len)
+{
+    if (len < 16) {
+        tb_s(t, p, len);
+        return;
+    }
+    tb_c(t, 0xD0 | (len >> 8));
+    tb_c(t, len & 0xFF);
+    memcpy(t->b + t->n, p, len);
+    t->n += len;
+}
+
+static void put_be64(uint8_t *p, uint64_t v)
+{
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        p[i] = v >> (56 - 8 * i);
+    }
+}
+
+/* the random source of the MPA tests; fails while rand_fail is set */
+static bool rand_fail;
+
+static bool ut_rand(void *opaque, uint8_t *b, size_t n)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        b[i] = rand_fail ? 0xA5 : g_random_int();
+    }
+    return !rand_fail;
+}
+
+/* an active Locking SP with MPA and an Admin1 session to it */
+static FemuOpal *mpa_init_dev(uint32_t *tsn)
+{
+    FemuOpal *o = g_new(FemuOpal, 1);
+    FemuOpalCfg c = cfg;
+    uint32_t t;
+
+    c.msid.len = 6;
+    memcpy(c.msid.v, "MSID-1", 6);
+    c.nlbas = NLBAS;
+    c.erase = erase_cb;
+    c.mpa = true;
+    c.rand = ut_rand;
+    rand_fail = false;
+    snprintf(c.serial, sizeof(c.serial), "UT-1");
+    femu_opal_init(o, &c);
+    g_assert_cmpuint(start(o, U_ADMINSP, U_SID, "MSID-1", &t), ==, 0);
+    g_assert_cmpuint(call0(o, t, U_LOCKINGSP, M_ACTIVATE), ==, 0);
+    eos(o, t);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", tsn), ==, 0);
+    er.n = 0;
+    return o;
+}
+
+/* read Certificate @c through its CertSize and CertData; returns the length */
+static uint32_t mpa_read_cert(FemuOpal *o, uint32_t tsn, int c, uint8_t *der)
+{
+    uint64_t size;
+    int n;
+
+    n = get(o, tsn, U_CERT(c), 3, 4);
+    g_assert_cmpint(n, >, 0);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpuint(uid_of(&rt[4]), ==, U_CERTDATA(c));
+    size = rt[8].val;
+    g_assert_cmpuint(size, >, 100);
+    g_assert_cmpuint(size, <=, FEMU_OPAL_MPA_CERT_MAX);
+    n = bytes_get(o, tsn, U_CERTDATA(c), 0, size - 1);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpuint(rt[1].len, ==, size);
+    memcpy(der, rt[1].p, size);
+    return size;
+}
+
+static const uint8_t *find(const uint8_t *h, uint32_t hl, const uint8_t *n,
+                           uint32_t nl)
+{
+    uint32_t i;
+
+    for (i = 0; i + nl <= hl; i++) {
+        if (!memcmp(h + i, n, nl)) {
+            return h + i;
+        }
+    }
+    return NULL;
+}
+
+/* the 32-byte key of the SubjectPublicKeyInfo with OID 1.3.101.@alg */
+static void spki_key(const uint8_t *der, uint32_t len, uint8_t alg,
+                     uint8_t pk[32])
+{
+    const uint8_t pat[] = { 0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65,
+                            alg, 0x03, 0x21, 0x00 };
+    const uint8_t *p = find(der, len, pat, sizeof(pat));
+
+    g_assert_nonnull(p);
+    memcpy(pk, p + sizeof(pat), 32);
+}
+
+/* the header length of the DER item at @p; *len gets its content length */
+static uint32_t der_hdr(const uint8_t *p, uint32_t *len)
+{
+    if (p[1] < 0x80) {
+        *len = p[1];
+        return 2;
+    }
+    if (p[1] == 0x81) {
+        g_assert_cmpuint(p[2], >=, 0x80);
+        *len = p[2];
+        return 3;
+    }
+    g_assert_cmpuint(p[1], ==, 0x82);
+    *len = (uint32_t)p[2] << 8 | p[3];
+    g_assert_cmpuint(*len, >=, 0x100);
+    return 4;
+}
+
+/* check the Ed25519 signature of @der with @pk; the TBS is the first item */
+static bool cert_signed_by(const uint8_t *der, uint32_t len,
+                           const uint8_t pk[32])
+{
+    uint32_t cl;
+    uint32_t tl;
+    uint32_t h = der_hdr(der, &cl);
+
+    g_assert_cmpuint(der[0], ==, 0x30);
+    g_assert_cmpuint(h + cl, ==, len);
+    g_assert_cmpuint(der[h], ==, 0x30);
+    tl = der_hdr(der + h, &tl) + tl;
+    return femu_ed25519_verify(der + len - 64, der + h, tl, pk);
+}
+
+static uint8_t kem_pk[32];
+
+static void mpa_load_kem(FemuOpal *o, uint32_t tsn)
+{
+    uint8_t der[FEMU_OPAL_MPA_CERT_MAX];
+    uint32_t n = mpa_read_cert(o, tsn, 1, der);
+
+    spki_key(der, n, 0x6E, kem_pk);
+}
+
+/*
+ * Method @m on AC @x, with the access keys sealed by an independent host
+ * context: SetupBaseS(kem_pk, info = method UID || AC UID). @ak2 is the new
+ * key of ChangeAccessKey; @nonce is the TestAccessKey nonce. @bad: 1 a
+ * wrong info, 2 a changed tag, 3 an all-zero enc.
+ */
+static int mpa_call(FemuOpal *o, uint32_t tsn, int m, int x,
+                    const uint8_t *ak, const uint8_t *ak2,
+                    const uint8_t *nonce, int bad)
+{
+    uint8_t info[16];
+    uint8_t ske[32];
+    uint8_t enc[32];
+    uint8_t ct[2][48];
+    FemuHpkeCtx c;
+    Tb t = { .n = 0 };
+    int i;
+
+    put_be64(info, M_MPA(bad == 1 ? (m == MPA_TEST ? MPA_ENABLE : MPA_TEST) :
+                         m));
+    put_be64(info + 8, U_AC(x));
+    for (i = 0; i < 32; i++) {
+        ske[i] = g_random_int();
+    }
+    g_assert_true(femu_hpke_setup_s(&c, enc, ske, kem_pk, info, 16));
+    femu_hpke_seal(&c, ct[0], NULL, 0, ak, 32);
+    if (ak2) {
+        femu_hpke_seal(&c, ct[1], NULL, 0, ak2, 32);
+    }
+    if (bad == 2) {
+        ct[0][47] ^= 1;
+    }
+    if (bad == 3) {
+        memset(enc, 0, sizeof(enc));
+    }
+    tb_call(&t, U_AC(x), M_MPA(m));
+    if (m != MPA_DISABLE) {
+        tb_b(&t, enc, 32);
+        tb_b(&t, ct[0], 48);
+    }
+    if (ak2) {
+        tb_b(&t, ct[1], 48);
+    }
+    if (nonce) {
+        tb_b(&t, nonce, 32);
+    }
+    tb_end(&t);
+    return xfer(o, &t, tsn);
+}
+
+static uint64_t mpa_st(FemuOpal *o, uint32_t tsn, int m, int x,
+                       const uint8_t *ak)
+{
+    return reply_status(mpa_call(o, tsn, m, x, ak, NULL, NULL, 0));
+}
+
+/* AccessEnabled of AC @x */
+static uint64_t ac_enabled(FemuOpal *o, uint32_t tsn, int x)
+{
+    int n = get(o, tsn, U_AC(x), 3, 3);
+
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    return rt[4].val;
+}
+
+/* Set a list of AC references in column @col of @obj */
+static uint64_t ac_list_set(FemuOpal *o, uint32_t tsn, uint64_t obj, int col,
+                            const int *acs, bool txn)
+{
+    Tb t = { .n = 0 };
+    int i;
+
+    if (txn) {
+        tb_c(&t, 0xFB);
+        tb_u(&t, 0);
+    }
+    tb_call(&t, obj, M_SET);
+    tb_c(&t, 0xF2);
+    tb_u(&t, 1);
+    tb_c(&t, 0xF0);
+    tb_c(&t, 0xF2);
+    tb_u(&t, col);
+    tb_c(&t, 0xF0);
+    for (i = 0; acs[i] > 0; i++) {
+        tb_uid(&t, U_AC(acs[i]));
+    }
+    tb_c(&t, 0xF1);
+    tb_c(&t, 0xF3);
+    tb_c(&t, 0xF1);
+    tb_c(&t, 0xF3);
+    tb_end(&t);
+    return reply_status(xfer(o, &t, tsn));
+}
+
+/* GenKey on K_AES row @r; @add: AdditionalAccessConditions, or NULL */
+static uint64_t mpa_genkey(FemuOpal *o, uint32_t tsn, int r, const int *add)
+{
+    Tb t = { .n = 0 };
+    int i;
+
+    tb_call(&t, U_KAES(r), M_GENKEY);
+    if (add) {
+        tb_c(&t, 0xF2);
+        tb_u(&t, 0x070000);
+        tb_c(&t, 0xF0);
+        for (i = 0; add[i] > 0; i++) {
+            tb_uid(&t, U_AC(add[i]));
+        }
+        tb_c(&t, 0xF1);
+        tb_c(&t, 0xF3);
+    }
+    tb_end(&t);
+    return reply_status(xfer(o, &t, tsn));
+}
+
+/* the AC numbers of list column @col of K_AES row @r, ended by 0 */
+static void kaes_list(FemuOpal *o, uint32_t tsn, int r, int col, int *out)
+{
+    int n = get(o, tsn, U_KAES(r), col, col);
+    int i;
+    int k = 0;
+
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpuint(rt[3].val, ==, col);
+    g_assert_cmpuint(rt[4].val, ==, 0xF0);
+    for (i = 5; rt[i].type == FEMU_OPAL_TOK_BYTES; i++) {
+        out[k++] = uid_of(&rt[i]) - U_T_ACS;
+    }
+    out[k] = 0;
+}
+
+static const uint8_t ak_a[32] = "access key A, thirty-two bytes.";
+static const uint8_t ak_b[32] = "access key B, thirty-two bytes.";
+static const uint8_t ak_c[32] = "access key C, thirty-two bytes.";
+
+static void test_mpa_off(void)
+{
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    uint8_t b[512];
+    uint32_t len = femu_opal_level0(o, b, sizeof(b));
+
+    g_assert_cmpuint(len, ==, 200);
+    g_assert_cmpint(get(o, tsn, U_AC(1), 0, 5), >, 0);
+    g_assert_cmpuint(reply_status(get(o, tsn, U_AC(1), 0, 5)), ==, 0x01);
+    g_assert_cmpuint(reply_status(get(o, tsn, U_CERT(1), 0, 6)), ==, 0x01);
+    g_assert_cmpuint(call0(o, tsn, U_AC(1), M_MPA(MPA_DISABLE)), ==, 0x01);
+    g_assert_cmpuint(reply_status(get(o, tsn, U_TABLE_ROW(0x1701), 0, 1)),
+                     ==, 0x01);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+static void test_mpa_tables(void)
+{
+    static const uint8_t ku[] = { 0x03, 0x02, 0x03, 0x28 };
+    static const uint8_t hpke[] = { 0x06, 0x06, 0x67, 0x81, 0x05, 0x15, 0x01,
+                                    0x01, 0x04, 0x0B, 0x30, 0x09, 0x02, 0x01,
+                                    0x20, 0x02, 0x01, 0x01, 0x02, 0x01, 0x03 };
+    static const uint8_t not_after[] = "99991231235959Z";
+    uint8_t c1[FEMU_OPAL_MPA_CERT_MAX];
+    uint8_t c2[FEMU_OPAL_MPA_CERT_MAX];
+    uint8_t c1b[FEMU_OPAL_MPA_CERT_MAX];
+    uint8_t id_pk[32];
+    uint8_t b[512];
+    uint32_t l1;
+    uint32_t l2;
+    uint32_t tsn;
+    FemuOpal *o = mpa_init_dev(&tsn);
+    uint8_t *d;
+    int n;
+
+    /* Level 0: 040Ch after 0404h, 12 bytes */
+    g_assert_cmpuint(femu_opal_level0(o, b, sizeof(b)), ==, 212);
+    d = b + 200;
+    g_assert_cmpuint(be16(d), ==, 0x040C);
+    g_assert_cmpuint(d[2], ==, 0x10);
+    g_assert_cmpuint(d[3], ==, 8);
+    g_assert_cmpuint(be16(d + 4), ==, FEMU_OPAL_MPA_ACS);
+    g_assert_cmpuint(be16(d + 6), ==, FEMU_OPAL_MPA_PER_KEY);
+    g_assert_cmpuint(d[8], ==, 48);
+    g_assert_cmpuint(d[9], ==, 0);
+    g_assert_cmpuint(be32(b), ==, 208);
+
+    /* the rows */
+    g_assert_cmpint(next_rows(o, tsn, U_T_ACS), ==, FEMU_OPAL_MPA_ACS);
+    g_assert_cmpuint(uid_of(&rt[2 + FEMU_OPAL_MPA_ACS - 1]), ==,
+                     U_AC(FEMU_OPAL_MPA_ACS));
+    g_assert_cmpint(next_rows(o, tsn, U_T_CERTS), ==, 2);
+    g_assert_cmpint(next_rows(o, tsn, U_T_ACE), ==, FEMU_OPAL_ACE_MAX);
+    g_assert_cmpuint(uid_of(&rt[2 + FEMU_OPAL_ACE_MAX - 1]), ==,
+                     0x0000000800064700ull + FEMU_OPAL_MPA_ACS);
+    n = get(o, tsn, U_AC(2), 0, 5);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpmem(rt[8].p, rt[8].len, "AccessCondition2", 16);
+    g_assert_cmpuint(rt[16].val, ==, 0);            /* AccessEnabled */
+    g_assert_cmpuint(rt[20].val, ==, 0xF0);         /* {0} */
+    g_assert_cmpuint(rt[21].val, ==, 0);
+    g_assert_cmpuint(uid_of(&rt[26]), ==, U_CERT(1));
+    n = get(o, tsn, U_CERT(1), 5, 6);
+    g_assert_cmpuint(rt[4].val, ==, 1);             /* EphemeralKeyPair */
+    g_assert_cmpuint(uid_of(&rt[8]), ==, U_CERT(2));
+    n = get(o, tsn, U_CERT(2), 5, 6);
+    g_assert_cmpuint(rt[4].val, ==, 0);
+    g_assert_cmpuint(uid_of(&rt[8]), ==, 0);
+    /* the ACEs of the methods (MPA Table 12) */
+    n = getacl(o, tsn, U_AC(3), M_MPA(MPA_ENABLE));
+    g_assert_cmpuint(uid_of(&rt[2]), ==, 0x0000000800064603ull);
+    n = getacl(o, tsn, U_KAES(2), M_SET);
+    g_assert_cmpuint(uid_of(&rt[2]), ==, 0x0000000800064102ull);
+    n = getacl(o, tsn, U_KAES(0), M_GET);
+    g_assert_cmpuint(uid_of(&rt[3]), ==, 0x0000000800064001ull);
+
+    /* Certificate1 is signed by Certificate2, which signs itself */
+    l1 = mpa_read_cert(o, tsn, 1, c1);
+    l2 = mpa_read_cert(o, tsn, 2, c2);
+    spki_key(c2, l2, 0x70, id_pk);
+    g_assert_true(cert_signed_by(c2, l2, id_pk));
+    g_assert_true(cert_signed_by(c1, l1, id_pk));
+    c1[20] ^= 1;
+    g_assert_false(cert_signed_by(c1, l1, id_pk));
+    c1[20] ^= 1;
+    g_assert_nonnull(find(c1, l1, ku, sizeof(ku)));
+    g_assert_nonnull(find(c1, l1, hpke, sizeof(hpke)));
+    g_assert_nonnull(find(c1, l1, not_after, 15));
+    g_assert_null(find(c2, l2, hpke, sizeof(hpke)));
+
+    /* GenKey on Certificate1 makes a new key and serial; not on 2 */
+    g_assert_cmpuint(call0(o, tsn, U_CERT(1), M_GENKEY), ==, 0);
+    g_assert_cmpuint(mpa_read_cert(o, tsn, 1, c1b), ==, l1);
+    g_assert_cmpint(memcmp(c1, c1b, l1), !=, 0);
+    g_assert_true(cert_signed_by(c1b, l1, id_pk));
+    g_assert_cmpuint(call0(o, tsn, U_CERT(2), M_GENKEY), ==, 0x0C);
+    eos(o, tsn);
+    /* each Activate, even on an active SP, makes a new KEM key */
+    memcpy(c1, c1b, l1);
+    g_assert_cmpuint(start(o, U_ADMINSP, U_SID, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_LOCKINGSP, M_ACTIVATE), ==, 0);
+    eos(o, tsn);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(mpa_read_cert(o, tsn, 1, c1b), ==, l1);
+    g_assert_cmpint(memcmp(c1, c1b, l1), !=, 0);
+    eos(o, tsn);
+    /* Anybody reads but may not GenKey */
+    g_assert_cmpuint(start(o, U_LOCKINGSP, 0, NULL, &tsn), ==, 0);
+    g_assert_cmpuint(mpa_read_cert(o, tsn, 1, c1), ==, l1);
+    g_assert_cmpuint(call0(o, tsn, U_CERT(1), M_GENKEY), ==, 0x01);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+static void test_mpa_methods(void)
+{
+    uint8_t seal[FEMU_OPAL_MPA_SEAL];
+    uint8_t nonce[32];
+    uint8_t want[48];
+    uint8_t uid[8];
+    gsize dl = sizeof(want);
+    GChecksum *h;
+    uint32_t tsn;
+    FemuOpal *o = mpa_init_dev(&tsn);
+    int n;
+
+    mpa_load_kem(o, tsn);
+    /* an AC that was never initialized */
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 2, ak_a), ==, 0x0C);
+    n = mpa_call(o, tsn, MPA_TEST, 2, ak_a, NULL, ak_b, 0);
+    g_assert_cmpuint(reply_status(n), ==, 0x3F);
+    n = mpa_call(o, tsn, MPA_CHANGE, 2, ak_a, ak_b, NULL, 0);
+    g_assert_cmpuint(reply_status(n), ==, 0x3F);
+
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_INIT, 1, ak_a), ==, 0);
+    g_assert_cmpuint(ac_enabled(o, tsn, 1), ==, 0);
+    /* bad payloads: wrong info, changed tag, all-zero enc */
+    g_assert_cmpuint(reply_status(mpa_call(o, tsn, MPA_ENABLE, 1, ak_a, NULL,
+                                           NULL, 1)), ==, 0x0C);
+    g_assert_cmpuint(reply_status(mpa_call(o, tsn, MPA_ENABLE, 1, ak_a, NULL,
+                                           NULL, 2)), ==, 0x0C);
+    g_assert_cmpuint(reply_status(mpa_call(o, tsn, MPA_ENABLE, 1, ak_a, NULL,
+                                           NULL, 3)), ==, 0x0C);
+    /* a payload for AC1 does not open on AC2 either */
+    g_assert_cmpuint(ac_enabled(o, tsn, 1), ==, 0);
+
+    /* TestAccessKey: SHA2-384(AC UID || ak || nonce) */
+    memset(nonce, 0x5A, sizeof(nonce));
+    n = mpa_call(o, tsn, MPA_TEST, 1, ak_a, NULL, nonce, 0);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    put_be64(uid, U_AC(1));
+    h = g_checksum_new(G_CHECKSUM_SHA384);
+    g_checksum_update(h, uid, 8);
+    g_checksum_update(h, ak_a, 32);
+    g_checksum_update(h, nonce, 32);
+    g_checksum_get_digest(h, want, &dl);
+    g_checksum_free(h);
+    g_assert_cmpuint(rt[0].val, ==, 0xF0);
+    g_assert_cmpmem(rt[1].p, rt[1].len, want, 48);
+    n = mpa_call(o, tsn, MPA_TEST, 1, ak_b, NULL, nonce, 0);
+    g_assert_cmpuint(reply_status(n), ==, 0x3F);
+
+    /* EnableAccess: a wrong key fails, the right one enables */
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_b), ==, 0x3F);
+    g_assert_cmpuint(ac_enabled(o, tsn, 1), ==, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0);
+    g_assert_cmpuint(ac_enabled(o, tsn, 1), ==, 1);
+    /* Initialize needs AccessEnabled False */
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_INIT, 1, ak_c), ==, 0x3F);
+
+    /* ChangeAccessKey A to B, on one context; a wrong current key fails */
+    n = mpa_call(o, tsn, MPA_CHANGE, 1, ak_c, ak_b, NULL, 0);
+    g_assert_cmpuint(reply_status(n), ==, 0x3F);
+    n = mpa_call(o, tsn, MPA_CHANGE, 1, ak_a, ak_b, NULL, 0);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    g_assert_cmpuint(ac_enabled(o, tsn, 1), ==, 1);
+    g_assert_cmpuint(call0(o, tsn, U_AC(1), M_MPA(MPA_DISABLE)), ==, 0);
+    g_assert_cmpuint(ac_enabled(o, tsn, 1), ==, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0x3F);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_b), ==, 0);
+    /* a second Initialize with the same key seals with a new nonce */
+    g_assert_cmpuint(call0(o, tsn, U_AC(1), M_MPA(MPA_DISABLE)), ==, 0);
+    memcpy(seal, o->sp.ac[0].seal, sizeof(seal));
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_INIT, 1, ak_b), ==, 0);
+    g_assert_cmpint(memcmp(seal, o->sp.ac[0].seal, 12), !=, 0);
+    g_assert_cmpint(memcmp(seal + 12, o->sp.ac[0].seal + 12, 48), !=, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_b), ==, 0);
+    /* parameter counts */
+    g_assert_cmpuint(call0(o, tsn, U_AC(1), M_MPA(MPA_ENABLE)), ==, 0x0C);
+    eos(o, tsn);
+    /* Anybody has no method ACE; a read session runs only TestAccessKey */
+    g_assert_cmpuint(start(o, U_LOCKINGSP, 0, NULL, &tsn), ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_AC(1), M_MPA(MPA_DISABLE)), ==, 0x01);
+    eos(o, tsn);
+    start_write = 0;
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    start_write = 1;
+    g_assert_cmpuint(call0(o, tsn, U_AC(1), M_MPA(MPA_DISABLE)), ==, 0x01);
+    n = mpa_call(o, tsn, MPA_TEST, 1, ak_b, NULL, nonce, 0);
+    g_assert_cmpuint(reply_status(n), ==, 0);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* two enabled ACs bound to Range1 at 100 + 50 */
+static FemuOpal *mpa_bound_dev(uint32_t *tsn)
+{
+    static const int both[] = { 1, 2, 0 };
+    FemuOpal *o = mpa_init_dev(tsn);
+
+    mpa_load_kem(o, *tsn);
+    g_assert_cmpuint(range_set(o, *tsn, 1, 100, 50), ==, 0);
+    g_assert_cmpuint(range_lock(o, *tsn, 1, false), ==, 0);
+    g_assert_cmpuint(mpa_st(o, *tsn, MPA_INIT, 1, ak_a), ==, 0);
+    g_assert_cmpuint(mpa_st(o, *tsn, MPA_INIT, 2, ak_b), ==, 0);
+    g_assert_cmpuint(ac_list_set(o, *tsn, U_KAES(1), 6, both, false), ==, 0);
+    er.n = 0;
+    return o;
+}
+
+static void test_mpa_bind(void)
+{
+    static const uint64_t r1[] = { 100, 50 };
+    static const int three[] = { 1, 2, 3, 0 };
+    static const int ac3[] = { 3, 0 };
+    static const int ac2l[] = { 2, 0 };
+    static const int cols_rle[] = { 5, -1 };
+    static const int cols_unlock[] = { 7, 8, -1 };
+    static const uint64_t zero[] = { 0, 0 };
+    uint32_t tsn;
+    FemuOpal *o = mpa_bound_dev(&tsn);
+    int l[4];
+
+    /* the lists */
+    kaes_list(o, tsn, 1, 6, l);
+    g_assert_cmpint(l[0], ==, 1);
+    g_assert_cmpint(l[1], ==, 2);
+    g_assert_cmpint(l[2], ==, 0);
+    kaes_list(o, tsn, 1, 5, l);
+    g_assert_cmpint(l[0], ==, 0);
+    g_assert_cmpuint(ac_list_set(o, tsn, U_KAES(1), 6, three, false), ==,
+                     0x0C);
+    g_assert_cmpuint(ac_list_set(o, tsn, U_KAES(1), 5, ac3, false), ==, 0x01);
+    /* Initialize refuses an AC in a list */
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_INIT, 1, ak_a), ==, 0x0C);
+    /* the union is too long; a known AC alone is a good list */
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, ac3), ==, 0x0C);
+    g_assert_cmpint(er.n, ==, 0);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, three), ==, 0x0C);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, three + 1), ==, 0x0C);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, ac2l), ==, 0);
+    erased(1, r1);
+    kaes_list(o, tsn, 1, 5, l);
+    g_assert_cmpint(l[0], ==, 1);
+    g_assert_cmpint(l[1], ==, 2);
+    g_assert_cmpint(l[2], ==, 0);
+
+    /* GenKey with both ACs disabled: the old MEK goes, no new MEK */
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, NULL), ==, 0);
+    erased(1, r1);
+    kaes_list(o, tsn, 1, 5, l);
+    g_assert_cmpint(l[0], ==, 1);
+    g_assert_cmpint(l[1], ==, 2);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 99, 1), ==, FEMU_OPAL_MEDIA);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_WRITE, 100, 1), ==, FEMU_OPAL_DENY);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 2, ak_b), ==, 0);
+    /* the MEK exists now, and the range was never locked */
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_WRITE, 100, 1), ==, FEMU_OPAL_MEDIA);
+    g_assert_cmpint(er.n, ==, 0);
+
+    /* a bound range keeps its LockEnabled columns */
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), cols_rle, zero, false), ==, 0x3F);
+    /* DisableAccess locks the range, and EnableAccess does not unlock it */
+    g_assert_cmpuint(call0(o, tsn, U_AC(2), M_MPA(MPA_DISABLE)), ==, 0);
+    get(o, tsn, U_LOCK(1), 7, 8);
+    g_assert_cmpuint(rt[4].val, ==, 1);
+    g_assert_cmpuint(rt[8].val, ==, 1);
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), cols_unlock, zero, false), ==,
+                     0x01);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 2, ak_b), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), cols_unlock, zero, false), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+
+    /* GenKey with an AdditionalAccessConditions list, deduplicated */
+    g_assert_cmpuint(ac_list_set(o, tsn, U_KAES(1), 6, ac3, false), ==, 0);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, three + 2), ==, 0);
+    erased(1, r1);
+    kaes_list(o, tsn, 1, 5, l);
+    g_assert_cmpint(l[0], ==, 3);
+    g_assert_cmpint(l[1], ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    /* an empty list unbinds, and the MEK is there at once */
+    g_assert_cmpuint(ac_list_set(o, tsn, U_KAES(1), 6, three + 3, false), ==,
+                     0);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, NULL), ==, 0);
+    erased(1, r1);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+    /* a bound GenKey needs both LockEnabled columns */
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), cols_rle, zero, false), ==, 0);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, ac3), ==, 0x3F);
+    g_assert_cmpint(er.n, ==, 0);
+    /* not on a certificate */
+    g_assert_cmpuint(mpa_genkey(o, tsn, 0, NULL), ==, 0);
+    er.n = 0;
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/*
+ * The rules run on the working image of a transaction (design v2.1 11.1):
+ * a rebind to AC2, then DisableAccess AC2, must leave Range1 locked.
+ */
+static void test_mpa_txn(void)
+{
+    static const int ac1[] = { 1, 0 };
+    static const int ac2[] = { 2, 0 };
+    static const int cols_unlock[] = { 7, 8, -1 };
+    static const uint64_t zero[] = { 0, 0 };
+    uint32_t tsn;
+    FemuOpal *o = mpa_bound_dev(&tsn);
+    Tb t = { .n = 0 };
+
+    g_assert_cmpuint(ac_list_set(o, tsn, U_KAES(1), 6, ac1, false), ==, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 2, ak_b), ==, 0);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, NULL), ==, 0);
+    er.n = 0;
+    g_assert_cmpuint(ac_list_set(o, tsn, U_KAES(1), 6, ac2, true), ==, 0);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, NULL), ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_AC(2), M_MPA(MPA_DISABLE)), ==, 0);
+    /* the I/O view still reads the committed image */
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+    et(o, tsn, 0);
+    g_assert_cmpint(er.n, ==, 1);
+    er.n = 0;
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 2, ak_b), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), cols_unlock, zero, false), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+
+    /* an aborted Initialize and Enable of AC3 leaves AC3 as it was */
+    tb_c(&t, 0xFB);
+    tb_u(&t, 0);
+    g_assert_cmpint(xfer(o, &t, tsn), ==, 2);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_INIT, 3, ak_c), ==, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 3, ak_c), ==, 0);
+    g_assert_cmpuint(ac_enabled(o, tsn, 3), ==, 1);
+    et(o, tsn, 1);
+    g_assert_cmpuint(ac_enabled(o, tsn, 3), ==, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 3, ak_c), ==, 0x0C);
+    g_assert_cmpint(er.n, ==, 0);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* a deferred MEK and a DisableAccess of an AC that is already disabled */
+static void test_mpa_deferred(void)
+{
+    static const int ac1[] = { 1, 0 };
+    static const int cols_unlock[] = { 7, 8, -1 };
+    static const uint64_t zero[] = { 0, 0 };
+    uint32_t tsn;
+    FemuOpal *o = mpa_bound_dev(&tsn);
+
+    g_assert_cmpuint(ac_list_set(o, tsn, U_KAES(1), 6, ac1, false), ==, 0);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, NULL), ==, 0);
+    er.n = 0;
+    g_assert_cmpuint(call0(o, tsn, U_AC(1), M_MPA(MPA_DISABLE)), ==, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), cols_unlock, zero, false), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+    /* the unlock and the enable made no new erase */
+    g_assert_cmpint(er.n, ==, 0);
+    /* a bound GenKey on a locked range erases; the MEK waits for unlock */
+    g_assert_cmpuint(range_lock(o, tsn, 1, true), ==, 0);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, NULL), ==, 0);
+    g_assert_cmpint(er.n, ==, 1);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    g_assert_cmpuint(lset(o, tsn, U_LOCK(1), cols_unlock, zero, false), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+static void tper_reset_on(FemuOpal *o)
+{
+    uint32_t t;
+
+    g_assert_cmpuint(start(o, U_ADMINSP, U_SID, "MSID-1", &t), ==, 0);
+    g_assert_cmpuint(set(o, t, U_TPERINFO, 8, NULL, 1, false), ==, 0);
+    eos(o, t);
+}
+
+static void test_mpa_resets(void)
+{
+    static const int ac1[] = { 1, 0 };
+    static const int prog[] = { 0, 3, -1 };
+    static const int power[] = { 0, -1 };
+    uint8_t z[8] = { 0 };
+    uint8_t pk0[32];
+    uint32_t tsn;
+    FemuOpal *o = mpa_bound_dev(&tsn);
+    Tb t = { .n = 0 };
+
+    g_assert_cmpuint(ac_list_set(o, tsn, U_KAES(1), 6, ac1, false), ==, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, NULL), ==, 0);
+    g_assert_cmpuint(resets_set(o, tsn, U_AC(1), 4, prog), ==, 0);
+    /* LockOnReset of Range1 is {0}, so only the AC rule locks it at type 3 */
+    eos(o, tsn);
+    tper_reset_on(o);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    /* a transaction drops type 3, then TPER_RESET aborts it first */
+    tb_c(&t, 0xFB);
+    tb_u(&t, 0);
+    g_assert_cmpint(xfer(o, &t, tsn), ==, 2);
+    g_assert_cmpuint(resets_set(o, tsn, U_AC(1), 4, power), ==, 0);
+    g_assert_cmpint(femu_opal_send(o, 2, 4, z, 8), ==, FEMU_OPAL_IF_GOOD);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(ac_enabled(o, tsn, 1), ==, 0);
+    get(o, tsn, U_LOCK(1), 7, 8);
+    g_assert_cmpuint(rt[4].val, ==, 1);
+    /* the KEM key stays across TPER_RESET */
+    memcpy(pk0, kem_pk, 32);
+    mpa_load_kem(o, tsn);
+    g_assert_cmpmem(pk0, 32, kem_pk, 32);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0);
+    /* with {0} only, TPER_RESET leaves the AC enabled */
+    g_assert_cmpuint(resets_set(o, tsn, U_AC(1), 4, power), ==, 0);
+    eos(o, tsn);
+    g_assert_cmpint(femu_opal_send(o, 2, 4, z, 8), ==, FEMU_OPAL_IF_GOOD);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(ac_enabled(o, tsn, 1), ==, 1);
+    eos(o, tsn);
+
+    /* a power cycle disables every AC and makes a new KEM key */
+    femu_opal_power_cycle(o);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(ac_enabled(o, tsn, 1), ==, 0);
+    g_assert_cmpuint(ac_enabled(o, tsn, 2), ==, 0);
+    /* the old KEM key no longer opens a payload */
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0x0C);
+    mpa_load_kem(o, tsn);
+    g_assert_cmpint(memcmp(pk0, kem_pk, 32), !=, 0);
+    /* the seal stays: the same access key enables the AC again */
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/*
+ * Lock columns with LockEnabled False do not count (design v2.1 11.2): a
+ * power cycle sets them on Range2, and an unbound GenKey still makes a MEK.
+ */
+static void test_mpa_lock_columns(void)
+{
+    uint32_t tsn;
+    FemuOpal *o = mpa_init_dev(&tsn);
+
+    g_assert_cmpuint(range_set(o, tsn, 2, 300, 10), ==, 0);
+    eos(o, tsn);
+    femu_opal_power_cycle(o);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    get(o, tsn, U_LOCK(2), 7, 7);
+    g_assert_cmpuint(rt[4].val, ==, 1);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 2, NULL), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_WRITE, 300, 1), ==,
+                    FEMU_OPAL_MEDIA);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+static void test_mpa_revert(void)
+{
+    static const int ac1[] = { 1, 0 };
+    uint32_t tsn;
+    FemuOpal *o = mpa_init_dev(&tsn);
+    int l[4];
+
+    mpa_load_kem(o, tsn);
+    g_assert_cmpuint(range_lock(o, tsn, 0, false), ==, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_INIT, 1, ak_a), ==, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0);
+    g_assert_cmpuint(ac_list_set(o, tsn, U_KAES(0), 6, ac1, false), ==, 0);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 0, NULL), ==, 0);
+    /* a bound Global key cannot stay */
+    g_assert_cmpuint(revertsp(o, tsn, 1), ==, 0x0C);
+    g_assert_cmpuint(revertsp(o, tsn, 0), ==, 0);
+    g_assert_cmpuint(start(o, U_ADMINSP, U_SID, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_LOCKINGSP, M_ACTIVATE), ==, 0);
+    eos(o, tsn);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    kaes_list(o, tsn, 0, 5, l);
+    g_assert_cmpint(l[0], ==, 0);
+    kaes_list(o, tsn, 0, 6, l);
+    g_assert_cmpint(l[0], ==, 0);
+    g_assert_cmpuint(ac_enabled(o, tsn, 1), ==, 0);
+    mpa_load_kem(o, tsn);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0x0C);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/* Format and crypto Sanitize rekey: the lists and the AC state stay */
+static void test_mpa_rekey(void)
+{
+    static const int ac1[] = { 1, 0 };
+    static const int ac2[] = { 2, 0 };
+    uint32_t tsn;
+    FemuOpal *o = mpa_bound_dev(&tsn);
+    int l[4];
+
+    g_assert_cmpuint(ac_list_set(o, tsn, U_KAES(1), 6, ac1, false), ==, 0);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0);
+    g_assert_cmpuint(mpa_genkey(o, tsn, 1, NULL), ==, 0);
+    g_assert_cmpuint(ac_list_set(o, tsn, U_KAES(1), 6, ac2, false), ==, 0);
+    femu_opal_rekey(o);
+    kaes_list(o, tsn, 1, 5, l);
+    g_assert_cmpint(l[0], ==, 1);
+    kaes_list(o, tsn, 1, 6, l);
+    g_assert_cmpint(l[0], ==, 2);
+    g_assert_cmpuint(ac_enabled(o, tsn, 1), ==, 1);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_MEDIA);
+    eos(o, tsn);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
+/*
+ * A failed random source: GenKey on Certificate1 and Activate give FAIL and
+ * keep the old KEM key; after a power cycle CertificateData1 gives FAIL
+ * until a GenKey succeeds (design 11.5).
+ */
+static void test_mpa_rand_fail(void)
+{
+    uint8_t c1[FEMU_OPAL_MPA_CERT_MAX];
+    uint8_t c1b[FEMU_OPAL_MPA_CERT_MAX];
+    uint32_t tsn;
+    uint32_t l1;
+    FemuOpal *o = mpa_init_dev(&tsn);
+
+    l1 = mpa_read_cert(o, tsn, 1, c1);
+    rand_fail = true;
+    g_assert_cmpuint(call0(o, tsn, U_CERT(1), M_GENKEY), ==, 0x3F);
+    g_assert_cmpuint(mpa_read_cert(o, tsn, 1, c1b), ==, l1);
+    g_assert_cmpmem(c1, l1, c1b, l1);
+    eos(o, tsn);
+    g_assert_cmpuint(start(o, U_ADMINSP, U_SID, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_LOCKINGSP, M_ACTIVATE), ==, 0x3F);
+    eos(o, tsn);
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(mpa_read_cert(o, tsn, 1, c1b), ==, l1);
+    g_assert_cmpmem(c1, l1, c1b, l1);
+    eos(o, tsn);
+
+    /* the power cycle destroys the KEM key before it fails */
+    femu_opal_power_cycle(o);
+    rand_fail = false;
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    g_assert_cmpuint(reply_status(bytes_get(o, tsn, U_CERTDATA(1), 0, 9)),
+                     ==, 0x3F);
+    g_assert_cmpuint(mpa_st(o, tsn, MPA_ENABLE, 1, ak_a), ==, 0x3F);
+    g_assert_cmpuint(call0(o, tsn, U_CERT(1), M_GENKEY), ==, 0);
+    g_assert_cmpuint(mpa_read_cert(o, tsn, 1, c1b), >, 100);
+    g_assert_cmpint(memcmp(c1, c1b, 32), !=, 0);
+
+    femu_opal_free(o);
+}
+
+/* openssl with @args (ended by NULL); returns its exit status */
+static int ossl_run(const char *ossl, const char *const *args, char **out)
+{
+    g_autoptr(GPtrArray) argv = g_ptr_array_new();
+    g_autoptr(GError) err = NULL;
+    int status = -1;
+
+    g_ptr_array_add(argv, (char *)ossl);
+    for (; *args; args++) {
+        g_ptr_array_add(argv, (char *)*args);
+    }
+    g_ptr_array_add(argv, NULL);
+    g_assert_true(g_spawn_sync(NULL, (char **)argv->pdata, NULL,
+                               G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL, out,
+                               NULL, &status, &err));
+    g_assert_no_error(err);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+/* write @der to @dir/@name.der and convert it to @dir/@name.pem */
+static char *ossl_pem(const char *ossl, const char *dir, const char *name,
+                      const uint8_t *der, uint32_t len)
+{
+    g_autofree char *d = g_strdup_printf("%s/%s.der", dir, name);
+    char *pem = g_strdup_printf("%s/%s.pem", dir, name);
+    const char *args[] = { "x509", "-inform", "DER", "-in", d, "-out", pem,
+                           NULL };
+
+    g_assert_true(g_file_set_contents(d, (const char *)der, len, NULL));
+    g_assert_cmpint(ossl_run(ossl, args, NULL), ==, 0);
+    g_assert_cmpint(g_remove(d), ==, 0);
+    return pem;
+}
+
+/*
+ * An independent verifier checks both certificates (design 11.4):
+ * openssl parses them, Certificate2 verifies itself and Certificate1, and
+ * a changed signature byte fails. Skipped when no openssl is on the PATH.
+ */
+static void test_mpa_openssl(void)
+{
+    g_autofree char *ossl = g_find_program_in_path("openssl");
+    g_autofree char *dir = NULL;
+    g_autofree char *p1 = NULL;
+    g_autofree char *p2 = NULL;
+    g_autofree char *pbad = NULL;
+    g_autofree char *text = NULL;
+    uint8_t c1[FEMU_OPAL_MPA_CERT_MAX];
+    uint8_t c2[FEMU_OPAL_MPA_CERT_MAX];
+    uint32_t l1;
+    uint32_t l2;
+    uint32_t tsn;
+    FemuOpal *o;
+
+    if (!ossl) {
+        g_test_skip("no openssl");
+        return;
+    }
+    o = mpa_init_dev(&tsn);
+    l1 = mpa_read_cert(o, tsn, 1, c1);
+    l2 = mpa_read_cert(o, tsn, 2, c2);
+    eos(o, tsn);
+    femu_opal_free(o);
+    dir = g_dir_make_tmp("femu-mpa-XXXXXX", NULL);
+    g_assert_nonnull(dir);
+    p1 = ossl_pem(ossl, dir, "c1", c1, l1);
+    p2 = ossl_pem(ossl, dir, "c2", c2, l2);
+    {
+        const char *show[] = { "x509", "-noout", "-text", "-in", p1, NULL };
+        const char *self[] = { "verify", "-CAfile", p2, p2, NULL };
+        const char *kem[] = { "verify", "-CAfile", p2, p1, NULL };
+
+        g_assert_cmpint(ossl_run(ossl, show, &text), ==, 0);
+        g_assert_nonnull(strstr(text, "ED25519"));
+        g_assert_cmpint(ossl_run(ossl, self, NULL), ==, 0);
+        g_assert_cmpint(ossl_run(ossl, kem, NULL), ==, 0);
+    }
+    c1[l1 - 1] ^= 1;
+    pbad = ossl_pem(ossl, dir, "bad", c1, l1);
+    {
+        const char *bad[] = { "verify", "-CAfile", p2, pbad, NULL };
+
+        g_assert_cmpint(ossl_run(ossl, bad, NULL), !=, 0);
+    }
+    g_assert_cmpint(g_remove(p1), ==, 0);
+    g_assert_cmpint(g_remove(p2), ==, 0);
+    g_assert_cmpint(g_remove(pbad), ==, 0);
+    g_assert_cmpint(g_rmdir(dir), ==, 0);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -2726,5 +3700,17 @@ int main(int argc, char **argv)
     g_test_add_func("/femu/opal/s3-edges", test_s3_edges);
     g_test_add_func("/femu/opal/s3-far-ranges", test_s3_far_ranges);
     g_test_add_func("/femu/opal/s3-hw-reset", test_s3_hw_reset);
+    g_test_add_func("/femu/opal/mpa-off", test_mpa_off);
+    g_test_add_func("/femu/opal/mpa-tables", test_mpa_tables);
+    g_test_add_func("/femu/opal/mpa-methods", test_mpa_methods);
+    g_test_add_func("/femu/opal/mpa-bind", test_mpa_bind);
+    g_test_add_func("/femu/opal/mpa-txn", test_mpa_txn);
+    g_test_add_func("/femu/opal/mpa-deferred", test_mpa_deferred);
+    g_test_add_func("/femu/opal/mpa-resets", test_mpa_resets);
+    g_test_add_func("/femu/opal/mpa-lock-columns", test_mpa_lock_columns);
+    g_test_add_func("/femu/opal/mpa-revert", test_mpa_revert);
+    g_test_add_func("/femu/opal/mpa-rekey", test_mpa_rekey);
+    g_test_add_func("/femu/opal/mpa-openssl", test_mpa_openssl);
+    g_test_add_func("/femu/opal/mpa-rand-fail", test_mpa_rand_fail);
     return g_test_run();
 }

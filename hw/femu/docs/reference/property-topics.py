@@ -28,6 +28,7 @@ DEVICES = [
                       "x-gc-idle-hold", "x-gc-idle-kick", "x-gc-idle-latch",
                       "x-gc-idle-order", "x-maint-idle",
                       "x-ns-test", "x-oc12-clock", "x-opal-gkey",
+                      "x-opal-power-cycle",
                       "x-oc12-trace", "x-ocp-lat-skew-ms", "x-idle-mw", "x-telemetry-trigger",
                       "x-persist-schema", "x-place-fail", "x-place-skip",
                       "x-rain-check",
@@ -72,7 +73,7 @@ DEVICES = [
                     "vid", "did", "pci_pm", "acl", "cqr", "vwc", "temperature", "mpsmin",
                     "mpsmax", "oacs", "oncs", "sgl", "cmbsz", "cmbloc", "fw_slots", "sanitize_ms", "sanitize_ops", "ana", "power_states", "lockdown", "reservations", "ps_max_watts",
                     "power_limit", "ns_wp", "sanitize_ns", "cancel",
-                    "shared_ftl", "x-opal",
+                    "shared_ftl", "x-opal", "x-opal-mpa",
                 ],
             },
             {

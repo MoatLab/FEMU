@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 312 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 313 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -101,6 +101,7 @@ Devices:
 | `cancel` | `bool` | `off` | bbssd, NoSSD: Cancel (I/O 18h, Base 2.3 7.1) aborts commands of its own submission queue, one by CID or all of a namespace; commands past the FTL step abort at once (CMDA), the others when the step ends (CEDA); needs mapping=page; not with buffer_size, cxl_ssd, ocp, power_loss or a femu-subsys; off (default) |
 | `shared_ftl` | `bool` | `off` | bbssd: the namespaces share the FTL and NAND array of namespace 1, each in its own slice of the logical pages, so writes and GC of one slow the I/O of another; sizes in whole NAND pages; needs mapping=page; not with a femu-subsys, ns_mgmt, power_loss, persist_ftl, ns_wp, sanitize_ns or telemetry_da4; off (default) |
 | `x-opal` | `bool` | `off` | TCG Opal security, experimental and not yet conformant: Security Send (81h) and Receive (82h), OACS bit 0, Level 0 discovery, ComID 1000h with STACK_RESET, Admin SP sessions with MSID, SID, PSID, Activate, Revert and transactions, Block SID and TPER_RESET; the Locking SP with 8 ranges, GenKey erase, an MBR shadow and the DataStore, a cryptographic erase in Format NVM (FNA bit 2), checked on every I/O command ([TCG Opal](../features/tcg-opal.md)); MSID and PSID are FEMU-MSID- and FEMU-PSID- plus the serial; one NoSSD or page-mapped bbssd namespace without metadata, not with a femu-subsys, CXL, CSD, ns_mgmt, power_loss, sanitize_ns, ns_wp or persist_file; off (default) |
+| `x-opal-mpa` | `bool` | `off` | x-opal: TCG MEK Multiparty Authorization 1.00, experimental: 4 AccessConditions with InitializeAccessCondition, TestAccessKey, ChangeAccessKey, EnableAccess and DisableAccess over HPKE (X25519, HKDF-SHA256, ChaCha20-Poly1305), an ephemeral KEM certificate signed by an Ed25519 identity certificate, Active and Pending lists on each K_AES_256 row (2 per key), Level 0 feature 040Ch; emulation only, not constant time ([TCG Opal](../features/tcg-opal.md)); needs x-opal; off (default) |
 
 ### LBA formats, metadata and protection
 
@@ -522,7 +523,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-cpl-count`, `x-cpl-hold`, `x-csd-pause-stats`, `x-durable-check`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-probe`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-lsi`, `x-lsi-state`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-opal-gkey`, `x-persist-schema`, `x-place-fail`, `x-place-skip`, `x-query-delay-ms`, `x-rain-check`, `x-rain-fail`, `x-range-waits`, `x-rber-u`, `x-sdc`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
+- `femu`: `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-cpl-count`, `x-cpl-hold`, `x-csd-pause-stats`, `x-durable-check`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-hold`, `x-ftl-probe`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-lsi`, `x-lsi-state`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-opal-gkey`, `x-opal-power-cycle`, `x-persist-schema`, `x-place-fail`, `x-place-skip`, `x-query-delay-ms`, `x-rain-check`, `x-rain-fail`, `x-range-waits`, `x-rber-u`, `x-sdc`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables

@@ -2984,6 +2984,7 @@ typedef struct FemuCtrl {
     DECLARE_BITMAP(lock_fid, 256);
     /* TCG Opal TPer behind Security Send and Receive (x-opal) */
     bool            opal;
+    bool            opal_mpa;           /* MEK Multiparty Authorization */
     struct FemuOpal *opal_tper;
     struct FemuOpalView *opal_view;     /* the pollers' copy */
     /* Reservations: the host, its notices (log 80h) and their masks */

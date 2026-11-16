@@ -29,6 +29,7 @@
 #include "hw/cxl/cxl_device.h"
 #include "hw/femu/tests/unit/hybrid-oracle.h"
 #include "hw/femu/cxlssd/cca-abi.h"
+#include "hw/femu/femu-hpke.h"
 #include "standard-headers/linux/pci_regs.h"
 
 #define FEMU_QSIZE          16
@@ -22819,6 +22820,399 @@ static void femu_test_opal_crypto_format(void *obj, void *data,
     g_assert_cmpuint(femu_opal_xfer(&c, qts, buf, &t, tsn, r), ==, 2);
     g_assert_cmphex(r[57], ==, 0);
     femu_opal_expect(&c, qts, 1, 64, io, 0x6B);
+    femu_opal_eos(&c, qts, buf, tsn);
+
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+/* ---- x-opal-mpa: MEK Multiparty Authorization over NVMe ---- */
+
+#define FEMU_MPA_AC(x)          (0x0000170100000000ull + (x))
+#define FEMU_MPA_CERT(c)        (0x0000000A00000400ull + (c))
+#define FEMU_MPA_CERTDATA(c)    (0x0000180000000000ull + ((uint64_t)(c) << 32))
+#define FEMU_MPA_M(m)           (0x0000000600000B00ull + (m))
+#define FEMU_MPA_KAES1          0x0000080600030001ull
+#define FEMU_MPA_LSP_ADMIN1     0x0000000900010001ull
+
+/* a uint atom at @p (tiny or short); *len gets its length */
+static uint64_t femu_mpa_uint(const uint8_t *p, uint32_t *len)
+{
+    uint64_t v = 0;
+    uint32_t i;
+
+    if (p[0] < 0x40) {
+        *len = 1;
+        return p[0];
+    }
+    g_assert_cmphex(p[0] & 0xF0, ==, 0x80);
+    for (i = 0; i < (p[0] & 0x0F); i++) {
+        v = v << 8 | p[1 + i];
+    }
+    *len = 1 + (p[0] & 0x0F);
+    return v;
+}
+
+/* read Certificate @cn: its CertSize, then its CertificateData bytes */
+static uint32_t femu_mpa_cert(FemuCtrlState *c, QTestState *qts,
+                              uint64_t buf, uint32_t tsn, int cn,
+                              uint8_t *der)
+{
+    FemuTb t = { .n = 0 };
+    uint8_t r[2048];
+    uint32_t len;
+    uint32_t al;
+    uint64_t size;
+
+    femu_tb_call(&t, FEMU_MPA_CERT(cn), 0x0000000600000016ull);
+    t.b[t.n++] = 0xF0;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 3;                     /* startColumn 3 */
+    t.b[t.n++] = 3;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 4;
+    t.b[t.n++] = 4;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF1;
+    femu_tb_end(&t);
+    g_assert_cmpuint(femu_opal_xfer(c, qts, buf, &t, tsn, r), >, 0);
+    /* SL SL SN 3 CertificateData-UID EN SN 4 size EN EL EL */
+    g_assert_cmphex(r[59], ==, 3);
+    g_assert_cmphex(r[60], ==, 0xA8);
+    g_assert_cmphex(r[71], ==, 4);
+    size = femu_mpa_uint(r + 72, &al);
+    g_assert_cmpuint(size, >, 100);
+    g_assert_cmpuint(size, <, 512);
+    t.n = 0;
+    femu_tb_call(&t, FEMU_MPA_CERTDATA(cn), 0x0000000600000016ull);
+    t.b[t.n++] = 0xF0;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 1;
+    t.b[t.n++] = 0;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 2;
+    femu_tb_u(&t, size - 1);
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF1;
+    femu_tb_end(&t);
+    g_assert_cmpuint(femu_opal_xfer(c, qts, buf, &t, tsn, r), >, size);
+    /* SL, a medium atom of @size bytes */
+    g_assert_cmphex(r[56], ==, 0xF0);
+    g_assert_cmphex(r[57] & 0xF8, ==, 0xD0);
+    len = (r[57] & 0x07) << 8 | r[58];
+    g_assert_cmpuint(len, ==, size);
+    memcpy(der, r + 59, size);
+    return size;
+}
+
+/* the key after the SubjectPublicKeyInfo header with OID 1.3.101.@alg */
+static void femu_mpa_spki(const uint8_t *der, uint32_t len, uint8_t alg,
+                          uint8_t pk[32])
+{
+    const uint8_t pat[] = { 0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65,
+                            alg, 0x03, 0x21, 0x00 };
+    uint32_t i;
+
+    for (i = 0; i + sizeof(pat) + 32 <= len; i++) {
+        if (!memcmp(der + i, pat, sizeof(pat))) {
+            memcpy(pk, der + i + sizeof(pat), 32);
+            return;
+        }
+    }
+    g_assert_not_reached();
+}
+
+/* the Ed25519 signature of @der: the TBS is its first item */
+static bool femu_mpa_signed(const uint8_t *der, uint32_t len,
+                            const uint8_t pk[32])
+{
+    uint32_t h = der[1] == 0x82 ? 4 : der[1] == 0x81 ? 3 : 2;
+    uint32_t th = der[h + 1] == 0x82 ? 4 : der[h + 1] == 0x81 ? 3 : 2;
+    uint32_t tl = th == 4 ? (der[h + 2] << 8 | der[h + 3]) :
+                  th == 3 ? der[h + 2] : der[h + 1];
+
+    return femu_ed25519_verify(der + len - 64, der + h, th + tl, pk);
+}
+
+/*
+ * MPA method @m on AC @x, the access keys sealed on a host HPKE context
+ * to @pk with info = method UID || AC UID. @ak2 is the new key of
+ * ChangeAccessKey. @txn starts a transaction first. Returns the status.
+ */
+static uint8_t femu_mpa_call_t(FemuCtrlState *c, QTestState *qts,
+                               uint64_t buf, uint32_t tsn, int m, int x,
+                               const uint8_t *pk, const uint8_t *ak,
+                               const uint8_t *ak2, bool txn)
+{
+    FemuTb t = { .n = 0 };
+    FemuHpkeCtx h;
+    uint8_t info[16];
+    uint8_t ske[32];
+    uint8_t enc[32];
+    uint8_t ct[48];
+    int i;
+
+    stq_be_p(info, FEMU_MPA_M(m));
+    stq_be_p(info + 8, FEMU_MPA_AC(x));
+    for (i = 0; i < 32; i++) {
+        ske[i] = g_test_rand_int();
+    }
+    g_assert_true(femu_hpke_setup_s(&h, enc, ske, pk, info, 16));
+    if (txn) {
+        t.b[t.n++] = 0xFB;
+        t.b[t.n++] = 0;
+    }
+    femu_tb_call(&t, FEMU_MPA_AC(x), FEMU_MPA_M(m));
+    if (ak) {
+        femu_tb_bytes(&t, enc, 32);
+        g_assert_true(femu_hpke_seal(&h, ct, NULL, 0, ak, 32));
+        femu_tb_bytes(&t, ct, 48);
+    }
+    if (ak2) {
+        g_assert_true(femu_hpke_seal(&h, ct, NULL, 0, ak2, 32));
+        femu_tb_bytes(&t, ct, 48);
+    }
+    return femu_opal_run(c, qts, buf, &t, tsn);
+}
+
+static uint8_t femu_mpa_call(FemuCtrlState *c, QTestState *qts, uint64_t buf,
+                             uint32_t tsn, int m, int x, const uint8_t *pk,
+                             const uint8_t *ak, const uint8_t *ak2)
+{
+    return femu_mpa_call_t(c, qts, buf, tsn, m, x, pk, ak, ak2, false);
+}
+
+/* Set column @col of @obj to a list of AC references; @acs ends with 0 */
+static uint8_t femu_mpa_list(FemuCtrlState *c, QTestState *qts, uint64_t buf,
+                             uint32_t tsn, uint64_t obj, int col,
+                             const int *acs)
+{
+    FemuTb t = { .n = 0 };
+    int i;
+
+    femu_tb_call(&t, obj, 0x0000000600000017ull);
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 1;
+    t.b[t.n++] = 0xF0;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = col;
+    t.b[t.n++] = 0xF0;
+    for (i = 0; acs[i]; i++) {
+        femu_tb_uid(&t, FEMU_MPA_AC(acs[i]));
+    }
+    t.b[t.n++] = 0xF1;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF1;
+    t.b[t.n++] = 0xF3;
+    return femu_opal_run(c, qts, buf, &t, tsn);
+}
+
+/* the AC count of list column @col of K_AES_256 Range1 */
+static int femu_mpa_list_len(FemuCtrlState *c, QTestState *qts, uint64_t buf,
+                             uint32_t tsn, int col)
+{
+    FemuTb t = { .n = 0 };
+    uint8_t r[2048];
+    int k = 0;
+    int i;
+
+    femu_tb_call(&t, FEMU_MPA_KAES1, 0x0000000600000016ull);
+    t.b[t.n++] = 0xF0;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 3;
+    t.b[t.n++] = col;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 4;
+    t.b[t.n++] = col;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF1;
+    femu_tb_end(&t);
+    g_assert_cmpuint(femu_opal_xfer(c, qts, buf, &t, tsn, r), >, 0);
+    /* SL SL SN col SL {A8 uid} EL EN EL EL */
+    g_assert_cmphex(r[59], ==, col);
+    g_assert_cmphex(r[60], ==, 0xF0);
+    for (i = 61; r[i] == 0xA8; i += 9) {
+        k++;
+    }
+    g_assert_cmphex(r[i], ==, 0xF1);
+    return k;
+}
+
+static void femu_mpa_power_cycle(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/mpa',"
+                           "'property':'x-opal-power-cycle','value':true}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/*
+ * x-opal-mpa over NVMe: Certificate1 is signed by Certificate2 and names
+ * the HPKE suite; a Range1 key bound to two ACs reads and writes only
+ * while both are enabled; DisableAccess locks it and EnableAccess does not
+ * unlock it; an aborted transaction undoes an Initialize; a TCG power
+ * cycle disables every AC and makes a new KEM key, and the old access key
+ * still works; a Format crypto erase keeps the lists.
+ */
+static void femu_test_opal_mpa(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const char pin[] = "FEMU-MSID-opal-mpa";
+    static const uint8_t hpke[] = { 0x06, 0x06, 0x67, 0x81, 0x05, 0x15, 0x01,
+                                    0x01, 0x04, 0x0B, 0x30, 0x09, 0x02, 0x01,
+                                    0x20, 0x02, 0x01, 0x01, 0x02, 0x01, 0x03 };
+    static const uint8_t ak1[32] = "party one access key, 32 bytes.";
+    static const uint8_t ak2[32] = "party two access key, 32 bytes.";
+    static const uint8_t ak3[32] = "party three access key, 32 byte";
+    static const int range[] = { 3, 4, 5, 6, 7, 8, -1 };
+    static const uint64_t open_r[] = { 64, 64, 1, 1, 0, 0 };
+    static const int rw[] = { 7, 8, -1 };
+    static const uint64_t unlock[] = { 0, 0 };
+    static const int both[] = { 1, 2, 0 };
+    static const int one[] = { 1, 0 };
+    static const int two[] = { 2, 0 };
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=mpa,addr=5,devsz_mb=256,"
+        "femu_mode=1,x-opal=on,x-opal-mpa=on,serial=opal-mpa");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    FemuTb t = { .n = 0 };
+    uint8_t c1[512];
+    uint8_t c2[512];
+    uint8_t id_pk[32];
+    uint8_t kem[32];
+    uint8_t kem0[32];
+    uint8_t r[2048];
+    uint32_t l1;
+    uint32_t l2;
+    uint32_t tsn = 0;
+    uint32_t i;
+    uint64_t buf;
+    uint64_t io;
+    bool found = false;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(&qs->alloc, 8192);
+    io = guest_alloc(&qs->alloc, FEMU_DATA_SIZE);
+
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, 0x0000020500000001ull,
+                                    0x0000000900000006ull, pin, &tsn), ==, 0);
+    femu_tb_call(&t, FEMU_OPAL_LOCKING_SP, 0x0000000600000203ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    femu_opal_eos(&c, qts, buf, tsn);
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
+                                    FEMU_MPA_LSP_ADMIN1, pin, &tsn), ==, 0);
+
+    /* the certificates: Certificate2 signs Certificate1 and itself */
+    l1 = femu_mpa_cert(&c, qts, buf, tsn, 1, c1);
+    l2 = femu_mpa_cert(&c, qts, buf, tsn, 2, c2);
+    femu_mpa_spki(c2, l2, 0x70, id_pk);
+    femu_mpa_spki(c1, l1, 0x6E, kem);
+    g_assert_true(femu_mpa_signed(c2, l2, id_pk));
+    g_assert_true(femu_mpa_signed(c1, l1, id_pk));
+    for (i = 0; i + sizeof(hpke) <= l1; i++) {
+        found |= !memcmp(c1 + i, hpke, sizeof(hpke));
+    }
+    g_assert_true(found);
+
+    /* Range1 at LBA 64, unlocked, bound to AC1 and AC2 */
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    range, open_r), ==, 0);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 1, 1, kem, ak1, NULL),
+                     ==, 0);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 1, 2, kem, ak2, NULL),
+                     ==, 0);
+    g_assert_cmpuint(femu_mpa_list(&c, qts, buf, tsn, FEMU_MPA_KAES1, 6,
+                                   both), ==, 0);
+    femu_opal_fill(&c, qts, 1, 64, io, 0x5A);
+    t.n = 0;
+    femu_tb_call(&t, FEMU_MPA_KAES1, 0x0000000600000010ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    g_assert_cmpint(femu_mpa_list_len(&c, qts, buf, tsn, 5), ==, 2);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 1, kem, ak2, NULL),
+                     ==, 0x3F);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 1, kem, ak1, NULL),
+                     ==, 0);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 2, kem, ak2, NULL),
+                     ==, 0);
+    /* both enabled: the GenKey erased the old data, the range works */
+    femu_opal_expect(&c, qts, 1, 64, io, 0);
+    femu_opal_fill(&c, qts, 1, 64, io, 0x6B);
+    /* DisableAccess locks, EnableAccess does not unlock */
+    t.n = 0;
+    femu_tb_call(&t, FEMU_MPA_AC(2), FEMU_MPA_M(5));
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1, rw,
+                                    unlock), ==, 0x01);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 2, kem, ak2, NULL),
+                     ==, 0);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1, rw,
+                                    unlock), ==, 0);
+    femu_opal_expect(&c, qts, 1, 64, io, 0x6B);
+
+    /* an aborted transaction undoes the Initialize of AC3 */
+    g_assert_cmpuint(femu_mpa_call_t(&c, qts, buf, tsn, 1, 3, kem, ak3, NULL,
+                                     true), ==, 0);
+    t.n = 0;
+    t.b[t.n++] = 0xFC;
+    t.b[t.n++] = 1;
+    g_assert_cmpuint(femu_opal_xfer(&c, qts, buf, &t, tsn, r), ==, 2);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 3, kem, ak3, NULL),
+                     ==, 0x0C);
+
+    /* a TCG power cycle: the ACs go disabled and Range1 locks */
+    femu_opal_eos(&c, qts, buf, tsn);
+    femu_mpa_power_cycle(qts);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
+                                    FEMU_MPA_LSP_ADMIN1, pin, &tsn), ==, 0);
+    memcpy(kem0, kem, 32);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 1, kem0, ak1, NULL),
+                     ==, 0x0C);
+    l1 = femu_mpa_cert(&c, qts, buf, tsn, 1, c1);
+    femu_mpa_spki(c1, l1, 0x6E, kem);
+    g_assert_cmpint(memcmp(kem, kem0, 32), !=, 0);
+    g_assert_true(femu_mpa_signed(c1, l1, id_pk));
+    /* the seals stay: the same access keys enable the ACs again */
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 1, kem, ak1, NULL),
+                     ==, 0);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 2, kem, ak2, NULL),
+                     ==, 0);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1, rw,
+                                    unlock), ==, 0);
+    femu_opal_expect(&c, qts, 1, 64, io, 0x6B);
+
+    /* Format crypto erase with Active [AC1] and Pending [AC2] */
+    g_assert_cmpuint(femu_mpa_list(&c, qts, buf, tsn, FEMU_MPA_KAES1, 6, one),
+                     ==, 0);
+    t.n = 0;
+    femu_tb_call(&t, FEMU_MPA_KAES1, 0x0000000600000010ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    g_assert_cmpuint(femu_mpa_list(&c, qts, buf, tsn, FEMU_MPA_KAES1, 6, two),
+                     ==, 0);
+    t.n = 0;
+    femu_tb_call(&t, FEMU_MPA_AC(2), FEMU_MPA_M(5));
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    femu_opal_fill(&c, qts, 1, 64, io, 0x7C);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 2)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_mpa_list_len(&c, qts, buf, tsn, 5), ==, 1);
+    g_assert_cmpint(femu_mpa_list_len(&c, qts, buf, tsn, 6), ==, 1);
+    femu_opal_expect(&c, qts, 1, 64, io, 0);
     femu_opal_eos(&c, qts, buf, tsn);
 
     g_free(pdev);
@@ -63989,6 +64383,7 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("format-crypto-ns", "femu", femu_test_format_crypto_ns,
                  NULL);
+    qos_add_test("opal-mpa", "femu", femu_test_opal_mpa, NULL);
     qos_add_test("opal-off", "femu", femu_test_opal_off, NULL);
     qos_add_test("opal-refused", "femu", femu_test_opal_refused, NULL);
     qos_add_test("telemetry-ctrl", "femu", femu_test_telemetry_ctrl,

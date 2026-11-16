@@ -10,6 +10,7 @@
 #define FEMU_OPAL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* the one static ComID (Opal 3.3.3, Table 14) */
@@ -52,6 +53,14 @@
 #define FEMU_OPAL_DS_SIZE       (10u << 20)
 #define FEMU_OPAL_CHUNK         (64u << 10)
 #define FEMU_OPAL_ACE_COUNT     69
+/* MEK Multiparty Authorization (TCG MEK-MPA 1.00): 10 + 6 per AC */
+#define FEMU_OPAL_MPA_ACS       4       /* Number of AccessConditions */
+#define FEMU_OPAL_MPA_PER_KEY   2       /* AccessConditions per key */
+#define FEMU_OPAL_MPA_AK_LEN    48      /* the encrypted access key */
+#define FEMU_OPAL_MPA_SEAL      60
+#define FEMU_OPAL_MPA_CERT_MAX  512
+#define FEMU_OPAL_ACE_MAX \
+    (FEMU_OPAL_ACE_COUNT + 10 + 6 * FEMU_OPAL_MPA_ACS)
 /* byte-table chunks one transaction may change (16 MiB) */
 #define FEMU_OPAL_UNDO_CHUNKS   256
 
@@ -96,7 +105,20 @@ typedef struct FemuOpalRange {
     uint8_t lor;                /* LockOnReset, one bit per reset type */
     uint64_t key;               /* key generation; a new one erases */
     FemuOpalPin cn;             /* CommonName */
+    /* MPA lists of AC numbers (1 based), packed, 0 ends a short list */
+    uint8_t active[FEMU_OPAL_MPA_PER_KEY];
+    uint8_t pending[FEMU_OPAL_MPA_PER_KEY];
 } FemuOpalRange;
+
+/* one AccessCondition row; enabled and secret end at a power cycle */
+typedef struct FemuOpalAc {
+    bool initialized;
+    bool enabled;               /* AccessEnabled */
+    uint8_t dor;                /* DisableAccessOnReset, one bit per type */
+    FemuOpalPin cn;             /* CommonName */
+    uint8_t seal[FEMU_OPAL_MPA_SEAL];   /* the secret under the access key */
+    uint8_t secret[32];
+} FemuOpalAc;
 
 /*
  * The personalization a transaction can roll back. Tries stays outside it:
@@ -111,7 +133,14 @@ typedef struct FemuOpalSp {
     bool mbr_enable;
     bool mbr_done;
     uint8_t mbr_dor;            /* DoneOnReset */
-    uint32_t ace[FEMU_OPAL_ACE_COUNT];      /* BooleanExpr: OR of bits */
+    uint32_t ace[FEMU_OPAL_ACE_MAX];        /* BooleanExpr: OR of bits */
+    /* MPA: the rows and the ephemeral KEM key of Certificate1 */
+    FemuOpalAc ac[FEMU_OPAL_MPA_ACS];
+    bool kem_ok;                /* false: no KEM key until a new one */
+    uint8_t kem_sk[32];
+    uint8_t kem_pk[32];
+    uint16_t cert1_len;
+    uint8_t cert1[FEMU_OPAL_MPA_CERT_MAX];
 } FemuOpalSp;
 
 /* the one session (MaxSessions 1) */
@@ -163,6 +192,8 @@ typedef struct FemuOpalEnc {
 
 /* erase @nlb LBAs at @slba: their old data must not come back */
 typedef void FemuOpalEraseFn(void *opaque, uint64_t slba, uint64_t nlb);
+/* fill @buf with @len random bytes; false on a failure */
+typedef bool FemuOpalRandFn(void *opaque, uint8_t *buf, size_t len);
 
 typedef struct FemuOpalCfg {
     uint32_t lba_size;
@@ -174,6 +205,9 @@ typedef struct FemuOpalCfg {
     bool crypto_erase;          /* GenKey, Revert and RevertSP erase */
     FemuOpalPin msid;           /* C_PIN_MSID */
     FemuOpalPin psid;           /* C_PIN_PSID */
+    bool mpa;                   /* MEK Multiparty Authorization */
+    FemuOpalRandFn *rand;       /* NULL: glib random, for the unit test */
+    char serial[24];            /* the controller serial, for certificates */
 } FemuOpalCfg;
 
 /* communication properties a host may set (Core 5.2.2.4) */
@@ -210,6 +244,14 @@ typedef struct FemuOpal {
     uint8_t *ds[FEMU_OPAL_DS_SIZE / FEMU_OPAL_CHUNK];
     void *undo;                 /* chunks a transaction changed: the old */
     uint64_t next_key;          /* 64 bits: never wraps */
+    /* MPA device state outside the rollback image */
+    bool id_ok;
+    uint8_t dev_root[32];
+    uint8_t id_seed[32];        /* the Ed25519 identity key */
+    uint8_t id_pk[32];
+    uint32_t cert_serial;
+    uint16_t cert2_len;
+    uint8_t cert2[FEMU_OPAL_MPA_CERT_MAX];
     FemuOpalTok toks[FEMU_OPAL_MAX_TOKS];
 } FemuOpal;
 

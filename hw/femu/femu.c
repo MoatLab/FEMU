@@ -4534,6 +4534,10 @@ static bool femu_fw_resolve(FemuCtrl *n, Error **errp)
                    "device yet");
         return false;
     }
+    if (n->opal_mpa && !n->opal) {
+        error_setg(errp, "x-opal-mpa needs x-opal");
+        return false;
+    }
     if (n->fw_slots > 1 && (n->subsys || n->cxl_dev)) {
         error_setg(errp, "fw_slots above 1%s does not work with a femu-subsys "
                    "or a CXL device yet", n->ocp ? " (ocp needs 3)" : "");
@@ -4990,6 +4994,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
             .lba_size = ns ? NVME_ID_NS_LBADS_BYTES(ns) : 512,
             .admins = 4,
             .users = 8,
+            .mpa = n->opal_mpa,
         };
 
         if (!femu_opal_config_check(n, errp)) {
@@ -4998,6 +5003,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         }
         femu_opal_pin(&cfg.msid, "MSID", n->serial);
         femu_opal_pin(&cfg.psid, "PSID", n->serial);
+        g_strlcpy(cfg.serial, n->serial ? n->serial : "", sizeof(cfg.serial));
         femu_opal_start(n, &cfg);
     }
     /* reservations and ANA work on the namespaces that now exist */
@@ -5493,6 +5499,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT8("fw_slots", FemuCtrl, fw_slots, 0),
     DEFINE_PROP_BOOL("lockdown", FemuCtrl, lockdown, false),
     DEFINE_PROP_BOOL("x-opal", FemuCtrl, opal, false),
+    DEFINE_PROP_BOOL("x-opal-mpa", FemuCtrl, opal_mpa, false),
     DEFINE_PROP_BOOL("reservations", FemuCtrl, reservations, false),
     DEFINE_PROP_BOOL("power_states", FemuCtrl, power_states, false),
     DEFINE_PROP_BOOL("ana", FemuCtrl, ana, false),
@@ -6814,6 +6821,15 @@ static void femu_test_opal_gkey_get(Object *obj, Visitor *v,
     visit_type_uint64(v, name, &value, errp);
 }
 
+/* x-opal-power-cycle: writing true runs a TCG power cycle of the TPer */
+static void femu_test_opal_power_cycle_set(Object *obj, bool value,
+                                           Error **errp)
+{
+    if (value && !femu_opal_test_power_cycle(FEMU(obj))) {
+        error_setg(errp, "x-opal-power-cycle: no x-opal, or I/O in flight");
+    }
+}
+
 /* x-tp-hold: keep pending translation pages pending, as at the reserve */
 static bool femu_test_tp_hold_get(Object *obj, Error **errp)
 {
@@ -6993,6 +7009,8 @@ static void femu_instance_init(Object *obj)
                             femu_test_range_waits_get, NULL, NULL, NULL);
         object_property_add(obj, "x-opal-gkey", "uint64",
                             femu_test_opal_gkey_get, NULL, NULL, NULL);
+        object_property_add_bool(obj, "x-opal-power-cycle", NULL,
+                                 femu_test_opal_power_cycle_set);
         object_property_add_str(obj, "x-oc12-trace", femu_test_oc12_trace,
                                 NULL);
     }

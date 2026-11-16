@@ -15,6 +15,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "system/reset.h"
+#include "crypto/random.h"
 #include "nvme-opal.h"
 #include "bbssd/ftl.h"
 
@@ -81,16 +82,39 @@ static void opal_machine_reset(void *opaque)
     nvme_resume_pollers(n, resume);
 }
 
+static bool opal_rand(void *opaque, uint8_t *buf, size_t len)
+{
+    return !qcrypto_random_bytes(buf, len, NULL);
+}
+
 /* the engine at realize, before the dataplane runs */
 void femu_opal_start(FemuCtrl *n, FemuOpalCfg *cfg)
 {
     cfg->erase = opal_erase;
+    cfg->rand = opal_rand;
     cfg->opaque = n;
     n->opal_tper = g_new(FemuOpal, 1);
     n->opal_view = g_new0(FemuOpalView, 1);
     femu_opal_init(n->opal_tper, cfg);
     femu_opal_publish(n);
     qemu_register_reset(opal_machine_reset, n);
+}
+
+/*
+ * A TCG power cycle for the qtest: QMP system_reset is a hardware reset
+ * (opal_machine_reset). False when the I/O did not drain.
+ */
+bool femu_opal_test_power_cycle(FemuCtrl *n)
+{
+    bool resume;
+
+    if (!n->opal_tper || !femu_opal_quiet(n, &resume)) {
+        return false;
+    }
+    femu_opal_power_cycle(n->opal_tper);
+    femu_opal_publish(n);
+    femu_opal_loud(n, resume);
+    return true;
 }
 
 void femu_opal_stop(FemuCtrl *n)

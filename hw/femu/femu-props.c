@@ -362,6 +362,15 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "NoSSD or page-mapped bbssd namespace without metadata, not with a "
       "femu-subsys, CXL, CSD, ns_mgmt, power_loss, sanitize_ns, ns_wp or "
       "persist_file; off (default)" },
+    { "x-opal-mpa",
+      "x-opal: TCG MEK Multiparty Authorization 1.00, experimental: 4 "
+      "AccessConditions with InitializeAccessCondition, TestAccessKey, "
+      "ChangeAccessKey, EnableAccess and DisableAccess over HPKE (X25519, "
+      "HKDF-SHA256, ChaCha20-Poly1305), an ephemeral KEM certificate signed"
+      " by an Ed25519 identity certificate, Active and Pending lists on "
+      "each K_AES_256 row (2 per key), Level 0 feature 040Ch; emulation "
+      "only, not constant time ([TCG Opal](../features/tcg-opal.md)); needs"
+      " x-opal; off (default)" },
     { "hmb_mb",
       "bbssd with mapping=dftl: ask the host for a Host Memory Buffer of "
       "this many MiB (Identify HMPRE and HMMIN). While the host has it "

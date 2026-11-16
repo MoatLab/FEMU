@@ -29,6 +29,14 @@
 #define UID_SECRETPROTECT_KAES 0x0000001D0000001Eull
 #define UID_M_GENKEY        0x0000000600000010ull
 #define UID_M_REVERTSP      0x0000000600000011ull
+/* MEK-MPA objects (Tables 10, 11, 15, 16) */
+#define UID_M_MPA(m)        (0x0000000600000B00ull + (m))
+#define UID_T_AC            0x0000170100000000ull
+#define UID_AC(x)           (UID_T_AC + (x))
+#define UID_T_CERTS         0x0000000A00000000ull
+#define UID_CERT(c)         (0x0000000A00000400ull + (c))
+#define UID_CERTDATA(c)     (0x0000180000000000ull + ((uint64_t)(c) << 32))
+#define NAME_ADDITIONAL_AC  0x070000
 
 /* the half-UIDs of a BooleanExpr (Core Table 210) */
 #define HALF_AUTHORITY_REF  0x00000C05u
@@ -71,8 +79,42 @@ enum {
     ACE_GLOBAL_ADMINS_SET = ACE_LOCK_WRLOCKED + 9,
     ACE_RANGE_ADMINS_SET, ACE_MBR_ADMINS_SET, ACE_MBR_DONE_TO_DOR,
     ACE_DS_GET, ACE_DS_SET, ACE_END,
+    /*
+     * MPA ACEs (MEK-MPA Table 13), present only with cfg.mpa: the K_AES
+     * list Get, the Pending Set of Global and Range1 to Range8, then per
+     * AC: Set DisableOnReset and the five methods.
+     */
+    ACE_MPA_KAES = ACE_END, ACE_MPA_PENDING,
+    ACE_MPA_DOR = ACE_MPA_PENDING + 9,
+    ACE_MPA_METHOD = ACE_MPA_DOR + FEMU_OPAL_MPA_ACS,
+    ACE_MPA_END = ACE_MPA_METHOD + 5 * FEMU_OPAL_MPA_ACS,
 };
 QEMU_BUILD_BUG_ON(ACE_END != FEMU_OPAL_ACE_COUNT);
+QEMU_BUILD_BUG_ON(ACE_MPA_END != FEMU_OPAL_ACE_MAX);
+
+/* MEK-MPA parts in femu-opal-mpa.c.inc */
+static int mpa_acl(const FemuOpal *o, uint64_t obj, uint64_t m, int *ace);
+static int mpa_maxcol(const FemuOpal *o, uint64_t uid);
+static int mpa_col(FemuOpal *o, uint64_t uid, uint32_t col, FemuOpalEnc *e);
+static int mpa_apply(const FemuOpal *o, FemuOpalSp *next, uint64_t uid,
+                     uint32_t col, const FemuOpalTok *v, int vn);
+static uint8_t mpa_set_check(const FemuOpal *o, const FemuOpalSp *next);
+static uint8_t mpa_genkey_kaes(FemuOpal *o, int k, const FemuOpalTok *t,
+                               int n);
+static uint8_t mpa_genkey_cert(FemuOpal *o, int c, int n);
+static int mpa_cert(const FemuOpal *o, uint64_t uid);
+static int mpa_certdata(const FemuOpal *o, uint64_t uid);
+static void mpa_cert_read(const FemuOpal *o, int c, uint64_t off,
+                          uint8_t *buf, uint32_t len);
+static void mpa_factory(FemuOpal *o);
+static bool mpa_blocked(const FemuOpalSp *sp, int r);
+static int mpa_list_len(const uint8_t *l);
+static int lsp_key_row(uint64_t uid);
+
+static int lsp_ace_end(const FemuOpal *o)
+{
+    return o->cfg.mpa ? ACE_MPA_END : ACE_END;
+}
 
 static uint64_t lsp_ace_uid(int i)
 {
@@ -84,7 +126,20 @@ static uint64_t lsp_ace_uid(int i)
     };
     uint32_t lo;
 
-    if (i < ACE_USER_SET_CN) {
+    if (i >= ACE_MPA_METHOD) {
+        int m = (i - ACE_MPA_METHOD) / FEMU_OPAL_MPA_ACS;
+
+        lo = 0x00064300 + 0x100 * m + (i - ACE_MPA_METHOD) %
+             FEMU_OPAL_MPA_ACS + 1;
+    } else if (i >= ACE_MPA_DOR) {
+        lo = 0x00064201 + (i - ACE_MPA_DOR);
+    } else if (i > ACE_MPA_PENDING) {
+        lo = 0x00064101 + (i - ACE_MPA_PENDING - 1);
+    } else if (i == ACE_MPA_PENDING) {
+        lo = 0x00064002;
+    } else if (i == ACE_MPA_KAES) {
+        lo = 0x00064001;
+    } else if (i < ACE_USER_SET_CN) {
         lo = fixed[i];
     } else if (i < ACE_CPIN_GET_NOPIN) {
         lo = 0x00044001 + (i - ACE_USER_SET_CN);
@@ -115,11 +170,11 @@ static uint64_t lsp_ace_uid(int i)
     return 0x0000000800000000ull | lo;
 }
 
-static int lsp_ace_index(uint64_t uid)
+static int lsp_ace_index(const FemuOpal *o, uint64_t uid)
 {
     int i;
 
-    for (i = 0; i < ACE_END; i++) {
+    for (i = 0; i < lsp_ace_end(o); i++) {
         if (lsp_ace_uid(i) == uid) {
             return i;
         }
@@ -130,6 +185,18 @@ static int lsp_ace_index(uint64_t uid)
 /* the columns an ACE grants (Opal Table 39) */
 static uint32_t lsp_ace_cols(int i)
 {
+    if (i >= ACE_MPA_METHOD) {
+        return COLS_ALL;
+    }
+    if (i >= ACE_MPA_DOR) {
+        return 1u << 4;
+    }
+    if (i >= ACE_MPA_PENDING) {
+        return 1u << 6;
+    }
+    if (i == ACE_MPA_KAES) {
+        return COLS(5, 6);
+    }
     if (i >= ACE_USER_SET_CN && i < ACE_CPIN_GET_NOPIN) {
         return 1u << 2;
     }
@@ -175,7 +242,8 @@ static uint32_t lsp_ace_cols(int i)
 
 static uint32_t lsp_ace_default(int i)
 {
-    if (i == ACE_ANYBODY || i == ACE_ANYBODY_GET_CN || i == ACE_KAES_MODE) {
+    if (i == ACE_ANYBODY || i == ACE_ANYBODY_GET_CN || i == ACE_KAES_MODE ||
+        i == ACE_MPA_KAES) {
         return EXPR_ANYBODY;
     }
     if (i >= ACE_CPIN_USER_SET_PIN && i < ACE_KAES_MODE) {
@@ -191,7 +259,8 @@ static bool lsp_ace_settable(int i)
            (i >= ACE_USER_SET_CN && i < ACE_CPIN_GET_NOPIN) ||
            (i >= ACE_CPIN_USER_SET_PIN && i < ACE_KAES_MODE) ||
            (i >= ACE_GENKEY && i < ACE_GLOBAL_ADMINS_SET) ||
-           i == ACE_MBR_DONE_TO_DOR || i == ACE_DS_GET || i == ACE_DS_SET;
+           i == ACE_MBR_DONE_TO_DOR || i == ACE_DS_GET || i == ACE_DS_SET ||
+           (i > ACE_MPA_KAES && i < ACE_MPA_END);
 }
 
 /* does the session satisfy BooleanExpr @expr? */
@@ -256,14 +325,19 @@ static const struct {
     uint32_t t;
     const char *name;
     uint32_t rows;              /* byte tables: their size */
+    bool mpa;                   /* MEK-MPA Table 11 */
 } lsp_tables[] = {
     { 0x0001, "Table" }, { 0x0002, "SPInfo" }, { 0x0003, "SPTemplates" },
     { 0x0006, "MethodID" }, { 0x0007, "AccessControl" }, { 0x0008, "ACE" },
-    { 0x0009, "Authority" }, { 0x000B, "C_PIN" },
+    { 0x0009, "Authority" }, { 0x000A, "Certificates", 0, true },
+    { 0x000B, "C_PIN" },
     { 0x001D, "SecretProtect" }, { 0x0801, "LockingInfo" },
     { 0x0802, "Locking" }, { 0x0803, "MBRControl" },
     { 0x0804, "MBR", FEMU_OPAL_MBR_SIZE }, { 0x0806, "K_AES_256" },
     { 0x1001, "DataStore", FEMU_OPAL_DS_SIZE },
+    { 0x1701, "AccessCondition", 0, true },
+    { 0x1801, "CertificateData1", FEMU_OPAL_MPA_CERT_MAX, true },
+    { 0x1802, "CertificateData2", FEMU_OPAL_MPA_CERT_MAX, true },
 };
 
 /* the SPTemplates rows (Opal Table 35) */
@@ -276,19 +350,26 @@ static const struct {
 static const struct {
     uint64_t uid;
     const char *name;
+    bool mpa;                   /* MEK-MPA Table 10 */
 } lsp_methods[] = {
     { UID_M_NEXT, "Next" }, { UID_M_GETACL, "GetACL" },
     { UID_M_GENKEY, "GenKey" }, { UID_M_REVERTSP, "RevertSP" },
     { UID_M_GET, "Get" }, { UID_M_SET, "Set" },
     { UID_M_AUTHENTICATE, "Authenticate" }, { UID_M_RANDOM, "Random" },
+    { UID_M_MPA(1), "InitializeAccessCondition", true },
+    { UID_M_MPA(2), "TestAccessKey", true },
+    { UID_M_MPA(3), "ChangeAccessKey", true },
+    { UID_M_MPA(4), "EnableAccess", true },
+    { UID_M_MPA(5), "DisableAccess", true },
 };
 
-static int lsp_table_row(uint64_t uid)
+static int lsp_table_row(const FemuOpal *o, uint64_t uid)
 {
     int i;
 
     for (i = 0; i < ARRAY_SIZE(lsp_tables); i++) {
-        if (uid == UID_TABLE(lsp_tables[i].t)) {
+        if (uid == UID_TABLE(lsp_tables[i].t) &&
+            (o->cfg.mpa || !lsp_tables[i].mpa)) {
             return i;
         }
     }
@@ -301,12 +382,12 @@ static int lsp_template_row(uint64_t uid)
            uid == UID_T_SPTEMPLATES + 2 ? 1 : -1;
 }
 
-static int lsp_method_row(uint64_t uid)
+static int lsp_method_row(const FemuOpal *o, uint64_t uid)
 {
     int i;
 
     for (i = 0; i < ARRAY_SIZE(lsp_methods); i++) {
-        if (uid == lsp_methods[i].uid) {
+        if (uid == lsp_methods[i].uid && (o->cfg.mpa || !lsp_methods[i].mpa)) {
             return i;
         }
     }
@@ -314,23 +395,27 @@ static int lsp_method_row(uint64_t uid)
 }
 
 /* rows that Anybody reads (Opal Table 38) */
-static bool lsp_public_row(uint64_t uid)
+static bool lsp_public_row(const FemuOpal *o, uint64_t uid)
 {
     return uid == UID_LSP_SPINFO || uid == UID_LOCKINGINFO ||
            uid == UID_MBRCONTROL || uid == UID_SECRETPROTECT_KAES ||
-           lsp_table_row(uid) >= 0 || lsp_template_row(uid) >= 0 ||
-           lsp_method_row(uid) >= 0;
+           lsp_table_row(o, uid) >= 0 || lsp_template_row(uid) >= 0 ||
+           lsp_method_row(o, uid) >= 0;
 }
 
 /*
  * The ACL of (object, method) in the Locking SP (Opal Table 38). Returns
  * the ACE count, 0 when the association does not exist.
  */
-static int lsp_acl(uint64_t obj, uint64_t m, int *ace)
+static int lsp_acl(const FemuOpal *o, uint64_t obj, uint64_t m, int *ace)
 {
     int r;
     int a;
 
+    a = mpa_acl(o, obj, m, ace);
+    if (a) {
+        return a;
+    }
     if (obj == UID_THISSP) {
         if (m == UID_M_AUTHENTICATE || m == UID_M_RANDOM) {
             ace[0] = ACE_ANYBODY;
@@ -353,7 +438,7 @@ static int lsp_acl(uint64_t obj, uint64_t m, int *ace)
         return 0;
     }
     if (m == UID_M_GET) {
-        if (lsp_public_row(obj) || obj == UID_T_MBR) {
+        if (lsp_public_row(o, obj) || obj == UID_T_MBR) {
             ace[0] = ACE_ANYBODY;
             return 1;
         }
@@ -361,7 +446,7 @@ static int lsp_acl(uint64_t obj, uint64_t m, int *ace)
             ace[0] = ACE_DS_GET;
             return 1;
         }
-        if (lsp_ace_index(obj) >= 0) {
+        if (lsp_ace_index(o, obj) >= 0) {
             ace[0] = ACE_ACE_GET_ALL;
             return 1;
         }
@@ -382,7 +467,8 @@ static int lsp_acl(uint64_t obj, uint64_t m, int *ace)
         }
         if (lsp_key_row(obj) >= 0) {
             ace[0] = ACE_KAES_MODE;
-            return 1;
+            ace[1] = ACE_MPA_KAES;
+            return o->cfg.mpa ? 2 : 1;
         }
         return 0;
     }
@@ -400,7 +486,7 @@ static int lsp_acl(uint64_t obj, uint64_t m, int *ace)
             ace[0] = ACE_DS_SET;
             return 1;
         }
-        if (lsp_ace_settable(lsp_ace_index(obj))) {
+        if (lsp_ace_settable(lsp_ace_index(o, obj))) {
             ace[0] = ACE_ACE_SET_BE;
             return 1;
         }
@@ -459,7 +545,7 @@ static bool lsp_allowed(const FemuOpal *o, uint64_t obj, uint64_t m)
 {
     int ace[4] = { 0 };
 
-    return lsp_grant(o, ace, lsp_acl(obj, m, ace)) != 0;
+    return lsp_grant(o, ace, lsp_acl(o, obj, m, ace)) != 0;
 }
 
 /* the Locking SP tables as they leave the factory (Opal Tables 39 to 48) */
@@ -479,9 +565,10 @@ static void lsp_factory_tables(FemuOpal *o, bool keep_global)
     o->sp.mbr_enable = false;
     o->sp.mbr_done = false;
     o->sp.mbr_dor = 1u << FEMU_OPAL_RESET_POWER;
-    for (i = 0; i < ACE_END; i++) {
+    for (i = 0; i < ACE_MPA_END; i++) {
         o->sp.ace[i] = lsp_ace_default(i);
     }
+    mpa_factory(o);
     for (i = FEMU_OPAL_AU_LSP_ADMIN1; i < FEMU_OPAL_AU_COUNT; i++) {
         memset(&o->sp.au_cn[i], 0, sizeof(o->sp.au_cn[i]));
     }
@@ -629,6 +716,8 @@ void femu_opal_cleanup(FemuOpal *o)
 void femu_opal_free(FemuOpal *o)
 {
     femu_opal_cleanup(o);
+    /* the device root, the identity seed, the KEM key and AC secrets */
+    mpa_wipe(o, sizeof(*o));
     g_free(o);
 }
 
@@ -740,6 +829,11 @@ void femu_opal_view(const FemuOpal *o, FemuOpalView *v)
         v->r[r].len = r ? sp->range[r].len : 0;
         v->r[r].rlocked = sp->range[r].rle && sp->range[r].rl;
         v->r[r].wlocked = sp->range[r].wle && sp->range[r].wl;
+        /* a disabled AC holds the MEK, or no MEK yet (MPA 4.2.2.3) */
+        if (o->cfg.mpa && mpa_blocked(sp, r)) {
+            v->r[r].rlocked = true;
+            v->r[r].wlocked = true;
+        }
     }
 }
 
@@ -1046,11 +1140,29 @@ static void lsp_ace_name(FemuOpalEnc *e, int i)
         "GenKey", "Get_RangeStartToActiveKey", "Set_RdLocked",
         "Set_WrLocked",
     };
+    static const char *const mpa_m[] = {
+        "InitializeAccessCondition", "TestAccessKey", "ChangeAccessKey",
+        "EnableAccess", "DisableAccess",
+    };
     char b[64];
     char g[16];
     int r;
 
-    if (i < ACE_USER_SET_CN) {
+    if (i >= ACE_MPA_METHOD) {
+        r = i - ACE_MPA_METHOD;
+        enc_name(e, "ACE_AccessCondition_AccessCondition%d_%s",
+                 r % FEMU_OPAL_MPA_ACS + 1, mpa_m[r / FEMU_OPAL_MPA_ACS]);
+    } else if (i >= ACE_MPA_DOR) {
+        enc_name(e, "ACE_AccessCondition_AccessCondition%d_Set_DisableOnReset",
+                 i - ACE_MPA_DOR + 1);
+    } else if (i > ACE_MPA_PENDING) {
+        enc_name(e, "ACE_K_AES_256_Range%d_Set_PendingAccessConditions",
+                 i - ACE_MPA_PENDING);
+    } else if (i == ACE_MPA_PENDING) {
+        enc_str(e, "ACE_K_AES_256_GlobalRange_Set_PendingAccessConditions");
+    } else if (i == ACE_MPA_KAES) {
+        enc_str(e, "ACE_K_AES_AccessConditions");
+    } else if (i < ACE_USER_SET_CN) {
         enc_str(e, fixed[i]);
     } else if (i < ACE_CPIN_GET_NOPIN) {
         enc_name(e, "ACE_User%d_Set_CommonName", i - ACE_USER_SET_CN + 1);
@@ -1082,12 +1194,17 @@ static void lsp_ace_name(FemuOpalEnc *e, int i)
 /* ---- Get ---- */
 
 /* the last column of a Locking SP object, or -1 */
-static int lsp_maxcol(uint64_t uid)
+static int lsp_maxcol(const FemuOpal *o, uint64_t uid)
 {
-    if (lsp_table_row(uid) >= 0) {
+    int mc = mpa_maxcol(o, uid);
+
+    if (mc >= 0) {
+        return mc;
+    }
+    if (lsp_table_row(o, uid) >= 0) {
         return 14;
     }
-    if (lsp_template_row(uid) >= 0 || lsp_method_row(uid) >= 0 ||
+    if (lsp_template_row(uid) >= 0 || lsp_method_row(o, uid) >= 0 ||
         uid == UID_SECRETPROTECT_KAES) {
         return 3;
     }
@@ -1100,7 +1217,7 @@ static int lsp_maxcol(uint64_t uid)
     if (uid == UID_MBRCONTROL) {
         return 3;
     }
-    if (lsp_key_row(uid) >= 0 || lsp_ace_index(uid) >= 0) {
+    if (lsp_key_row(uid) >= 0 || lsp_ace_index(o, uid) >= 0) {
         return 4;
     }
     if (lsp_authority(uid)) {
@@ -1123,7 +1240,11 @@ static bool lsp_col(FemuOpal *o, uint64_t uid, uint32_t col, FemuOpalEnc *e)
         femu_opal_enc_uid(e, uid);
         return true;
     }
-    r = lsp_table_row(uid);
+    r = mpa_col(o, uid, col, e);
+    if (r >= 0) {
+        return r;
+    }
+    r = lsp_table_row(o, uid);
     if (r >= 0) {
         uint32_t rows = lsp_tables[r].rows;
 
@@ -1165,7 +1286,7 @@ static bool lsp_col(FemuOpal *o, uint64_t uid, uint32_t col, FemuOpalEnc *e)
         }
         return false;
     }
-    r = lsp_method_row(uid);
+    r = lsp_method_row(o, uid);
     if (r >= 0) {
         if (col != 1) {
             return false;
@@ -1286,7 +1407,7 @@ static bool lsp_col(FemuOpal *o, uint64_t uid, uint32_t col, FemuOpalEnc *e)
         }
         return false;                           /* the Key stays hidden */
     }
-    a = lsp_ace_index(uid);
+    a = lsp_ace_index(o, uid);
     if (a >= 0) {
         uint32_t cols = lsp_ace_cols(a);
         int c;
@@ -1397,10 +1518,13 @@ static bool lsp_col(FemuOpal *o, uint64_t uid, uint32_t col, FemuOpalEnc *e)
 }
 
 /* Get[Cellblock startRow = 1, endRow = 2] on a byte table (Core 5.3.3.6) */
-static void lsp_byte_get(FemuOpal *o, bool ds, const FemuOpalTok *t, int n,
-                         FemuOpalReply *r)
+static void lsp_byte_get(FemuOpal *o, uint64_t uid, const FemuOpalTok *t,
+                         int n, FemuOpalReply *r)
 {
-    uint64_t size = ds ? FEMU_OPAL_DS_SIZE : FEMU_OPAL_MBR_SIZE;
+    bool ds = uid == UID_T_DATASTORE;
+    int c = mpa_certdata(o, uid);
+    uint64_t size = c ? FEMU_OPAL_MPA_CERT_MAX :
+                    ds ? FEMU_OPAL_DS_SIZE : FEMU_OPAL_MBR_SIZE;
     uint64_t start = 0;
     uint64_t end = size - 1;
     uint8_t buf[FEMU_OPAL_BUF];
@@ -1408,6 +1532,11 @@ static void lsp_byte_get(FemuOpal *o, bool ds, const FemuOpalTok *t, int n,
 
     if (n < 2 || !tok_is(&t[0], TOK_SL) || !tok_is(&t[n - 1], TOK_EL)) {
         r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
+        return;
+    }
+    /* no KEM key after a failed power cycle: no Certificate1 (11.5) */
+    if (c == 1 && !o->sp.kem_ok) {
+        r->status = FEMU_OPAL_ST_FAIL;
         return;
     }
     for (i = 1; i < n - 1; i += 4) {
@@ -1430,7 +1559,11 @@ static void lsp_byte_get(FemuOpal *o, bool ds, const FemuOpalTok *t, int n,
         r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
         return;
     }
-    lsp_bytes_read(o, ds, false, start, buf, end - start + 1);
+    if (c) {
+        mpa_cert_read(o, c, start, buf, end - start + 1);
+    } else {
+        lsp_bytes_read(o, ds, false, start, buf, end - start + 1);
+    }
     femu_opal_enc_ctrl(&r->e, TOK_SL);
     femu_opal_enc_bytes(&r->e, buf, end - start + 1);
     femu_opal_enc_ctrl(&r->e, TOK_EL);
@@ -1440,7 +1573,7 @@ static void lsp_get(FemuOpal *o, uint64_t uid, const FemuOpalTok *t, int n,
                     FemuOpalReply *r)
 {
     int ace[4] = { 0 };
-    int na = lsp_acl(uid, UID_M_GET, ace);
+    int na = lsp_acl(o, uid, UID_M_GET, ace);
     uint32_t cols = lsp_grant(o, ace, na);
     uint64_t start = 0;
     uint64_t end;
@@ -1452,8 +1585,8 @@ static void lsp_get(FemuOpal *o, uint64_t uid, const FemuOpalTok *t, int n,
         r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
         return;
     }
-    if (uid == UID_T_MBR || uid == UID_T_DATASTORE) {
-        lsp_byte_get(o, uid == UID_T_DATASTORE, t, n, r);
+    if (uid == UID_T_MBR || uid == UID_T_DATASTORE || mpa_certdata(o, uid)) {
+        lsp_byte_get(o, uid, t, n, r);
         return;
     }
     if (n < 2 || !tok_is(&t[0], TOK_SL) || !tok_is(&t[n - 1], TOK_EL)) {
@@ -1476,9 +1609,9 @@ static void lsp_get(FemuOpal *o, uint64_t uid, const FemuOpalTok *t, int n,
         }
     }
     if (!have_end) {
-        end = lsp_maxcol(uid);
+        end = lsp_maxcol(o, uid);
     }
-    if (start > end || end > lsp_maxcol(uid)) {
+    if (start > end || end > lsp_maxcol(o, uid)) {
         r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
         return;
     }
@@ -1542,13 +1675,17 @@ static void lsp_byte_set(FemuOpal *o, bool ds, const FemuOpalTok *t, int n,
 }
 
 /* apply column @col = v[0..vn) to @next; false: INVALID_PARAMETER */
-static bool lsp_apply(FemuOpalSp *next, uint64_t uid, uint32_t col,
-                      const FemuOpalTok *v, int vn)
+static bool lsp_apply(const FemuOpal *o, FemuOpalSp *next, uint64_t uid,
+                      uint32_t col, const FemuOpalTok *v, int vn)
 {
     int r = lsp_lock_row(uid);
     int a;
     int ai;
 
+    a = mpa_apply(o, next, uid, col, v, vn);
+    if (a >= 0) {
+        return a;
+    }
     if (r >= 0) {
         FemuOpalRange *g = &next->range[r];
 
@@ -1598,7 +1735,7 @@ static bool lsp_apply(FemuOpalSp *next, uint64_t uid, uint32_t col,
         /* a PIN of at most 32 bytes (Core 5.1.3.63) */
         return col == 3 && val_name(v, vn, &next->au[a].pin);
     }
-    ai = lsp_ace_index(uid);
+    ai = lsp_ace_index(o, uid);
     if (ai >= 0 && col == 3) {
         uint32_t m;
 
@@ -1656,12 +1793,11 @@ static bool lsp_ranges_ok(const FemuOpal *o, const FemuOpalSp *sp)
  * column is checked before any change. A column no passing ACE grants:
  * NOT_AUTHORIZED. A bad value, a column twice, an overlap: INVALID.
  */
-static void lsp_set(FemuOpal *o, uint64_t uid, const FemuOpalTok *t, int n,
-                    FemuOpalReply *r)
+static void lsp_set_into(FemuOpal *o, FemuOpalSp *next, uint64_t uid,
+                         const FemuOpalTok *t, int n, FemuOpalReply *r)
 {
-    FemuOpalSp next = o->sp;
     int ace[4] = { 0 };
-    int na = lsp_acl(uid, UID_M_SET, ace);
+    int na = lsp_acl(o, uid, UID_M_SET, ace);
     uint32_t cols = lsp_grant(o, ace, na);
     uint32_t seen = 0;
     bool denied = false;
@@ -1692,7 +1828,7 @@ static void lsp_set(FemuOpal *o, uint64_t uid, const FemuOpalTok *t, int n,
 
         if (i + 3 >= n - 1 || !tok_is(&t[i], TOK_SN) ||
             col->type != FEMU_OPAL_TOK_UINT ||
-            col->val > lsp_maxcol(uid) || (seen & (1u << col->val))) {
+            col->val > lsp_maxcol(o, uid) || (seen & (1u << col->val))) {
             r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
             return;
         }
@@ -1704,7 +1840,7 @@ static void lsp_set(FemuOpal *o, uint64_t uid, const FemuOpalTok *t, int n,
         seen |= 1u << col->val;
         if (!(cols & (1u << col->val))) {
             denied = true;
-        } else if (!lsp_apply(&next, uid, col->val, &t[i + 2],
+        } else if (!lsp_apply(o, next, uid, col->val, &t[i + 2],
                               ve - (i + 2))) {
             r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
             return;
@@ -1715,32 +1851,56 @@ static void lsp_set(FemuOpal *o, uint64_t uid, const FemuOpalTok *t, int n,
         r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
         return;
     }
-    if (!lsp_ranges_ok(o, &next)) {
+    if (!lsp_ranges_ok(o, next)) {
         r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
         return;
     }
-    o->sp = next;
+    r->status = mpa_set_check(o, next);
+    if (r->status) {
+        return;
+    }
+    o->sp = *next;
     femu_opal_enc_ctrl(&r->e, TOK_SL);
     femu_opal_enc_ctrl(&r->e, TOK_EL);
+}
+
+/* the copy holds AC secrets, so it is wiped on every path */
+static void lsp_set(FemuOpal *o, uint64_t uid, const FemuOpalTok *t, int n,
+                    FemuOpalReply *r)
+{
+    g_autofree FemuOpalSp *next = g_memdup2(&o->sp, sizeof(o->sp));
+
+    lsp_set_into(o, next, uid, t, n, r);
+    mpa_wipe(next, sizeof(*next));
 }
 
 /* ---- other methods ---- */
 
 /* GenKey on a K_AES_256 row (Core 5.3.3.16): a new key erases its LBAs */
-static void lsp_genkey(FemuOpal *o, uint64_t uid, int n, FemuOpalReply *r)
+static void lsp_genkey(FemuOpal *o, uint64_t uid, const FemuOpalTok *t,
+                       int n, FemuOpalReply *r)
 {
     int k = lsp_key_row(uid);
+    int c = mpa_cert(o, uid);
 
-    if (k < 0 || !lsp_allowed(o, uid, UID_M_GENKEY) || !o->s.write) {
+    if ((k < 0 && !c) || !lsp_allowed(o, uid, UID_M_GENKEY) ||
+        !o->s.write) {
         r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
         return;
     }
-    if (n) {
+    if (c || o->cfg.mpa) {
+        r->status = c ? mpa_genkey_cert(o, c, n) :
+                        mpa_genkey_kaes(o, k, t, n);
+        if (r->status) {
+            return;
+        }
+    } else if (n) {
         /* PinLength and PublicExponent do not apply to a K_AES row */
         r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
         return;
+    } else {
+        o->sp.range[k].key = o->next_key++;
     }
-    o->sp.range[k].key = o->next_key++;
     femu_opal_enc_ctrl(&r->e, TOK_SL);
     femu_opal_enc_ctrl(&r->e, TOK_EL);
 }
@@ -1768,6 +1928,11 @@ static bool lsp_revertsp(FemuOpal *o, const FemuOpalTok *t, int n,
                                FEMU_OPAL_ST_INVALID_PARAMETER;
         return false;
     }
+    /* a bound Global key cannot stay (MPA 4.1.2.3) */
+    if (keep && mpa_list_len(g->active)) {
+        r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
+        return false;
+    }
     if (keep && g->rle && g->rl && g->wle && g->wl) {
         r->status = FEMU_OPAL_ST_FAIL;
         return false;
@@ -1792,7 +1957,7 @@ static void lsp_getacl(FemuOpal *o, const FemuOpalTok *t, int n,
         r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
         return;
     }
-    na = lsp_acl(obj, m, ace);
+    na = lsp_acl(o, obj, m, ace);
     if (!na) {
         r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
         return;
@@ -1807,7 +1972,7 @@ static void lsp_getacl(FemuOpal *o, const FemuOpalTok *t, int n,
 }
 
 /* the rows Next walks in the Locking SP, in table order; returns the count */
-static int lsp_rows(uint64_t table, uint64_t *rows)
+static int lsp_rows(const FemuOpal *o, uint64_t table, uint64_t *rows)
 {
     int k = 0;
     int i;
@@ -1838,13 +2003,26 @@ static int lsp_rows(uint64_t table, uint64_t *rows)
         }
         break;
     case UID_T_ACE:
-        for (i = 0; i < ACE_END; i++) {
+        for (i = 0; i < lsp_ace_end(o); i++) {
             rows[k++] = lsp_ace_uid(i);
         }
         break;
     case UID_T_TABLE:
         for (i = 0; i < ARRAY_SIZE(lsp_tables); i++) {
-            rows[k++] = UID_TABLE(lsp_tables[i].t);
+            if (o->cfg.mpa || !lsp_tables[i].mpa) {
+                rows[k++] = UID_TABLE(lsp_tables[i].t);
+            }
+        }
+        break;
+    case UID_T_AC:
+        for (i = 0; o->cfg.mpa && i < FEMU_OPAL_MPA_ACS; i++) {
+            rows[k++] = UID_AC(i + 1);
+        }
+        break;
+    case UID_T_CERTS:
+        if (o->cfg.mpa) {
+            rows[k++] = UID_CERT(1);
+            rows[k++] = UID_CERT(2);
         }
         break;
     case UID_T_SPTEMPLATES:
@@ -1853,7 +2031,9 @@ static int lsp_rows(uint64_t table, uint64_t *rows)
         break;
     case UID_T_METHODID:
         for (i = 0; i < ARRAY_SIZE(lsp_methods); i++) {
-            rows[k++] = lsp_methods[i].uid;
+            if (o->cfg.mpa || !lsp_methods[i].mpa) {
+                rows[k++] = lsp_methods[i].uid;
+            }
         }
         break;
     case UID_T_SECRETPROTECT:
@@ -1862,3 +2042,5 @@ static int lsp_rows(uint64_t table, uint64_t *rows)
     }
     return k;
 }
+
+#include "femu-opal-mpa.c.inc"

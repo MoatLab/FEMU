@@ -21,7 +21,15 @@ enum {
 static void lsp_factory_tables(FemuOpal *o, bool keep_global);
 static void lsp_bytes_clear(FemuOpal *o);
 static void lsp_undo_finish(FemuOpal *o, bool rollback);
-static int lsp_rows(uint64_t table, uint64_t *rows);
+static int lsp_rows(const FemuOpal *o, uint64_t table, uint64_t *rows);
+static uint8_t *mpa_level0(const FemuOpal *o, uint8_t *p);
+static void mpa_reset(FemuOpal *o, int type);
+static bool mpa_new_kem(FemuOpal *o, bool keep);
+static void mpa_init(FemuOpal *o);
+struct FemuOpalReply;
+static bool mpa_method(FemuOpal *o, uint64_t obj, uint64_t m,
+                       const FemuOpalTok *t, int n, struct FemuOpalReply *r);
+static void mpa_wipe(void *p, size_t n);
 
 /* frame header sizes (Core 3.2.3, Tables 17, 18 and 20) */
 #define COMPKT_HDR      20
@@ -132,6 +140,7 @@ void femu_opal_init(FemuOpal *o, const FemuOpalCfg *cfg)
     o->next_tsn = 0x1000;
     o->next_key = 1;
     femu_opal_stack_reset(o);
+    mpa_init(o);
     femu_opal_factory(o);
 }
 
@@ -412,6 +421,8 @@ uint32_t femu_opal_level0(const FemuOpal *o, uint8_t *buf, uint32_t cap)
     p[3] = 0x20;
     p[6] = o->cfg.crypto_erase ? 0x04 : 0;
     p += 36;
+
+    p = mpa_level0(o, p);
 
     put32(d, (p - d) - 4);
     memcpy(buf, d, MIN(cap, (uint32_t)(p - d)));
@@ -1126,10 +1137,9 @@ static void femu_opal_get(FemuOpal *o, uint64_t uid, const FemuOpalTok *t,
  * column is checked before any change, so a refusal writes nothing. No
  * Values: success with no change. A column twice: INVALID_PARAMETER.
  */
-static void femu_opal_set(FemuOpal *o, uint64_t uid, const FemuOpalTok *t,
-                          int n, FemuOpalReply *r)
+static void femu_opal_set_into(FemuOpal *o, FemuOpalSp *next, uint64_t uid,
+                               const FemuOpalTok *t, int n, FemuOpalReply *r)
 {
-    FemuOpalSp next = o->sp;
     int a = asp_cpin(uid);
     int au = femu_opal_auth_index(false, uid);
     uint32_t seen = 0;
@@ -1175,7 +1185,7 @@ static void femu_opal_set(FemuOpal *o, uint64_t uid, const FemuOpalTok *t,
                 r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
                 return;
             }
-            next.au[au].enabled = v->val;
+            next->au[au].enabled = v->val;
             continue;
         } else if (uid == UID_TPERINFO && col->val == 8) {
             /* ACE_TPerInfo_Set_ProgrammaticResetEnable */
@@ -1184,7 +1194,7 @@ static void femu_opal_set(FemuOpal *o, uint64_t uid, const FemuOpalTok *t,
                 r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
                 return;
             }
-            next.pre = v->val;
+            next->pre = v->val;
             continue;
         } else {
             denied = true;
@@ -1195,16 +1205,26 @@ static void femu_opal_set(FemuOpal *o, uint64_t uid, const FemuOpalTok *t,
             r->status = FEMU_OPAL_ST_INVALID_PARAMETER;
             return;
         }
-        next.au[a].pin.len = v->len;
-        memcpy(next.au[a].pin.v, v->p, v->len);
+        next->au[a].pin.len = v->len;
+        memcpy(next->au[a].pin.v, v->p, v->len);
     }
     if (denied) {
         r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
         return;
     }
-    o->sp = next;
+    o->sp = *next;
     femu_opal_enc_ctrl(&r->e, TOK_SL);
     femu_opal_enc_ctrl(&r->e, TOK_EL);
+}
+
+/* the copy holds AC secrets, so it is wiped on every path */
+static void femu_opal_set(FemuOpal *o, uint64_t uid, const FemuOpalTok *t,
+                          int n, FemuOpalReply *r)
+{
+    g_autofree FemuOpalSp *next = g_memdup2(&o->sp, sizeof(o->sp));
+
+    femu_opal_set_into(o, next, uid, t, n, r);
+    mpa_wipe(next, sizeof(*next));
 }
 
 /* Authenticate[Authority, Proof = 0] (Core 5.3.4.1.14.1): result True/False */
@@ -1278,7 +1298,7 @@ static void femu_opal_next(FemuOpal *o, uint64_t table, const FemuOpalTok *t,
     };
     static const uint64_t sp[] = { UID_SP_ADMIN, UID_SP_LOCKING };
     static const uint64_t spinfo[] = { UID_SPINFO };
-    uint64_t lrows[FEMU_OPAL_ACE_COUNT];
+    uint64_t lrows[FEMU_OPAL_ACE_MAX];
     const uint64_t *rows;
     uint64_t where = 0;
     uint64_t count = ~0ull;
@@ -1288,7 +1308,7 @@ static void femu_opal_next(FemuOpal *o, uint64_t table, const FemuOpalTok *t,
 
     if (o->s.locking) {
         rows = lrows;
-        nrows = lsp_rows(table, lrows);
+        nrows = lsp_rows(o, table, lrows);
         if (!nrows) {
             r->status = FEMU_OPAL_ST_NOT_AUTHORIZED;
             return;
@@ -1436,6 +1456,11 @@ static void femu_opal_activate(FemuOpal *o, uint64_t uid, int n,
         r->status = n ? FEMU_OPAL_ST_INVALID_PARAMETER : FEMU_OPAL_ST_FAIL;
         return;
     }
+    /* each Activate replaces the ephemeral KEM key (MPA 4.1.2.1) */
+    if (o->cfg.mpa && !mpa_new_kem(o, true)) {
+        r->status = FEMU_OPAL_ST_FAIL;
+        return;
+    }
     if (o->sp.lsp_life == FEMU_OPAL_LIFE_INACTIVE) {
         o->sp.lsp_life = FEMU_OPAL_LIFE_MANUFACTURED;
         o->sp.au[FEMU_OPAL_AU_LSP_ADMIN1].pin = o->sp.au[FEMU_OPAL_AU_SID].pin;
@@ -1554,7 +1579,7 @@ static int femu_opal_method(FemuOpal *o, const FemuOpalTok *t, int n,
             }
             return METHOD_DONE;
         case UID_M_GENKEY:
-            lsp_genkey(o, obj, n, r);
+            lsp_genkey(o, obj, t, n, r);
             return METHOD_DONE;
         case UID_M_REVERTSP:
             if (obj != UID_THISSP) {
@@ -1562,6 +1587,10 @@ static int femu_opal_method(FemuOpal *o, const FemuOpalTok *t, int n,
                 return METHOD_DONE;
             }
             return lsp_revertsp(o, t, n, r) ? METHOD_END : METHOD_DONE;
+        default:
+            if (mpa_method(o, obj, m, t, n, r)) {
+                return METHOD_DONE;
+            }
         }
     }
     switch (m) {
@@ -1669,11 +1698,13 @@ static void femu_opal_session_packet(FemuOpal *o, const FemuOpalTok *t, int n)
         before = o->sp;
         rc = femu_opal_method(o, t + i, k + 6 - i, &r);
         if (rc == METHOD_ABORT) {
+            mpa_wipe(&before, sizeof(before));
             goto abort;
         }
         if (!o->s.txn) {
             femu_opal_effects(o, &before);
         }
+        mpa_wipe(&before, sizeof(before));
         reply_status(&r, mark);
         i = k + 6;
     }
@@ -1693,6 +1724,7 @@ static void femu_opal_session_packet(FemuOpal *o, const FemuOpalTok *t, int n)
         }
         lsp_undo_finish(o, st);
         o->s.txn = false;
+        mpa_wipe(&o->s.txn_sp, sizeof(o->s.txn_sp));
         femu_opal_enc_ctrl(&r.e, TOK_ET);
         femu_opal_enc_uint(&r.e, st);
         i += 2;
@@ -1750,6 +1782,7 @@ static FemuOpalIf femu_opal_tper_reset(FemuOpal *o)
     femu_opal_stack_reset(o);
     o->mgmt_req = 0;
     lsp_reset(o, FEMU_OPAL_RESET_PROG);
+    mpa_reset(o, FEMU_OPAL_RESET_PROG);
     return FEMU_OPAL_IF_GOOD;
 }
 
@@ -1780,6 +1813,7 @@ void femu_opal_power_cycle(FemuOpal *o)
     o->sid_blocked = false;
     o->sid_block_hw = false;
     lsp_reset(o, FEMU_OPAL_RESET_POWER);
+    mpa_reset(o, FEMU_OPAL_RESET_POWER);
 }
 
 /*

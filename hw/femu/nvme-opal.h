@@ -13,6 +13,7 @@
 void femu_opal_start(FemuCtrl *n, FemuOpalCfg *cfg);
 void femu_opal_stop(FemuCtrl *n);
 void femu_opal_publish(FemuCtrl *n);
+bool femu_opal_test_power_cycle(FemuCtrl *n);
 bool femu_opal_quiet(FemuCtrl *n, bool *resume);
 void femu_opal_loud(FemuCtrl *n, bool resume);
 FemuOpalIf femu_opal_quiet_send(FemuCtrl *n, uint8_t secp, uint16_t spsp,
