@@ -23,6 +23,19 @@ done
 # only errors and worse reach the console from here on, so a driver
 # warning cannot split a FEMU-CHECK line; panics and BUG lines still do
 echo 4 > /proc/sys/kernel/printk
+# femu.view=1: print what the guest sees of the machine, to compare bases
+if [ "$(arg femu.view)" = 1 ]; then
+	bb=/bin/busybox
+	echo "FEMU-VIEW cpu$($bb grep -m1 '^flags' /proc/cpuinfo | $bb cut -d: -f2)"
+	for d in /sys/bus/pci/devices/*; do
+		v=""
+		for f in vendor device class subsystem_vendor subsystem_device revision; do
+			v="$v $($bb cat "$d/$f")"
+		done
+		echo "FEMU-VIEW pci ${d##*/}$v"
+	done
+	$bb dmesg | $bb grep -E 'BIOS-e820|DMI:' | $bb sed 's/^\[[^]]*\] //; s/^/FEMU-VIEW boot /'
+fi
 echo "FEMU-READY mode=$mode"
 /bin/femu-guest-check "$mode" "$serial"
 echo "FEMU-DONE rc=$?"

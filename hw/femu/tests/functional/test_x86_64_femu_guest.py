@@ -116,7 +116,9 @@ class FemuGuest(QemuSystemTest):
     def run_mode(self, name, extra_dev=''):
         m = MODES[name]
         # a versioned machine keeps the guest view the same across QEMU bases
-        self.set_machine(os.environ.get('FEMU_MACHINE', 'pc-q35-10.1'))
+        machine, _, mopts = os.environ.get('FEMU_MACHINE',
+                                           'pc-q35-10.1').partition(',')
+        self.set_machine(machine)
         acc = self.accel()
         vm = self.get_vm(name=name)
         vm.set_console()
@@ -124,16 +126,29 @@ class FemuGuest(QemuSystemTest):
         dev = f'femu,id=fd,{m["dev"]}'
         if extra_dev:
             dev += ',' + extra_dev
-        vm.add_args('-accel', acc, '-cpu', 'max', '-m', '512',
+        view = os.environ.get('FEMU_VIEW_OUT')
+        vm.add_args('-accel', acc, '-cpu', os.environ.get('FEMU_CPU', 'max'),
+                    '-m', '512',
                     # no ACPI: the MP table lists one CPU per socket
                     '-smp', '2,sockets=2,cores=1,threads=1',
                     '-nodefaults', '-kernel', self.kernel,
                     '-initrd', self.initrd,
                     '-append', f'console=ttyS0 femu.mode={name} '
-                               f'femu.serial={m["serial"]} panic=-1',
+                               f'femu.serial={m["serial"]} panic=-1'
+                               + (' femu.view=1' if view else ''),
                     '-no-reboot', '-device', dev)
+        if mopts:
+            vm.add_args('-machine', mopts)
         vm.launch()
         lines = self.read_console(vm, time.monotonic() + DEADLINE)
+        if view:
+            got = [ln for ln in lines if ln.startswith(b'FEMU-VIEW')]
+            with open(f'{view}.{name}', 'wb') as f:
+                f.writelines(ln + b'\n' for ln in got)
+            # an old initramfs or a lost record must not pass as a match
+            for kind in (b'cpu ', b'pci ', b'boot BIOS-e820'):
+                self.assertTrue(any(ln.startswith(b'FEMU-VIEW ' + kind)
+                                    for ln in got), f'no {kind!r} view line')
         # query-femu answers once the guest has enabled the controller
         ns = None
         if name == 'bbssd':
