@@ -27,7 +27,7 @@ DEVICES = [
                       "x-gc-frontier", "x-gc-idle",
                       "x-gc-idle-hold", "x-gc-idle-kick", "x-gc-idle-latch",
                       "x-gc-idle-order", "x-maint-idle",
-                      "x-ns-test", "x-oc12-clock",
+                      "x-ns-test", "x-oc12-clock", "x-opal-gkey",
                       "x-oc12-trace", "x-ocp-lat-skew-ms", "x-idle-mw", "x-telemetry-trigger",
                       "x-persist-schema", "x-place-fail", "x-place-skip",
                       "x-rain-check",

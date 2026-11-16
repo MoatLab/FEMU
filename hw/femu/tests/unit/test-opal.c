@@ -2033,6 +2033,71 @@ static void test_s3_txn(void)
     g_free(o);
 }
 
+/* a cryptographic erase: new keys, and an open transaction stays true */
+static void test_s3_rekey(void)
+{
+    static const uint64_t r1[] = { 100, 50 };
+    uint64_t k[FEMU_OPAL_RANGES + 1];
+    uint64_t g;
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    int r;
+    int i;
+
+    g_assert_cmpuint(range_set(o, tsn, 1, 100, 50), ==, 0);
+    er.n = 0;
+    for (r = 0; r <= FEMU_OPAL_RANGES; r++) {
+        k[r] = femu_opal_key(o, r);
+    }
+    femu_opal_rekey(o);
+    for (r = 0; r <= FEMU_OPAL_RANGES; r++) {
+        g_assert_cmpuint(femu_opal_key(o, r), !=, k[r]);
+        for (i = 0; i < r; i++) {
+            g_assert_cmpuint(femu_opal_key(o, r), !=, femu_opal_key(o, i));
+        }
+    }
+    /* the engine erases nothing itself, and no other column moves */
+    g_assert_cmpint(er.n, ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 50), ==, FEMU_OPAL_MEDIA);
+    g_assert_cmpuint(range_lock(o, tsn, 1, true), ==, 0);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 100, 1), ==, FEMU_OPAL_DENY);
+    g_assert_cmpint(check(o, FEMU_OPAL_OP_READ, 99, 1), ==, FEMU_OPAL_MEDIA);
+    g_assert_cmpuint(range_lock(o, tsn, 1, false), ==, 0);
+
+    /* in a transaction: the commit of an untouched range erases nothing */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_DS, 0, "a", true), ==, 0);
+    femu_opal_rekey(o);
+    g = femu_opal_key(o, 1);
+    et(o, tsn, 0);
+    g_assert_cmpint(er.n, ==, 0);
+    g_assert_cmpuint(femu_opal_key(o, 1), ==, g);
+    /* an abort keeps the new key */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_DS, 0, "b", true), ==, 0);
+    femu_opal_rekey(o);
+    g = femu_opal_key(o, 0);
+    et(o, tsn, 1);
+    g_assert_cmpint(er.n, ==, 0);
+    g_assert_cmpuint(femu_opal_key(o, 0), ==, g);
+    /* a pending GenKey still erases its range at the commit */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_DS, 0, "c", true), ==, 0);
+    g_assert_cmpuint(call0(o, tsn, U_KAES(1), M_GENKEY), ==, 0);
+    femu_opal_rekey(o);
+    g = femu_opal_key(o, 1);
+    g_assert_cmpint(er.n, ==, 0);
+    et(o, tsn, 0);
+    erased(1, r1);
+    g_assert_cmpuint(femu_opal_key(o, 1), !=, g);
+    /* a session that ends in a transaction keeps the new key too */
+    g_assert_cmpuint(bytes_set(o, tsn, U_T_DS, 0, "d", true), ==, 0);
+    femu_opal_rekey(o);
+    g = femu_opal_key(o, 1);
+    eos(o, tsn);
+    g_assert_cmpint(er.n, ==, 0);
+    g_assert_cmpuint(femu_opal_key(o, 1), ==, g);
+    femu_opal_cleanup(o);
+    g_free(o);
+}
+
 static void test_s3_revertsp(void)
 {
     static const uint64_t r1[] = { 100, 50 };
@@ -2648,6 +2713,7 @@ int main(int argc, char **argv)
     g_test_add_func("/femu/opal/s3-users", test_s3_users);
     g_test_add_func("/femu/opal/s3-mbr", test_s3_mbr);
     g_test_add_func("/femu/opal/s3-txn", test_s3_txn);
+    g_test_add_func("/femu/opal/s3-rekey", test_s3_rekey);
     g_test_add_func("/femu/opal/s3-revertsp", test_s3_revertsp);
     g_test_add_func("/femu/opal/s3-tables", test_s3_tables);
     g_test_add_func("/femu/opal/s3-check", test_s3_check);

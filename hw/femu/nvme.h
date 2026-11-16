@@ -1559,6 +1559,11 @@ enum NvmeIdCtrlOacs {
     NVME_OACS_CFLS          = 1 << 10,
 };
 
+/* Format NVM Attributes: bit 2 is Cryptographic Erase Supported */
+enum NvmeIdCtrlFna {
+    NVME_FNA_CRYES          = 1 << 2,
+};
+
 enum NvmeIdCtrlOncs {
     NVME_ONCS_COMPARE       = 1 << 0,
     NVME_ONCS_WRITE_UNCORR  = 1 << 1,

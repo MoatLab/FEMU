@@ -280,6 +280,11 @@ void femu_opal_consume(FemuOpal *o);
 void femu_opal_power_cycle(FemuOpal *o);
 void femu_opal_hw_reset(FemuOpal *o);
 
+/* a cryptographic erase: a new key for every range, also in a transaction */
+void femu_opal_rekey(FemuOpal *o);
+/* the committed key number of @range (0 is Global) */
+uint64_t femu_opal_key(const FemuOpal *o, int range);
+
 /* Level 0 discovery data; returns the full length, copies at most @cap */
 uint32_t femu_opal_level0(const FemuOpal *o, uint8_t *buf, uint32_t cap);
 

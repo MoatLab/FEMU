@@ -2997,7 +2997,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     strpadcpy((char *)id->subnqn, sizeof(id->subnqn), subnqn, '\0');
     g_free(subnqn);
     id->fuses        = cpu_to_le16(0);
-    id->fna          = 0;
+    /* CRYES: x-opal keys and the crypto_mbps engine model encryption */
+    id->fna          = n->opal || n->crypto_mbps ? NVME_FNA_CRYES : 0;
     /*
      * Flush Behavior 10b: a Flush to every namespace at once (NSID FFFFFFFFh)
      * is refused, which is what the I/O path does.
@@ -6802,6 +6803,17 @@ static void femu_test_range_waits_get(Object *obj, Visitor *v,
     visit_type_uint64(v, name, &value, errp);
 }
 
+/* the committed key number of the Global range; 0 without x-opal */
+static void femu_test_opal_gkey_get(Object *obj, Visitor *v,
+                                    const char *name, void *opaque,
+                                    Error **errp)
+{
+    FemuOpal *o = FEMU(obj)->opal_tper;
+    uint64_t value = o ? femu_opal_key(o, 0) : 0;
+
+    visit_type_uint64(v, name, &value, errp);
+}
+
 /* x-tp-hold: keep pending translation pages pending, as at the reserve */
 static bool femu_test_tp_hold_get(Object *obj, Error **errp)
 {
@@ -6979,6 +6991,8 @@ static void femu_instance_init(Object *obj)
                             femu_test_copy_held_get, NULL, NULL, NULL);
         object_property_add(obj, "x-range-waits", "uint64",
                             femu_test_range_waits_get, NULL, NULL, NULL);
+        object_property_add(obj, "x-opal-gkey", "uint64",
+                            femu_test_opal_gkey_get, NULL, NULL, NULL);
         object_property_add_str(obj, "x-oc12-trace", femu_test_oc12_trace,
                                 NULL);
     }

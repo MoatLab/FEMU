@@ -67,6 +67,12 @@ MBR Done to read the media again.
 
 - Format NVM is refused with Invalid Format (1/0Ah), DNR, when a formatted
   LBA has a write-locked owner.
+- Format NVM offers a cryptographic erase (FNA bit 2, SES 010b). It
+  clears the data, as a user data erase does, and gives every range a
+  new key. The PINs, ACEs and ranges stay. A Sanitize Crypto Erase also
+  gives new keys.
+- An open transaction keeps the new keys. A GenKey that it holds still
+  erases its range at the commit.
 - Sanitize is refused with Access Denied, DNR, while the Locking SP is
   active.
 - Copy accepts descriptor format 0h only; OCFS reports it.

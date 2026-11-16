@@ -113,6 +113,7 @@ listed one by one.
 - Opt-in power loss model (`power_loss`) that drops data still held in the volatile write buffer and records the event in SMART and the event log (46602b0e7, 303c77aef, 7679c443d).
 - TCG Opal groundwork (`x-opal=on`, experimental, off by default): Security Send (81h) and Receive (82h), with OACS bit 0. It answers Level 0 discovery and the protocol list. ComID 1000h has its state machine, STACK_RESET and the Session Manager Properties method. Sessions reach the Admin SP: MSID, SID and PSID, Activate, Revert and transactions, with Block SID and TPER_RESET.
 - TCG Opal locking (`x-opal=on`): the Locking SP has 8 ranges, keys, users, ACEs, MBR control, the MBR table and the DataStore. Read, Write, Write Zeroes, Write Uncorrectable, Compare, Verify, DSM and Copy check the locks and fail with Access Denied. GenKey and a range change erase the LBAs that change owner or key. The MBR shadow serves Reads until MBR Done. Format is refused on a write-locked LBA, and Sanitize while the Locking SP is active. See [TCG Opal](features/tcg-opal.md).
+- Format NVM accepts a cryptographic erase (SES 010b) when `x-opal=on` or `crypto_mbps` is set; FNA bit 2 reports it. The data goes as with a user data erase. With `x-opal`, every range also gets a new key, and so does a Sanitize Crypto Erase.
 
 #### ZNS
 

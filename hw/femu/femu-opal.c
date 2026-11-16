@@ -1783,6 +1783,37 @@ void femu_opal_power_cycle(FemuOpal *o)
 }
 
 /*
+ * A cryptographic erase: every range gets a new key. An open transaction
+ * keeps its pending GenKey, so its commit still erases that range, and a
+ * range it did not touch commits without an erase.
+ */
+void femu_opal_rekey(FemuOpal *o)
+{
+    bool txn = o->s.open && o->s.txn;
+    int r;
+
+    for (r = 0; r <= FEMU_OPAL_RANGES; r++) {
+        uint64_t *was = &o->s.txn_sp.range[r].key;
+        uint64_t *key = &o->sp.range[r].key;
+
+        if (txn && *was != *key) {
+            *was = o->next_key++;
+            *key = o->next_key++;
+            continue;
+        }
+        *key = o->next_key++;
+        if (txn) {
+            *was = *key;
+        }
+    }
+}
+
+uint64_t femu_opal_key(const FemuOpal *o, int range)
+{
+    return committed(o)->range[range].key;
+}
+
+/*
  * A Session Manager call: CALL SMUID method SL params EL EOD SL s 0 0 EL.
  * The control session ignores unknown methods with no response (Core
  * 3.3.7.1.3). A known method with a bad status list gets

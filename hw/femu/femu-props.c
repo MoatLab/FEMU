@@ -356,6 +356,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "with STACK_RESET, Admin SP sessions with MSID, SID, PSID, Activate, "
       "Revert and transactions, Block SID and TPER_RESET; the Locking SP "
       "with 8 ranges, GenKey erase, an MBR shadow and the DataStore, "
+      "a cryptographic erase in Format NVM (FNA bit 2), "
       "checked on every I/O command ([TCG Opal](../features/tcg-opal.md)); "
       "MSID and PSID are FEMU-MSID- and FEMU-PSID- plus the serial; one "
       "NoSSD or page-mapped bbssd namespace without metadata, not with a "
@@ -375,7 +376,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Write, Zone Append, Compare, Verify, Write Zeroes that programs, "
       "twice for Copy, key-value and memory transfers) passes the one "
       "engine, after the media and the host link; a failed command pays "
-      "nothing, and a reset clears the engine. 0 (default) is off" },
+      "nothing, and a reset clears the engine; not 0 also offers a "
+      "cryptographic erase in Format NVM (FNA bit 2). 0 (default) is off" },
     { "telemetry_da4",
       "report Data Area 4 in the telemetry logs (07h, 08h) when the host "
       "sets ETDAS in Host Behavior Support: one 512-byte counter block per "

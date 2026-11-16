@@ -4734,6 +4734,10 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     stl_le_p(ev + 8, le32_to_cpu(cmd->cdw11));
     stl_le_p(ev + 12, NVME_NSID_BROADCAST);
     femu_pel_log(n, NVME_PEL_SANITIZE_START, 2, ev, 16);
+    /* a crypto erase destroys the keys at its start */
+    if (n->opal_tper && sanact == 0x4) {
+        femu_opal_rekey(n->opal_tper);
+    }
     /* a new operation clears the completion event of the last one */
     nvme_clear_ns_events(n, NVME_AER_TYPE_IO_SPECIFIC, NVME_LOG_SANITIZE, 0,
                          true);
@@ -5595,10 +5599,11 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_FORMAT | NVME_DNR;
     }
     /*
-     * No erase or a user data erase. FNA reports no cryptographic erase, and
-     * 011b and above are reserved (Base 2.3, Figure 193).
+     * No erase, a user data erase, or a cryptographic erase when FNA has
+     * CRYES; 011b and above are reserved (Base 2.3, Figure 193).
      */
-    if (sec_erase > 1) {
+    if (sec_erase > 2 ||
+        (sec_erase == 2 && !(n->id_ctrl.fna & NVME_FNA_CRYES))) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     /* FNA 0: a Format changes only the namespaces it names */
@@ -5729,6 +5734,10 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     }
 
     if (n->opal_tper) {
+        /* the data is gone, so the keys go too (x-opal has one namespace) */
+        if (modified && sec_erase == 2) {
+            femu_opal_rekey(n->opal_tper);
+        }
         femu_opal_publish(n);
         femu_opal_loud(n, resume);
     } else {

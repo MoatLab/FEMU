@@ -18212,8 +18212,9 @@ static void femu_test_format_pi_needs_metadata(void *obj, void *data,
 
 /*
  * Secure Erase Settings are bits 11:9 of CDW10 (Base 2.3, Figure 193). No
- * erase and a user data erase are accepted; a cryptographic erase is not
- * offered and 011b and above are reserved. Bit 8 is PIL, not part of it.
+ * erase and a user data erase are accepted; without encryption FNA has no
+ * CRYES, so a cryptographic erase is refused, and 011b and above are
+ * reserved. Bit 8 is PIL, not part of it.
  */
 static void femu_test_format_ses(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -22678,6 +22679,186 @@ static void femu_test_opal_shadow(void *obj, void *data,
     g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
                                     0x0000000900010001ull, pin, &tsn), ==, 0);
     femu_opal_eos(&c, qts, buf, tsn);
+
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+#define FEMU_ID_FNA             524
+#define FEMU_FNA_CRYES          0x04
+
+static uint64_t femu_opal_gkey(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/ocf',"
+                           "'property':'x-opal-gkey'}}");
+    uint64_t value = qdict_get_int(rsp, "return");
+
+    qobject_unref(rsp);
+    return value;
+}
+
+/* read 4 KiB at @slba and compare each byte with @v */
+static void femu_opal_expect(FemuCtrlState *c, QTestState *qts, uint32_t nsid,
+                             uint64_t slba, uint64_t io, uint8_t v)
+{
+    uint8_t got[FEMU_DATA_SIZE];
+    uint8_t want[FEMU_DATA_SIZE];
+
+    qtest_memset(qts, io, ~v, FEMU_DATA_SIZE);
+    g_assert_cmphex(FEMU_SC(femu_rw_ns(c, NVME_CMD_READ, nsid, slba, io)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, io, got, sizeof(got));
+    memset(want, v, sizeof(want));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+}
+
+static void femu_opal_fill(FemuCtrlState *c, QTestState *qts, uint32_t nsid,
+                           uint64_t slba, uint64_t io, uint8_t v)
+{
+    qtest_memset(qts, io, v, FEMU_DATA_SIZE);
+    g_assert_cmphex(FEMU_SC(femu_rw_ns(c, NVME_CMD_WRITE, nsid, slba, io)), ==,
+                    NVME_SUCCESS);
+}
+
+/*
+ * x-opal models encryption, so FNA has CRYES and Format SES 010b is a
+ * cryptographic erase: the data goes and every range gets a new key. SES
+ * 000b and 001b keep the keys, and a write-locked LBA refuses the Format
+ * (SIIS 6.7.3). An open transaction stays true: its commit erases nothing
+ * written after the Format. A crypto Sanitize also changes the keys.
+ */
+static void femu_test_opal_crypto_format(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    static const char pin[] = "FEMU-MSID-opal-cry";
+    static const int range[] = { 3, 4, 5, 6, 7, 8, -1 };
+    static const uint64_t wlock[] = { 64, 64, 1, 1, 0, 1 };
+    static const int rw[] = { 7, 8, -1 };
+    static const uint64_t open[] = { 0, 0 };
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ocf,addr=5,devsz_mb=256,"
+        "femu_mode=1,sanitize_ops=on,x-opal=on,serial=opal-cry");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    FemuTb t = { .n = 0 };
+    uint8_t r[2048];
+    uint32_t tsn = 0;
+    uint64_t buf;
+    uint64_t io;
+    uint64_t g;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(&qs->alloc, 8192);
+    io = guest_alloc(&qs->alloc, FEMU_DATA_SIZE);
+
+    g_assert_cmphex(FEMU_SC(femu_identify(&c, 0, 1, 0, buf)), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, buf + FEMU_ID_FNA), ==, FEMU_FNA_CRYES);
+
+    /* SES 010b: the data and the keys go */
+    femu_opal_fill(&c, qts, 1, 64, io, 0x5A);
+    g = femu_opal_gkey(qts);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 2)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_opal_gkey(qts), !=, g);
+    femu_opal_expect(&c, qts, 1, 64, io, 0);
+    /* SES 000b and 001b keep the keys; 011b is reserved */
+    g = femu_opal_gkey(qts);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 1)), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 3)), ==, NVME_INVALID_FIELD);
+    g_assert_cmpuint(femu_opal_gkey(qts), ==, g);
+    /* a crypto Sanitize changes the keys too; a Block Erase does not */
+    cmd.opcode = FEMU_ADM_SANITIZE;
+    cmd.cdw10 = cpu_to_le32(2);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_opal_gkey(qts), ==, g);
+    cmd.cdw10 = cpu_to_le32(4);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_opal_gkey(qts), !=, g);
+
+    /* owned: a write-locked LBA refuses the Format and keeps the keys */
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, 0x0000020500000001ull,
+                                    0x0000000900000006ull, pin, &tsn), ==, 0);
+    femu_tb_call(&t, FEMU_OPAL_LOCKING_SP, 0x0000000600000203ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    femu_opal_eos(&c, qts, buf, tsn);
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
+                                    0x0000000900010001ull, pin, &tsn), ==, 0);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    range, wlock), ==, 0);
+    g = femu_opal_gkey(qts);
+    g_assert_cmphex(femu_format(&c, 1, 0, 2), ==,
+                    NVME_INVALID_FORMAT | NVME_DNR);
+    g_assert_cmpuint(femu_opal_gkey(qts), ==, g);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    rw, open), ==, 0);
+
+    /* a Format in an open transaction; its commit keeps the new data */
+    t.n = 0;
+    t.b[t.n++] = 0xFB;
+    t.b[t.n++] = 0;
+    femu_tb_call(&t, 0x0000080400000000ull, 0x0000000600000017ull);
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 0;
+    t.b[t.n++] = 0;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 1;
+    femu_tb_bytes(&t, (const uint8_t *)"T", 1);
+    t.b[t.n++] = 0xF3;
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 2)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_opal_gkey(qts), !=, g);
+    femu_opal_fill(&c, qts, 1, 64, io, 0x6B);
+    t.n = 0;
+    t.b[t.n++] = 0xFC;
+    t.b[t.n++] = 0;
+    g_assert_cmpuint(femu_opal_xfer(&c, qts, buf, &t, tsn, r), ==, 2);
+    g_assert_cmphex(r[57], ==, 0);
+    femu_opal_expect(&c, qts, 1, 64, io, 0x6B);
+    femu_opal_eos(&c, qts, buf, tsn);
+
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+/*
+ * crypto_mbps models an inline encryption engine, so FNA has CRYES. FNA
+ * leaves SENS clear: a cryptographic erase of one namespace keeps the
+ * data of the other, and the broadcast NSID erases both.
+ */
+static void femu_test_format_crypto_ns(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=cfn,addr=5,devsz_mb=64,"
+        "femu_mode=2,namespaces=2,crypto_mbps=100,serial=cry-ns");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t io;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(&qs->alloc, 4096);
+    io = guest_alloc(&qs->alloc, FEMU_DATA_SIZE);
+
+    g_assert_cmphex(FEMU_SC(femu_identify(&c, 0, 1, 0, buf)), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, buf + FEMU_ID_FNA), ==, FEMU_FNA_CRYES);
+    femu_opal_fill(&c, qts, 1, 8, io, 0x11);
+    femu_opal_fill(&c, qts, 2, 8, io, 0x22);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 2)), ==, NVME_SUCCESS);
+    femu_opal_expect(&c, qts, 1, 8, io, 0);
+    femu_opal_expect(&c, qts, 2, 8, io, 0x22);
+    femu_opal_fill(&c, qts, 1, 8, io, 0x11);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, NVME_NSID_BROADCAST, 0, 2)), ==,
+                    NVME_SUCCESS);
+    femu_opal_expect(&c, qts, 1, 8, io, 0);
+    femu_opal_expect(&c, qts, 2, 8, io, 0);
 
     g_free(pdev);
     qtest_pc_shutdown(qs);
@@ -63804,6 +63985,10 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "x-opal=on,serial=opal-lock",
     });
     qos_add_test("opal-shadow", "femu", femu_test_opal_shadow, NULL);
+    qos_add_test("opal-crypto-format", "femu", femu_test_opal_crypto_format,
+                 NULL);
+    qos_add_test("format-crypto-ns", "femu", femu_test_format_crypto_ns,
+                 NULL);
     qos_add_test("opal-off", "femu", femu_test_opal_off, NULL);
     qos_add_test("opal-refused", "femu", femu_test_opal_refused, NULL);
     qos_add_test("telemetry-ctrl", "femu", femu_test_telemetry_ctrl,
