@@ -189,6 +189,37 @@ jobs:
         QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \
           -p /x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests
 
+    - name: Restore the guest kernel source
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ~/femu-guest/linux-*.tar.xz
+        key: guest-kernel-${{ hashFiles('hw/femu/scripts/build-guest-kernel.sh') }}
+
+    - name: Boot a Linux guest on each FEMU mode
+      run: |
+        # A pinned tinyconfig kernel and a busybox initramfs boot NoSSD,
+        # bbssd, ZNS and KV under TCG. The guest drives the real NVMe driver;
+        # the host requires every check of each mode, and GC on bbssd.
+        # A failed mlock only warns, so the runner needs no memlock limit.
+        sudo apt install -y libelf-dev busybox-static cpio bc
+        bash hw/femu/scripts/build-guest-kernel.sh "$HOME/femu-guest"
+        bash hw/femu/scripts/build-guest-initramfs.sh "$HOME/femu-guest"
+        rc=0
+        FEMU_GUEST_KERNEL=$HOME/femu-guest/bzImage \
+        FEMU_GUEST_INITRD=$HOME/femu-guest/initramfs.cpio.gz \
+        FEMU_GUEST_REQUIRED=1 FEMU_GUEST_ACCEL=tcg \
+        QEMU_TEST_QEMU_BINARY=$PWD/build-femu/qemu-system-x86_64 \
+        QEMU_BUILD_ROOT=$PWD/build-femu \
+        PYTHONPATH=$PWD/python:$PWD/tests/functional \
+          timeout 900 build-femu/pyvenv/bin/python3 \
+          hw/femu/tests/functional/test_x86_64_femu_guest.py \
+          > guest-boot.log 2>&1 || rc=$?
+        cat guest-boot.log
+        # four tests ran and none skipped, so a missing asset cannot pass
+        test "$rc" -eq 0
+        test "$(grep -c '^ok ' guest-boot.log)" -eq 4
+        ! grep -q '# SKIP' guest-boot.log
+
     - name: Check the host monitoring tools
       run: |
         # Each self-test starts QEMU under qtest and plants faults that its

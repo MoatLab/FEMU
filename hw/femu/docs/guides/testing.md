@@ -152,6 +152,49 @@ make -C hw/femu/tests check-tools
 
 Set `QEMU=` for a build elsewhere. CI runs the same self-tests.
 
+## Guest boot test
+
+CI boots a small Linux guest on NoSSD, bbssd, ZNS and KV under TCG. The
+guest uses the real NVMe driver, so it covers what qtests skip: probe,
+MSI-X queues, and block-layer I/O.
+
+```
+ build-guest-kernel.sh     pinned 6.12 tinyconfig + tests/functional/guest.config
+ build-guest-initramfs.sh  busybox, femu-guest-check (static), /init
+        |
+ test_x86_64_femu_guest.py  one VM per mode, -smp 2, 512 MiB
+        |
+ guest: FEMU-READY, FEMU-CHECK <name> ok|fail, FEMU-DONE rc=N
+ host:  exact check set, size, no panic; bbssd: GC count > 0 and
+        valid pages equal the namespace pages; then QMP quit
+```
+
+The checks of each mode:
+
+| Mode | Checks |
+| --- | --- |
+| NoSSD, bbssd | namespace size, serial, one I/O queue per CPU, three passes of patterned `O_DIRECT` writes read back, interrupts on both queues |
+| ZNS | as above, then zone 0: reset, write, write pointer, read back, reset, rewrite |
+| KV | generic node `/dev/ng0n1`, serial, MSI-X, Store, Retrieve, Delete, then Retrieve gives 87h |
+
+Run it by hand after a build:
+
+```sh
+bash hw/femu/scripts/build-guest-kernel.sh ~/femu-guest
+bash hw/femu/scripts/build-guest-initramfs.sh ~/femu-guest
+FEMU_GUEST_KERNEL=~/femu-guest/bzImage \
+FEMU_GUEST_INITRD=~/femu-guest/initramfs.cpio.gz \
+QEMU_TEST_QEMU_BINARY=$PWD/build-femu/qemu-system-x86_64 \
+QEMU_BUILD_ROOT=$PWD/build-femu \
+PYTHONPATH=$PWD/python:$PWD/tests/functional \
+  build-femu/pyvenv/bin/python3 hw/femu/tests/functional/test_x86_64_femu_guest.py
+```
+
+The kernel build needs `libelf-dev`, `flex`, `bison` and `bc`. The
+initramfs needs `busybox-static` and `cpio`. Without the two images the
+test skips; `FEMU_GUEST_REQUIRED=1` makes it fail instead. KVM is used
+when `/dev/kvm` opens; `FEMU_GUEST_ACCEL=tcg` or `kvm` forces one.
+
 ## Guest-side tests
 
 These need a booted guest; CI does not run them. Copy the files into the
