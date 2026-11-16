@@ -4476,7 +4476,6 @@ static inline uint16_t nvme_check_mdts(FemuCtrl *n, uint64_t len)
 }
 
 #define MN_MAX_LEN (64)
-#define ID_MAX_LEN (4)
 
 #ifdef FEMU_DEBUG_NVME
 #define femu_debug(fmt, ...) \

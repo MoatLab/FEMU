@@ -1149,14 +1149,10 @@ void nvme_set_ctrl_name(FemuCtrl *n, NvmeNamespace *ns, const char *mn,
 {
     NvmeIdCtrl *id = &n->id_ctrl;
     char *subnqn;
-    char serial[MN_MAX_LEN], dev_id_str[ID_MAX_LEN];
+    char serial[MN_MAX_LEN];
 
-    memset(serial, 0, MN_MAX_LEN);
-    memset(dev_id_str, 0, ID_MAX_LEN);
-    strcat(serial, sn);
-
-    sprintf(dev_id_str, "%d", *dev_id);
-    strcat(serial, dev_id_str);
+    /* the mode prefix and the device number, cut to fit */
+    snprintf(serial, sizeof(serial), "%s%d", sn, *dev_id);
     (*dev_id)++;
     if (ns && ns->femu_mode != n->femu_mode) {
         return;
