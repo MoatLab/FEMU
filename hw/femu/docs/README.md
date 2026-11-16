@@ -130,6 +130,8 @@ two differ.
   checks, guest-side tests, and how to add a test.
 - [Keeping the documentation correct](development/docs-maintenance.md): the
   generated references, the mode table and the example checks.
+- [QEMU base](development/qemu-base.md): the QEMU version under FEMU, and
+  each QEMU file that FEMU changes.
 - [Code structure](development/code-structure.md): what lives where under
   `hw/femu/`, and where to start a change. [Architecture](concepts/architecture.md)
   explains how the parts work together.
