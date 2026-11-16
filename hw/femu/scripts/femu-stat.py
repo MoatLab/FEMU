@@ -1102,7 +1102,7 @@ class QemuUnderQtest:
             "-accel", "qtest", "-nodefaults", "-display", "none",
             "-qtest", f"unix:{qt_path}", "-qtest-log", "/dev/null",
             "-chardev", f"socket,path={qmp_path},id=femu-check-qmp",
-            "-mon", "chardev=femu-check-qmp,mode=control"]
+            "-qmp", "chardev:femu-check-qmp"]
         if qmp_server:
             argv += ["-qmp", f"unix:{self.server_path},server=on,wait=off"]
         self.argv = argv
