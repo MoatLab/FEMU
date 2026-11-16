@@ -115,7 +115,8 @@ class FemuGuest(QemuSystemTest):
 
     def run_mode(self, name, extra_dev=''):
         m = MODES[name]
-        self.set_machine('q35')
+        # a versioned machine keeps the guest view the same across QEMU bases
+        self.set_machine(os.environ.get('FEMU_MACHINE', 'pc-q35-10.1'))
         acc = self.accel()
         vm = self.get_vm(name=name)
         vm.set_console()

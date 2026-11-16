@@ -21,6 +21,7 @@ fi
 
 sudo ./qemu-system-x86_64 \
     -name "FEMU-NoSSD-VM",debug-threads=on \
+    -machine "${FEMU_MACHINE:-pc-i440fx-10.1}" \
     -enable-kvm \
     -cpu host \
     -smp 4 \

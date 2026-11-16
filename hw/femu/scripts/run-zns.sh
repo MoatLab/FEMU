@@ -41,6 +41,7 @@ FEMU_OPTIONS=${FEMU_OPTIONS}",femu_mode=3"
 
 sudo ./qemu-system-x86_64 \
     -name "FEMU-ZNSSD-VM",debug-threads=on \
+    -machine "${FEMU_MACHINE:-pc-i440fx-10.1}" \
     -enable-kvm \
     -cpu host \
     -smp 4 \

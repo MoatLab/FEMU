@@ -104,7 +104,7 @@ fi
 
 args=(
     -name FEMU-CXLSSD-VM,debug-threads=on
-    -machine q35,cxl=on,smm=off -accel "${ACCEL:-kvm}"
+    -machine "${FEMU_MACHINE:-pc-q35-10.1}",cxl=on,smm=off -accel "${ACCEL:-kvm}"
     -cpu "${CPU:-host}" -smp "${CPUS:-4}" -m "${RAM:-4G}"
     -object "$CXL_BACKEND,id=cxlmem,size=$CXL_SIZE"
     -device pxb-cxl,id=cxl.0,bus=pcie.0,bus_nr=52

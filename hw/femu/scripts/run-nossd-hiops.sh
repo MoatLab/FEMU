@@ -39,6 +39,7 @@ echo "  ssh fwd    : tcp::${SSH_PORT}-:22"
 
 sudo ./qemu-system-x86_64 \
     -name "FEMU-NoSSD-MQ-VM",debug-threads=on \
+    -machine "${FEMU_MACHINE:-pc-i440fx-10.1}" \
     -enable-kvm \
     -cpu host \
     -smp $VM_SMP \

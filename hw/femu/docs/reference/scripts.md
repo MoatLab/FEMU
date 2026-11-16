@@ -42,6 +42,7 @@ no network and no `sudo` (see below). All except `run-cxlssd.sh` read:
 | `IMGDIR` | `$HOME/images` | Directory of the guest image |
 | `OSIMGF` | `$IMGDIR/u20s.qcow2` | Guest image file; the script exits with status 1 if it does not exist |
 | `SSH_PORT` | `8080` | Host port forwarded to the guest's SSH port; use a different one for each VM you run at the same time |
+| `FEMU_MACHINE` | `pc-i440fx-10.1` | Machine type; a versioned name keeps the guest view the same on a new QEMU base |
 
 The device geometry, size and timing are shell variables at the top of each
 script. Edit them there; they are not read from the environment.
@@ -91,6 +92,7 @@ its command line. Its settings are environment variables:
 | `TRACEFS_DIR` | unset | `tracefs-dir`, only when set |
 | `CXL_BACKEND` | `memory-backend-ram` | memory backend type and options |
 | `ACCEL`, `CPU`, `CPUS`, `RAM` | `kvm`, `host`, `4`, `4G` | accelerator, CPU model, vCPUs, guest RAM |
+| `FEMU_MACHINE` | `pc-q35-10.1` | machine type; `cxl=on,smm=off` is added |
 | `DRY_RUN` | `0` | `1` prints the command instead of running it |
 
 These defaults follow Cylon's launch script and differ from the device's

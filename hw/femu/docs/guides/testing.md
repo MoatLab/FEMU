@@ -193,7 +193,8 @@ PYTHONPATH=$PWD/python:$PWD/tests/functional \
 The kernel build needs `libelf-dev`, `flex`, `bison` and `bc`. The
 initramfs needs `busybox-static` and `cpio`. Without the two images the
 test skips; `FEMU_GUEST_REQUIRED=1` makes it fail instead. KVM is used
-when `/dev/kvm` opens; `FEMU_GUEST_ACCEL=tcg` or `kvm` forces one.
+when `/dev/kvm` opens; `FEMU_GUEST_ACCEL=tcg` or `kvm` forces one. The
+machine is `pc-q35-10.1`; `FEMU_MACHINE` sets another.
 
 ## Guest-side tests
 

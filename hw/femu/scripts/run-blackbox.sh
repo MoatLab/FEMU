@@ -66,6 +66,7 @@ sudo FEMU_EXP_LOG=${FEMU_EXP_LOG} \
      FEMU_DUMP_LPN=${FEMU_DUMP_LPN} \
      ./qemu-system-x86_64 \
     -name "FEMU-BBSSD-VM",debug-threads=on \
+    -machine "${FEMU_MACHINE:-pc-i440fx-10.1}" \
     -enable-kvm \
     -cpu host \
     -smp 4 \
