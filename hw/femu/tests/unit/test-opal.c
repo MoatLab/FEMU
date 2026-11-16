@@ -3651,6 +3651,43 @@ static void test_mpa_openssl(void)
     g_assert_cmpint(g_rmdir(dir), ==, 0);
 }
 
+/*
+ * ST GenKey, then ET 0 with a stray token after it: the packet is
+ * malformed, so the session ends with no reply and nothing commits. The
+ * same holds for a method outside a transaction (Core 3.2.2.3.3.4).
+ */
+static void test_s3_bad_tail(void)
+{
+    uint32_t tsn;
+    FemuOpal *o = s3_init(&tsn);
+    uint64_t k1 = femu_opal_key(o, 1);
+    Tb t = { .n = 0 };
+
+    er.n = 0;
+    tb_c(&t, 0xFB);
+    tb_u(&t, 0);
+    tb_call(&t, U_KAES(1), M_GENKEY);
+    tb_end(&t);
+    g_assert_cmpuint(reply_status(xfer(o, &t, tsn)), ==, 0);
+    t.n = 0;
+    tb_c(&t, 0xFC);
+    tb_u(&t, 0);
+    tb_u(&t, 5);
+    g_assert_cmpint(xfer(o, &t, tsn), ==, -1);
+    g_assert_cmpuint(femu_opal_key(o, 1), ==, k1);
+    g_assert_cmpint(er.n, ==, 0);
+    /* a GenKey with a stray token after its status list */
+    g_assert_cmpuint(start(o, U_LOCKINGSP, U_LSP_ADM1, "MSID-1", &tsn), ==, 0);
+    t.n = 0;
+    tb_call(&t, U_KAES(1), M_GENKEY);
+    tb_end(&t);
+    tb_u(&t, 5);
+    g_assert_cmpint(xfer(o, &t, tsn), ==, -1);
+    g_assert_cmpuint(femu_opal_key(o, 1), ==, k1);
+    g_assert_cmpint(er.n, ==, 0);
+    femu_opal_free(o);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -3690,6 +3727,7 @@ int main(int argc, char **argv)
     g_test_add_func("/femu/opal/s3-rekey", test_s3_rekey);
     g_test_add_func("/femu/opal/s3-revertsp", test_s3_revertsp);
     g_test_add_func("/femu/opal/s3-tables", test_s3_tables);
+    g_test_add_func("/femu/opal/s3-bad-tail", test_s3_bad_tail);
     g_test_add_func("/femu/opal/s3-check", test_s3_check);
     g_test_add_func("/femu/opal/s3-ace-set", test_s3_ace_set);
     g_test_add_func("/femu/opal/s3-expr-encoding", test_s3_expr_encoding);

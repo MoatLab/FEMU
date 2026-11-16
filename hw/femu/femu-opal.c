@@ -1662,6 +1662,39 @@ static void reply_status(FemuOpalReply *r, uint32_t mark)
  * no reply (Core 3.2.2.3.3.3 and 3.2.2.3.3.4). The reply mirrors the
  * transaction tokens.
  */
+/* the token layout [ST u] [CALL ... EOD SL s 0 0 EL] [ET u] [EOS] */
+static bool femu_opal_packet_shape(const FemuOpalTok *t, int n)
+{
+    int i = 0;
+    int k;
+
+    if (i < n && tok_is(&t[i], TOK_ST)) {
+        if (n < 2 || t[1].type != FEMU_OPAL_TOK_UINT) {
+            return false;
+        }
+        i = 2;
+    }
+    if (i < n && tok_is(&t[i], TOK_CALL)) {
+        for (k = i; k < n && !tok_is(&t[k], TOK_EOD); k++) {
+            ;
+        }
+        if (k + 6 > n) {
+            return false;
+        }
+        i = k + 6;
+    }
+    if (i < n && tok_is(&t[i], TOK_ET)) {
+        if (i + 1 >= n || t[i + 1].type != FEMU_OPAL_TOK_UINT) {
+            return false;
+        }
+        i += 2;
+    }
+    if (i < n && tok_is(&t[i], TOK_EOS)) {
+        i++;
+    }
+    return i == n;
+}
+
 static void femu_opal_session_packet(FemuOpal *o, const FemuOpalTok *t, int n)
 {
     FemuOpalReply r = {
@@ -1673,6 +1706,10 @@ static void femu_opal_session_packet(FemuOpal *o, const FemuOpalTok *t, int n)
     int rc = METHOD_DONE;
     int i = 0;
 
+    /* check the whole packet first: a bad tail must not follow a commit */
+    if (!femu_opal_packet_shape(t, n)) {
+        goto abort;
+    }
     if (tok_is(&t[0], TOK_ST)) {
         if (o->s.txn || n < 2 || t[1].type != FEMU_OPAL_TOK_UINT) {
             goto abort;
