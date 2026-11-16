@@ -1,0 +1,31 @@
+#!/bin/sh
+# /init of the FEMU guest boot test: mount, run the checks, report.
+# The host reads FEMU-READY, the FEMU-CHECK lines and FEMU-DONE on the
+# serial console, then ends QEMU over QMP.
+/bin/busybox mkdir -p /proc /sys /dev
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev
+arg() {
+	for w in $(/bin/busybox cat /proc/cmdline); do
+		case $w in "$1"=*) echo "${w#*=}" ;; esac
+	done
+}
+mode=$(arg femu.mode)
+serial=$(arg femu.serial)
+# the controller probes in the background: wait up to 30 s for its node
+n=0
+while [ ! -e /dev/nvme0 ] && [ $n -lt 300 ]; do
+	/bin/busybox usleep 100000
+	n=$((n + 1))
+done
+/bin/busybox usleep 500000
+# only errors and worse reach the console from here on, so a driver
+# warning cannot split a FEMU-CHECK line; panics and BUG lines still do
+echo 4 > /proc/sys/kernel/printk
+echo "FEMU-READY mode=$mode"
+/bin/femu-guest-check "$mode" "$serial"
+echo "FEMU-DONE rc=$?"
+while :; do
+	/bin/busybox sleep 3600
+done
