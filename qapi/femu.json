@@ -49,13 +49,15 @@
 #     Zoned namespaces only.
 #
 # @reclaim-units: the summary and one record per reclaim unit, for a
-#     window of units.  Blackbox namespaces with flexible data placement
+#     window of units.  Blackbox namespaces with flexible data
+#     placement
 #     only.
 #
 # @blocks: the summary and one record per flash block, for a window of
 #     blocks.  Blackbox namespaces only.
 #
-# @dies: the summary and the wait counters of each LUN, for a window of
+# @dies: the summary and the wait counters of each LUN, for a window
+#     of
 #     LUNs.  Blackbox namespaces with die_stats only.
 #
 # Since: 10.1
@@ -67,7 +69,8 @@
 ##
 # @FemuDieInfo:
 #
-# What the array bookings of one LUN saw (die_stats).  A booking is one
+# What the array bookings of one LUN saw (die_stats).  A booking is
+# one
 # array operation: a multi-plane group is one, a copyback two.  LUNs
 # are listed in the order channel, LUN.
 #
@@ -79,7 +82,8 @@
 #
 # @waits: bookings that found the LUN busy and started later
 #
-# @wait-ns: the sum of those delays, from when a booking could start to
+# @wait-ns: the sum of those delays, from when a booking could start
+#     to
 #     when it started
 #
 # @array-ns: the sum of the array time booked.  Bookings on several
@@ -94,7 +98,8 @@
 ##
 # @FemuBlockInfo:
 #
-# The wear of one flash block.  Blocks are listed in the order channel,
+# The wear of one flash block.  Blocks are listed in the order
+# channel,
 # LUN, plane, block, so block i of the listing is block (i mod
 # blocks per plane) of its plane.
 #
@@ -112,7 +117,8 @@
 #
 # @overworn: the block is past @pe-limit and still in service
 #
-# @failed: an erase failure killed the block (erase_fail_ppm).  A failed
+# @failed: an erase failure killed the block (erase_fail_ppm).  A
+#     failed
 #     block sits only in a retired or spare line.
 #
 # Since: 10.1
@@ -236,7 +242,8 @@
 # @idle-reclaims: read reclaims done in idle time.  Present only with
 #     maint_idle.
 #
-# @idle-refreshes: retention refreshes done in idle time, by the scan or
+# @idle-refreshes: retention refreshes done in idle time, by the scan
+#     or
 #     a queued age reclaim.  Present only with maint_idle.
 #
 # @waf: write amplification factor, (@nand-write-pages +
@@ -416,7 +423,8 @@
 #
 # @full: closed with every page valid
 #
-# @victim: closed with invalid or unwritten pages, a garbage collection
+# @victim: closed with invalid or unwritten pages, a garbage
+#     collection
 #     candidate.  A Reclaim Unit Handle Update closes a unit before it
 #     fills.
 #
@@ -464,7 +472,8 @@
 # @host-bytes: bytes of the logical blocks the host wrote through the
 #     handle
 #
-# @media-bytes: bytes programmed for the handle: host writes, data that
+# @media-bytes: bytes programmed for the handle: host writes, data
+#     that
 #     garbage collection moved out of its units, and pad pages that
 #     closed its units
 #
@@ -533,7 +542,8 @@
 # @FemuReclaimGroupInfo:
 #
 # One reclaim group: the dies that hold its reclaim units.  A group is
-# a set of whole channels, or of LUNs of one channel, and every unit of
+# a set of whole channels, or of LUNs of one channel, and every unit
+# of
 # the group is one block of each plane of each of its dies.
 #
 # @id: group index, from 0
@@ -573,7 +583,8 @@
 # @unit-counts: reclaim units in each state
 #
 # @placement-handles: the placement handle list of the namespace: the
-#     reclaim unit handle that each placement handle selects, placement
+#     reclaim unit handle that each placement handle selects,
+#     placement
 #     handle 0 first
 #
 # @ftl-nsid: the namespace whose FTL holds the reclaim units.  Every
@@ -603,7 +614,8 @@
 #
 # @table: per NAND type and page type, from a table
 #
-# @page-type: one read and erase time, and a program time per page type
+# @page-type: one read and erase time, and a program time per page
+#     type
 #     (pgtype_lat)
 #
 # Since: 10.1
@@ -631,7 +643,8 @@
 #
 # The NAND bus timing a namespace charges.  The values are the ones
 # the media layer uses, after its fallbacks: a command phase that the
-# ONFI profile does not set takes cmd_addr_lat.  With @staged-bus false
+# ONFI profile does not set takes cmd_addr_lat.  With @staged-bus
+# false
 # the bus costs nothing, so every bus phase is 0.  Times are in
 # nanoseconds.
 #
@@ -641,7 +654,8 @@
 #     phases
 #
 # @onfi-mode: the ONFI 6.0 timing mode.  Present only with
-#     @onfi-profile.  With a parameter page and onfi_mode -1, it is the
+#     @onfi-profile.  With a parameter page and onfi_mode -1, it is
+#     the
 #     highest mode that the page lists.
 #
 # @column-cycles: the column address cycles of a command, or 0 without
@@ -712,7 +726,8 @@
 #     without @cache-read
 #
 # @cache-select-ns: the status that selects the LUN before each 31h or
-#     3Fh when several LUNs share a channel; 0 with one LUN, or without
+#     3Fh when several LUNs share a channel; 0 with one LUN, or
+#     without
 #     @cache-read
 #
 # @onfi-order: a read reads its status before its data out, and a
@@ -956,7 +971,8 @@
 #     replacement, or the FTL had no line left to write
 #
 # @credit-pages: the most pages that admitted writes may hold at once;
-#     the reserve lines hold that many erased pages (under flexible data
+#     the reserve lines hold that many erased pages (under flexible
+#     data
 #     placement, the reserve units of each reclaim group hold more)
 #
 # @held-pages: pages the admitted writes hold now
@@ -978,7 +994,8 @@
 # counts for the namespace whose slice of the logical pages holds it.
 # Mapping, pad and parity pages are not in any namespace.
 #
-# @host-write-pages: pages the host wrote to this namespace, counted as
+# @host-write-pages: pages the host wrote to this namespace, counted
+#     as
 #     @FemuWriteCounters counts them
 #
 # @nand-write-pages: pages of this namespace programmed for host data
@@ -1016,7 +1033,8 @@
 #     eol_read_only and blk_pe_limit.
 #
 # @shared-ftl-nsid: with shared_ftl, the namespace whose FTL holds
-#     this one.  Every namespace of the controller places into that FTL,
+#     this one.  Every namespace of the controller places into that
+#     FTL,
 #     so each reports the same geometry and write counters.
 #
 # @namespace-counters: the pages of this namespace alone, when several
@@ -1035,11 +1053,14 @@
 #     largest @wait-ns (the lowest index on a tie).  Absent when no
 #     booking waited.
 #
-# @offset: with kind @lines, @reclaim-units, @blocks or @dies, the index
+# @offset: with kind @lines, @reclaim-units, @blocks or @dies, the
+#     index
 #     of the first record in the listing
 #
-# @next-offset: with kind @lines, @reclaim-units, @blocks or @dies, the
-#     offset that continues the listing.  Absent after the last record.
+# @next-offset: with kind @lines, @reclaim-units, @blocks or @dies,
+#     the
+#     offset that continues the listing.  Absent after the last
+#     record.
 #
 # Since: 10.1
 ##
@@ -1140,7 +1161,8 @@
 # zoned (znssd) namespaces are supported.  For a computational storage
 # (csd), key-value (kvssd) or OpenChannel (ocssd) namespace, the reply
 # has the NAND bus timing.  A key-value namespace also has its value
-# packing (kv_pack=on), and with kv_index=lsm the state of its LSM-tree
+# packing (kv_pack=on), and with kv_index=lsm the state of its
+# LSM-tree
 # index.  A selected
 # no-SSD (nossd) namespace, or one backed by a CXL SSD medium, makes
 # the command fail.  The
@@ -1183,7 +1205,8 @@
 #              "geometry": { "channels": 8, "luns-per-channel": 8,
 #                            "planes-per-lun": 1,
 #                            "blocks-per-plane": 256,
-#                            "pages-per-block": 256, "page-size": 4096,
+#                            "pages-per-block": 256, "page-size":
+#     4096,
 #                            "pages-per-line": 16384 },
 #              "counters": { "host-write-pages": 1024,
 #                            "nand-write-pages": 1024,
@@ -1202,9 +1225,11 @@
 #                         "program-confirm-ns": 0,
 #                         "plane-read-busy-ns": 0,
 #                         "plane-program-busy-ns": 0,
-#                         "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
+#                         "plane-erase-busy-ns": 0, "data-in-gap-ns":
+#     0,
 #                         "data-out-edges-ns": 0, "sca": false,
-#                         "cache-read": false, "read-cache-busy-ns": 0,
+#                         "cache-read": false, "read-cache-busy-ns":
+#     0,
 #                         "cache-step-ns": 0, "cache-select-ns": 0,
 #                         "onfi-order": false,
 #                         "page-register-hold": false,
@@ -1240,9 +1265,11 @@
 #                         "program-confirm-ns": 0,
 #                         "plane-read-busy-ns": 0,
 #                         "plane-program-busy-ns": 0,
-#                         "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
+#                         "plane-erase-busy-ns": 0, "data-in-gap-ns":
+#     0,
 #                         "data-out-edges-ns": 0, "sca": false,
-#                         "cache-read": false, "read-cache-busy-ns": 0,
+#                         "cache-read": false, "read-cache-busy-ns":
+#     0,
 #                         "cache-step-ns": 0, "cache-select-ns": 0,
 #                         "onfi-order": false,
 #                         "page-register-hold": false,
@@ -1253,7 +1280,8 @@
 #                         { "index": 1, "type": "sequential",
 #                           "state": "implicitly-open",
 #                           "start-lba": 131072, "capacity": 131072,
-#                           "write-pointer": 131080, "zrwa": false } ],
+#                           "write-pointer": 131080, "zrwa": false }
+#     ],
 #              "offset": 0, "next-offset": 2 } ] } }
 #
 # .. qmp-example::
@@ -1285,9 +1313,11 @@
 #                         "program-confirm-ns": 0,
 #                         "plane-read-busy-ns": 0,
 #                         "plane-program-busy-ns": 0,
-#                         "plane-erase-busy-ns": 0, "data-in-gap-ns": 0,
+#                         "plane-erase-busy-ns": 0, "data-in-gap-ns":
+#     0,
 #                         "data-out-edges-ns": 0, "sca": false,
-#                         "cache-read": false, "read-cache-busy-ns": 0,
+#                         "cache-read": false, "read-cache-busy-ns":
+#     0,
 #                         "cache-step-ns": 0, "cache-select-ns": 0,
 #                         "onfi-order": false,
 #                         "page-register-hold": false,
@@ -1295,19 +1325,23 @@
 #              "fdp": { "reclaim-groups": 1, "units-per-group": 25,
 #                       "pages-per-unit": 16,
 #                       "handles": [ { "id": 0,
-#                                      "type": "persistently-isolated",
+#                                      "type":
+#     "persistently-isolated",
 #                                      "host-bytes": 0,
 #                                      "media-bytes": 0 },
 #                                    { "id": 1,
-#                                      "type": "persistently-isolated",
+#                                      "type":
+#     "persistently-isolated",
 #                                      "host-bytes": 0,
 #                                      "media-bytes": 0 },
 #                                    { "id": 2,
-#                                      "type": "persistently-isolated",
+#                                      "type":
+#     "persistently-isolated",
 #                                      "host-bytes": 0,
 #                                      "media-bytes": 0 },
 #                                    { "id": 3,
-#                                      "type": "persistently-isolated",
+#                                      "type":
+#     "persistently-isolated",
 #                                      "host-bytes": 0,
 #                                      "media-bytes": 0 } ],
 #                       "unit-counts": { "free": 21, "open": 4,
@@ -1333,7 +1367,8 @@
 #              "geometry": { "channels": 8, "luns-per-channel": 8,
 #                            "planes-per-lun": 1,
 #                            "blocks-per-plane": 256,
-#                            "pages-per-block": 256, "page-size": 4096,
+#                            "pages-per-block": 256, "page-size":
+#     4096,
 #                            "pages-per-line": 16384 },
 #              "counters": { "host-write-pages": 0,
 #                            "nand-write-pages": 0,
@@ -1353,9 +1388,11 @@
 #                         "program-confirm-ns": 125,
 #                         "plane-read-busy-ns": 500,
 #                         "plane-program-busy-ns": 500,
-#                         "plane-erase-busy-ns": 500, "data-in-gap-ns": 0,
+#                         "plane-erase-busy-ns": 500,
+#     "data-in-gap-ns": 0,
 #                         "data-out-edges-ns": 0, "sca": false,
-#                         "cache-read": false, "read-cache-busy-ns": 0,
+#                         "cache-read": false, "read-cache-busy-ns":
+#     0,
 #                         "cache-step-ns": 0, "cache-select-ns": 0,
 #                         "onfi-order": true,
 #                         "page-register-hold": true,
@@ -1384,7 +1421,8 @@
 #
 # @post-delay: from ready to the posted completion entry
 #
-# @total: from the fetch of the command to the posted completion entry.
+# @total: from the fetch of the command to the posted completion
+#     entry.
 #     For a command that goes through the FTL ring, submit, ftl, hold
 #     and post-delay add up to total.
 #
@@ -1502,7 +1540,8 @@
 # stage, from the fetch of a command to its posted completion entry.
 # The device needs the property io_stages=on.  Commands that complete
 # without the FTL ring count only in post-delay, past-due and total.
-# Commands a namespace retired are not counted.  Without reset the sums
+# Commands a namespace retired are not counted.  Without reset the
+# sums
 # are taken while I/O may run, so they can differ by commands in
 # flight; with reset the pollers stop while the counts are read and
 # cleared.
@@ -1533,7 +1572,8 @@
 #                          "buckets": [ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 #                                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 #                                       2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-#                                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ] } ],
+#                                       0, 0, 0, 0, 0, 0, 0, 0, 0, 0 ]
+#     } ],
 #            "returned-after-due": 0,
 #            "bands": [ { "bucket": 20, "count": 2,
 #                         "total-sum-ns": 4100000,
@@ -1648,7 +1688,8 @@
 ##
 # @femu-save-data:
 #
-# Write a checkpoint of a femu device's data in the persist_file format:
+# Write a checkpoint of a femu device's data in the persist_file
+# format:
 # the data, the namespace layout and LBA format, and the deallocated
 # and uncorrectable blocks.  The device's I/O pauses for the write.  A
 # later run loads the file with -device femu,persist_file=FILE.  The
