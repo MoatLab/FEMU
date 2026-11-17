@@ -317,8 +317,6 @@ qos_test_ss.add(
   'ne2000-test.c',
   'tulip-test.c',
   'nvme-test.c',
-  meson.project_source_root() / 'hw/femu/tests/qtest/femu-test.c',
-  meson.project_source_root() / 'hw/femu/femu-hpke.c',
   'pca9552-test.c',
   'pci-test.c',
   'pcnet-test.c',
@@ -339,6 +337,8 @@ qos_test_ss.add(
   'ufs-test.c',
   'riscv-iommu-test.c',
 )
+# FEMU qtests, listed in hw/femu/meson.build
+qos_test_ss.add(get_variable('femu_qos_test_files', []))
 
 if config_all_devices.has_key('CONFIG_VIRTIO_SERIAL')
   qos_test_ss.add(files('virtio-serial-test.c'))

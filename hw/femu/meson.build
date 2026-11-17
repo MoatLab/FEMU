@@ -36,3 +36,7 @@ system_ss.add(when: ['CONFIG_FEMU_PCI', 'CONFIG_CXL_MEM_DEVICE'],
 specific_ss.add(when: 'CONFIG_FEMU_PCI', if_true: files('femu-freeze-kvm.c'))
 specific_ss.add(when: ['CONFIG_FEMU_PCI', 'CONFIG_CXL_MEM_DEVICE'],
                 if_true: files('cxlssd/qemu-adapter.c'))
+
+# FEMU qtests and the HPKE code they check, built into qos-test by
+# tests/qtest/meson.build
+femu_qos_test_files = files('tests/qtest/femu-test.c', 'femu-hpke.c')
