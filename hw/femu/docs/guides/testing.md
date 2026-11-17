@@ -183,6 +183,8 @@ The checks of each mode:
 The interrupt checks read the vector mode from
 `/sys/class/nvme/nvme0/device/msi_irqs/`. Linux 6.1 names MSI-X vectors
 `PCI-MSI` in `/proc/interrupts`, and later kernels name them `PCI-MSIX`.
+The queue check accepts hctx 0 on CPU 0 or on CPU 1. Linux 7.x gives
+hctx 0 to CPU 1 when the guest has two CPUs.
 
 Run it by hand after a build:
 

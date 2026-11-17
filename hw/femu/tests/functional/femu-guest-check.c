@@ -225,7 +225,13 @@ static int check_queues(bool blk)
             n += e->d_name[0] != '.';
         }
         closedir(d);
-        if (n != 2 || !hctx_cpu(0, "0") || !hctx_cpu(1, "1")) {
+        /*
+         * One hardware queue per CPU, in either order: Linux 7.x spreads
+         * the CPUs over the vectors with new code and gives hctx 0 to
+         * CPU 1. The data check needs only both queues busy.
+         */
+        if (n != 2 || !((hctx_cpu(0, "0") && hctx_cpu(1, "1")) ||
+                        (hctx_cpu(0, "1") && hctx_cpu(1, "0")))) {
             char c0[16] = "none";
             char c1[16] = "none";
             char why[64];
