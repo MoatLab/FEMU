@@ -453,8 +453,18 @@ static int update_non_interleaved(Object *obj, void *opaque)
     return 0;
 }
 
+/*
+ * FEMU: keep every window access on the device handlers. The direct
+ * aliases outlive an uncommit or reset and cover more than the routed
+ * range, and femu-cxl-ssd must see each access for its timing model.
+ */
+static const bool cxl_direct_map;
+
 void cfmws_update_non_interleaved(bool commit)
 {
+    if (!cxl_direct_map) {
+        return;
+    }
     /*
      * Walk endpoints to find both committed and uncommitted decoders,
      * then check if they are not interleaved (but the path is fully set up).

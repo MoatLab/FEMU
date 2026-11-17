@@ -11,8 +11,8 @@ static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
     if (!msix_enabled(&(n->parent_obj))) {
         return -1;
     }
-    /* without an in-kernel irqchip (TCG), interrupts go out directly */
-    if (!accel_msi_via_irqfd_enabled()) {
+    /* the route lifecycle below is KVM only; others notify directly */
+    if (!kvm_msi_via_irqfd_enabled()) {
         return -1;
     }
 

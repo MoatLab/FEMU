@@ -48,6 +48,8 @@ struct FemuCxlSsd {
     /* The thread that realized the device: the main loop's. */
     QemuThread main_loop;
     Notifier machine_done;
+    /* Refuses a new KVM VM on reset while a DER mode holds memslots. */
+    NotifierWithReturn vmfd_change;
     bool attached;
     bool test_change_dpa;
     bool test_media_disabled;
@@ -789,6 +791,24 @@ static const MemoryRegionOps adapter_ops = {
     .impl = { .min_access_size = 1, .max_access_size = 8, .unaligned = true },
 };
 
+/*
+ * A new KVM VM drops the DER memslots and the fault exit, but the device
+ * still holds them. Refuse the change before the old VM closes; QEMU then
+ * stops the guest with an internal error.
+ */
+static int adapter_vmfd_change(NotifierWithReturn *notifier, void *data,
+                               Error **errp)
+{
+    VmfdChangeNotifier *change = data;
+
+    if (!change->pre) {
+        return 0;
+    }
+    error_report("femu-cxl-ssd: a DER mode cannot run with "
+                 "x-change-vmfd-on-reset=on");
+    return -EPERM;
+}
+
 static void adapter_machine_done(Notifier *notifier, void *opaque)
 {
     FemuCxlSsd *dev = container_of(notifier, FemuCxlSsd, machine_done);
@@ -832,6 +852,10 @@ static void adapter_detach(FemuCxlSsd *dev)
 {
     assert(femu_cxl_locked());
     qemu_remove_machine_init_done_notifier(&dev->machine_done);
+    if (dev->vmfd_change.notify) {
+        kvm_vmfd_remove_change_notifier(&dev->vmfd_change);
+        dev->vmfd_change.notify = NULL;
+    }
     if (dev->attached && !--adapter_users) {
         FemuCxlWindow *w;
         FemuCxlWindow *next;
@@ -1665,6 +1689,13 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
                    "or der=off");
         return;
     }
+    /* a new KVM VM on reset drops the DER memslots and the fault exit */
+    if (s->der && strcmp(s->der, "off") &&
+        MACHINE(qdev_get_machine())->new_accel_vmfd_on_reset) {
+        error_setg(errp, "der=%s cannot run with x-change-vmfd-on-reset=on",
+                   s->der);
+        return;
+    }
     if (s->der && !strcmp(s->der, "cylon") && !s->cylon_kernel_ack) {
         error_setg(errp, "der=cylon requires cylon-kernel-ack=on after "
                    "reviewing the host dual-mode leaf lifetime fix");
@@ -1760,6 +1791,10 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     adapter_cci_hook(&ct3d->cci, ct3d);
     FEMU_CXL_SSD(dev)->machine_done.notify = adapter_machine_done;
     qemu_add_machine_init_done_notifier(&FEMU_CXL_SSD(dev)->machine_done);
+    if (s->der && strcmp(s->der, "off") && kvm_enabled()) {
+        FEMU_CXL_SSD(dev)->vmfd_change.notify = adapter_vmfd_change;
+        kvm_vmfd_add_change_notifier(&FEMU_CXL_SSD(dev)->vmfd_change);
+    }
     /* The thread starts last: nothing after it can fail. */
     if (s->cca_enabled) {
         femu_cxl_cca_start(s, dev, OBJECT(dev), adapter_media_enabled);
