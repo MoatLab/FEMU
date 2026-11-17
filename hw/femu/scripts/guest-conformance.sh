@@ -53,7 +53,7 @@ smp_override=""
 mem_override=""
 
 usage() {
-	cat <<EOF
+    cat <<EOF
 Usage: $(basename "$0") [options] SUITE...
 
 Run conformance suites in a FEMU guest.
@@ -91,31 +91,31 @@ EOF
 }
 
 die() {
-	echo "guest-conformance: $*" >&2
-	exit 2
+    echo "guest-conformance: $*" >&2
+    exit 2
 }
 
 while [[ $# -gt 0 ]]; do
-	case $1 in
-	--qemu) qemu=${2:?--qemu needs a path}; shift 2 ;;
-	--image) image=${2:?--image needs a file}; shift 2 ;;
-	--key) ssh_key=${2:?--key needs a file}; shift 2 ;;
-	--port) ssh_port=${2:?--port needs a number}; shift 2 ;;
-	--outdir) outdir=${2:?--outdir needs a directory}; shift 2 ;;
-	--timeout) suite_timeout=${2:?--timeout needs seconds}; shift 2 ;;
-	--boot-timeout) boot_timeout=${2:?--boot-timeout needs seconds}; shift 2 ;;
-	--device) dev_override=${2:?--device needs properties}; shift 2 ;;
-	--smp) smp_override=${2:?--smp needs a number}; shift 2 ;;
-	--mem) mem_override=${2:?--mem needs a size}; shift 2 ;;
-	--sudo) use_sudo=1; shift ;;
-	--keep) keep=1; shift ;;
-	-h | --help) usage; exit 0 ;;
-	-*) usage >&2; die "unknown option $1" ;;
-	all) suites+=(blktests-block blktests-zbd nvme-cli zenfs-crash kv-bench); shift ;;
-	blktests-block | blktests-zbd | nvme-cli | zenfs-crash | kv-bench)
-		suites+=("$1"); shift ;;
-	*) usage >&2; die "unknown suite $1" ;;
-	esac
+    case $1 in
+    --qemu) qemu=${2:?--qemu needs a path}; shift 2 ;;
+    --image) image=${2:?--image needs a file}; shift 2 ;;
+    --key) ssh_key=${2:?--key needs a file}; shift 2 ;;
+    --port) ssh_port=${2:?--port needs a number}; shift 2 ;;
+    --outdir) outdir=${2:?--outdir needs a directory}; shift 2 ;;
+    --timeout) suite_timeout=${2:?--timeout needs seconds}; shift 2 ;;
+    --boot-timeout) boot_timeout=${2:?--boot-timeout needs seconds}; shift 2 ;;
+    --device) dev_override=${2:?--device needs properties}; shift 2 ;;
+    --smp) smp_override=${2:?--smp needs a number}; shift 2 ;;
+    --mem) mem_override=${2:?--mem needs a size}; shift 2 ;;
+    --sudo) use_sudo=1; shift ;;
+    --keep) keep=1; shift ;;
+    -h | --help) usage; exit 0 ;;
+    -*) usage >&2; die "unknown option $1" ;;
+    all) suites+=(blktests-block blktests-zbd nvme-cli zenfs-crash kv-bench); shift ;;
+    blktests-block | blktests-zbd | nvme-cli | zenfs-crash | kv-bench)
+        suites+=("$1"); shift ;;
+    *) usage >&2; die "unknown suite $1" ;;
+    esac
 done
 
 ((${#suites[@]} > 0)) || { usage >&2; die "name at least one suite"; }
@@ -124,17 +124,17 @@ done
 [[ -r $ssh_key ]] || die "SSH key not found: $ssh_key (use --key)"
 [[ $ssh_port =~ ^[0-9]+$ ]] || die "bad port: $ssh_port"
 [[ -z $suite_timeout || $suite_timeout =~ ^[1-9][0-9]*$ ]] ||
-	die "bad --timeout: $suite_timeout"
+    die "bad --timeout: $suite_timeout"
 [[ -z $smp_override || $smp_override =~ ^[1-9][0-9]*$ ]] ||
-	die "bad --smp: $smp_override"
+    die "bad --smp: $smp_override"
 [[ -z $mem_override || $mem_override =~ ^[1-9][0-9]*[MG]$ ]] ||
-	die "bad --mem: $mem_override (use a size such as 8G)"
+    die "bad --mem: $mem_override (use a size such as 8G)"
 for tool in qemu-img ssh scp timeout; do
-	command -v "$tool" >/dev/null || die "$tool is not installed"
+    command -v "$tool" >/dev/null || die "$tool is not installed"
 done
 for f in blktests-guest.sh nvme-cli-e2e-guest.sh zenfs-crash-guest.sh \
-	kv-bench-guest.sh kv-probe.c kv-bench.c; do
-	[[ -r $SCRIPT_DIR/$f ]] || die "missing $SCRIPT_DIR/$f"
+    kv-bench-guest.sh kv-probe.c kv-bench.c; do
+    [[ -r $SCRIPT_DIR/$f ]] || die "missing $SCRIPT_DIR/$f"
 done
 
 outdir=${outdir:-./conformance-$(date +%Y%m%d-%H%M%S)}
@@ -143,13 +143,13 @@ outdir=$(cd "$outdir" && pwd)
 image=$(cd "$(dirname "$image")" && pwd)/$(basename "$image")
 
 ssh_opts=(
-	-o StrictHostKeyChecking=no
-	-o UserKnownHostsFile=/dev/null
-	-o LogLevel=ERROR
-	-o ConnectTimeout=8
-	-o BatchMode=yes
-	-o IdentitiesOnly=yes
-	-i "$ssh_key"
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR
+    -o ConnectTimeout=8
+    -o BatchMode=yes
+    -o IdentitiesOnly=yes
+    -i "$ssh_key"
 )
 
 qemu_pid=""
@@ -157,186 +157,191 @@ qemu_pid=""
 # With --sudo, QEMU runs as root, so the checks and signals go through sudo
 # too; ps or kill -0 as the user can fail on a root process.
 as_owner() {
-	if ((use_sudo)); then
-		sudo "$@"
-	else
-		"$@"
-	fi
+    if ((use_sudo)); then
+        sudo "$@"
+    else
+        "$@"
+    fi
 }
 
 alive() {
-	[[ -n $qemu_pid ]] && as_owner kill -0 "$qemu_pid" 2>/dev/null
+    [[ -n $qemu_pid ]] && as_owner kill -0 "$qemu_pid" 2>/dev/null
 }
 
 stop_guest() {
-	if alive; then
-		as_owner kill "$qemu_pid" 2>/dev/null || true
-		for _ in {1..20}; do
-			alive || break
-			sleep 0.5
-		done
-		alive && as_owner kill -9 "$qemu_pid" 2>/dev/null
-	fi
-	qemu_pid=""
+    if alive; then
+        as_owner kill "$qemu_pid" 2>/dev/null || true
+        for _ in {1..20}; do
+            alive || break
+            sleep 0.5
+        done
+        alive && as_owner kill -9 "$qemu_pid" 2>/dev/null
+    fi
+    qemu_pid=""
 }
 trap stop_guest EXIT
 trap 'exit 130' INT TERM
 
 guest_ssh() {
-	ssh "${ssh_opts[@]}" -p "$ssh_port" femu@localhost "$@"
+    ssh "${ssh_opts[@]}" -p "$ssh_port" femu@localhost "$@"
 }
 
 # Start the guest with one FEMU device and wait for SSH; leave the QEMU PID
 # in qemu_pid. Every step checks its own status: the caller runs this
 # function in a condition, where set -e does not apply.
 start_guest() {
-	local name=$1 dev=$2 overlay=$3 smp=$4 mem=$5
-	local pidfile=$outdir/$name.pid
-	# A nonce in an SMBIOS OEM string tells this guest from another guest
-	# that answers on the same port.
-	local nonce
-	nonce="femu-conformance-$$-$RANDOM$RANDOM"
-	local -a cmd=()
+    local name=$1 dev=$2 overlay=$3 smp=$4 mem=$5
+    local pidfile=$outdir/$name.pid
+    # A nonce in an SMBIOS OEM string tells this guest from another guest
+    # that answers on the same port.
+    local nonce
+    nonce="femu-conformance-$$-$RANDOM$RANDOM"
+    local -a cmd=()
 
-	if ss -ltn 2>/dev/null | grep -q ":$ssh_port "; then
-		echo "$name: port $ssh_port is in use (use --port)"
-		return 2
-	fi
-	if [[ -e $overlay || -e $pidfile ]]; then
-		echo "$name: $overlay or $pidfile exists (use another --outdir)"
-		return 2
-	fi
-	qemu-img create -q -f qcow2 -b "$image" -F qcow2 "$overlay" || {
-		echo "$name: cannot create $overlay"
-		return 2
-	}
-	((use_sudo)) && cmd+=(sudo)
-	cmd+=("$qemu" -name "femu-conformance-$name" -enable-kvm -cpu host
-		-smp "$smp" -m "$mem" -pidfile "$pidfile"
-		-smbios "type=11,value=$nonce"
-		-device "virtio-scsi-pci,id=scsi0" -device "scsi-hd,drive=hd0"
-		-drive "file=$overlay,if=none,cache=none,format=qcow2,id=hd0"
-		-device "femu,$dev"
-		-net "user,hostfwd=tcp:127.0.0.1:$ssh_port-:22"
-		-net "nic,model=virtio"
-		-display none -monitor none
-		-serial "file:$outdir/$name.serial.log")
-	"${cmd[@]}" >"$outdir/$name.qemu.log" 2>&1 </dev/null &
-	local launcher=$!
+    if ss -ltn 2>/dev/null | grep -q ":$ssh_port "; then
+        echo "$name: port $ssh_port is in use (use --port)"
+        return 2
+    fi
+    if [[ -e $overlay || -e $pidfile ]]; then
+        echo "$name: $overlay or $pidfile exists (use another --outdir)"
+        return 2
+    fi
+    qemu-img create -q -f qcow2 -b "$image" -F qcow2 "$overlay" || {
+        echo "$name: cannot create $overlay"
+        return 2
+    }
+    ((use_sudo)) && cmd+=(sudo)
+    cmd+=("$qemu" -name "femu-conformance-$name"
+        -machine "${FEMU_MACHINE:-pc-i440fx-10.1}" -enable-kvm -cpu host
+        -smp "$smp" -m "$mem" -pidfile "$pidfile"
+        -smbios "type=11,value=$nonce"
+        -device "virtio-scsi-pci,id=scsi0" -device "scsi-hd,drive=hd0"
+        -drive "file=$overlay,if=none,cache=none,format=qcow2,id=hd0"
+        -device "femu,$dev"
+        -net "user,hostfwd=tcp:127.0.0.1:$ssh_port-:22"
+        -net "nic,model=virtio"
+        -display none -monitor none
+        -serial "file:$outdir/$name.serial.log")
+    "${cmd[@]}" >"$outdir/$name.qemu.log" 2>&1 </dev/null &
+    local launcher=$!
 
-	local deadline=$((SECONDS + boot_timeout))
-	while [[ ! -s $pidfile ]]; do
-		if ! as_owner kill -0 "$launcher" 2>/dev/null || ((SECONDS >= deadline)); then
-			echo "$name: QEMU did not start; see $outdir/$name.qemu.log"
-			tail -3 "$outdir/$name.qemu.log"
-			return 2
-		fi
-		sleep 0.5
-	done
-	# QEMU creates the PID file with mode 0600, so read it as its owner.
-	qemu_pid=$(as_owner cat "$pidfile") || return 2
+    local deadline=$((SECONDS + boot_timeout))
+    while [[ ! -s $pidfile ]]; do
+        if ! as_owner kill -0 "$launcher" 2>/dev/null || ((SECONDS >= deadline)); then
+            echo "$name: QEMU did not start; see $outdir/$name.qemu.log"
+            tail -3 "$outdir/$name.qemu.log"
+            return 2
+        fi
+        sleep 0.5
+    done
+    # QEMU creates the PID file with mode 0600, so read it as its owner.
+    qemu_pid=$(as_owner cat "$pidfile") || return 2
 
-	while ((SECONDS < deadline)); do
-		if ! alive; then
-			echo "$name: QEMU exited; see $outdir/$name.qemu.log"
-			tail -3 "$outdir/$name.qemu.log"
-			return 2
-		fi
-		if guest_ssh true 2>/dev/null; then
-			if guest_ssh sudo grep -qaF "$nonce" /sys/firmware/dmi/entries/11-0/raw; then
-				return 0
-			fi
-			echo "$name: port $ssh_port answers for another guest (use --port)"
-			return 2
-		fi
-		sleep 3
-	done
-	echo "$name: no SSH answer within ${boot_timeout}s"
-	return 2
+    while ((SECONDS < deadline)); do
+        if ! alive; then
+            echo "$name: QEMU exited; see $outdir/$name.qemu.log"
+            tail -3 "$outdir/$name.qemu.log"
+            return 2
+        fi
+        if guest_ssh true 2>/dev/null; then
+            if guest_ssh sudo grep -qaF "$nonce" /sys/firmware/dmi/entries/11-0/raw; then
+                return 0
+            fi
+            echo "$name: port $ssh_port answers for another guest (use --port)"
+            return 2
+        fi
+        sleep 3
+    done
+    echo "$name: no SSH answer within ${boot_timeout}s"
+    return 2
 }
 
 # Return 0 when the suite passed, 1 when it failed, 2 on a setup error.
 run_suite() {
-	local name=$1 dev script smp=4 mem=4G tmo=3600
-	local -a args=() envs=() extra=()
+    local name=$1 dev script smp=4 mem=4G tmo=3600
+    local -a args=() envs=() extra=()
 
-	case $name in
-	blktests-block) dev=$bb_dev; script=blktests-guest.sh; args=(block) ;;
-	blktests-zbd) dev=$zns_dev; script=blktests-guest.sh; args=(zbd) ;;
-	nvme-cli) dev=$cli_dev; script=nvme-cli-e2e-guest.sh ;;
-	zenfs-crash)
-		dev=$zenfs_dev; script=zenfs-crash-guest.sh; smp=16; mem=16G; tmo=7200 ;;
-	kv-bench) dev=$kv_dev; script=kv-bench-guest.sh; extra=(kv-probe.c kv-bench.c) ;;
-	esac
-	dev=${dev_override:-$dev}
-	smp=${smp_override:-$smp}
-	mem=${mem_override:-$mem}
-	tmo=${suite_timeout:-$tmo}
-	for v in BLKTESTS_REPO BLKTESTS_REF NVMECLI_REPO NVMECLI_REF \
-		ROCKSDB_REPO ROCKSDB_REF ZENFS_REPO ZENFS_REF ZENFS_ROUNDS \
-		ZENFS_INTERVAL ZENFS_THREADS ZENFS_KEYS ZENFS_CONTROL \
-		KVBENCH_KEYS KVBENCH_OPS KVBENCH_THREADS KVBENCH_SEED \
-		KVBENCH_CONTROL; do
-		[[ -n ${!v:-} ]] && envs+=("$v=${!v}")
-	done
+    case $name in
+    blktests-block) dev=$bb_dev; script=blktests-guest.sh; args=(block) ;;
+    blktests-zbd) dev=$zns_dev; script=blktests-guest.sh; args=(zbd) ;;
+    nvme-cli) dev=$cli_dev; script=nvme-cli-e2e-guest.sh ;;
+    zenfs-crash)
+        dev=$zenfs_dev; script=zenfs-crash-guest.sh; smp=16; mem=16G; tmo=7200 ;;
+    kv-bench) dev=$kv_dev; script=kv-bench-guest.sh; extra=(kv-probe.c kv-bench.c) ;;
+    esac
+    dev=${dev_override:-$dev}
+    smp=${smp_override:-$smp}
+    mem=${mem_override:-$mem}
+    tmo=${suite_timeout:-$tmo}
+    for v in BLKTESTS_REPO BLKTESTS_REF NVMECLI_REPO NVMECLI_REF \
+        ROCKSDB_REPO ROCKSDB_REF ZENFS_REPO ZENFS_REF ZENFS_ROUNDS \
+        ZENFS_INTERVAL ZENFS_THREADS ZENFS_KEYS ZENFS_CONTROL \
+        KVBENCH_KEYS KVBENCH_OPS KVBENCH_THREADS KVBENCH_SEED \
+        KVBENCH_CONTROL; do
+        [[ -n ${!v:-} ]] && envs+=("$v=${!v}")
+    done
 
-	local overlay=$outdir/$name.qcow2 log=$outdir/$name.log rc=0
-	local remote_dir=/tmp/femu-conformance-$$
-	local remote_script=$remote_dir/$script
-	local -a files=()
-	local f
-	for f in "$script" "${extra[@]}"; do
-		files+=("$SCRIPT_DIR/$f")
-	done
-	echo "=== $name: device femu,$dev (smp $smp, mem $mem)"
-	start_guest "$name" "$dev" "$overlay" "$smp" "$mem" || { stop_guest; return 2; }
-	if ! guest_ssh mkdir -p "$remote_dir" ||
-		! scp "${ssh_opts[@]}" -P "$ssh_port" "${files[@]}" \
-			"femu@localhost:$remote_dir/" >/dev/null; then
-		echo "$name: cannot copy $script into the guest"
-		stop_guest
-		return 2
-	fi
-	# ssh joins its arguments into one remote command; quote each word.
-	local remote
-	remote=$(printf '%q ' sudo env "${envs[@]}" bash "$remote_script" "${args[@]}")
-	timeout "$tmo" ssh "${ssh_opts[@]}" -p "$ssh_port" \
-		femu@localhost "$remote" >"$log" 2>&1 || rc=$?
-	stop_guest
-	((keep)) || rm -f "$overlay"
+    local overlay=$outdir/$name.qcow2 log=$outdir/$name.log rc=0
+    local remote_dir=/tmp/femu-conformance-$$
+    local remote_script=$remote_dir/$script
+    local -a files=()
+    local f
+    for f in "$script" "${extra[@]}"; do
+        files+=("$SCRIPT_DIR/$f")
+    done
+    echo "=== $name: device femu,$dev (smp $smp, mem $mem)"
+    start_guest "$name" "$dev" "$overlay" "$smp" "$mem" || { stop_guest; return 2; }
+    if ! guest_ssh mkdir -p "$remote_dir" ||
+        ! scp "${ssh_opts[@]}" -P "$ssh_port" "${files[@]}" \
+            "femu@localhost:$remote_dir/" >/dev/null; then
+        echo "$name: cannot copy $script into the guest"
+        stop_guest
+        return 2
+    fi
+    # ssh joins its arguments into one remote command; quote each word.
+    local remote
+    remote=$(printf '%q ' sudo env "${envs[@]}" bash "$remote_script" "${args[@]}")
+    timeout "$tmo" ssh "${ssh_opts[@]}" -p "$ssh_port" \
+        femu@localhost "$remote" >"$log" 2>&1 || rc=$?
+    stop_guest
+    ((keep)) || rm -f "$overlay"
 
-	grep -E '^(BLKTESTS_COMMIT|NVMECLI_COMMIT|PASSED|TAP_PLAN|TAP_OK|TAP_NOT_OK|FAILED_TEST|KNOWN_DEFECT|E2E_SETUP|BLKTESTS_SETUP|BLKTESTS_ABNORMAL|E2E_ABNORMAL|ROCKSDB_COMMIT|ZENFS_|KVPROBE_|KVBENCH_STEP|KVBENCH_SETUP|KVBENCH_DONE|\[[a-z]+\] KVBENCH_(CHECK|ERRORS|MISMATCHES|RESULT|PHASE))' \
-		"$log" || true
-	case $rc in
-	0 | 1 | 2) ;;
-	124) echo "$name: no result within ${tmo}s"; rc=1 ;;
-	255) echo "$name: SSH to the guest failed"; rc=2 ;;
-	*) echo "$name: the guest script ended with status $rc"; rc=1 ;;
-	esac
-	if grep -aqE 'ERROR: AddressSanitizer|runtime error:|Assertion .* failed' \
-		"$outdir/$name.qemu.log"; then
-		echo "$name: QEMU reported a sanitizer error or an assertion"
-		rc=1
-	fi
-	echo "$name: status $rc (log $log)"
-	return "$rc"
+    local keys='BLKTESTS_COMMIT|NVMECLI_COMMIT|PASSED|TAP_PLAN|TAP_OK'
+    keys+='|TAP_NOT_OK|FAILED_TEST|KNOWN_DEFECT|E2E_SETUP|BLKTESTS_SETUP'
+    keys+='|BLKTESTS_ABNORMAL|E2E_ABNORMAL|ROCKSDB_COMMIT|ZENFS_|KVPROBE_'
+    keys+='|KVBENCH_STEP|KVBENCH_SETUP|KVBENCH_DONE'
+    keys+='|\[[a-z]+\] KVBENCH_(CHECK|ERRORS|MISMATCHES|RESULT|PHASE)'
+    grep -E "^($keys)" "$log" || true
+    case $rc in
+    0 | 1 | 2) ;;
+    124) echo "$name: no result within ${tmo}s"; rc=1 ;;
+    255) echo "$name: SSH to the guest failed"; rc=2 ;;
+    *) echo "$name: the guest script ended with status $rc"; rc=1 ;;
+    esac
+    if grep -aqE 'ERROR: AddressSanitizer|runtime error:|Assertion .* failed' \
+        "$outdir/$name.qemu.log"; then
+        echo "$name: QEMU reported a sanitizer error or an assertion"
+        rc=1
+    fi
+    echo "$name: status $rc (log $log)"
+    return "$rc"
 }
 
 failed=0
 setup_failed=0
 for s in "${suites[@]}"; do
-	rc=0
-	run_suite "$s" || rc=$?
-	case $rc in
-	0) echo "RESULT $s PASS" ;;
-	2) echo "RESULT $s SETUP-ERROR"; setup_failed=1 ;;
-	*) echo "RESULT $s FAIL"; failed=1 ;;
-	esac
+    rc=0
+    run_suite "$s" || rc=$?
+    case $rc in
+    0) echo "RESULT $s PASS" ;;
+    2) echo "RESULT $s SETUP-ERROR"; setup_failed=1 ;;
+    *) echo "RESULT $s FAIL"; failed=1 ;;
+    esac
 done
 echo "results in $outdir"
 if ((failed)); then
-	exit 1
+    exit 1
 elif ((setup_failed)); then
-	exit 2
+    exit 2
 fi
 exit 0
