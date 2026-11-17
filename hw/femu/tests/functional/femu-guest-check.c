@@ -226,8 +226,16 @@ static int check_queues(bool blk)
         }
         closedir(d);
         if (n != 2 || !hctx_cpu(0, "0") || !hctx_cpu(1, "1")) {
+            char c0[16] = "none";
+            char c1[16] = "none";
+            char why[64];
+
+            read_line("/sys/block/nvme0n1/mq/0/cpu_list", c0, sizeof(c0));
+            read_line("/sys/block/nvme0n1/mq/1/cpu_list", c1, sizeof(c1));
+            snprintf(why, sizeof(why), "queue-cpu-map hctx=%d q0=%s q1=%s",
+                     n, c0, c1);
             errno = 0;
-            return fail(name, "queue-cpu-map");
+            return fail(name, why);
         }
     }
     if (!irq_ok()) {
