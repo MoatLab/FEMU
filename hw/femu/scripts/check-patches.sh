@@ -5,7 +5,9 @@
 # commit in BASE..HEAD (merges left out). An ERROR, or a checker or git
 # failure, fails the check; a WARNING is printed only. A base of all zeros
 # (a new branch) checks HEAD alone. Binary or mode-only commits are not
-# checked. The old tree is not checked: it predates this.
+# checked. The old tree is not checked: it predates this. A QEMU base
+# move ("Rebase FEMU onto QEMU X.Y.Z") brings in upstream QEMU code, so
+# only its hw/femu/ part is checked. Its VERSION file must hold X.Y.Z.
 #
 # check-patches.sh --self-test: feed checkpatch a patch with a C99
 # comment, which it must report as an ERROR, so a checker that cannot
@@ -78,6 +80,7 @@ if ! commits=$(git rev-list --no-merges --reverse "$base..$head"); then
     exit 2
 fi
 
+base_move='^Rebase FEMU onto QEMU ([0-9]+(\.[0-9]+)+)$'
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 bad=0
@@ -85,16 +88,39 @@ n=0
 for c in $commits; do
     n=$((n + 1))
     short=$(git log -1 --format='%h %s' "$c")
-    if ! git format-patch -1 --stdout "$c" > "$tmp"; then
+    scope=()
+    if [[ $(git log -1 --format=%s "$c") =~ $base_move ]]; then
+        # the subject must name the QEMU version that the commit holds
+        version=$(git show "$c:VERSION" 2>/dev/null || true)
+        if [[ $version != "${BASH_REMATCH[1]}" ]]; then
+            echo "check-patches: $short: VERSION is '$version'," \
+                 "not ${BASH_REMATCH[1]}"
+            bad=1
+            continue
+        fi
+        scope=(-- ':(top)hw/femu')
+        echo "check-patches: $short: a QEMU base move; checking hw/femu/ only"
+    fi
+    # a range, not -1: with a path, -1 picks the last commit on that path
+    range=("$c~1..$c")
+    if ! git rev-parse -q --verify "$c^" >/dev/null; then
+        range=(--root -1 "$c")
+    fi
+    if ! git format-patch --stdout "${range[@]}" "${scope[@]}" > "$tmp"; then
         echo "check-patches: $short: cannot make the patch" >&2
         exit 2
+    fi
+    if [[ ! -s $tmp ]]; then
+        echo "check-patches: $short: no hw/femu/ change; not checked"
+        continue
     fi
     rc=0
     out=$(perl "$checkpatch" --no-signoff - < "$tmp" 2>&1) || rc=$?
     # binary files and mode changes alone are no unified diff to check
     if grep -q 'Does not appear to be a unified-diff format patch' \
             <<<"$out" &&
-       ! git diff-tree --no-commit-id -r --numstat "$c" |
+       ! git diff-tree --root --no-commit-id -r --numstat "$c" \
+            "${scope[@]}" |
             awk '$1 != "-" && ($1 + $2) > 0 { found = 1 } END { exit !found }'
     then
         echo "check-patches: $short: no text change; not checked"
