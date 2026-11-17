@@ -1,0 +1,19 @@
+# Changes of device properties that existing command lines can notice.
+#
+# check-property-compat.py compares reference/properties.snapshot between two
+# commits. Each property that goes away, or whose type, default or kind
+# changes, needs one line here at the new commit:
+#
+#   KIND DEVICE PROPERTY OLD NEW RELEASE  # what users see
+#
+# KIND: remove, type, default, kind (the check finds these), deprecate,
+# behavior (people write these; no check can find them). OLD and NEW are
+# compact JSON values as in properties.snapshot; "-" means no value. RELEASE
+# is "unreleased" until the release commit names its femu-vX.Y.Z tag.
+# Two changes of one value need two lines; the check follows the chain.
+# Lines stay for ever. development/release.md has the policy.
+
+default femu oncs 20 413 unreleased  # Copy and Write Zeroes are on by default
+default femu-cxl-ssd cylon-revoke-batch 32 64 unreleased  # more pages share one TLB flush pair
+type femu-cxl-ssd cylon-never-emulate "bool" "OnOffAuto" unreleased  # QMP takes "on", "off" or "auto", not a JSON bool
+default femu-cxl-ssd cylon-never-emulate false "auto" unreleased  # version 2 of the fault exit when the host kernel has it

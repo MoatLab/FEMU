@@ -223,7 +223,7 @@ explains each.
 
 | Script | Arguments |
 | --- | --- |
-| `gen-property-docs.py` | `--qemu BINARY` regenerates `reference/properties.md` and `runtime-properties.md` from the binary; `--check` compares instead of writing (`--qemu` is still required); `--schema FILE` also writes a JSON Schema (draft 2020-12) of each device's own properties: JSON type, integer range, default, description, QOM type and topic |
+| `gen-property-docs.py` | `--qemu BINARY` regenerates `reference/properties.md`, `runtime-properties.md` and the `properties.snapshot` snapshot from the binary; `--check` compares instead of writing (`--qemu` is still required); `--schema FILE` also writes a JSON Schema (draft 2020-12) of each device's own properties: JSON type, integer range, default, description, QOM type and topic |
 | `gen-combinations.py` | rewrites `reference/combinations.md` from the refusal messages in `hw/femu`; `--check` compares instead of writing; `--self-test` checks the parser |
 | `gen-mode-table.py` | rewrites the mode tables from `docs/modes.py`; `--check` compares and checks `modes.py` against the code |
 | `check-doc-links.py` | `[--root DIR] [PATH...]`; checks every relative link and anchor |
@@ -232,6 +232,8 @@ explains each.
 | `check-patches.sh` | `BASE HEAD` or `--self-test`; runs QEMU's `scripts/checkpatch.pl` on each commit in `BASE..HEAD`, merges left out: an ERROR or a git or checker failure fails, a WARNING is printed in full. A base of all zeros (a new branch) checks HEAD alone; binary or mode-only commits are skipped. A commit titled `Rebase FEMU onto QEMU X.Y.Z` is checked under `hw/femu/` only, since the rest is upstream QEMU code. Its `VERSION` file must hold `X.Y.Z`. CI runs it on the commits of each push and pull request |
 | `qemu-canary.py` | `FEMU_REV QEMU_REV OUTDIR`, `--base REV` or `--self-test`; merges FEMU with a newer QEMU (a three-way merge on the QEMU base that `VERSION` names) and writes `OUTDIR/report.txt` and the merged tree in `OUTDIR/src`. Two lists in the script hold the FEMU policy: QEMU files that FEMU does not ship, and QEMU submodules that FEMU ships as directories. A conflict on any other path makes the result red (exit 1). It uses no network |
 | `check-property-tests.py` | no argument or `--self-test`; checks that a file under `tests/` or `scripts/` names each property in `reference/properties.md`, or that `tests/untested-properties.list` lists it with a reason |
+| `check-property-compat.py` | `OLD NEW`, `--release TAG --published FILE` or `--self-test`; compares `reference/properties.snapshot` at two commits, and fails on a removed property or a new type, default or kind that `reference/interface-changes.list` does not record; `--release` compares a tag with the newest published release before it (FILE lists the published tags) and checks the deprecation period; CI and the release check run it |
+| `release-notes.py` | `TAG`, `--check` or `--self-test`; prints the changelog section of a release tag, or checks the changelog layout (an Unreleased section first, then releases newest first); CI and the release check run it |
 | `check-unit-tests.py` | no argument, `--meson-names`, `--listed FILE` or `--self-test`; checks that each `tests/unit/test-*.c` is in `tests/meson.build` or `tests/Makefile`, and that the `femu-unit` suite lists every meson unit test |
 | `check-doc-examples.py` | `--lint`, `--list`, `--self-test`, `--qemu BINARY`, `--qos-test BINARY`, `--only NAME`, `--timeout SEC`, `[PATH...]`; checks every code block's tag and runs the tagged examples |
 

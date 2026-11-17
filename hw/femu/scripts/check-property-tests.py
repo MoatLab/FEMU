@@ -32,7 +32,7 @@ EXEMPT = os.path.join(FEMU, "tests", "untested-properties.list")
 SEARCH = [os.path.join(FEMU, "tests"), os.path.join(FEMU, "scripts")]
 # files that list property names without using them
 SKIP = {"gen-property-docs.py", "check-property-tests.py",
-        "untested-properties.list"}
+        "untested-properties.list", "check-property-compat.py"}
 SUFFIXES = (".c", ".h", ".sh", ".py", ".ini", ".cfg", ".conf", ".json")
 
 

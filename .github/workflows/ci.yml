@@ -568,6 +568,37 @@ jobs:
         # report and the exported files.
         python3 hw/femu/scripts/qemu-canary.py --self-test
 
+    - name: Check property compatibility and the changelog layout
+      env:
+        EVENT: ${{ github.event_name }}
+        BEFORE: ${{ github.event.before }}
+        AFTER: ${{ github.sha }}
+        PR_BASE: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD: ${{ github.event.pull_request.head.sha }}
+      run: |
+        # A property that goes away, or whose type, default or kind
+        # changes, needs a line in reference/interface-changes.list. A push
+        # compares the trees before and after it; a pull request compares
+        # its head with the merge base. The self-tests plant each fault.
+        python3 hw/femu/scripts/check-property-compat.py --self-test
+        python3 hw/femu/scripts/release-notes.py --self-test
+        python3 hw/femu/scripts/release-notes.py --check
+        case "$EVENT" in
+        push)
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then
+            echo "SKIP a new branch has no previous tree"; exit 0
+          fi
+          # a force push can leave the old tip unreachable: fetch it, or fail
+          git cat-file -e "$BEFORE^{commit}" 2>/dev/null ||
+            git fetch -q origin "$BEFORE"
+          old=$BEFORE new=$AFTER ;;
+        pull_request)
+          old=$(git merge-base "$PR_BASE" "$PR_HEAD") new=$PR_HEAD ;;
+        *)
+          echo "SKIP $EVENT has no previous tree"; exit 0 ;;
+        esac
+        python3 hw/femu/scripts/check-property-compat.py "$old" "$new"
+
     - name: Check that a test names each property
       run: |
         # A property that no test names, and that

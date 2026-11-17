@@ -1,0 +1,2242 @@
+{
+ "devices": {
+  "femu": {
+   "acl": {
+    "default": 3,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "aerl": {
+    "default": 3,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "age_scale": {
+    "default": 1,
+    "kind": "static",
+    "type": "int32"
+   },
+   "ana": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "ana-state": {
+    "default": null,
+    "kind": "runtime",
+    "type": "string"
+   },
+   "atomic_write_lbas": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "awupf_lbas": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "bbssd_ns_limit": {
+    "default": 4,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "blk_early_pe": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "blk_early_ppm": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "blk_er_lat": {
+    "default": 2000000,
+    "kind": "static",
+    "type": "int32"
+   },
+   "blk_pe_limit": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "blk_pe_seed": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "blk_pe_spread": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "blks_per_pl": {
+    "default": 256,
+    "kind": "static",
+    "type": "int32"
+   },
+   "buffer_low_pcent": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "buffer_size": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "buffer_thres_pcent": {
+    "default": 90,
+    "kind": "static",
+    "type": "int32"
+   },
+   "cache_evict": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "cancel": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "cell_pages": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "ch_xfer_lat": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "cmbloc": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "cmbsz": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "cmd_addr_lat": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "context_switch_time": {
+    "default": 200,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "cqr": {
+    "default": 1,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "crypto_mbps": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "csd_cp": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "csd_legacy_opcodes": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "csd_pause": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "csd_pause_max_ms": {
+    "default": 1000,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "csd_program_dir": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "csd_slm_size": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "csf_runtime_scale": {
+    "default": 3,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "cxl_ssd": {
+    "default": null,
+    "kind": "static",
+    "type": "link<femu-cxl-ssd>"
+   },
+   "debug_ftl": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "devsz_mb": {
+    "default": 1024,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "did": {
+    "default": 7967,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "die-slow": {
+    "default": null,
+    "kind": "runtime",
+    "type": "string"
+   },
+   "die_parity": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "die_slow": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "die_stats": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "dlfeat": {
+    "default": 1,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "dpc": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "dps": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "dram_hit_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "durable_at_done": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "e2e_check": {
+    "default": true,
+    "kind": "static",
+    "type": "bool"
+   },
+   "ecc_cw_bytes": {
+    "default": 1024,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "ecc_hard_bits": {
+    "default": 40,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "ecc_retention_sec": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "ecc_soft_bits": {
+    "default": 72,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "ecc_step_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "elpe": {
+    "default": 3,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "energy_erase_nj": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "energy_prog_nj": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "energy_read_nj": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "entries": {
+    "default": 2047,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "eol_read_only": {
+    "default": true,
+    "kind": "static",
+    "type": "bool"
+   },
+   "erase_fail_ppm": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "err_read_unc_ppm": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "err_write_fail_ppm": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "events_file": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "extended": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "failed_die": {
+    "default": -1,
+    "kind": "static",
+    "type": "int32"
+   },
+   "fdm_size": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "fdp_trim_erase_all": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "femu_mode": {
+    "default": 2,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "flash_type": {
+    "default": 2,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "fw_cores": {
+    "default": 1,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "fw_cpu_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "fw_other_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "fw_read_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "fw_slots": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "fw_write_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "gc_copyback": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "gc_frontier": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "gc_idle_ms": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "gc_idle_pcent": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "gc_pace": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "gc_policy": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "gc_seed": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "gc_strategy": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "gc_thres_pcent": {
+    "default": 75,
+    "kind": "static",
+    "type": "int32"
+   },
+   "gc_thres_pcent_high": {
+    "default": 95,
+    "kind": "static",
+    "type": "int32"
+   },
+   "hiops_inline": {
+    "default": true,
+    "kind": "static",
+    "type": "bool"
+   },
+   "hmb_mb": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "hmb_ns": {
+    "default": 1000,
+    "kind": "static",
+    "type": "int32"
+   },
+   "hot_cold_sep": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "hot_k": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "idle_mw": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "inject_die": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "intc": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "intc_thresh": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "intc_time": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "io_stages": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "io_trace": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "iu_pages": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "kv_index": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "kv_lsm_memtable_keys": {
+    "default": 1024,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "kv_lsm_pinned_levels": {
+    "default": 1,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "kv_lsm_size_ratio": {
+    "default": 10,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "kv_max_keys": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "kv_model_coeffs": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "kv_pack": {
+    "default": true,
+    "kind": "static",
+    "type": "bool"
+   },
+   "kv_timing": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "l2p_dram_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "lba_index": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "learly_reset": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "lmax_sec_per_rq": {
+    "default": 64,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "lmetasize": {
+    "default": 16,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "lnum_ch": {
+    "default": 2,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "lnum_lun": {
+    "default": 8,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "lnum_pln": {
+    "default": 2,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "lockdown": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "lpgs_per_blk": {
+    "default": 512,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "lsec_size": {
+    "default": 4096,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "lsecs_per_pg": {
+    "default": 4,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "luns_per_ch": {
+    "default": 8,
+    "kind": "static",
+    "type": "int32"
+   },
+   "lver": {
+    "default": 2,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "maint_idle": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "mapping": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "mapping_cache_mb": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "max_cqes": {
+    "default": 4,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "max_sqes": {
+    "default": 6,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "mc": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "mdts": {
+    "default": 10,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "meta": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "mode": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "mp_program": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "mp_read": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "mpsmax": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "mpsmin": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "ms": {
+    "default": 16,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "ms_max": {
+    "default": 64,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "multipoller_enabled": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "namespace_modes": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "namespace_phls": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "namespace_sizes": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "namespaces": {
+    "default": 1,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "nand_bad_blocks": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "nand_cell_type": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "nand_profile": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "nchs": {
+    "default": 8,
+    "kind": "static",
+    "type": "int32"
+   },
+   "nlbaf": {
+    "default": 5,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "nr_cu": {
+    "default": 4,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "nr_thread": {
+    "default": 4,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "ns_mgmt": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "ns_wp": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "oacs": {
+    "default": 2,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "oc12_channel_timing": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "oc20_page_types": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "ocp": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "ocp_profile": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "oncs": {
+    "default": 413,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "onfi_cache_read": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "onfi_mode": {
+    "default": -1,
+    "kind": "static",
+    "type": "int32"
+   },
+   "onfi_mts": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "onfi_param_page": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "onfi_sca": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "onfi_spare_bytes": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "onfi_tccs_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "op_pcent": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "parity_xor_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pci_pm": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "pcie_bandwidth_mbps": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "pcie_prop_delay_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "pcie_write_first": {
+    "default": true,
+    "kind": "static",
+    "type": "bool"
+   },
+   "pd_edge_tiers": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pd_edge_wls": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pd_open_age": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "pd_open_close_sec": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pd_open_read_limit": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pd_open_tiers": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pe_cycles_rated": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "pe_suspend": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pe_suspend_max": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "pel_file": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "perf_hints": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "persist_file": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "persist_ftl": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "pg_rd_lat": {
+    "default": 40000,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pg_wr_lat": {
+    "default": 200000,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pg_xfer_lat": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pgs_per_blk": {
+    "default": 256,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pgtype_lat": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "pi": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "pif": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "plane_first": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "plane_reads": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "plp": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "plp-health": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint32"
+   },
+   "plp_fail_mode": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "plp_health": {
+    "default": 120,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "pls_per_lun": {
+    "default": 1,
+    "kind": "static",
+    "type": "int32"
+   },
+   "poller_ratio": {
+    "default": 1,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "power_limit": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "power_loss": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "power_meas": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "power_states": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "prog_pass2_lag": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "prog_pass2_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "ps_max_watts": {
+    "default": 25,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "queues": {
+    "default": 8,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "rain_loss": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "rain_parity": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "rain_read_only": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "rain_rebuild": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "rber_age_double_sec": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "rber_pe_double": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "rber_ppb": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "rber_read_double": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "rber_seed": {
+    "default": 1,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "rber_timing_only": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "read_cache_mb": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "read_prio": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "read_reclaim_limit": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "ready_ms": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "recovery_ms": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "reservations": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "retention_limit_sec": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "rr_floor_pct": {
+    "default": 10,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "rr_gain": {
+    "default": 2,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "rr_soft_ns": {
+    "default": 20000,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "rr_soft_senses": {
+    "default": 3,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "rr_steps": {
+    "default": 4,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "rrl": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "sanitize_ms": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "sanitize_ns": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "sanitize_ops": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "sdc": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "sdc_kind": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "sdc_ppm": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "sdc_seed": {
+    "default": 1,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "secs_per_pg": {
+    "default": 8,
+    "kind": "static",
+    "type": "int32"
+   },
+   "secsz": {
+    "default": 512,
+    "kind": "static",
+    "type": "int32"
+   },
+   "serial": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "sgl": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "shared_ftl": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "shutdown_ms": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "simulate-power-loss": {
+    "default": null,
+    "kind": "runtime",
+    "type": "bool"
+   },
+   "spare_lines": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "stage_ns": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "status_lat": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "streams": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "streams.max": {
+    "default": 8,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "stride": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "subsys": {
+    "default": null,
+    "kind": "static",
+    "type": "link<femu-subsys>"
+   },
+   "telemetry_da4": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "temperature": {
+    "default": 323,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "thermal_r": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "thermal_step_ms": {
+    "default": 100,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "thermal_tau_ms": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "throttle": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "throttle_heavy_pct": {
+    "default": 300,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "throttle_light_pct": {
+    "default": 150,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "tier_full_policy": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "tier_idle_ms": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "tier_lazy_pct": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "tier_max_mb": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "tier_mode": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "tier_pslc_erase_ns": {
+    "default": 3500000,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "tier_pslc_pe_cycles": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "tier_pslc_prog_ns": {
+    "default": 200000,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "tier_pslc_read_ns": {
+    "default": 25000,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "tier_shrink_pct": {
+    "default": 50,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "tier_static_mb": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "time_slice": {
+    "default": 200000,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "tplebsy": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "tplpbsy": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "tplrbsy": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "trcbsy": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "tresume_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "trim_lat_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "tsusp_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "vid": {
+    "default": 7453,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "vwc": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "wl_spread": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "wrr": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "x-opal": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "x-opal-mpa": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "zns_blk_er_lat": {
+    "default": 0,
+    "kind": "static",
+    "type": "int64"
+   },
+   "zns_chnls_per_zone": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_cmd_addr_lat": {
+    "default": 0,
+    "kind": "static",
+    "type": "int64"
+   },
+   "zns_cross_zone_read": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "zns_ecc_step_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "int64"
+   },
+   "zns_flash_type": {
+    "default": 4,
+    "kind": "static",
+    "type": "int32"
+   },
+   "zns_frl_sec": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_fzr_sec": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_lun_contention": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "zns_luns_per_zone": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_max_active": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_max_open": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_num_blk": {
+    "default": 32,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "zns_num_ch": {
+    "default": 2,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "zns_num_conv_zones": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_num_lun": {
+    "default": 4,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "zns_num_plane": {
+    "default": 2,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "zns_num_wc": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_page_types": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "zns_pe_suspend": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "zns_pg_rd_lat": {
+    "default": 0,
+    "kind": "static",
+    "type": "int64"
+   },
+   "zns_pg_wr_lat": {
+    "default": 0,
+    "kind": "static",
+    "type": "int64"
+   },
+   "zns_pg_xfer_lat": {
+    "default": 0,
+    "kind": "static",
+    "type": "int64"
+   },
+   "zns_reset_by_fill": {
+    "default": 0,
+    "kind": "static",
+    "type": "int32"
+   },
+   "zns_rrl_sec": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_rzr_sec": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_status_lat": {
+    "default": 0,
+    "kind": "static",
+    "type": "int64"
+   },
+   "zns_tsusp_ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "int64"
+   },
+   "zns_zasl_bs": {
+    "default": 131072,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_zd_ext_size": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_zone_cap": {
+    "default": 0,
+    "kind": "static",
+    "type": "size"
+   },
+   "zns_zone_order": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "zns_zrwa_num": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "zns_zrwa_size": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "zns_zrwafg_size": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint64"
+   }
+  },
+  "femu-cxl-ssd": {
+   "blocks-per-plane": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "cache-entries": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cache-evictions": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cache-hits": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cache-inserts": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cache-misses": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cache-pages": {
+    "default": 1024,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "cache-policy": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "cache-ways": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint32"
+   },
+   "cca": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "cca-commands": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cca-dropped": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cca-errors": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cca-pin-fills": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cca-pinned": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cca-pinned-set-misses": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cca-uncached": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cca-writebacks": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cdat": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "channel-ns": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "channels": {
+    "default": 4,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "concurrent-misses": {
+    "default": "auto",
+    "kind": "static",
+    "type": "OnOffAuto"
+   },
+   "control-argument": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "control-command": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "control-status": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "cylon-emul-exit": {
+    "default": true,
+    "kind": "static",
+    "type": "bool"
+   },
+   "cylon-fault-stop": {
+    "default": 100000,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "cylon-first-touch-program": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "cylon-free-writeback": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "cylon-kernel-ack": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "cylon-never-emulate": {
+    "default": "auto",
+    "kind": "static",
+    "type": "OnOffAuto"
+   },
+   "cylon-revoke-batch": {
+    "default": 64,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "der": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "der-active": {
+    "default": null,
+    "kind": "runtime",
+    "type": "bool"
+   },
+   "der-ahead-remaps": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-emul-exit": {
+    "default": null,
+    "kind": "runtime",
+    "type": "bool"
+   },
+   "der-emul-failures": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-emul-fetch-fills": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-emul-fills": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-emul-v2": {
+    "default": null,
+    "kind": "runtime",
+    "type": "bool"
+   },
+   "der-fallbacks": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-bql": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-conflicts": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-deliveries": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-emulated": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-fetches": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-forced": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-marker-refused": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-overflows": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-page-walks": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-reads": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-unprotected": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-fault-writes": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-mapped": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-probes": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-quiet-revocations": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-ratio": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-remaps": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-replace-rate": {
+    "default": 64,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "der-replacements": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-revocations": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-revoke-flushes": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "der-revoked-ahead": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "dma-accesses": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "dma-media-ops": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "dma-media-time-ns": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "erase-ns": {
+    "default": 2000000,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "fast-load": {
+    "default": null,
+    "kind": "runtime",
+    "type": "bool"
+   },
+   "fast-load-drain-ns": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "fast-load-switch-ns": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "flush-cache": {
+    "default": null,
+    "kind": "runtime",
+    "type": "bool"
+   },
+   "ftl": {
+    "default": true,
+    "kind": "static",
+    "type": "bool"
+   },
+   "gc-stall-max-ns": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "gc-stall-ns": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "gc-stalls": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "gc-threshold": {
+    "default": 75,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "gc-threshold-high": {
+    "default": 95,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "hdm-db": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "invalidations": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "last-entries": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "last-evictions": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "last-inserts": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "last-prefetch-inserts": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "last-read-hits": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "last-read-misses": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "last-write-hits": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "last-write-misses": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "log-dir": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "log-dropped": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "log-limit": {
+    "default": 67108864,
+    "kind": "static",
+    "type": "size"
+   },
+   "lsa": {
+    "default": null,
+    "kind": "static",
+    "type": "link<memory-backend>"
+   },
+   "lsa-control": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "luns-per-channel": {
+    "default": 4,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "media-full": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "media-reads": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "media-time-ns": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "media-writes": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "memdev": {
+    "default": null,
+    "kind": "static",
+    "type": "link<memory-backend>"
+   },
+   "nand-idle-ns": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "num-dc-regions": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "nvme-drops": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "pages-per-block": {
+    "default": 256,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "persistent-memdev": {
+    "default": null,
+    "kind": "static",
+    "type": "link<memory-backend>"
+   },
+   "prefetch-degree": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint32"
+   },
+   "prefetch-inserts": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "prefetch-stride": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint32"
+   },
+   "program-ns": {
+    "default": 200000,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "read-hits": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "read-misses": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "read-ns": {
+    "default": 40000,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "sn": {
+    "default": 18446744073709551615,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "stats-reset": {
+    "default": null,
+    "kind": "runtime",
+    "type": "bool"
+   },
+   "tracefs-dir": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "volatile-dc-memdev": {
+    "default": null,
+    "kind": "static",
+    "type": "link<memory-backend>"
+   },
+   "volatile-memdev": {
+    "default": null,
+    "kind": "static",
+    "type": "link<memory-backend>"
+   },
+   "write-hits": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "write-misses": {
+    "default": null,
+    "kind": "runtime",
+    "type": "uint64"
+   },
+   "x-256b-flit": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "x-speed": {
+    "default": "32",
+    "kind": "static",
+    "type": "PCIELinkSpeed"
+   },
+   "x-width": {
+    "default": "16",
+    "kind": "static",
+    "type": "PCIELinkWidth"
+   }
+  },
+  "femu-subsys": {
+   "fdp": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "fdp.isolation_mode": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "fdp.nrg": {
+    "default": 1,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "fdp.nru": {
+    "default": 128,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "fdp.nruh": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint16"
+   },
+   "fdp.runs": {
+    "default": 0,
+    "kind": "static",
+    "type": "size"
+   },
+   "nqn": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "ns_mgmt": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
+   "rotational": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   }
+  }
+ },
+ "format": 1,
+ "note": "generated by hw/femu/scripts/gen-property-docs.py; do not edit"
+}

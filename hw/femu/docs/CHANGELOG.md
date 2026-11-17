@@ -557,7 +557,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 ### Documentation and tooling
 
-- A release checklist ([releases](development/release.md)) names the tag format, the steps and what a release promises. The README release badge now reads the newest `femu-v*` tag, so it no longer names a version that has no tag.
+- A release process ([releases](development/release.md)): a signed tag, notes from this changelog, and a read-only release check workflow. A property that goes away, or whose type, default or kind changes, now needs a line in `reference/interface-changes.list`; `check-property-compat.py` checks each push against the new `reference/properties.snapshot` snapshot. A deprecated property works for one more minor release before its removal. The README badge shows the newest published release.
 - `femu-steady-state.py` reports when per-round fio results reach steady state, by the SNIA PTS rule, so a WAF or GC study can skip the fresh-device rounds.
 - `femu-stat.py` prints the end-of-life state of a namespace with `eol_read_only`: read-only or writable, and the reserve pages that admitted writes hold.
 - Documentation moved under `hw/femu/docs/` with getting-started, concepts, mode and feature guides, an FAQ, security notes and a doc map (e00c70f99, 034670c4c, 62a565ae0, fb1cf3ce6, 28aa224b7, 0bcb5cae2).

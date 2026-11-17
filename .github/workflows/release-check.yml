@@ -1,0 +1,107 @@
+name: Release check
+
+# On a femu-v* tag push, check the tag and write the release notes as an
+# artifact. The job only reads: the owner creates the GitHub release by
+# hand from these notes (development/release.md). A tag can point at a
+# commit that changes this file, so this job holds no write token.
+on:
+  push:
+    tags: [ 'femu-v*' ]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  check:
+    if: github.repository == 'MoatLab/FEMU'
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        # with pipefail, a failed check before a pipe fails its step
+        shell: bash
+    env:
+      # the tag name only reaches the shell through this variable
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        fetch-depth: 0
+
+    - name: Check the tag
+      run: |
+        # the full grammar, before any other use of the name
+        [[ $TAG =~ ^femu-v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+          { echo "FAIL the tag must be femu-vX.Y.Z"; exit 1; }
+        # checkout fetched the tag; it must be annotated, its own header
+        # must name it, and it must peel to the commit of this event
+        [[ $(git cat-file -t "refs/tags/$TAG") == tag ]] ||
+          { echo "FAIL $TAG is not an annotated tag"; exit 1; }
+        # awk reads the whole object, so a long message gets no SIGPIPE
+        inner=$(git cat-file tag "refs/tags/$TAG" |
+          awk 'h == 0 && /^$/ { h = 1 } h == 0 && sub(/^tag /, "")')
+        [[ $inner == "$TAG" ]] ||
+          { echo "FAIL the tag object names $inner"; exit 1; }
+        commit=$(git rev-parse "refs/tags/$TAG^{commit}")
+        [[ $commit == "$GITHUB_SHA" && $commit == $(git rev-parse HEAD) ]] ||
+          { echo "FAIL $TAG moved during the run"; exit 1; }
+        git fetch -q origin master
+        git merge-base --is-ancestor "$commit" origin/master ||
+          { echo "FAIL $commit is not on master"; exit 1; }
+        # the newest CI run of a push to master for this commit decides;
+        # a re-run keeps its run number and shows its last result
+        res=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$commit&event=push&branch=master&per_page=100" \
+          --jq '[.workflow_runs[]] | max_by(.run_number) | .conclusion // "none"')
+        [[ $res == success ]] ||
+          { echo "FAIL the CI run of $commit on master is $res"; exit 1; }
+        echo "TAG $TAG commit $commit on master, CI green"
+
+    - name: Check the signature
+      run: |
+        # The keys come from master, not from the tagged commit. A missing
+        # key file makes the tag UNVERIFIED, which fails this step.
+        git show origin/master:hw/femu/docs/development/allowed-signers \
+          > "$RUNNER_TEMP/allowed-signers" 2>/dev/null || true
+        git show origin/master:hw/femu/docs/development/release-keys.asc \
+          > "$RUNNER_TEMP/release-keys.asc" 2>/dev/null || true
+        # an empty key ring, so no key of the runner can verify the tag
+        export GNUPGHOME=$RUNNER_TEMP/gnupg
+        mkdir -m 700 "$GNUPGHOME"
+        obj=$(git cat-file tag "refs/tags/$TAG")
+        if grep -q '^-----BEGIN SSH SIGNATURE-----' <<<"$obj"; then
+          [[ -s $RUNNER_TEMP/allowed-signers ]] &&
+            git -c gpg.format=ssh \
+              -c gpg.ssh.allowedSignersFile="$RUNNER_TEMP/allowed-signers" \
+              tag -v "$TAG" && { echo "VERIFIED ssh"; exit 0; }
+        elif grep -q '^-----BEGIN PGP SIGNATURE-----' <<<"$obj"; then
+          if [[ -s $RUNNER_TEMP/release-keys.asc ]]; then
+            gpg -q --import "$RUNNER_TEMP/release-keys.asc"
+            git tag -v "$TAG" && { echo "VERIFIED gpg"; exit 0; }
+          fi
+        fi
+        echo "UNVERIFIED no listed key signed $TAG"
+        exit 1
+
+    - name: Write the release notes
+      run: |
+        mkdir -p release
+        python3 hw/femu/scripts/release-notes.py --check
+        python3 hw/femu/scripts/release-notes.py "$TAG" > release/notes.md
+        # the published releases, drafts left out, are the possible bases
+        # every page: a list cut short could hide the true base release
+        gh api --paginate "repos/$REPO/releases?per_page=100" \
+          --jq '.[] | select(.draft | not) | .tag_name' > release/published.txt
+        python3 hw/femu/scripts/check-property-compat.py --release "$TAG" \
+          --published release/published.txt | tee release/compat.txt
+        wc -l release/notes.md
+
+    - name: Upload the release notes
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+      with:
+        name: release-notes
+        path: release/
+        if-no-files-found: warn
