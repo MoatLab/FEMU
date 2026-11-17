@@ -38,7 +38,14 @@ if [ "$(arg femu.view)" = 1 ]; then
 fi
 echo "FEMU-READY mode=$mode"
 /bin/femu-guest-check "$mode" "$serial"
-echo "FEMU-DONE rc=$?"
+rc=$?
+# the console level hides NVMe warnings, so print them here for the host;
+# the device name comes before or after the error words
+/bin/busybox dmesg | /bin/busybox grep -i nvme |
+	/bin/busybox grep -iE 'timeout|reset|I/O error|abort|failed' |
+	/bin/busybox grep -v 'Shutdown timeout set to' |
+	/bin/busybox sed 's/^/FEMU-DMESG /'
+echo "FEMU-DONE rc=$rc"
 while :; do
 	/bin/busybox sleep 3600
 done

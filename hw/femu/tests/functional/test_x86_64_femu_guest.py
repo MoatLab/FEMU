@@ -156,6 +156,11 @@ class FemuGuest(QemuSystemTest):
         elif name == 'zns':
             ns = self.query_ns(vm)
         vm.shutdown()
+        # a sanitizer report or a crash at quit must fail the mode
+        self.assertEqual(vm.exitcode(), 0, f'QEMU exit code {vm.exitcode()}')
+        out = vm.get_log() or ''
+        for bad in ('runtime error:', 'Sanitizer'):
+            self.assertNotIn(bad, out, 'QEMU reported a sanitizer error')
         return m, lines, ns
 
     def check_mode(self, name):
@@ -171,6 +176,8 @@ class FemuGuest(QemuSystemTest):
                 self.assertNotIn(g.group(1), got, f'check twice: {t}')
                 got[g.group(1)] = g.group(3).strip()
         self.assertEqual(list(got), m['checks'])
+        bad = [t for t in text if t.startswith('FEMU-DMESG')]
+        self.assertEqual(bad, [], 'NVMe errors in the guest log')
         self.assertEqual(text[-1], 'FEMU-DONE rc=0')
         if 'dev' in got:
             size = int(re.match(r'size=(\d+)', got['dev']).group(1))

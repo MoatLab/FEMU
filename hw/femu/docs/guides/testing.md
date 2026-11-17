@@ -164,8 +164,11 @@ MSI-X queues, and block-layer I/O.
         |
  test_x86_64_femu_guest.py  one VM per mode, -smp 2, 512 MiB
         |
- guest: FEMU-READY, FEMU-CHECK <name> ok|fail, FEMU-DONE rc=N
- host:  exact check set, size, no panic; bbssd: GC count > 0 and
+ guest: FEMU-READY, FEMU-CHECK <name> ok|fail, FEMU-DMESG <NVMe error>,
+        FEMU-DONE rc=N
+ host:  exact check set, size, no panic, no FEMU-DMESG line,
+        QEMU exit code 0, no sanitizer report;
+        bbssd: GC count > 0 and
         valid pages equal the namespace pages; then QMP quit
 ```
 
@@ -176,6 +179,10 @@ The checks of each mode:
 | NoSSD, bbssd | namespace size, serial, one I/O queue per CPU, three passes of patterned `O_DIRECT` writes read back, interrupts on both queues |
 | ZNS | as above, then zone 0: reset, write, write pointer, read back, reset, rewrite |
 | KV | generic node `/dev/ng0n1`, serial, MSI-X, Store, Retrieve, Delete, then Retrieve gives 87h |
+
+The interrupt checks read the vector mode from
+`/sys/class/nvme/nvme0/device/msi_irqs/`. Linux 6.1 names MSI-X vectors
+`PCI-MSI` in `/proc/interrupts`, and later kernels name them `PCI-MSIX`.
 
 Run it by hand after a build:
 

@@ -139,6 +139,20 @@ static int check_serial(void)
     return ok("serial");
 }
 
+/*
+ * The chip name in /proc/interrupts is PCI-MSI on Linux 6.1 for MSI-X
+ * too, and PCI-MSIX later, so the vector mode comes from sysfs.
+ */
+static bool irq_is_msix(int irq)
+{
+    char path[80];
+    char buf[16];
+
+    snprintf(path, sizeof(path),
+             "/sys/class/nvme/nvme0/device/msi_irqs/%d", irq);
+    return read_line(path, buf, sizeof(buf)) && !strcmp(buf, "msix");
+}
+
 /* interrupts of the MSI-X vector of I/O queue @q, or -1 without one */
 static long long irq_count(int q)
 {
@@ -154,7 +168,7 @@ static long long irq_count(int q)
     while (fgets(line, sizeof(line), f)) {
         char *p = strchr(line, ':');
 
-        if (!p || !strstr(line, "PCI-MSIX") || !strstr(line, name)) {
+        if (!p || !strstr(line, name) || !irq_is_msix(atoi(line))) {
             continue;
         }
         n = 0;
