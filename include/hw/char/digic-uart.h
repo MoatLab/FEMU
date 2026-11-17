@@ -18,7 +18,7 @@
 #ifndef HW_CHAR_DIGIC_UART_H
 #define HW_CHAR_DIGIC_UART_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "chardev/char-fe.h"
 #include "qom/object.h"
 
@@ -38,7 +38,7 @@ struct DigicUartState {
     /*< public >*/
 
     MemoryRegion regs_region;
-    CharBackend chr;
+    CharFrontend chr;
 
     uint32_t reg_rx;
     uint32_t reg_st;

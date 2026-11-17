@@ -19,6 +19,7 @@
 
 #include "qemu/osdep.h"
 #include "exec/page-protection.h"
+#include "exec/target_page.h"
 #include "exec/log.h"
 #include "cpu.h"
 #include "internal.h"
@@ -492,7 +493,7 @@ bool ppc_booke_xlate(PowerPCCPU *cpu, vaddr eaddr, MMUAccessType access_type,
     if (ret == 0) {
         *raddrp = raddr;
         *protp = prot;
-        *psizep = TARGET_PAGE_BITS;
+        *psizep = qemu_target_page_bits();
         return true;
     } else if (!guest_visible) {
         return false;

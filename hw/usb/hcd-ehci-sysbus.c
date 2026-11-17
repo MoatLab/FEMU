@@ -16,7 +16,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/usb/hcd-ehci.h"
 #include "migration/vmstate.h"
 
@@ -31,7 +31,7 @@ static const VMStateDescription vmstate_ehci_sysbus = {
 };
 
 static const Property ehci_sysbus_properties[] = {
-    DEFINE_PROP_UINT32("maxframes", EHCISysBusState, ehci.maxframes, 128),
+    DEFINE_EHCI_COMMON_PROPERTIES(EHCISysBusState),
     DEFINE_PROP_BOOL("companion-enable", EHCISysBusState, ehci.companion_enable,
                      false),
 };

@@ -14,7 +14,7 @@
 #ifndef HW_S390_SCLP_H
 #define HW_S390_SCLP_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "target/s390x/cpu-qom.h"
 #include "qom/object.h"
 
@@ -136,7 +136,9 @@ typedef struct ReadInfo {
     uint32_t hmfai;
     uint8_t  _reserved7[134 - 128];     /* 128-133 */
     uint8_t  fac134;
-    uint8_t  _reserved8[144 - 135];     /* 135-143 */
+    uint8_t  _reserved8[139 - 135];     /* 135-138 */
+    uint8_t  fac139;
+    uint8_t  _reserved9[144 - 140];     /* 140-143 */
     struct CPUEntry entries[];
     /*
      * When the Extended-Length SCCB (ELS) feature is enabled the
@@ -197,12 +199,9 @@ OBJECT_DECLARE_TYPE(SCLPDevice, SCLPDeviceClass,
 struct SCLPEventFacility;
 
 struct SCLPDevice {
-    /* private */
     DeviceState parent_obj;
-    struct SCLPEventFacility *event_facility;
-    int increment_size;
 
-    /* public */
+    struct SCLPEventFacility *event_facility;
 };
 
 struct SCLPDeviceClass {

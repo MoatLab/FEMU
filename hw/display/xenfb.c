@@ -191,30 +191,14 @@ static int xenfb_send_position(struct XenInput *xenfb,
     return xenfb_kbd_event(xenfb, &event);
 }
 
-/*
- * Send a key event from the client to the guest OS
- * QEMU gives us a QCode.
- * We have to turn this into a Linux Input layer keycode.
- *
- * Wish we could just send scancodes straight to the guest which
- * already has code for dealing with this...
- */
+/* Send a key event from the client to the guest OS */
 static void xenfb_key_event(DeviceState *dev, QemuConsole *src,
-                            InputEvent *evt)
+                            QemuInputEvent *evt)
 {
     struct XenInput *xenfb = (struct XenInput *)dev;
-    InputKeyEvent *key = evt->u.key.data;
-    int qcode = qemu_input_key_value_to_qcode(key->key);
-    int lnx;
 
-    if (qcode < qemu_input_map_qcode_to_linux_len) {
-        lnx = qemu_input_map_qcode_to_linux[qcode];
-
-        if (lnx) {
-            trace_xenfb_key_event(xenfb, lnx, key->down);
-            xenfb_send_key(xenfb, key->down, lnx);
-        }
-    }
+    trace_xenfb_key_event(xenfb, evt->key.key, evt->key.down);
+    xenfb_send_key(xenfb, evt->key.down, evt->key.key);
 }
 
 /*
@@ -227,35 +211,32 @@ static void xenfb_key_event(DeviceState *dev, QemuConsole *src,
  * the button state.
  */
 static void xenfb_mouse_event(DeviceState *dev, QemuConsole *src,
-                              InputEvent *evt)
+                              QemuInputEvent *evt)
 {
     struct XenInput *xenfb = (struct XenInput *)dev;
-    InputBtnEvent *btn;
-    InputMoveEvent *move;
     QemuConsole *con;
     DisplaySurface *surface;
     int scale;
 
     switch (evt->type) {
     case INPUT_EVENT_KIND_BTN:
-        btn = evt->u.btn.data;
-        switch (btn->button) {
+        switch (evt->btn.button) {
         case INPUT_BUTTON_LEFT:
-            xenfb_send_key(xenfb, btn->down, BTN_LEFT);
+            xenfb_send_key(xenfb, evt->btn.down, BTN_LEFT);
             break;
         case INPUT_BUTTON_RIGHT:
-            xenfb_send_key(xenfb, btn->down, BTN_LEFT + 1);
+            xenfb_send_key(xenfb, evt->btn.down, BTN_LEFT + 1);
             break;
         case INPUT_BUTTON_MIDDLE:
-            xenfb_send_key(xenfb, btn->down, BTN_LEFT + 2);
+            xenfb_send_key(xenfb, evt->btn.down, BTN_LEFT + 2);
             break;
         case INPUT_BUTTON_WHEEL_UP:
-            if (btn->down) {
+            if (evt->btn.down) {
                 xenfb->wheel--;
             }
             break;
         case INPUT_BUTTON_WHEEL_DOWN:
-            if (btn->down) {
+            if (evt->btn.down) {
                 xenfb->wheel++;
             }
             break;
@@ -265,9 +246,8 @@ static void xenfb_mouse_event(DeviceState *dev, QemuConsole *src,
         break;
 
     case INPUT_EVENT_KIND_ABS:
-        move = evt->u.abs.data;
         if (xenfb->raw_pointer_wanted) {
-            xenfb->axis[move->axis] = move->value;
+            xenfb->axis[evt->abs.axis] = evt->abs.value;
         } else {
             con = qemu_console_lookup_by_index(0);
             if (!con) {
@@ -275,7 +255,7 @@ static void xenfb_mouse_event(DeviceState *dev, QemuConsole *src,
                 return;
             }
             surface = qemu_console_surface(con);
-            switch (move->axis) {
+            switch (evt->abs.axis) {
             case INPUT_AXIS_X:
                 scale = surface_width(surface) - 1;
                 break;
@@ -283,16 +263,14 @@ static void xenfb_mouse_event(DeviceState *dev, QemuConsole *src,
                 scale = surface_height(surface) - 1;
                 break;
             default:
-                scale = 0x8000;
-                break;
+                g_assert_not_reached();
             }
-            xenfb->axis[move->axis] = move->value * scale / 0x7fff;
+            xenfb->axis[evt->abs.axis] = evt->abs.value * scale / 0x7fff;
         }
         break;
 
     case INPUT_EVENT_KIND_REL:
-        move = evt->u.rel.data;
-        xenfb->axis[move->axis] += move->value;
+        xenfb->axis[evt->rel.axis] += evt->rel.value;
         break;
 
     default:
@@ -460,10 +438,7 @@ static int xenfb_map_fb(struct XenFB *xenfb)
          */
         uint32_t *ptr32 = NULL;
         uint32_t *ptr64 = NULL;
-#if defined(__i386__)
-        ptr32 = (void*)page->pd;
-        ptr64 = ((void*)page->pd) + 4;
-#elif defined(__x86_64__)
+#if defined(__x86_64__)
         ptr32 = ((void*)page->pd) - 4;
         ptr64 = (void*)page->pd;
 #endif
@@ -481,11 +456,6 @@ static int xenfb_map_fb(struct XenFB *xenfb)
         /* 64bit dom0, 32bit domU */
         mode = 32;
         pd   = ((void*)page->pd) - 4;
-#elif defined(__i386__)
-    } else if (strcmp(protocol, XEN_IO_PROTO_ABI_X86_64) == 0) {
-        /* 32bit dom0, 64bit domU */
-        mode = 64;
-        pd   = ((void*)page->pd) + 4;
 #endif
     }
 
@@ -666,7 +636,7 @@ static void xenfb_guest_copy(struct XenFB *xenfb, int x, int y, int w, int h)
         xen_pv_printf(&xenfb->c.xendev, 0, "%s: oops: convert %d -> %d bpp?\n",
                       __func__, xenfb->depth, bpp);
 
-    dpy_gfx_update(xenfb->con, x, y, w, h);
+    qemu_console_update(xenfb->con, x, y, w, h);
 }
 
 #ifdef XENFB_TYPE_REFRESH_PERIOD
@@ -718,14 +688,14 @@ static void xenfb_send_refresh_period(struct XenFB *xenfb, int period)
  * Our screen might be inactive.  When asked for
  * an update we know it is active.
  */
-static void xenfb_update(void *opaque)
+static bool xenfb_update(void *opaque)
 {
     struct XenFB *xenfb = opaque;
     DisplaySurface *surface;
     int i;
 
     if (xenfb->c.xendev.be_state != XenbusStateConnected)
-        return;
+        return true;
 
     if (!xenfb->feature_update) {
         /* we don't get update notifications, thus use the
@@ -752,7 +722,7 @@ static void xenfb_update(void *opaque)
             surface = qemu_create_displaysurface(xenfb->width, xenfb->height);
             break;
         }
-        dpy_gfx_replace_surface(xenfb->con, surface);
+        qemu_console_set_surface(xenfb->con, surface);
         xen_pv_printf(&xenfb->c.xendev, 1,
                       "update: resizing: %dx%d @ %d bpp%s\n",
                       xenfb->width, xenfb->height, xenfb->depth,
@@ -779,6 +749,8 @@ static void xenfb_update(void *opaque)
     }
     xenfb->up_count = 0;
     xenfb->up_fullscreen = 0;
+
+    return true;
 }
 
 static void xenfb_ui_info(void *opaque, uint32_t idx, QemuUIInfo *info)
@@ -910,7 +882,7 @@ static int fb_initialise(struct XenLegacyDevice *xendev)
     if (rc != 0)
         return rc;
 
-    fb->con = graphic_console_init(NULL, 0, &xenfb_ops, fb);
+    fb->con = qemu_graphic_console_create(NULL, 0, &xenfb_ops, fb);
 
     if (xenstore_read_fe_int(xendev, "feature-update", &fb->feature_update) == -1)
         fb->feature_update = 0;

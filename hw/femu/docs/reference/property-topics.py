@@ -437,6 +437,10 @@ DEVICES = [
                 "builds a table from the backends; femu-cxl-ssd leaves it "
                 "unchanged"
             ),
+            "hdm-db": (
+                "Report HDM-DB back-invalidation in the HDM decoders; needs "
+                "x-256b-flit=on; femu-cxl-ssd leaves it unchanged"
+            ),
             "lsa": (
                 "Label storage area backend served by Get and Set LSA; "
                 "femu-cxl-ssd accepts it only with lsa-control=off"
@@ -468,6 +472,10 @@ DEVICES = [
                 "GiB; der=cylon needs a hugetlbfs file backend with share=on "
                 "and prealloc=on, or direct mapping falls back to MMIO with a "
                 "warning"
+            ),
+            "x-256b-flit": (
+                "Run the CXL link in 256-byte flit mode; femu-cxl-ssd leaves "
+                "it unchanged"
             ),
             "x-speed": (
                 "PCIe link speed the device reports; femu-cxl-ssd leaves it "

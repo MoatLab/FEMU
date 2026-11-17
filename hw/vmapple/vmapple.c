@@ -25,14 +25,13 @@
 #include "qemu/option.h"
 #include "qemu/units.h"
 #include "monitor/qdev.h"
-#include "hw/boards.h"
-#include "hw/irq.h"
-#include "hw/loader.h"
-#include "hw/qdev-properties.h"
-#include "hw/sysbus.h"
-#include "hw/usb.h"
+#include "hw/core/boards.h"
+#include "hw/core/irq.h"
+#include "hw/core/loader.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/sysbus.h"
+#include "hw/usb/usb.h"
 #include "hw/arm/boot.h"
-#include "hw/arm/primecell.h"
 #include "hw/char/pl011.h"
 #include "hw/intc/arm_gic.h"
 #include "hw/intc/arm_gicv3_common.h"
@@ -51,6 +50,8 @@
 #include "system/reset.h"
 #include "system/runstate.h"
 #include "system/system.h"
+#include "target/arm/gtimer.h"
+#include "target/arm/cpu.h"
 
 struct VMAppleMachineState {
     MachineState parent;
@@ -324,8 +325,8 @@ static void create_gpio_devices(const VMAppleMachineState *vms, int gpio,
 
     pl061_dev = qdev_new("pl061");
     /* Pull lines down to 0 if not driven by the PL061 */
-    qdev_prop_set_uint32(pl061_dev, "pullups", 0);
-    qdev_prop_set_uint32(pl061_dev, "pulldowns", 0xff);
+    qdev_prop_set_uint8(pl061_dev, "pullups", 0);
+    qdev_prop_set_uint8(pl061_dev, "pulldowns", 0xff);
     s = SYS_BUS_DEVICE(pl061_dev);
     sysbus_realize_and_unref(s, &error_fatal);
     memory_region_add_subregion(mem, base, sysbus_mmio_get_region(s, 0));

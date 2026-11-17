@@ -10,9 +10,9 @@
 
 #include "qemu/osdep.h"
 #include "hw/ipack/ipack.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "migration/vmstate.h"
 #include "qemu/bitops.h"
 #include "qemu/module.h"
@@ -93,13 +93,16 @@
 #define ISR_RXRDY(CH) (((CH) & 1) ? BIT(5) : BIT(1))
 #define ISR_BREAK(CH) (((CH) & 1) ? BIT(6) : BIT(2))
 
-typedef struct IPOctalState IPOctalState;
+#define TYPE_IPOCTAL "ipoctal232"
+
+OBJECT_DECLARE_SIMPLE_TYPE(IPOctalState, IPOCTAL)
+
 typedef struct SCC2698Channel SCC2698Channel;
 typedef struct SCC2698Block SCC2698Block;
 
 struct SCC2698Channel {
     IPOctalState *ipoctal;
-    CharBackend dev;
+    CharFrontend dev;
     bool rx_enabled;
     uint8_t mr[2];
     uint8_t mr_idx;
@@ -121,10 +124,6 @@ struct IPOctalState {
     SCC2698Block blk[N_BLOCKS];
     uint8_t irq_vector;
 };
-
-#define TYPE_IPOCTAL "ipoctal232"
-
-OBJECT_DECLARE_SIMPLE_TYPE(IPOctalState, IPOCTAL)
 
 static const VMStateDescription vmstate_scc2698_channel = {
     .name = "scc2698_channel",

@@ -11,7 +11,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "block/aio.h"
+#include "qemu/aio.h"
 #include "qemu/coroutine.h"
 #include "qemu/thread.h"
 #include "qemu/error-report.h"
@@ -443,7 +443,7 @@ static void test_multi_mutex_10(void)
 
 int main(int argc, char **argv)
 {
-    init_clocks(NULL);
+    qemu_init_clocks(NULL);
 
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/aio/multi/lifecycle", test_lifecycle);

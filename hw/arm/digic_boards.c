@@ -26,11 +26,12 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/datadir.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "qemu/error-report.h"
 #include "hw/arm/digic.h"
+#include "hw/arm/machines-qom.h"
 #include "hw/block/flash.h"
-#include "hw/loader.h"
+#include "hw/core/loader.h"
 #include "system/qtest.h"
 #include "qemu/units.h"
 #include "qemu/cutils.h"
@@ -97,7 +98,7 @@ static void digic_load_rom(DigicState *s, hwaddr addr,
             exit(1);
         }
 
-        rom_size = load_image_targphys(fn, addr, max_size);
+        rom_size = load_image_targphys(fn, addr, max_size, NULL);
         if (rom_size < 0 || rom_size > max_size) {
             error_report("Couldn't load rom image '%s'.", filename);
             exit(1);
@@ -145,4 +146,4 @@ static void canon_a1100_machine_init(MachineClass *mc)
     mc->default_ram_id = "ram";
 }
 
-DEFINE_MACHINE("canon-a1100", canon_a1100_machine_init)
+DEFINE_MACHINE_ARM("canon-a1100", canon_a1100_machine_init)

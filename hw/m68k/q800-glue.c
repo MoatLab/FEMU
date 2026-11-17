@@ -21,12 +21,12 @@
  */
 
 #include "qemu/osdep.h"
-#include "cpu.h"
+#include "target/m68k/cpu.h"
 #include "hw/m68k/q800-glue.h"
-#include "hw/boards.h"
-#include "hw/irq.h"
-#include "hw/nmi.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/boards.h"
+#include "hw/core/irq.h"
+#include "hw/core/nmi.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 
 /*

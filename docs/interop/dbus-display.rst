@@ -1,3 +1,5 @@
+.. _dbus-display:
+
 D-Bus display
 =============
 

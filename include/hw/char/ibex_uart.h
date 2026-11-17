@@ -25,7 +25,7 @@
 #ifndef HW_IBEX_UART_H
 #define HW_IBEX_UART_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "chardev/char-fe.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
@@ -64,7 +64,7 @@ struct IbexUartState {
 
     Clock *f_clk;
 
-    CharBackend chr;
+    CharFrontend chr;
     qemu_irq tx_watermark;
     qemu_irq rx_watermark;
     qemu_irq tx_empty;

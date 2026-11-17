@@ -44,14 +44,13 @@ static void test_output_pins(const char *machine, const uint32_t base)
 static void test_input_pins(const char *machine, const uint32_t base)
 {
     QTestState *s = qtest_init(machine);
-    char name[16];
     uint32_t offset = 0;
     uint32_t value = 0;
     uint32_t pin = 0;
 
     for (char c = 'A'; c <= 'D'; c++) {
         for (int i = 0; i < 8; i++) {
-            sprintf(name, "gpio%c%d", c, i);
+            g_autofree const char *name = g_strdup_printf("gpio%c%d", c, i);
             offset = base + (pin * 4);
             /* input direction */
             qtest_writel(s, offset, 0);

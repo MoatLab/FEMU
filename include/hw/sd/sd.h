@@ -30,7 +30,7 @@
 #ifndef HW_SD_H
 #define HW_SD_H
 
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 #include "qom/object.h"
 
 #define OUT_OF_RANGE            (1 << 31)
@@ -56,7 +56,6 @@
 #define AKE_SEQ_ERROR           (1 << 3)
 
 enum SDPhySpecificationVersion {
-    SD_PHY_SPECv1_10_VERS     = 1,
     SD_PHY_SPECv2_00_VERS     = 2,
     SD_PHY_SPECv3_01_VERS     = 3,
 };
@@ -108,22 +107,30 @@ struct SDCardClass {
     size_t (*do_command)(SDState *sd, SDRequest *req,
                          uint8_t *resp, size_t respsz);
     /**
-     * Write a byte to a SD card.
+     * Write data to a SD card.
      * @sd: card
-     * @value: byte to write
+     * @value: data to write
+     * @len: length of data
      *
-     * Write a byte on the data lines of a SD card.
+     * Write data on the data lines of a SD card. May write not all data, in
+     * which case it should be called again. At least one byte must be consumed.
+     *
+     * Return: number of bytes actually written. >= 1
      */
-    void (*write_byte)(SDState *sd, uint8_t value);
+    size_t (*write_data)(SDState *sd, const void *buf, size_t len);
     /**
      * Read a byte from a SD card.
      * @sd: card
+     * @buf: buffer to receive the data
+     * @len: size of data to read
      *
-     * Read a byte from the data lines of a SD card.
+     * Read data from the data lines of a SD card. This may not read all
+     * requested data, in this case it should be called again with the remaining
+     * buffer. At least one byte must be read.
      *
-     * Return: byte value read
+     * Return: number of bytes actually read. >= 1
      */
-    uint8_t (*read_byte)(SDState *sd);
+    size_t (*read_data)(SDState *sd, void* buf, size_t len);
     bool (*receive_ready)(SDState *sd);
     bool (*data_ready)(SDState *sd);
     void (*set_voltage)(SDState *sd, uint16_t millivolts);

@@ -27,9 +27,9 @@ Sample QEMU xenpvh commands for running and connecting with Xen:
 
     qemu-system-aarch64 -xen-domid 1 \
       -chardev socket,id=libxl-cmd,path=qmp-libxl-1,server=on,wait=off \
-      -mon chardev=libxl-cmd,mode=control \
+      -object monitor-qmp,id=qmp0,chardev=libxl-cmd \
       -chardev socket,id=libxenstat-cmd,path=qmp-libxenstat-1,server=on,wait=off \
-      -mon chardev=libxenstat-cmd,mode=control \
+      -object monitor-qmp,id=qmp1,chardev=libxenstat-cmd \
       -xen-attach -name guest0 -vnc none -display none -nographic \
       -machine xenpvh -m 1301 \
       -chardev socket,id=chrtpm,path=tmp/vtpm2/swtpm-sock \

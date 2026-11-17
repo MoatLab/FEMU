@@ -99,6 +99,7 @@ typedef struct MirrorBlockJob {
 
 typedef struct MirrorBDSOpaque {
     MirrorBlockJob *job;
+    BdrvDirtyBitmap *dirty_bitmap;
     bool stop;
     bool is_commit;
 } MirrorBDSOpaque;
@@ -453,7 +454,7 @@ static void coroutine_fn mirror_co_discard(void *opaque)
     *op->bytes_handled = op->bytes;
     op->is_in_flight = true;
 
-    ret = blk_co_pdiscard(op->s->target, op->offset, op->bytes);
+    ret = blk_co_pdiscard(op->s->target, op->offset, op->bytes, 0);
     mirror_write_complete(op, ret);
 }
 
@@ -1275,22 +1276,24 @@ static void mirror_complete(Job *job, Error **errp)
         return;
     }
 
-    /* block all operations on to_replace bs */
-    if (s->replaces) {
-        s->to_replace = bdrv_find_node(s->replaces);
-        if (!s->to_replace) {
-            error_setg(errp, "Node name '%s' not found", s->replaces);
-            return;
+    if (!s->should_complete) {
+        /* block all operations on to_replace bs */
+        if (s->replaces) {
+            s->to_replace = bdrv_find_node(s->replaces);
+            if (!s->to_replace) {
+                error_setg(errp, "Node name '%s' not found", s->replaces);
+                return;
+            }
+
+            /* TODO Translate this into child freeze system. */
+            error_setg(&s->replace_blocker,
+                       "block device is in use by block-job-complete");
+            bdrv_op_block_all(s->to_replace, s->replace_blocker);
+            bdrv_ref(s->to_replace);
         }
 
-        /* TODO Translate this into child freeze system. */
-        error_setg(&s->replace_blocker,
-                   "block device is in use by block-job-complete");
-        bdrv_op_block_all(s->to_replace, s->replace_blocker);
-        bdrv_ref(s->to_replace);
+        s->should_complete = true;
     }
-
-    s->should_complete = true;
 
     /* If the job is paused, it will be re-entered when it is resumed */
     WITH_JOB_LOCK_GUARD() {
@@ -1514,9 +1517,12 @@ do_sync_target_write(MirrorBlockJob *job, MirrorMethod method,
         assert(!qiov);
         ret = blk_co_pwrite_zeroes(job->target, offset, bytes, flags);
         if (job->zero_bitmap && ret >= 0) {
-            bitmap_set(job->zero_bitmap, dirty_bitmap_offset / job->granularity,
-                       (dirty_bitmap_end - dirty_bitmap_offset) /
-                       job->granularity);
+            if (dirty_bitmap_offset < dirty_bitmap_end) {
+                bitmap_set(job->zero_bitmap,
+                           dirty_bitmap_offset / job->granularity,
+                           (dirty_bitmap_end - dirty_bitmap_offset) /
+                           job->granularity);
+            }
         }
         break;
 
@@ -1526,7 +1532,7 @@ do_sync_target_write(MirrorBlockJob *job, MirrorMethod method,
                          zero_bitmap_end - zero_bitmap_offset);
         }
         assert(!qiov);
-        ret = blk_co_pdiscard(job->target, offset, bytes);
+        ret = blk_co_pdiscard(job->target, offset, bytes, 0);
         break;
 
     default:
@@ -1672,9 +1678,11 @@ bdrv_mirror_top_do_write(BlockDriverState *bs, MirrorMethod method,
         abort();
     }
 
-    if (!copy_to_target && s->job && s->job->dirty_bitmap) {
-        qatomic_set(&s->job->actively_synced, false);
-        bdrv_set_dirty_bitmap(s->job->dirty_bitmap, offset, bytes);
+    if (!copy_to_target) {
+        if (s->job) {
+            qatomic_set(&s->job->actively_synced, false);
+        }
+        bdrv_set_dirty_bitmap(s->dirty_bitmap, offset, bytes);
     }
 
     if (ret < 0) {
@@ -1901,12 +1909,34 @@ static BlockJob *mirror_start_job(
 
     bdrv_drained_begin(bs);
     ret = bdrv_append(mirror_top_bs, bs, errp);
-    bdrv_drained_end(bs);
-
     if (ret < 0) {
+        bdrv_drained_end(bs);
         bdrv_unref(mirror_top_bs);
         return NULL;
     }
+
+    bs_opaque->dirty_bitmap = bdrv_create_dirty_bitmap(mirror_top_bs,
+                                                       granularity,
+                                                       NULL, errp);
+    if (!bs_opaque->dirty_bitmap) {
+        bdrv_drained_end(bs);
+        bdrv_unref(mirror_top_bs);
+        return NULL;
+    }
+
+    /*
+     * The mirror job doesn't use the block layer's dirty tracking because it
+     * needs to be able to switch seemlessly between background copy mode (which
+     * does need dirty tracking) and write blocking mode (which doesn't) and
+     * doing that would require draining the node. Instead, mirror_top_bs takes
+     * care of updating the dirty bitmap as appropriate.
+     *
+     * Note that write blocking mode only becomes effective after mirror_run()
+     * sets mirror_top_opaque->job (see should_copy_to_target()). Until then,
+     * we're still in background copy mode irrespective of @copy_mode.
+     */
+    bdrv_disable_dirty_bitmap(bs_opaque->dirty_bitmap);
+    bdrv_drained_end(bs);
 
     /* Make sure that the source is not resized while the job is running */
     s = block_job_create(job_id, driver, NULL, mirror_top_bs,
@@ -2002,23 +2032,12 @@ static BlockJob *mirror_start_job(
     s->base_overlay = bdrv_find_overlay(bs, base);
     s->granularity = granularity;
     s->buf_size = ROUND_UP(buf_size, granularity);
+    s->dirty_bitmap = bs_opaque->dirty_bitmap;
     s->unmap = unmap;
     if (auto_complete) {
         s->should_complete = true;
     }
     bdrv_graph_rdunlock_main_loop();
-
-    s->dirty_bitmap = bdrv_create_dirty_bitmap(s->mirror_top_bs, granularity,
-                                               NULL, errp);
-    if (!s->dirty_bitmap) {
-        goto fail;
-    }
-
-    /*
-     * The dirty bitmap is set by bdrv_mirror_top_do_write() when not in active
-     * mode.
-     */
-    bdrv_disable_dirty_bitmap(s->dirty_bitmap);
 
     bdrv_graph_wrlock_drained();
     ret = block_job_add_bdrv(&s->common, "source", bs, 0,
@@ -2099,9 +2118,6 @@ fail:
         g_free(s->replaces);
         blk_unref(s->target);
         bs_opaque->job = NULL;
-        if (s->dirty_bitmap) {
-            bdrv_release_dirty_bitmap(s->dirty_bitmap);
-        }
         job_early_fail(&s->common.job);
     }
 
@@ -2115,6 +2131,7 @@ fail:
     bdrv_graph_wrunlock();
     bdrv_drained_end(bs);
 
+    bdrv_release_dirty_bitmap(bs_opaque->dirty_bitmap);
     bdrv_unref(mirror_top_bs);
 
     return NULL;

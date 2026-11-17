@@ -60,6 +60,10 @@ libqos_srcs = files(
         'x86_64_pc-machine.c',
         'riscv-virt-machine.c',
         'loongarch-virt-machine.c',
+
+        # SMMU:
+        'qos-iommu-testdev.c',
+        'qos-smmuv3.c',
 )
 
 if have_virtfs
@@ -67,7 +71,10 @@ if have_virtfs
 endif
 
 if config_all_devices.has_key('CONFIG_RISCV_IOMMU')
-  libqos_srcs += files('riscv-iommu.c')
+  libqos_srcs += files('riscv-iommu.c', 'qos-riscv-iommu.c')
+endif
+if config_all_devices.has_key('CONFIG_VTD')
+  libqos_srcs += files('qos-intel-iommu.c')
 endif
 if config_all_devices.has_key('CONFIG_TPCI200')
   libqos_srcs += files('tpci200.c')

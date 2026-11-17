@@ -28,6 +28,7 @@
 #include "qemu/osdep.h"
 #include "accel/accel-ops.h"
 #include "accel/accel-cpu-ops.h"
+#include "accel/tcg/cpu-loop.h"
 #include "system/tcg.h"
 #include "system/replay.h"
 #include "exec/icount.h"
@@ -82,8 +83,6 @@ int tcg_cpu_exec(CPUState *cpu)
     ret = cpu_exec(cpu);
     cpu_exec_end(cpu);
 
-    qatomic_set_mb(&cpu->exit_request, 0);
-
     return ret;
 }
 
@@ -97,7 +96,7 @@ static void tcg_cpu_reset_hold(CPUState *cpu)
 /* mask must never be zero, except for A20 change call */
 void tcg_handle_interrupt(CPUState *cpu, int mask)
 {
-    cpu->interrupt_request |= mask;
+    cpu_set_interrupt(cpu, mask);
 
     /*
      * If called from iothread context, wake the target cpu in
@@ -110,13 +109,8 @@ void tcg_handle_interrupt(CPUState *cpu, int mask)
     }
 }
 
-static bool tcg_supports_guest_debug(void)
-{
-    return true;
-}
-
 /* Translate GDB watchpoint type to a flags value for cpu_watchpoint_* */
-static inline int xlat_gdb_type(CPUState *cpu, int gdbtype)
+static inline int xlat_gdb_type(CPUState *cpu, GdbBreakpointType gdbtype)
 {
     static const int xlat[] = {
         [GDB_WATCHPOINT_WRITE]  = BP_GDB | BP_MEM_WRITE,
@@ -132,7 +126,8 @@ static inline int xlat_gdb_type(CPUState *cpu, int gdbtype)
     return cputype;
 }
 
-static int tcg_insert_breakpoint(CPUState *cs, int type, vaddr addr, vaddr len)
+static int tcg_insert_gdbstub_breakpoint(CPUState *cs, GdbBreakpointType type,
+                                         vaddr addr, vaddr len)
 {
     CPUState *cpu;
     int err = 0;
@@ -163,7 +158,8 @@ static int tcg_insert_breakpoint(CPUState *cs, int type, vaddr addr, vaddr len)
     }
 }
 
-static int tcg_remove_breakpoint(CPUState *cs, int type, vaddr addr, vaddr len)
+static int tcg_remove_gdbstub_breakpoint(CPUState *cs, GdbBreakpointType type,
+                                         vaddr addr, vaddr len)
 {
     CPUState *cpu;
     int err = 0;
@@ -194,7 +190,7 @@ static int tcg_remove_breakpoint(CPUState *cs, int type, vaddr addr, vaddr len)
     }
 }
 
-static inline void tcg_remove_all_breakpoints(CPUState *cpu)
+static void tcg_remove_all_gdbstub_breakpoints(CPUState *cpu)
 {
     cpu_breakpoint_remove_all(cpu, BP_GDB);
     cpu_watchpoint_remove_all(cpu, BP_GDB);
@@ -206,7 +202,7 @@ static void tcg_accel_ops_init(AccelClass *ac)
 
     if (qemu_tcg_mttcg_enabled()) {
         ops->create_vcpu_thread = mttcg_start_vcpu_thread;
-        ops->kick_vcpu_thread = mttcg_kick_vcpu_thread;
+        ops->kick_vcpu_thread = tcg_kick_vcpu_thread;
         ops->handle_interrupt = tcg_handle_interrupt;
     } else {
         ops->create_vcpu_thread = rr_start_vcpu_thread;
@@ -222,10 +218,9 @@ static void tcg_accel_ops_init(AccelClass *ac)
     }
 
     ops->cpu_reset_hold = tcg_cpu_reset_hold;
-    ops->supports_guest_debug = tcg_supports_guest_debug;
-    ops->insert_breakpoint = tcg_insert_breakpoint;
-    ops->remove_breakpoint = tcg_remove_breakpoint;
-    ops->remove_all_breakpoints = tcg_remove_all_breakpoints;
+    ops->insert_gdbstub_breakpoint = tcg_insert_gdbstub_breakpoint;
+    ops->remove_gdbstub_breakpoint = tcg_remove_gdbstub_breakpoint;
+    ops->remove_all_gdbstub_breakpoints = tcg_remove_all_gdbstub_breakpoints;
 }
 
 static void tcg_accel_ops_class_init(ObjectClass *oc, const void *data)

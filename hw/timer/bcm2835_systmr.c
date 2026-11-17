@@ -1,7 +1,7 @@
 /*
  * BCM2835 SYS timer emulation
  *
- * Copyright (C) 2019 Philippe Mathieu-Daudé <f4bug@amsat.org>
+ * Copyright (C) 2019 Philippe Mathieu-Daudé
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
@@ -16,7 +16,7 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "hw/timer/bcm2835_systmr.h"
-#include "hw/registerfields.h"
+#include "hw/core/registerfields.h"
 #include "migration/vmstate.h"
 #include "trace.h"
 

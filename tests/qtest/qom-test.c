@@ -180,7 +180,7 @@ static void test_properties(QTestState *qts, const char *path, bool recurse)
         links = g_slist_delete_link(links, links);
     }
     while (children) {
-        test_properties(qts, children->data, true);
+        test_properties(qts, children->data, g_test_slow());
         g_free(children->data);
         children = g_slist_delete_link(children, children);
     }
@@ -211,16 +211,11 @@ static void test_machine(gconstpointer data)
 
     test_properties(qts, "/machine", true);
 
-    qlist_append_str(paths, "/machine");
+    qlist_append_str(paths, "/");
     test_list_get(qts, paths);
     test_list_get_value(qts);
 
-    response = qtest_qmp(qts, "{ 'execute': 'quit' }");
-    g_assert(qdict_haskey(response, "return"));
-    qobject_unref(response);
-
     qtest_quit(qts);
-    g_free((void *)machine);
 }
 
 static void add_machine_test_case(const char *mname)
@@ -228,8 +223,19 @@ static void add_machine_test_case(const char *mname)
     char *path;
 
     path = g_strdup_printf("qom/%s", mname);
-    qtest_add_data_func(path, g_strdup(mname), test_machine);
+    qtest_add_data_func(path, mname, test_machine);
     g_free(path);
+}
+
+static void test_qom_qtests(void)
+{
+    QTestState *qts;
+
+    qts = qtest_initf("-machine none");
+
+    qtest_qom_tests(qts);
+
+    qtest_quit(qts);
 }
 
 int main(int argc, char **argv)
@@ -243,6 +249,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
 
     qtest_cb_for_every_machine(add_machine_test_case, g_test_quick());
+    qtest_add_func("qom/qom-qtests", test_qom_qtests);
 
     return g_test_run();
 }

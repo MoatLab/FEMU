@@ -4,7 +4,7 @@
  * Copyright (c) 2021 Red Hat, Inc.
  *
  * Author:
- *   Philippe Mathieu-Daudé <philmd@redhat.com>
+ *   Philippe Mathieu-Daudé
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
@@ -21,6 +21,11 @@ bool pc_system_ovmf_table_find(const char *entry, uint8_t **data, int *data_len)
 }
 
 void pc_system_parse_ovmf_flash(uint8_t *flash_ptr, size_t flash_size)
+{
+    g_assert_not_reached();
+}
+
+void x86_firmware_configure(hwaddr gpa, void *ptr, int size)
 {
     g_assert_not_reached();
 }

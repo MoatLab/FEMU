@@ -50,6 +50,8 @@ static void host_signal_handler(int host_signum, siginfo_t *info,
 /* Fallback addresses into sigtramp page. */
 abi_ulong default_sigreturn;
 abi_ulong default_rt_sigreturn;
+abi_ulong vdso_sigreturn_region_start;
+abi_ulong vdso_sigreturn_region_end;
 
 /*
  * System includes define _NSIG as SIGRTMAX + 1, but qemu (like the kernel)
@@ -1382,6 +1384,11 @@ void process_pending_signals(CPUArchState *cpu_env)
             }
 
             handle_pending_signal(cpu_env, sig, &ts->sync_signal);
+            /*
+             * Restart scan from the beginning, as handle_pending_signal
+             * might have resulted in a new synchronous signal (eg SIGSEGV).
+             */
+            goto restart_scan;
         }
 
         for (sig = 1; sig <= TARGET_NSIG; sig++) {
@@ -1392,9 +1399,7 @@ void process_pending_signals(CPUArchState *cpu_env)
                 (!sigismember(blocked_set,
                               target_to_host_signal_table[sig]))) {
                 handle_pending_signal(cpu_env, sig, &ts->sigtab[sig - 1]);
-                /* Restart scan from the beginning, as handle_pending_signal
-                 * might have resulted in a new synchronous signal (eg SIGSEGV).
-                 */
+                /* Restart scan, explained above. */
                 goto restart_scan;
             }
         }

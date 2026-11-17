@@ -17,7 +17,7 @@
 #include "qemu/log.h"
 #include "qapi/visitor.h"
 #include "qapi/error.h"
-#include "block/aio-wait.h"
+#include "qemu/aio-wait.h"
 #include "system/address-spaces.h"
 #include "system/dma.h"
 #include "migration/blocker.h"
@@ -317,8 +317,8 @@ static void apple_gfx_render_frame_completed_bh(void *opaque)
             copy_mtl_texture_to_surface_mem(s->texture, surface_data(s->surface));
             if (s->gfx_update_requested) {
                 s->gfx_update_requested = false;
-                dpy_gfx_update_full(s->con);
-                graphic_hw_update_done(s->con);
+                qemu_console_update_full(s->con);
+                qemu_console_hw_update_done(s->con);
                 s->new_frame_ready = false;
             } else {
                 s->new_frame_ready = true;
@@ -330,25 +330,25 @@ static void apple_gfx_render_frame_completed_bh(void *opaque)
     }
 }
 
-static void apple_gfx_fb_update_display(void *opaque)
+static bool apple_gfx_fb_update_display(void *opaque)
 {
     AppleGFXState *s = opaque;
+    bool done = true;
 
     assert(bql_locked());
     if (s->new_frame_ready) {
-        dpy_gfx_update_full(s->con);
+        qemu_console_update_full(s->con);
         s->new_frame_ready = false;
-        graphic_hw_update_done(s->con);
     } else if (s->pending_frames > 0) {
         s->gfx_update_requested = true;
-    } else {
-        graphic_hw_update_done(s->con);
+        done = false;
     }
+
+    return done;
 }
 
 static const GraphicHwOps apple_gfx_fb_ops = {
     .gfx_update = apple_gfx_fb_update_display,
-    .gfx_update_async = true,
 };
 
 /* ------ Mouse cursor and display mode setting ------ */
@@ -380,14 +380,14 @@ static void set_mode(AppleGFXState *s, uint32_t width, uint32_t height)
             (s->texture.storageMode == MTLStorageModeManaged);
     }
 
-    dpy_gfx_replace_surface(s->con, s->surface);
+    qemu_console_set_surface(s->con, s->surface);
 }
 
 static void update_cursor(AppleGFXState *s)
 {
     assert(bql_locked());
-    dpy_mouse_set(s->con, s->pgdisp.cursorPosition.x,
-                  s->pgdisp.cursorPosition.y, qatomic_read(&s->cursor_show));
+    qemu_console_set_mouse(s->con, s->pgdisp.cursorPosition.x,
+                           s->pgdisp.cursorPosition.y, qatomic_read(&s->cursor_show));
 }
 
 static void update_cursor_bh(void *opaque)
@@ -443,7 +443,7 @@ static void set_cursor_glyph(void *opaque)
             }
             px_data += padding_bytes_per_row;
         }
-        dpy_cursor_define(s->con, s->cursor);
+        qemu_console_set_cursor(s->con, s->cursor);
         update_cursor(s);
     }
     [glyph release];
@@ -792,7 +792,7 @@ bool apple_gfx_common_realize(AppleGFXState *s, DeviceState *dev,
         apple_gfx_create_display_mode_array(display_modes, num_display_modes);
     [mode_array release];
 
-    s->con = graphic_console_init(dev, 0, &apple_gfx_fb_ops, s);
+    s->con = qemu_graphic_console_create(dev, 0, &apple_gfx_fb_ops, s);
     return true;
 }
 

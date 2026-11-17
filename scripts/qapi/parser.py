@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-#
 # QAPI schema parser
 #
 # Copyright IBM, Corp. 2011
@@ -109,6 +107,11 @@ class QAPISchemaParser:
         # Parser output:
         self.exprs: List[QAPIExpression] = []
         self.docs: List[QAPIDoc] = []
+
+        # State for tracking qmp-example blocks and simple
+        # :: literal blocks.
+        self._literal_mode = False
+        self._literal_mode_indent = 0
 
         # Showtime!
         self._parse()
@@ -425,12 +428,55 @@ class QAPISchemaParser:
             if self.val != '##':
                 raise QAPIParseError(
                     self, "junk after '##' at end of documentation comment")
+            self._literal_mode = False
             return None
         if self.val == '#':
             return ''
         if self.val[1] != ' ':
             raise QAPIParseError(self, "missing space after #")
-        return self.val[2:].rstrip()
+
+        line = self.val[2:].rstrip()
+
+        if re.match(r'(\.\. +qmp-example)? *::$', line):
+            self._literal_mode = True
+            self._literal_mode_indent = 0
+        elif self._literal_mode and line:
+            indent = must_match(r'\s*', line).end()
+            if self._literal_mode_indent == 0:
+                self._literal_mode_indent = indent
+            elif indent < self._literal_mode_indent:
+                # ReST directives stop at decreasing indentation
+                self._literal_mode = False
+
+        if not self._literal_mode:
+            self._validate_doc_line_format(line)
+
+        return line
+
+    def _validate_doc_line_format(self, line: str) -> None:
+        """
+        Validate documentation format rules for a single line:
+        1. Lines should not exceed 70 characters
+        2. Sentences should be separated by two spaces
+        """
+        full_line_length = len(line) + 2  # "# " = 2 characters
+        if full_line_length > 70:
+            # Skip URL lines - they can't be broken
+            if re.match(r' *(https?|ftp)://[^ ]*$', line):
+                pass
+            else:
+                raise QAPIParseError(
+                    self, "documentation line longer than 70 characters")
+
+        single_space_pattern = r'(\be\.g\.|^ *\d\.|([.!?])) [A-Z0-9(]'
+        for m in list(re.finditer(single_space_pattern, line)):
+            if not m.group(2):
+                continue
+            # HACK so the error message points to the offending spot
+            self.pos = self.line_pos + 2 + m.start(2) + 1
+            raise QAPIParseError(
+                self, "Use two spaces between sentences\n"
+                "If this not the end of a sentence, please report a bug.")
 
     @staticmethod
     def _match_at_name_colon(string: str) -> Optional[Match[str]]:
@@ -496,8 +542,8 @@ class QAPISchemaParser:
             if not symbol:
                 raise QAPIParseError(self, "name required after '@'")
             doc = QAPIDoc(info, symbol)
-            self.accept(False)
-            line = self.get_doc_line()
+            doc.all_sections.append(QAPIDoc.Section(info, QAPIDoc.Kind.INTRO))
+            line = self.get_doc_indented(doc)
             no_more_args = False
 
             while line is not None:
@@ -509,7 +555,7 @@ class QAPISchemaParser:
                     break
                 # Non-blank line, first of a section
                 if line == 'Features:':
-                    if doc.features:
+                    if doc.has_features:
                         raise QAPIParseError(
                             self, "duplicated 'Features:' line")
                     self.accept(False)
@@ -524,7 +570,7 @@ class QAPISchemaParser:
                         if text:
                             doc.append_line(text)
                         line = self.get_doc_indented(doc)
-                    if not doc.features:
+                    if not doc.has_features:
                         raise QAPIParseError(
                             self, 'feature descriptions expected')
                     no_more_args = True
@@ -585,7 +631,7 @@ class QAPISchemaParser:
                     line = self.get_doc_indented(doc)
                     no_more_args = True
                 else:
-                    # plain paragraph
+                    # plain paragraph(s)
                     doc.ensure_untagged_section(self.info)
                     doc.append_line(line)
                     line = self.get_doc_paragraph(doc)
@@ -635,6 +681,7 @@ class QAPIDoc:
         ERRORS = 4
         SINCE = 5
         TODO = 6
+        INTRO = 7
 
         @staticmethod
         def from_string(kind: str) -> 'QAPIDoc.Kind':
@@ -683,26 +730,24 @@ class QAPIDoc:
         # definition doc's symbol, None for free-form doc
         self.symbol: Optional[str] = symbol
         # the sections in textual order
-        self.all_sections: List[QAPIDoc.Section] = [
-            QAPIDoc.Section(info, QAPIDoc.Kind.PLAIN)
-        ]
-        # the body section
-        self.body: Optional[QAPIDoc.Section] = self.all_sections[0]
+        self.all_sections: List[QAPIDoc.Section] = []
         # dicts mapping parameter/feature names to their description
-        self.args: Dict[str, QAPIDoc.ArgSection] = {}
-        self.features: Dict[str, QAPIDoc.ArgSection] = {}
+        self._args: Dict[str, QAPIDoc.ArgSection] = {}
+        self._features: Dict[str, QAPIDoc.ArgSection] = {}
         # a command's "Returns" and "Errors" section
-        self.returns: Optional[QAPIDoc.Section] = None
-        self.errors: Optional[QAPIDoc.Section] = None
+        self._returns: Optional[QAPIDoc.Section] = None
+        self._errors: Optional[QAPIDoc.Section] = None
         # "Since" section
         self.since: Optional[QAPIDoc.Section] = None
-        # sections other than .body, .args, .features
-        self.sections: List[QAPIDoc.Section] = []
+
+    @property
+    def has_features(self) -> bool:
+        return bool(self._features)
 
     def end(self) -> None:
         for section in self.all_sections:
             section.text = section.text.strip('\n')
-            if section.kind != QAPIDoc.Kind.PLAIN and section.text == '':
+            if not (section.kind.name in ("INTRO", "PLAIN") or section.text):
                 raise QAPISemError(
                     section.info, "text required after '%s:'" % section.kind)
 
@@ -720,7 +765,6 @@ class QAPIDoc:
 
         # start new section
         section = self.Section(info, kind)
-        self.sections.append(section)
         self.all_sections.append(section)
 
     def new_tagged_section(
@@ -730,21 +774,20 @@ class QAPIDoc:
     ) -> None:
         section = self.Section(info, kind)
         if kind == QAPIDoc.Kind.RETURNS:
-            if self.returns:
+            if self._returns:
                 raise QAPISemError(
                     info, "duplicated '%s' section" % kind)
-            self.returns = section
+            self._returns = section
         elif kind == QAPIDoc.Kind.ERRORS:
-            if self.errors:
+            if self._errors:
                 raise QAPISemError(
                     info, "duplicated '%s' section" % kind)
-            self.errors = section
+            self._errors = section
         elif kind == QAPIDoc.Kind.SINCE:
             if self.since:
                 raise QAPISemError(
                     info, "duplicated '%s' section" % kind)
             self.since = section
-        self.sections.append(section)
         self.all_sections.append(section)
 
     def _new_description(
@@ -763,16 +806,68 @@ class QAPIDoc:
         desc[name] = section
 
     def new_argument(self, info: QAPISourceInfo, name: str) -> None:
-        self._new_description(info, name, QAPIDoc.Kind.MEMBER, self.args)
+        self._new_description(info, name, QAPIDoc.Kind.MEMBER, self._args)
 
     def new_feature(self, info: QAPISourceInfo, name: str) -> None:
-        self._new_description(info, name, QAPIDoc.Kind.FEATURE, self.features)
+        self._new_description(info, name, QAPIDoc.Kind.FEATURE, self._features)
 
     def append_line(self, line: str) -> None:
         self.all_sections[-1].append_line(line)
 
+    def _insert_near_kind(
+        self,
+        kind: 'QAPIDoc.Kind',
+        new_sect: 'QAPIDoc.Section',
+        after: bool = False,
+    ) -> bool:
+        """Insert or append a new doc section at a specific point."""
+        for idx, sect in enumerate(reversed(self.all_sections)):
+            if sect.kind == kind:
+                pos = len(self.all_sections) - idx - 1
+                if after:
+                    pos += 1
+                self.all_sections.insert(pos, new_sect)
+                return True
+        return False
+
+    def _insert_after_intro(
+        self,
+        section: 'QAPIDoc.Section',
+    ) -> None:
+        """
+        Insert a section immediately after the intro section.
+
+        While we convert PLAIN sections to INTRO sections, all
+        contiguous INTRO/PLAIN sections at the start of a QAPIDoc
+        section list are treated as "the intro".
+
+        Once INTRO conversion is complete, this helper will no longer be
+        needed and ``_insert_near_kind(QAPIDoc.Kind.INTRO, ...)`` will
+        be sufficient.
+        """
+        index = 0
+        for index, ref_section in enumerate(self.all_sections):
+            if ref_section.kind.name in ("PLAIN", "INTRO"):
+                continue
+            break
+        else:
+            index += 1
+
+        self.all_sections.insert(index, section)
+
+    def append_member_stub(self, stub: 'QAPIDoc.Section') -> None:
+
+        """
+        Append a stub section after any Member sections.
+        """
+        if self._insert_near_kind(QAPIDoc.Kind.MEMBER, stub, True):
+            return
+
+        # No MEMBER sections present. Insert after INTRO/PLAIN sections.
+        self._insert_after_intro(stub)
+
     def connect_member(self, member: 'QAPISchemaMember') -> None:
-        if member.name not in self.args:
+        if member.name not in self._args:
             assert member.info
             if self.symbol not in member.info.pragma.documentation_exceptions:
                 raise QAPISemError(member.info,
@@ -780,45 +875,27 @@ class QAPIDoc:
                                    % (member.role, member.name))
             # Insert stub documentation section for missing member docs.
             # TODO: drop when undocumented members are outlawed
-
-            section = QAPIDoc.ArgSection(
+            stub_section = QAPIDoc.ArgSection(
                 self.info, QAPIDoc.Kind.MEMBER, member.name)
-            self.args[member.name] = section
+            self._args[member.name] = stub_section
+            self.append_member_stub(stub_section)
 
-            # Determine where to insert stub doc - it should go at the
-            # end of the members section(s), if any. Note that index 0
-            # is assumed to be an untagged intro section, even if it is
-            # empty.
-            index = 1
-            if len(self.all_sections) > 1:
-                while self.all_sections[index].kind == QAPIDoc.Kind.MEMBER:
-                    index += 1
-            self.all_sections.insert(index, section)
-
-        self.args[member.name].connect(member)
+        self._args[member.name].connect(member)
 
     def connect_feature(self, feature: 'QAPISchemaFeature') -> None:
-        if feature.name not in self.features:
+        if feature.name not in self._features:
             raise QAPISemError(feature.info,
                                "feature '%s' lacks documentation"
                                % feature.name)
-        self.features[feature.name].connect(feature)
+        self._features[feature.name].connect(feature)
 
     def ensure_returns(self, info: QAPISourceInfo) -> None:
-
-        def _insert_near_kind(
-            kind: QAPIDoc.Kind,
-            new_sect: QAPIDoc.Section,
-            after: bool = False,
-        ) -> bool:
-            for idx, sect in enumerate(reversed(self.all_sections)):
-                if sect.kind == kind:
-                    pos = len(self.all_sections) - idx - 1
-                    if after:
-                        pos += 1
-                    self.all_sections.insert(pos, new_sect)
-                    return True
-            return False
+        # This is more complicated than it ought to be.  The doc
+        # parser should already know where a generated RETURNS section
+        # should go.  It currently doesn't, mostly because it accepts
+        # tagged sections in any order.
+        #
+        # TODO: Tighten doc syntax and simplify.
 
         if any(s.kind == QAPIDoc.Kind.RETURNS for s in self.all_sections):
             return
@@ -826,7 +903,7 @@ class QAPIDoc:
         # Stub "Returns" section for undocumented returns value
         stub = QAPIDoc.Section(info, QAPIDoc.Kind.RETURNS)
 
-        if any(_insert_near_kind(kind, stub, after) for kind, after in (
+        if any(self._insert_near_kind(kind, stub, after) for kind, after in (
                 # 1. If arguments, right after those.
                 (QAPIDoc.Kind.MEMBER, True),
                 # 2. Elif errors, right *before* those.
@@ -836,25 +913,23 @@ class QAPIDoc:
         )):
             return
 
-        # Otherwise, it should go right after the intro. The intro
-        # is always the first section and is always present (even
-        # when empty), so we can insert directly at index=1 blindly.
-        self.all_sections.insert(1, stub)
+        # Otherwise, it should go right after the intro.
+        self._insert_after_intro(stub)
 
     def check_expr(self, expr: QAPIExpression) -> None:
         if 'command' in expr:
-            if self.returns and 'returns' not in expr:
+            if self._returns and 'returns' not in expr:
                 raise QAPISemError(
-                    self.returns.info,
+                    self._returns.info,
                     "'Returns' section, but command doesn't return anything")
         else:
-            if self.returns:
+            if self._returns:
                 raise QAPISemError(
-                    self.returns.info,
+                    self._returns.info,
                     "'Returns' section is only valid for commands")
-            if self.errors:
+            if self._errors:
                 raise QAPISemError(
-                    self.errors.info,
+                    self._errors.info,
                     "'Errors' section is only valid for commands")
 
     def check(self) -> None:
@@ -874,5 +949,5 @@ class QAPIDoc:
                         "do" if len(bogus) > 1 else "does"
                     ))
 
-        check_args_section(self.args, 'member')
-        check_args_section(self.features, 'feature')
+        check_args_section(self._args, 'member')
+        check_args_section(self._features, 'feature')

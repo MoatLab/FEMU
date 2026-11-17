@@ -21,7 +21,7 @@
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/pci_bus.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/riscv/riscv_hart.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
@@ -158,6 +158,9 @@ static void riscv_iommu_pci_init(Object *obj)
 
     iommu->icvec_avail_vectors = RISCV_IOMMU_PCI_ICVEC_VECTORS;
     riscv_iommu_set_cap_igs(iommu, RISCV_IOMMU_CAP_IGS_MSI);
+
+    /* Report maximum physical address size of riscv64 */
+    iommu->pas_bits = 56;
 }
 
 static const Property riscv_iommu_pci_properties[] = {

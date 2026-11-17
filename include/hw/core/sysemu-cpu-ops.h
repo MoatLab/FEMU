@@ -18,6 +18,9 @@
 typedef struct SysemuCPUOps {
     /**
      * @has_work: Callback for checking if there is work to do.
+     *
+     * This function should be idempotent (i.e. not change state) as
+     * it will likely be queried multiple times before a CPU resumes.
      */
     bool (*has_work)(CPUState *cpu); /* MANDATORY NON-NULL */
     /**
@@ -30,18 +33,31 @@ typedef struct SysemuCPUOps {
      */
     bool (*get_paging_enabled)(const CPUState *cpu);
     /**
-     * @get_phys_page_debug: Callback for obtaining a physical address.
+     * @get_phys_addr_debug: Callback for obtaining a physical address.
+     * This must be able to handle a non-page-aligned address, and will
+     * return the physical address corresponding to that address.
+     *
+     * CPUs should prefer to implement translate_for_debug instead of
+     * this (and must do so if their translations are not always valid
+     * for a complete target page or they use memory attributes).
      */
-    hwaddr (*get_phys_page_debug)(CPUState *cpu, vaddr addr);
+    hwaddr (*get_phys_addr_debug)(CPUState *cpu, vaddr addr);
     /**
-     * @get_phys_page_attrs_debug: Callback for obtaining a physical address
-     *       and the associated memory transaction attributes to use for the
-     *       access.
-     * CPUs which use memory transaction attributes should implement this
-     * instead of get_phys_page_debug.
+     * @translate_for_debug: Callback for translating a virtual address into
+     * a physical address for debug purposes.
+     * The implementation should fill in @result with the physical address,
+     * transaction attributes, and log2 of the size of the aligned block of
+     * memory that the translation is valid for.
+     * This must be able to handle a non-page-aligned address, and will
+     * return the physical address corresponding to that address.
+     * The attributes must include the debug flag being set.
+     * Returns false on translation failure; on success returns true and
+     * fills in @result.
+     *
+     * This is the preferred method to implement for new CPUs.
      */
-    hwaddr (*get_phys_page_attrs_debug)(CPUState *cpu, vaddr addr,
-                                        MemTxAttrs *attrs);
+    bool (*translate_for_debug)(CPUState *cpu, vaddr addr,
+                                TranslateForDebugResult *result);
     /**
      * @asidx_from_attrs: Callback to return the CPU AddressSpace to use for
      *       a memory access with the specified memory transaction attributes.
@@ -77,13 +93,27 @@ typedef struct SysemuCPUOps {
     int (*write_elf64_qemunote)(WriteCoreDumpFunction f, CPUState *cpu,
                                 DumpState *s);
     /**
-     * @virtio_is_big_endian: Callback to return %true if a CPU which supports
+     * @internal_is_big_endian: Callback to return %true if a CPU which supports
      * runtime configurable endianness is currently big-endian.
      * Non-configurable CPUs can use the default implementation of this method.
      * This method should not be used by any callers other than the pre-1.0
-     * virtio devices.
+     * virtio devices and the semihosting interface.
      */
-    bool (*virtio_is_big_endian)(CPUState *cpu);
+    bool (*internal_is_big_endian)(CPUState *cpu);
+
+    /**
+     * @monitor_get_register: Callback to fill @pval with register @name value.
+     *                        This field is legacy, use @gdb_core_xml_file
+     *                        to dump registers instead.
+     * Returns: 0 on success or negative errno on failure.
+     */
+    int (*monitor_get_register)(CPUState *cs, const char *name, int64_t *pval);
+
+    /**
+     * @monitor_defs: Array of MonitorDef entries. This field is legacy,
+     *                use @gdb_core_xml_file to dump registers instead.
+     */
+    const MonitorDef *monitor_defs;
 
     /**
      * @legacy_vmsd: Legacy state for migration.

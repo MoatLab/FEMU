@@ -1,13 +1,18 @@
 #include "./nvme.h"
+#include "system/accel-irq.h"
 
 static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
 {
     int virq;
     int vector_n;
-    KVMRouteChange c;
+    AccelRouteChange c;
 
     /* only an MSI-X vector can have a route; others are notified directly */
     if (!msix_enabled(&(n->parent_obj))) {
+        return -1;
+    }
+    /* without an in-kernel irqchip (TCG), interrupts go out directly */
+    if (!accel_msi_via_irqfd_enabled()) {
         return -1;
     }
 
@@ -19,14 +24,14 @@ static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
 
     vector_n = cq->vector;
 
-    c = kvm_irqchip_begin_route_changes(kvm_state);
-    virq = kvm_irqchip_add_msi_route(&c, vector_n, &n->parent_obj);
+    c = accel_irqchip_begin_route_changes();
+    virq = accel_irqchip_add_msi_route(&c, vector_n, &n->parent_obj);
     if (virq < 0) {
         femu_debug("no KVM route for MSI-X vector %d\n", vector_n);
         event_notifier_cleanup(&cq->guest_notifier);
         return -1;
     }
-    kvm_irqchip_commit_route_changes(&c);
+    accel_irqchip_commit_route_changes(&c);
     cq->virq = virq;
     femu_debug("%s,cq[%d]->virq=%d\n", __func__, cq->cqid, virq);
 

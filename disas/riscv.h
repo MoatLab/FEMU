@@ -149,6 +149,7 @@ typedef enum {
     rv_codec_v_r,
     rv_codec_v_ldst,
     rv_codec_v_i,
+    rv_codec_v_i_u,
     rv_codec_vsetvli,
     rv_codec_vsetivli,
     rv_codec_vror_vi,
@@ -189,7 +190,7 @@ typedef struct {
 } rv_opcode_data;
 
 typedef struct {
-    RISCVCPUConfig *cfg;
+    const RISCVCPUConfig *cfg;
     uint64_t  pc;
     uint64_t  inst;
     const rv_opcode_data *opcode_data;

@@ -46,6 +46,7 @@
 #include "vnc.h"
 #include "vnc-enc-tight.h"
 #include "vnc-palette.h"
+#include "trace.h"
 
 /* Compression level stuff. The following array contains various
    encoder parameters for each of 10 compression levels (0..9).
@@ -795,8 +796,7 @@ static int tight_init_stream(VncState *vs, VncTight *tight, int stream_id,
     if (zstream->opaque == NULL) {
         int err;
 
-        VNC_DEBUG("VNC: TIGHT: initializing zlib stream %d\n", stream_id);
-        VNC_DEBUG("VNC: TIGHT: opaque = %p | vs = %p\n", zstream->opaque, vs);
+        trace_vnc_tight_zlib_init(vs, stream_id, zstream->opaque);
         zstream->zalloc = vnc_zlib_zalloc;
         zstream->zfree = vnc_zlib_zfree;
 

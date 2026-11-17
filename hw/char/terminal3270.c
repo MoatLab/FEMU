@@ -15,8 +15,8 @@
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "chardev/char-fe.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/s390x/3270-ccw.h"
 #include "qom/object.h"
 
@@ -30,7 +30,7 @@
 
 struct Terminal3270 {
     EmulatedCcw3270Device cdev;
-    CharBackend chr;
+    CharFrontend chr;
     uint8_t inv[INPUT_BUFFER_SIZE];
     uint8_t outv[OUTPUT_BUFFER_SIZE];
     int in_len;
@@ -52,10 +52,7 @@ static int terminal_can_read(void *opaque)
 
 static void terminal_timer_cancel(Terminal3270 *t)
 {
-    if (t->timer_tag) {
-        g_source_remove(t->timer_tag);
-        t->timer_tag = 0;
-    }
+    g_clear_handle_id(&t->timer_tag, g_source_remove);
 }
 
 /*

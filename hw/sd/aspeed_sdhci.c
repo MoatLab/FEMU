@@ -11,9 +11,9 @@
 #include "qemu/error-report.h"
 #include "hw/sd/aspeed_sdhci.h"
 #include "qapi/error.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "migration/vmstate.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "trace.h"
 
 #define ASPEED_SDHCI_INFO            0x00
@@ -124,7 +124,7 @@ static void aspeed_sdhci_write(void *opaque, hwaddr addr, uint64_t val,
 static const MemoryRegionOps aspeed_sdhci_ops = {
     .read = aspeed_sdhci_read,
     .write = aspeed_sdhci_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
     .valid.min_access_size = 4,
     .valid.max_access_size = 4,
 };
@@ -182,9 +182,9 @@ static void aspeed_sdhci_realize(DeviceState *dev, Error **errp)
     }
 }
 
-static void aspeed_sdhci_reset(DeviceState *dev)
+static void aspeed_sdhci_reset_hold(Object *obj, ResetType type)
 {
-    AspeedSDHCIState *sdhci = ASPEED_SDHCI(dev);
+    AspeedSDHCIState *sdhci = ASPEED_SDHCI(obj);
 
     memset(sdhci->regs, 0, ASPEED_SDHCI_REG_SIZE);
 
@@ -211,9 +211,10 @@ static const Property aspeed_sdhci_properties[] = {
 static void aspeed_sdhci_class_init(ObjectClass *classp, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(classp);
+    ResettableClass *rc = RESETTABLE_CLASS(classp);
 
     dc->realize = aspeed_sdhci_realize;
-    device_class_set_legacy_reset(dc, aspeed_sdhci_reset);
+    rc->phases.hold = aspeed_sdhci_reset_hold;
     dc->vmsd = &vmstate_aspeed_sdhci;
     device_class_set_props(dc, aspeed_sdhci_properties);
 }

@@ -22,17 +22,20 @@
 
 #include "kvm-consts.h"
 #include "qemu/cpu-float.h"
-#include "hw/registerfields.h"
+#include "hw/core/registerfields.h"
 #include "cpu-qom.h"
 #include "exec/cpu-common.h"
-#include "exec/cpu-defs.h"
 #include "exec/cpu-interrupt.h"
 #include "exec/gdbstub.h"
 #include "exec/page-protection.h"
 #include "qapi/qapi-types-common.h"
 #include "target/arm/multiprocessing.h"
+#include "hw/arm/arm-security.h"
 #include "target/arm/gtimer.h"
 #include "target/arm/cpu-sysregs.h"
+#include "target/arm/mmuidx.h"
+#include "hw/intc/arm_gicv5_types.h"
+#include "target/arm/vector-type.h"
 
 #define EXCP_UDEF            1   /* undefined instruction */
 #define EXCP_SWI             2   /* software interrupt */
@@ -138,43 +141,6 @@ typedef struct ARMGenericTimer {
     uint64_t ctl; /* Timer Control register */
 } ARMGenericTimer;
 
-/* Define a maximum sized vector register.
- * For 32-bit, this is a 128-bit NEON/AdvSIMD register.
- * For 64-bit, this is a 2048-bit SVE register.
- *
- * Note that the mapping between S, D, and Q views of the register bank
- * differs between AArch64 and AArch32.
- * In AArch32:
- *  Qn = regs[n].d[1]:regs[n].d[0]
- *  Dn = regs[n / 2].d[n & 1]
- *  Sn = regs[n / 4].d[n % 4 / 2],
- *       bits 31..0 for even n, and bits 63..32 for odd n
- *       (and regs[16] to regs[31] are inaccessible)
- * In AArch64:
- *  Zn = regs[n].d[*]
- *  Qn = regs[n].d[1]:regs[n].d[0]
- *  Dn = regs[n].d[0]
- *  Sn = regs[n].d[0] bits 31..0
- *  Hn = regs[n].d[0] bits 15..0
- *
- * This corresponds to the architecturally defined mapping between
- * the two execution states, and means we do not need to explicitly
- * map these registers when changing states.
- *
- * Align the data for use with TCG host vector operations.
- */
-
-#define ARM_MAX_VQ    16
-
-typedef struct ARMVectorReg {
-    uint64_t d[2 * ARM_MAX_VQ] QEMU_ALIGNED(16);
-} ARMVectorReg;
-
-/* In AArch32 mode, predicate registers do not exist at all.  */
-typedef struct ARMPredicateReg {
-    uint64_t p[DIV_ROUND_UP(2 * ARM_MAX_VQ, 8)] QEMU_ALIGNED(16);
-} ARMPredicateReg;
-
 /* In AArch32 mode, PAC keys do not exist at all.  */
 typedef struct ARMPACKey {
     uint64_t lo, hi;
@@ -255,6 +221,22 @@ typedef enum ARMFPStatusFlavour {
 } ARMFPStatusFlavour;
 #define FPST_COUNT  10
 
+/* Architecturally there are 128 PPIs in a GICv5 */
+#define GICV5_NUM_PPIS 128
+
+/**
+ * ARMHaltReason - the reason we have entered halt state
+ *
+ * To be able to correctly wake up via arm_cpu_has_work() we need to
+ * track the reason we went to sleep.
+ */
+typedef enum {
+    NOT_HALTED = 0,
+    HALT_PSCI,
+    HALT_WFI,
+    HALT_WFE
+} ARMHaltReason;
+
 typedef struct CPUArchState {
     /* Regs for current mode.  */
     uint32_t regs[16];
@@ -267,7 +249,7 @@ typedef struct CPUArchState {
     uint64_t xregs[32];
     uint64_t pc;
     /* PSTATE isn't an architectural register for ARMv8. However, it is
-     * convenient for us to assemble the underlying state into a 32 bit format
+     * convenient for us to assemble the underlying state into a 64 bit format
      * identical to the architectural format used for the SPSR. (This is also
      * what the Linux kernel's 'pstate' field in signal handlers and KVM's
      * 'pstate' register are.) Of the PSTATE bits:
@@ -279,7 +261,7 @@ typedef struct CPUArchState {
      *  SM and ZA are kept in env->svcr
      *  all other bits are stored in their correct places in env->pstate
      */
-    uint32_t pstate;
+    uint64_t pstate;
     bool aarch64; /* True if CPU is in aarch64 state; inverse of PSTATE.nRW */
     bool thumb;   /* True if CPU is in thumb mode; cpsr[5] */
 
@@ -337,10 +319,10 @@ typedef struct CPUArchState {
             };
             uint64_t sctlr_el[4];
         };
+        uint64_t sctlr2_el[4]; /* Extension to System control register. */
         uint64_t vsctlr; /* Virtualization System control register. */
         uint64_t cpacr_el1; /* Architectural feature access control register */
         uint64_t cptr_el[4];  /* ARMv8 feature trap registers */
-        uint32_t c1_xscaleauxcr; /* XScale auxiliary control register.  */
         uint64_t sder; /* Secure debug enable register. */
         uint32_t nsacr; /* Non-secure access control register. */
         union { /* MMU translation table base 0. */
@@ -365,8 +347,12 @@ typedef struct CPUArchState {
         uint64_t vsttbr_el2; /* Secure Virtualization Translation Table. */
         /* MMU translation table base control. */
         uint64_t tcr_el[4];
+        uint64_t tcr2_el[3];
         uint64_t vtcr_el2; /* Virtualization Translation Control.  */
         uint64_t vstcr_el2; /* Secure Virtualization Translation Control. */
+        uint64_t pir_el[4]; /* PIRE0_EL1, PIR_EL1, PIR_EL2, PIR_EL3 */
+        uint64_t pire0_el2;
+        uint64_t s2pir_el2;
         uint32_t c2_data; /* MPU data cacheable bits.  */
         uint32_t c2_insn; /* MPU instruction cacheable bits.  */
         union { /* MMU domain access control register
@@ -442,7 +428,8 @@ typedef struct CPUArchState {
         uint64_t c9_pmuserenr; /* perf monitor user enable */
         uint64_t c9_pmselr; /* perf monitor counter selection register */
         uint64_t c9_pminten; /* perf monitor interrupt enables */
-        union { /* Memory attribute redirection */
+        /* Memory attribute redirection */
+        union {
             struct {
 #if HOST_BIG_ENDIAN
                 uint64_t _unused_mair_0;
@@ -462,6 +449,7 @@ typedef struct CPUArchState {
             };
             uint64_t mair_el[4];
         };
+        uint64_t mair2_el[4];
         union { /* vector base address register */
             struct {
                 uint64_t _unused_vbar;
@@ -511,7 +499,6 @@ typedef struct CPUArchState {
         uint64_t cntvoff_el2; /* Counter Virtual Offset register */
         uint64_t cntpoff_el2; /* Counter Physical Offset register */
         ARMGenericTimer c14_timer[NUM_GTIMERS];
-        uint32_t c15_cpar; /* XScale Coprocessor Access Register */
         uint32_t c15_ticonfig; /* TI925T configuration byte.  */
         uint32_t c15_i_max; /* Maximum D-cache dirty line index.  */
         uint32_t c15_i_min; /* Minimum D-cache dirty line index.  */
@@ -572,11 +559,42 @@ typedef struct CPUArchState {
         /* RME registers */
         uint64_t gpccr_el3;
         uint64_t gptbr_el3;
+        uint64_t gpcbw_el3;
         uint64_t mfar_el3;
 
         /* NV2 register */
         uint64_t vncr_el2;
+
+        uint64_t gcscr_el[4];   /* GCSCRE0_EL1, GCSCR_EL[123] */
+        uint64_t gcspr_el[4];   /* GCSPR_EL[0123] */
+
+        /* MEC registers */
+        uint64_t mecid_p0_el2;
+        uint64_t mecid_a0_el2;
+        uint64_t mecid_p1_el2;
+        uint64_t mecid_a1_el2;
+        uint64_t mecid_rl_a_el3;
+        uint64_t vmecid_p_el2;
+        uint64_t vmecid_a_el2;
     } cp15;
+
+    struct {
+        /* GICv5 CPU interface data */
+        uint64_t icc_icsr_el1;
+        uint64_t icc_apr[NUM_GICV5_DOMAINS];
+        uint64_t icc_cr0[NUM_GICV5_DOMAINS];
+        uint64_t icc_pcr[NUM_GICV5_DOMAINS];
+        /* Most PPI registers have 1 bit per PPI, so 64 PPIs to a register */
+        uint64_t ppi_active[GICV5_NUM_PPIS / 64];
+        uint64_t ppi_hm[GICV5_NUM_PPIS / 64];
+        uint64_t ppi_pend[GICV5_NUM_PPIS / 64];
+        uint64_t ppi_enable[GICV5_NUM_PPIS / 64];
+        /* The PRIO regs have 1 byte per PPI, so 8 PPIs to a register */
+        uint64_t ppi_priority[GICV5_NUM_PPIS / 8];
+
+        /* Cached highest-priority pending PPI for each domain */
+        GICv5PendingIrq ppi_hppi[NUM_GICV5_DOMAINS];
+    } gicv5_cpuif;
 
     struct {
         /* M profile has up to 4 stack pointers:
@@ -630,13 +648,10 @@ typedef struct CPUArchState {
      * entry process.
      */
     struct {
-        uint32_t syndrome; /* AArch64 format syndrome register */
-        uint32_t fsr; /* AArch32 format fault status register info */
+        uint64_t syndrome; /* AArch64 format syndrome register */
         uint64_t vaddress; /* virtual addr associated with exception, if any */
+        uint32_t fsr; /* AArch32 format fault status register info */
         uint32_t target_el; /* EL the exception should be targeted for */
-        /* If we implement EL2 we will also need to store information
-         * about the intermediate physical address for stage 2 faults.
-         */
     } exception;
 
     /* Information associated with an SError */
@@ -676,6 +691,7 @@ typedef struct CPUArchState {
          */
         uint64_t fpsr;
         uint64_t fpcr;
+        uint64_t fpmr;
 
         uint32_t xregs[16];
 
@@ -696,14 +712,6 @@ typedef struct CPUArchState {
      * semantics of these fields are baked into the migration format.
      */
     uint64_t exclusive_high;
-
-    /* iwMMXt coprocessor state.  */
-    struct {
-        uint64_t regs[16];
-        uint64_t val;
-
-        uint32_t cregs[16];
-    } iwmmxt;
 
     struct {
         ARMPACKey apia;
@@ -752,6 +760,15 @@ typedef struct CPUArchState {
     /* Optional fault info across tlb lookup. */
     ARMMMUFaultInfo *tlb_fi;
 
+    /* Reason the CPU is halted */
+    ARMHaltReason halt_reason;
+
+    /*
+     * The event register is shared by all ARM profiles (A/R/M),
+     * so it is stored in the top-level CPU state.
+     */
+    bool event_register;
+
     /* Fields up to this point are cleared by a CPU reset */
     struct {} end_reset_fields;
 
@@ -797,6 +814,10 @@ typedef struct CPUArchState {
     const struct arm_boot_info *boot_info;
     /* Store GICv3CPUState to access from this struct */
     void *gicv3state;
+    /* Similarly, for a GICv5Common */
+    void *gicv5state;
+    /* For GICv5, this CPU's IAFFID */
+    uint64_t gicv5_iaffid;
 #else /* CONFIG_USER_ONLY */
     /* For usermode syscall translation.  */
     bool eabi;
@@ -933,8 +954,10 @@ struct ArchCPU {
 
     DynamicGDBFeatureInfo dyn_sysreg_feature;
     DynamicGDBFeatureInfo dyn_svereg_feature;
+    DynamicGDBFeatureInfo dyn_smereg_feature;
     DynamicGDBFeatureInfo dyn_m_systemreg_feature;
     DynamicGDBFeatureInfo dyn_m_secextreg_feature;
+    DynamicGDBFeatureInfo dyn_tls_feature;
 
     /* Timers used by the generic (architected) timer */
     QEMUTimer *gt_timer[NUM_GTIMERS];
@@ -943,7 +966,7 @@ struct ArchCPU {
      * pmu_op_finish() - it does not need other handling during migration
      */
     QEMUTimer *pmu_timer;
-    /* Timer used for WFxT timeouts */
+    /* Timer used for WFxT timeouts OR event stream events */
     QEMUTimer *wfxt_timer;
 
     /* GPIO outputs for generic timer */
@@ -989,6 +1012,8 @@ struct ArchCPU {
     bool has_neon;
     /* CPU has M-profile DSP extension */
     bool has_dsp;
+    /* CPU has FEAT_GCIE GICv5 CPU interface */
+    bool has_gcie;
 
     /* CPU has memory protection unit */
     bool has_mpu;
@@ -1063,7 +1088,8 @@ struct ArchCPU {
      * Note that if you add an ID register to the ARMISARegisters struct
      * you need to also update the 32-bit and 64-bit versions of the
      * kvm_arm_get_host_cpu_features() function to correctly populate the
-     * field by reading the value from the KVM vCPU.
+     * field by reading the value from the KVM vCPU. If it is an AArch64
+     * ID register then you also must update arm_clear_aarch64_idregs().
      */
     struct ARMISARegisters {
         uint32_t mvfr0;
@@ -1102,8 +1128,6 @@ struct ArchCPU {
     bool prop_pauth_qarma5;
     bool prop_lpa2;
 
-    /* DCZ blocksize, in log_2(words), ie low 4 bits of DCZID_EL0 */
-    uint8_t dcz_blocksize;
     /* GM blocksize, in log_2(words), ie low 4 bits of GMID_EL0 */
     uint8_t gm_blocksize;
 
@@ -1124,6 +1148,7 @@ struct ArchCPU {
 
     QLIST_HEAD(, ARMELChangeHook) pre_el_change_hooks;
     QLIST_HEAD(, ARMELChangeHook) el_change_hooks;
+    QLIST_HEAD(, ARMCPRegMigTolerance) cpreg_mig_tolerances;
 
     int32_t node_id; /* NUMA node this CPU belongs to */
 
@@ -1169,6 +1194,18 @@ struct ARMCPUClass {
     ResettablePhases parent_phases;
 };
 
+static inline uint8_t get_dczid_bs(ARMCPU *cpu)
+{
+    return extract64(cpu->isar.idregs[DCZID_EL0_IDX], 0, 4);
+}
+
+static inline void set_dczid_bs(ARMCPU *cpu, uint8_t bs)
+{
+    /* keep dzp unchanged */
+    cpu->isar.idregs[DCZID_EL0_IDX] =
+        deposit64(cpu->isar.idregs[DCZID_EL0_IDX], 0, 4, bs);
+}
+
 /* Callback functions for the generic timer's timers. */
 void arm_gt_ptimer_cb(void *opaque);
 void arm_gt_vtimer_cb(void *opaque);
@@ -1204,8 +1241,41 @@ extern const VMStateDescription vmstate_arm_cpu;
 void arm_cpu_do_interrupt(CPUState *cpu);
 void arm_v7m_cpu_do_interrupt(CPUState *cpu);
 
-hwaddr arm_cpu_get_phys_page_attrs_debug(CPUState *cpu, vaddr addr,
-                                         MemTxAttrs *attrs);
+typedef struct ARMGranuleProtectionConfig {
+    /* GPCCR_EL3 */
+    uint64_t gpccr;
+    /* GPCBW_EL3 */
+    uint64_t gpcbw;
+    /* GPTBR_EL3 */
+    uint64_t gptbr;
+    /* ID_AA64MMFR0_EL1.PARange */
+    uint8_t parange;
+    /* FEAT_SEL2 */
+    bool support_sel2;
+    /* Address space to access Granule Protection Table */
+    AddressSpace *gpt_as;
+} ARMGranuleProtectionConfig;
+
+/**
+ * arm_granule_protection_check
+ * @config: granule protection configuration
+ * @paddress: address accessed
+ * @pspace: physical address space accessed
+ * @ss: security state for access
+ * @fi: fault information in case a fault is detected
+ *
+ * Checks if @paddress can be accessed in physical adress space @pspace
+ * for @ss secure state, following granule protection setup with @config.
+ * If a fault is detected, @fi is set accordingly.
+ * See GranuleProtectionCheck() in A-profile manual.
+ *
+ * Returns: true if access is authorized, else false.
+ */
+bool arm_granule_protection_check(ARMGranuleProtectionConfig config,
+                                  uint64_t paddress,
+                                  ARMSecuritySpace pspace,
+                                  ARMSecuritySpace ss,
+                                  ARMMMUFaultInfo *fi);
 #endif /* !CONFIG_USER_ONLY */
 
 int arm_cpu_gdb_read_register(CPUState *cpu, GByteArray *buf, int reg);
@@ -1291,7 +1361,7 @@ uint32_t sve_vqm1_for_el_sm(CPUARMState *env, int el, bool sm);
 /* Likewise, but using @sm = PSTATE.SM. */
 uint32_t sve_vqm1_for_el(CPUARMState *env, int el);
 
-static inline bool is_a64(CPUARMState *env)
+static inline bool is_a64(const CPUARMState *env)
 {
     return env->aarch64;
 }
@@ -1397,6 +1467,7 @@ void pmu_init(ARMCPU *cpu);
 #define SCTLR_DSSBS_32 (1U << 31) /* v8.5, AArch32 only */
 #define SCTLR_CMOW    (1ULL << 32) /* FEAT_CMOW */
 #define SCTLR_MSCEN   (1ULL << 33) /* FEAT_MOPS */
+#define SCTLR_EnFPM   (1ULL << 34) /* FEAT_FPMR */
 #define SCTLR_BT0     (1ULL << 35) /* v8.5-BTI */
 #define SCTLR_BT1     (1ULL << 36) /* v8.5-BTI */
 #define SCTLR_ITFSB   (1ULL << 37) /* v8.5-MemTag */
@@ -1415,10 +1486,25 @@ void pmu_init(ARMCPU *cpu);
 #define SCTLR_EnAS0   (1ULL << 55) /* FEAT_LS64_ACCDATA */
 #define SCTLR_EnALS   (1ULL << 56) /* FEAT_LS64 */
 #define SCTLR_EPAN    (1ULL << 57) /* FEAT_PAN3 */
+#define SCTLR_TCSO0   (1ULL << 58) /* FEAT_MTE_STORE_ONLY */
+#define SCTLR_TCSO    (1ULL << 59) /* FEAT_MTE_STORE_ONLY */
 #define SCTLR_EnTP2   (1ULL << 60) /* FEAT_SME */
 #define SCTLR_NMI     (1ULL << 61) /* FEAT_NMI */
 #define SCTLR_SPINTMASK (1ULL << 62) /* FEAT_NMI */
 #define SCTLR_TIDCP   (1ULL << 63) /* FEAT_TIDCP1 */
+
+#define SCTLR2_EMEC (1ULL << 1) /* FEAT_MEC */
+#define SCTLR2_NMEA (1ULL << 2) /* FEAT_DoubleFault2 */
+#define SCTLR2_ENADERR (1ULL << 3) /* FEAT_ADERR */
+#define SCTLR2_ENANERR (1ULL << 4) /* FEAT_ANERR */
+#define SCTLR2_EASE (1ULL << 5) /* FEAT_DoubleFault2 */
+#define SCTLR2_ENIDCP128 (1ULL << 6) /* FEAT_SYSREG128 */
+#define SCTLR2_ENPACM (1ULL << 7) /* FEAT_PAuth_LR */
+#define SCTLR2_ENPACM0 (1ULL << 8) /* FEAT_PAuth_LR */
+#define SCTLR2_CPTA (1ULL << 9) /* FEAT_CPA2 */
+#define SCTLR2_CPTA0 (1ULL << 10) /* FEAT_CPA2 */
+#define SCTLR2_CPTM (1ULL << 11) /* FEAT_CPA2 */
+#define SCTLR2_CPTM0 (1ULL << 12) /* FEAT_CAP2 */
 
 #define CPSR_M (0x1fU)
 #define CPSR_T (1U << 5)
@@ -1492,6 +1578,7 @@ void pmu_init(ARMCPU *cpu);
 #define PSTATE_C (1U << 29)
 #define PSTATE_Z (1U << 30)
 #define PSTATE_N (1U << 31)
+#define PSTATE_EXLOCK (1ULL << 34)
 #define PSTATE_NZCV (PSTATE_N | PSTATE_Z | PSTATE_C | PSTATE_V)
 #define PSTATE_DAIF (PSTATE_D | PSTATE_A | PSTATE_I | PSTATE_F)
 #define CACHED_PSTATE_BITS (PSTATE_NZCV | PSTATE_DAIF | PSTATE_BTYPE)
@@ -1528,7 +1615,7 @@ static inline unsigned int aarch64_pstate_mode(unsigned int el, bool handler)
  * interprocessing, so we don't attempt to sync with the cpsr state used by
  * the 32 bit decoder.
  */
-static inline uint32_t pstate_read(CPUARMState *env)
+static inline uint64_t pstate_read(CPUARMState *env)
 {
     int ZF;
 
@@ -1538,7 +1625,7 @@ static inline uint32_t pstate_read(CPUARMState *env)
         | env->pstate | env->daif | (env->btype << 10);
 }
 
-static inline void pstate_write(CPUARMState *env, uint32_t val)
+static inline void pstate_write(CPUARMState *env, uint64_t val)
 {
     env->ZF = (~val) & PSTATE_Z;
     env->NF = val;
@@ -1710,10 +1797,35 @@ static inline void xpsr_write(CPUARMState *env, uint32_t val, uint32_t mask)
 #define SCR_ENAS0             (1ULL << 36)
 #define SCR_ADEN              (1ULL << 37)
 #define SCR_HXEN              (1ULL << 38)
+#define SCR_GCSEN             (1ULL << 39)
 #define SCR_TRNDR             (1ULL << 40)
 #define SCR_ENTP2             (1ULL << 41)
+#define SCR_TCR2EN            (1ULL << 43)
+#define SCR_SCTLR2EN          (1ULL << 44)
+#define SCR_PIEN              (1ULL << 45)
+#define SCR_AIEN              (1ULL << 46)
 #define SCR_GPF               (1ULL << 48)
+#define SCR_MECEN             (1ULL << 49)
+#define SCR_ENFPM             (1ULL << 50)
+#define SCR_TMEA              (1ULL << 51)
+#define SCR_TWERR             (1ULL << 52)
+#define SCR_PFAREN            (1ULL << 53)
+#define SCR_SRMASKEN          (1ULL << 54)
+#define SCR_ENIDCP128         (1ULL << 55)
+#define SCR_DSE               (1ULL << 57)
+#define SCR_ENDSE             (1ULL << 58)
+#define SCR_FGTEN2            (1ULL << 59)
+#define SCR_HDBSSEN           (1ULL << 60)
+#define SCR_HACDBSEN          (1ULL << 61)
 #define SCR_NSE               (1ULL << 62)
+
+/* GCSCR_ELx fields */
+#define GCSCR_PCRSEL    (1ULL << 0)
+#define GCSCR_RVCHKEN   (1ULL << 5)
+#define GCSCR_EXLOCKEN  (1ULL << 6)
+#define GCSCR_PUSHMEN   (1ULL << 8)
+#define GCSCR_STREN     (1ULL << 9)
+#define GCSCRE0_NTR     (1ULL << 10)
 
 /* Return the current FPSCR value.  */
 uint32_t vfp_get_fpscr(CPUARMState *env);
@@ -1847,16 +1959,6 @@ enum arm_cpu_mode {
 
 /* QEMU-internal value meaning "FPSCR, but we care only about NZCV" */
 #define QEMU_VFP_FPSCR_NZCV 0xffff
-
-/* iwMMXt coprocessor control registers.  */
-#define ARM_IWMMXT_wCID  0
-#define ARM_IWMMXT_wCon  1
-#define ARM_IWMMXT_wCSSF 2
-#define ARM_IWMMXT_wCASF 3
-#define ARM_IWMMXT_wCGR0 8
-#define ARM_IWMMXT_wCGR1 9
-#define ARM_IWMMXT_wCGR2 10
-#define ARM_IWMMXT_wCGR3 11
 
 /* V7M CCR bits */
 FIELD(V7M_CCR, NONBASETHRDENA, 0, 1)
@@ -1996,424 +2098,29 @@ FIELD(V7M_VPR, P0, 0, 16)
 FIELD(V7M_VPR, MASK01, 16, 4)
 FIELD(V7M_VPR, MASK23, 20, 4)
 
-/*
- * System register ID fields.
- */
-FIELD(CLIDR_EL1, CTYPE1, 0, 3)
-FIELD(CLIDR_EL1, CTYPE2, 3, 3)
-FIELD(CLIDR_EL1, CTYPE3, 6, 3)
-FIELD(CLIDR_EL1, CTYPE4, 9, 3)
-FIELD(CLIDR_EL1, CTYPE5, 12, 3)
-FIELD(CLIDR_EL1, CTYPE6, 15, 3)
-FIELD(CLIDR_EL1, CTYPE7, 18, 3)
-FIELD(CLIDR_EL1, LOUIS, 21, 3)
-FIELD(CLIDR_EL1, LOC, 24, 3)
-FIELD(CLIDR_EL1, LOUU, 27, 3)
-FIELD(CLIDR_EL1, ICB, 30, 3)
-
-/* When FEAT_CCIDX is implemented */
-FIELD(CCSIDR_EL1, CCIDX_LINESIZE, 0, 3)
-FIELD(CCSIDR_EL1, CCIDX_ASSOCIATIVITY, 3, 21)
-FIELD(CCSIDR_EL1, CCIDX_NUMSETS, 32, 24)
-
-/* When FEAT_CCIDX is not implemented */
-FIELD(CCSIDR_EL1, LINESIZE, 0, 3)
-FIELD(CCSIDR_EL1, ASSOCIATIVITY, 3, 10)
-FIELD(CCSIDR_EL1, NUMSETS, 13, 15)
-
-FIELD(CTR_EL0,  IMINLINE, 0, 4)
-FIELD(CTR_EL0,  L1IP, 14, 2)
-FIELD(CTR_EL0,  DMINLINE, 16, 4)
-FIELD(CTR_EL0,  ERG, 20, 4)
-FIELD(CTR_EL0,  CWG, 24, 4)
-FIELD(CTR_EL0,  IDC, 28, 1)
-FIELD(CTR_EL0,  DIC, 29, 1)
-FIELD(CTR_EL0,  TMINLINE, 32, 6)
-
-FIELD(MIDR_EL1, REVISION, 0, 4)
-FIELD(MIDR_EL1, PARTNUM, 4, 12)
-FIELD(MIDR_EL1, ARCHITECTURE, 16, 4)
-FIELD(MIDR_EL1, VARIANT, 20, 4)
-FIELD(MIDR_EL1, IMPLEMENTER, 24, 8)
-
-FIELD(ID_ISAR0, SWAP, 0, 4)
-FIELD(ID_ISAR0, BITCOUNT, 4, 4)
-FIELD(ID_ISAR0, BITFIELD, 8, 4)
-FIELD(ID_ISAR0, CMPBRANCH, 12, 4)
-FIELD(ID_ISAR0, COPROC, 16, 4)
-FIELD(ID_ISAR0, DEBUG, 20, 4)
-FIELD(ID_ISAR0, DIVIDE, 24, 4)
-
-FIELD(ID_ISAR1, ENDIAN, 0, 4)
-FIELD(ID_ISAR1, EXCEPT, 4, 4)
-FIELD(ID_ISAR1, EXCEPT_AR, 8, 4)
-FIELD(ID_ISAR1, EXTEND, 12, 4)
-FIELD(ID_ISAR1, IFTHEN, 16, 4)
-FIELD(ID_ISAR1, IMMEDIATE, 20, 4)
-FIELD(ID_ISAR1, INTERWORK, 24, 4)
-FIELD(ID_ISAR1, JAZELLE, 28, 4)
-
-FIELD(ID_ISAR2, LOADSTORE, 0, 4)
-FIELD(ID_ISAR2, MEMHINT, 4, 4)
-FIELD(ID_ISAR2, MULTIACCESSINT, 8, 4)
-FIELD(ID_ISAR2, MULT, 12, 4)
-FIELD(ID_ISAR2, MULTS, 16, 4)
-FIELD(ID_ISAR2, MULTU, 20, 4)
-FIELD(ID_ISAR2, PSR_AR, 24, 4)
-FIELD(ID_ISAR2, REVERSAL, 28, 4)
-
-FIELD(ID_ISAR3, SATURATE, 0, 4)
-FIELD(ID_ISAR3, SIMD, 4, 4)
-FIELD(ID_ISAR3, SVC, 8, 4)
-FIELD(ID_ISAR3, SYNCHPRIM, 12, 4)
-FIELD(ID_ISAR3, TABBRANCH, 16, 4)
-FIELD(ID_ISAR3, T32COPY, 20, 4)
-FIELD(ID_ISAR3, TRUENOP, 24, 4)
-FIELD(ID_ISAR3, T32EE, 28, 4)
-
-FIELD(ID_ISAR4, UNPRIV, 0, 4)
-FIELD(ID_ISAR4, WITHSHIFTS, 4, 4)
-FIELD(ID_ISAR4, WRITEBACK, 8, 4)
-FIELD(ID_ISAR4, SMC, 12, 4)
-FIELD(ID_ISAR4, BARRIER, 16, 4)
-FIELD(ID_ISAR4, SYNCHPRIM_FRAC, 20, 4)
-FIELD(ID_ISAR4, PSR_M, 24, 4)
-FIELD(ID_ISAR4, SWP_FRAC, 28, 4)
-
-FIELD(ID_ISAR5, SEVL, 0, 4)
-FIELD(ID_ISAR5, AES, 4, 4)
-FIELD(ID_ISAR5, SHA1, 8, 4)
-FIELD(ID_ISAR5, SHA2, 12, 4)
-FIELD(ID_ISAR5, CRC32, 16, 4)
-FIELD(ID_ISAR5, RDM, 24, 4)
-FIELD(ID_ISAR5, VCMA, 28, 4)
-
-FIELD(ID_ISAR6, JSCVT, 0, 4)
-FIELD(ID_ISAR6, DP, 4, 4)
-FIELD(ID_ISAR6, FHM, 8, 4)
-FIELD(ID_ISAR6, SB, 12, 4)
-FIELD(ID_ISAR6, SPECRES, 16, 4)
-FIELD(ID_ISAR6, BF16, 20, 4)
-FIELD(ID_ISAR6, I8MM, 24, 4)
-
-FIELD(ID_MMFR0, VMSA, 0, 4)
-FIELD(ID_MMFR0, PMSA, 4, 4)
-FIELD(ID_MMFR0, OUTERSHR, 8, 4)
-FIELD(ID_MMFR0, SHARELVL, 12, 4)
-FIELD(ID_MMFR0, TCM, 16, 4)
-FIELD(ID_MMFR0, AUXREG, 20, 4)
-FIELD(ID_MMFR0, FCSE, 24, 4)
-FIELD(ID_MMFR0, INNERSHR, 28, 4)
-
-FIELD(ID_MMFR1, L1HVDVA, 0, 4)
-FIELD(ID_MMFR1, L1UNIVA, 4, 4)
-FIELD(ID_MMFR1, L1HVDSW, 8, 4)
-FIELD(ID_MMFR1, L1UNISW, 12, 4)
-FIELD(ID_MMFR1, L1HVD, 16, 4)
-FIELD(ID_MMFR1, L1UNI, 20, 4)
-FIELD(ID_MMFR1, L1TSTCLN, 24, 4)
-FIELD(ID_MMFR1, BPRED, 28, 4)
-
-FIELD(ID_MMFR2, L1HVDFG, 0, 4)
-FIELD(ID_MMFR2, L1HVDBG, 4, 4)
-FIELD(ID_MMFR2, L1HVDRNG, 8, 4)
-FIELD(ID_MMFR2, HVDTLB, 12, 4)
-FIELD(ID_MMFR2, UNITLB, 16, 4)
-FIELD(ID_MMFR2, MEMBARR, 20, 4)
-FIELD(ID_MMFR2, WFISTALL, 24, 4)
-FIELD(ID_MMFR2, HWACCFLG, 28, 4)
-
-FIELD(ID_MMFR3, CMAINTVA, 0, 4)
-FIELD(ID_MMFR3, CMAINTSW, 4, 4)
-FIELD(ID_MMFR3, BPMAINT, 8, 4)
-FIELD(ID_MMFR3, MAINTBCST, 12, 4)
-FIELD(ID_MMFR3, PAN, 16, 4)
-FIELD(ID_MMFR3, COHWALK, 20, 4)
-FIELD(ID_MMFR3, CMEMSZ, 24, 4)
-FIELD(ID_MMFR3, SUPERSEC, 28, 4)
-
-FIELD(ID_MMFR4, SPECSEI, 0, 4)
-FIELD(ID_MMFR4, AC2, 4, 4)
-FIELD(ID_MMFR4, XNX, 8, 4)
-FIELD(ID_MMFR4, CNP, 12, 4)
-FIELD(ID_MMFR4, HPDS, 16, 4)
-FIELD(ID_MMFR4, LSM, 20, 4)
-FIELD(ID_MMFR4, CCIDX, 24, 4)
-FIELD(ID_MMFR4, EVT, 28, 4)
-
-FIELD(ID_MMFR5, ETS, 0, 4)
-FIELD(ID_MMFR5, NTLBPA, 4, 4)
-
-FIELD(ID_PFR0, STATE0, 0, 4)
-FIELD(ID_PFR0, STATE1, 4, 4)
-FIELD(ID_PFR0, STATE2, 8, 4)
-FIELD(ID_PFR0, STATE3, 12, 4)
-FIELD(ID_PFR0, CSV2, 16, 4)
-FIELD(ID_PFR0, AMU, 20, 4)
-FIELD(ID_PFR0, DIT, 24, 4)
-FIELD(ID_PFR0, RAS, 28, 4)
-
-FIELD(ID_PFR1, PROGMOD, 0, 4)
-FIELD(ID_PFR1, SECURITY, 4, 4)
-FIELD(ID_PFR1, MPROGMOD, 8, 4)
-FIELD(ID_PFR1, VIRTUALIZATION, 12, 4)
-FIELD(ID_PFR1, GENTIMER, 16, 4)
-FIELD(ID_PFR1, SEC_FRAC, 20, 4)
-FIELD(ID_PFR1, VIRT_FRAC, 24, 4)
-FIELD(ID_PFR1, GIC, 28, 4)
-
-FIELD(ID_PFR2, CSV3, 0, 4)
-FIELD(ID_PFR2, SSBS, 4, 4)
-FIELD(ID_PFR2, RAS_FRAC, 8, 4)
-
-FIELD(ID_AA64ISAR0, AES, 4, 4)
-FIELD(ID_AA64ISAR0, SHA1, 8, 4)
-FIELD(ID_AA64ISAR0, SHA2, 12, 4)
-FIELD(ID_AA64ISAR0, CRC32, 16, 4)
-FIELD(ID_AA64ISAR0, ATOMIC, 20, 4)
-FIELD(ID_AA64ISAR0, TME, 24, 4)
-FIELD(ID_AA64ISAR0, RDM, 28, 4)
-FIELD(ID_AA64ISAR0, SHA3, 32, 4)
-FIELD(ID_AA64ISAR0, SM3, 36, 4)
-FIELD(ID_AA64ISAR0, SM4, 40, 4)
-FIELD(ID_AA64ISAR0, DP, 44, 4)
-FIELD(ID_AA64ISAR0, FHM, 48, 4)
-FIELD(ID_AA64ISAR0, TS, 52, 4)
-FIELD(ID_AA64ISAR0, TLB, 56, 4)
-FIELD(ID_AA64ISAR0, RNDR, 60, 4)
-
-FIELD(ID_AA64ISAR1, DPB, 0, 4)
-FIELD(ID_AA64ISAR1, APA, 4, 4)
-FIELD(ID_AA64ISAR1, API, 8, 4)
-FIELD(ID_AA64ISAR1, JSCVT, 12, 4)
-FIELD(ID_AA64ISAR1, FCMA, 16, 4)
-FIELD(ID_AA64ISAR1, LRCPC, 20, 4)
-FIELD(ID_AA64ISAR1, GPA, 24, 4)
-FIELD(ID_AA64ISAR1, GPI, 28, 4)
-FIELD(ID_AA64ISAR1, FRINTTS, 32, 4)
-FIELD(ID_AA64ISAR1, SB, 36, 4)
-FIELD(ID_AA64ISAR1, SPECRES, 40, 4)
-FIELD(ID_AA64ISAR1, BF16, 44, 4)
-FIELD(ID_AA64ISAR1, DGH, 48, 4)
-FIELD(ID_AA64ISAR1, I8MM, 52, 4)
-FIELD(ID_AA64ISAR1, XS, 56, 4)
-FIELD(ID_AA64ISAR1, LS64, 60, 4)
-
-FIELD(ID_AA64ISAR2, WFXT, 0, 4)
-FIELD(ID_AA64ISAR2, RPRES, 4, 4)
-FIELD(ID_AA64ISAR2, GPA3, 8, 4)
-FIELD(ID_AA64ISAR2, APA3, 12, 4)
-FIELD(ID_AA64ISAR2, MOPS, 16, 4)
-FIELD(ID_AA64ISAR2, BC, 20, 4)
-FIELD(ID_AA64ISAR2, PAC_FRAC, 24, 4)
-FIELD(ID_AA64ISAR2, CLRBHB, 28, 4)
-FIELD(ID_AA64ISAR2, SYSREG_128, 32, 4)
-FIELD(ID_AA64ISAR2, SYSINSTR_128, 36, 4)
-FIELD(ID_AA64ISAR2, PRFMSLC, 40, 4)
-FIELD(ID_AA64ISAR2, RPRFM, 48, 4)
-FIELD(ID_AA64ISAR2, CSSC, 52, 4)
-FIELD(ID_AA64ISAR2, LUT, 56, 4)
-FIELD(ID_AA64ISAR2, ATS1A, 60, 4)
-
-FIELD(ID_AA64PFR0, EL0, 0, 4)
-FIELD(ID_AA64PFR0, EL1, 4, 4)
-FIELD(ID_AA64PFR0, EL2, 8, 4)
-FIELD(ID_AA64PFR0, EL3, 12, 4)
-FIELD(ID_AA64PFR0, FP, 16, 4)
-FIELD(ID_AA64PFR0, ADVSIMD, 20, 4)
-FIELD(ID_AA64PFR0, GIC, 24, 4)
-FIELD(ID_AA64PFR0, RAS, 28, 4)
-FIELD(ID_AA64PFR0, SVE, 32, 4)
-FIELD(ID_AA64PFR0, SEL2, 36, 4)
-FIELD(ID_AA64PFR0, MPAM, 40, 4)
-FIELD(ID_AA64PFR0, AMU, 44, 4)
-FIELD(ID_AA64PFR0, DIT, 48, 4)
-FIELD(ID_AA64PFR0, RME, 52, 4)
-FIELD(ID_AA64PFR0, CSV2, 56, 4)
-FIELD(ID_AA64PFR0, CSV3, 60, 4)
-
-FIELD(ID_AA64PFR1, BT, 0, 4)
-FIELD(ID_AA64PFR1, SSBS, 4, 4)
-FIELD(ID_AA64PFR1, MTE, 8, 4)
-FIELD(ID_AA64PFR1, RAS_FRAC, 12, 4)
-FIELD(ID_AA64PFR1, MPAM_FRAC, 16, 4)
-FIELD(ID_AA64PFR1, SME, 24, 4)
-FIELD(ID_AA64PFR1, RNDR_TRAP, 28, 4)
-FIELD(ID_AA64PFR1, CSV2_FRAC, 32, 4)
-FIELD(ID_AA64PFR1, NMI, 36, 4)
-FIELD(ID_AA64PFR1, MTE_FRAC, 40, 4)
-FIELD(ID_AA64PFR1, GCS, 44, 4)
-FIELD(ID_AA64PFR1, THE, 48, 4)
-FIELD(ID_AA64PFR1, MTEX, 52, 4)
-FIELD(ID_AA64PFR1, DF2, 56, 4)
-FIELD(ID_AA64PFR1, PFAR, 60, 4)
-
-FIELD(ID_AA64MMFR0, PARANGE, 0, 4)
-FIELD(ID_AA64MMFR0, ASIDBITS, 4, 4)
-FIELD(ID_AA64MMFR0, BIGEND, 8, 4)
-FIELD(ID_AA64MMFR0, SNSMEM, 12, 4)
-FIELD(ID_AA64MMFR0, BIGENDEL0, 16, 4)
-FIELD(ID_AA64MMFR0, TGRAN16, 20, 4)
-FIELD(ID_AA64MMFR0, TGRAN64, 24, 4)
-FIELD(ID_AA64MMFR0, TGRAN4, 28, 4)
-FIELD(ID_AA64MMFR0, TGRAN16_2, 32, 4)
-FIELD(ID_AA64MMFR0, TGRAN64_2, 36, 4)
-FIELD(ID_AA64MMFR0, TGRAN4_2, 40, 4)
-FIELD(ID_AA64MMFR0, EXS, 44, 4)
-FIELD(ID_AA64MMFR0, FGT, 56, 4)
-FIELD(ID_AA64MMFR0, ECV, 60, 4)
-
-FIELD(ID_AA64MMFR1, HAFDBS, 0, 4)
-FIELD(ID_AA64MMFR1, VMIDBITS, 4, 4)
-FIELD(ID_AA64MMFR1, VH, 8, 4)
-FIELD(ID_AA64MMFR1, HPDS, 12, 4)
-FIELD(ID_AA64MMFR1, LO, 16, 4)
-FIELD(ID_AA64MMFR1, PAN, 20, 4)
-FIELD(ID_AA64MMFR1, SPECSEI, 24, 4)
-FIELD(ID_AA64MMFR1, XNX, 28, 4)
-FIELD(ID_AA64MMFR1, TWED, 32, 4)
-FIELD(ID_AA64MMFR1, ETS, 36, 4)
-FIELD(ID_AA64MMFR1, HCX, 40, 4)
-FIELD(ID_AA64MMFR1, AFP, 44, 4)
-FIELD(ID_AA64MMFR1, NTLBPA, 48, 4)
-FIELD(ID_AA64MMFR1, TIDCP1, 52, 4)
-FIELD(ID_AA64MMFR1, CMOW, 56, 4)
-FIELD(ID_AA64MMFR1, ECBHB, 60, 4)
-
-FIELD(ID_AA64MMFR2, CNP, 0, 4)
-FIELD(ID_AA64MMFR2, UAO, 4, 4)
-FIELD(ID_AA64MMFR2, LSM, 8, 4)
-FIELD(ID_AA64MMFR2, IESB, 12, 4)
-FIELD(ID_AA64MMFR2, VARANGE, 16, 4)
-FIELD(ID_AA64MMFR2, CCIDX, 20, 4)
-FIELD(ID_AA64MMFR2, NV, 24, 4)
-FIELD(ID_AA64MMFR2, ST, 28, 4)
-FIELD(ID_AA64MMFR2, AT, 32, 4)
-FIELD(ID_AA64MMFR2, IDS, 36, 4)
-FIELD(ID_AA64MMFR2, FWB, 40, 4)
-FIELD(ID_AA64MMFR2, TTL, 48, 4)
-FIELD(ID_AA64MMFR2, BBM, 52, 4)
-FIELD(ID_AA64MMFR2, EVT, 56, 4)
-FIELD(ID_AA64MMFR2, E0PD, 60, 4)
-
-FIELD(ID_AA64MMFR3, TCRX, 0, 4)
-FIELD(ID_AA64MMFR3, SCTLRX, 4, 4)
-FIELD(ID_AA64MMFR3, S1PIE, 8, 4)
-FIELD(ID_AA64MMFR3, S2PIE, 12, 4)
-FIELD(ID_AA64MMFR3, S1POE, 16, 4)
-FIELD(ID_AA64MMFR3, S2POE, 20, 4)
-FIELD(ID_AA64MMFR3, AIE, 24, 4)
-FIELD(ID_AA64MMFR3, MEC, 28, 4)
-FIELD(ID_AA64MMFR3, D128, 32, 4)
-FIELD(ID_AA64MMFR3, D128_2, 36, 4)
-FIELD(ID_AA64MMFR3, SNERR, 40, 4)
-FIELD(ID_AA64MMFR3, ANERR, 44, 4)
-FIELD(ID_AA64MMFR3, SDERR, 52, 4)
-FIELD(ID_AA64MMFR3, ADERR, 56, 4)
-FIELD(ID_AA64MMFR3, SPEC_FPACC, 60, 4)
-
-FIELD(ID_AA64DFR0, DEBUGVER, 0, 4)
-FIELD(ID_AA64DFR0, TRACEVER, 4, 4)
-FIELD(ID_AA64DFR0, PMUVER, 8, 4)
-FIELD(ID_AA64DFR0, BRPS, 12, 4)
-FIELD(ID_AA64DFR0, PMSS, 16, 4)
-FIELD(ID_AA64DFR0, WRPS, 20, 4)
-FIELD(ID_AA64DFR0, SEBEP, 24, 4)
-FIELD(ID_AA64DFR0, CTX_CMPS, 28, 4)
-FIELD(ID_AA64DFR0, PMSVER, 32, 4)
-FIELD(ID_AA64DFR0, DOUBLELOCK, 36, 4)
-FIELD(ID_AA64DFR0, TRACEFILT, 40, 4)
-FIELD(ID_AA64DFR0, TRACEBUFFER, 44, 4)
-FIELD(ID_AA64DFR0, MTPMU, 48, 4)
-FIELD(ID_AA64DFR0, BRBE, 52, 4)
-FIELD(ID_AA64DFR0, EXTTRCBUFF, 56, 4)
-FIELD(ID_AA64DFR0, HPMN0, 60, 4)
-
-FIELD(ID_AA64ZFR0, SVEVER, 0, 4)
-FIELD(ID_AA64ZFR0, AES, 4, 4)
-FIELD(ID_AA64ZFR0, BITPERM, 16, 4)
-FIELD(ID_AA64ZFR0, BFLOAT16, 20, 4)
-FIELD(ID_AA64ZFR0, B16B16, 24, 4)
-FIELD(ID_AA64ZFR0, SHA3, 32, 4)
-FIELD(ID_AA64ZFR0, SM4, 40, 4)
-FIELD(ID_AA64ZFR0, I8MM, 44, 4)
-FIELD(ID_AA64ZFR0, F32MM, 52, 4)
-FIELD(ID_AA64ZFR0, F64MM, 56, 4)
-
-FIELD(ID_AA64SMFR0, F32F32, 32, 1)
-FIELD(ID_AA64SMFR0, BI32I32, 33, 1)
-FIELD(ID_AA64SMFR0, B16F32, 34, 1)
-FIELD(ID_AA64SMFR0, F16F32, 35, 1)
-FIELD(ID_AA64SMFR0, I8I32, 36, 4)
-FIELD(ID_AA64SMFR0, F16F16, 42, 1)
-FIELD(ID_AA64SMFR0, B16B16, 43, 1)
-FIELD(ID_AA64SMFR0, I16I32, 44, 4)
-FIELD(ID_AA64SMFR0, F64F64, 48, 1)
-FIELD(ID_AA64SMFR0, I16I64, 52, 4)
-FIELD(ID_AA64SMFR0, SMEVER, 56, 4)
-FIELD(ID_AA64SMFR0, FA64, 63, 1)
-
-FIELD(ID_DFR0, COPDBG, 0, 4)
-FIELD(ID_DFR0, COPSDBG, 4, 4)
-FIELD(ID_DFR0, MMAPDBG, 8, 4)
-FIELD(ID_DFR0, COPTRC, 12, 4)
-FIELD(ID_DFR0, MMAPTRC, 16, 4)
-FIELD(ID_DFR0, MPROFDBG, 20, 4)
-FIELD(ID_DFR0, PERFMON, 24, 4)
-FIELD(ID_DFR0, TRACEFILT, 28, 4)
-
-FIELD(ID_DFR1, MTPMU, 0, 4)
-FIELD(ID_DFR1, HPMN0, 4, 4)
-
-FIELD(DBGDIDR, SE_IMP, 12, 1)
-FIELD(DBGDIDR, NSUHD_IMP, 14, 1)
-FIELD(DBGDIDR, VERSION, 16, 4)
-FIELD(DBGDIDR, CTX_CMPS, 20, 4)
-FIELD(DBGDIDR, BRPS, 24, 4)
-FIELD(DBGDIDR, WRPS, 28, 4)
-
-FIELD(DBGDEVID, PCSAMPLE, 0, 4)
-FIELD(DBGDEVID, WPADDRMASK, 4, 4)
-FIELD(DBGDEVID, BPADDRMASK, 8, 4)
-FIELD(DBGDEVID, VECTORCATCH, 12, 4)
-FIELD(DBGDEVID, VIRTEXTNS, 16, 4)
-FIELD(DBGDEVID, DOUBLELOCK, 20, 4)
-FIELD(DBGDEVID, AUXREGS, 24, 4)
-FIELD(DBGDEVID, CIDMASK, 28, 4)
-
-FIELD(DBGDEVID1, PCSROFFSET, 0, 4)
-
-FIELD(MVFR0, SIMDREG, 0, 4)
-FIELD(MVFR0, FPSP, 4, 4)
-FIELD(MVFR0, FPDP, 8, 4)
-FIELD(MVFR0, FPTRAP, 12, 4)
-FIELD(MVFR0, FPDIVIDE, 16, 4)
-FIELD(MVFR0, FPSQRT, 20, 4)
-FIELD(MVFR0, FPSHVEC, 24, 4)
-FIELD(MVFR0, FPROUND, 28, 4)
-
-FIELD(MVFR1, FPFTZ, 0, 4)
-FIELD(MVFR1, FPDNAN, 4, 4)
-FIELD(MVFR1, SIMDLS, 8, 4) /* A-profile only */
-FIELD(MVFR1, SIMDINT, 12, 4) /* A-profile only */
-FIELD(MVFR1, SIMDSP, 16, 4) /* A-profile only */
-FIELD(MVFR1, SIMDHP, 20, 4) /* A-profile only */
-FIELD(MVFR1, MVE, 8, 4) /* M-profile only */
-FIELD(MVFR1, FP16, 20, 4) /* M-profile only */
-FIELD(MVFR1, FPHP, 24, 4)
-FIELD(MVFR1, SIMDFMAC, 28, 4)
-
-FIELD(MVFR2, SIMDMISC, 0, 4)
-FIELD(MVFR2, FPMISC, 4, 4)
-
 FIELD(GPCCR, PPS, 0, 3)
+FIELD(GPCCR, RLPAD, 5, 1)
+FIELD(GPCCR, NSPAD, 6, 1)
+FIELD(GPCCR, SPAD, 7, 1)
 FIELD(GPCCR, IRGN, 8, 2)
 FIELD(GPCCR, ORGN, 10, 2)
 FIELD(GPCCR, SH, 12, 2)
 FIELD(GPCCR, PGS, 14, 2)
 FIELD(GPCCR, GPC, 16, 1)
 FIELD(GPCCR, GPCP, 17, 1)
+FIELD(GPCCR, TBGPCD, 18, 1)
+FIELD(GPCCR, NSO, 19, 1)
 FIELD(GPCCR, L0GPTSZ, 20, 4)
+FIELD(GPCCR, APPSAA, 24, 1)
+FIELD(GPCCR, SA, 25, 1)
+FIELD(GPCCR, NSP, 26, 1)
+FIELD(GPCCR, NA6, 27, 1)
+FIELD(GPCCR, NA7, 28, 1)
+FIELD(GPCCR, GPCBW, 29, 1)
+
+FIELD(GPCBW, BWSIZE, 37, 2)
+FIELD(GPCBW, BWSTRIDE, 32, 5)
+FIELD(GPCBW, BWADDR, 0, 25)
 
 FIELD(MFAR, FPA, 12, 40)
 FIELD(MFAR, NSE, 62, 1)
@@ -2427,8 +2134,6 @@ QEMU_BUILD_BUG_ON(ARRAY_SIZE(((ARMCPU *)0)->ccsidr) <= R_V7M_CSSELR_INDEX_MASK);
  */
 enum arm_features {
     ARM_FEATURE_AUXCR,  /* ARM1026 Auxiliary control register.  */
-    ARM_FEATURE_XSCALE, /* Intel XScale extensions.  */
-    ARM_FEATURE_IWMMXT, /* Intel iwMMXt extension.  */
     ARM_FEATURE_V6,
     ARM_FEATURE_V6K,
     ARM_FEATURE_V7,
@@ -2474,37 +2179,13 @@ enum arm_features {
     ARM_FEATURE_BACKCOMPAT_CNTFRQ, /* 62.5MHz timer default */
 };
 
-static inline int arm_feature(CPUARMState *env, int feature)
+static inline int arm_feature(const CPUARMState *env, int feature)
 {
     return (env->features & (1ULL << feature)) != 0;
 }
 
 void arm_cpu_finalize_features(ARMCPU *cpu, Error **errp);
 
-/*
- * ARM v9 security states.
- * The ordering of the enumeration corresponds to the low 2 bits
- * of the GPI value, and (except for Root) the concat of NSE:NS.
- */
-
-typedef enum ARMSecuritySpace {
-    ARMSS_Secure     = 0,
-    ARMSS_NonSecure  = 1,
-    ARMSS_Root       = 2,
-    ARMSS_Realm      = 3,
-} ARMSecuritySpace;
-
-/* Return true if @space is secure, in the pre-v9 sense. */
-static inline bool arm_space_is_secure(ARMSecuritySpace space)
-{
-    return space == ARMSS_Secure || space == ARMSS_Root;
-}
-
-/* Return the ARMSecuritySpace for @secure, assuming !RME or EL[0-2]. */
-static inline ARMSecuritySpace arm_secure_to_space(bool secure)
-{
-    return secure ? ARMSS_Secure : ARMSS_NonSecure;
-}
 
 #if !defined(CONFIG_USER_ONLY)
 /**
@@ -2629,6 +2310,7 @@ static inline bool arm_is_el2_enabled(CPUARMState *env)
  */
 uint64_t arm_hcr_el2_eff_secstate(CPUARMState *env, ARMSecuritySpace space);
 uint64_t arm_hcr_el2_eff(CPUARMState *env);
+uint64_t arm_hcr_el2_nvx_eff(CPUARMState *env);
 uint64_t arm_hcrx_el2_eff(CPUARMState *env);
 
 /*
@@ -2708,218 +2390,13 @@ bool write_cpustate_to_list(ARMCPU *cpu, bool kvm_sync);
 
 #define TYPE_ARM_HOST_CPU "host-" TYPE_ARM_CPU
 
-/* ARM has the following "translation regimes" (as the ARM ARM calls them):
- *
- * If EL3 is 64-bit:
- *  + NonSecure EL1 & 0 stage 1
- *  + NonSecure EL1 & 0 stage 2
- *  + NonSecure EL2
- *  + NonSecure EL2 & 0   (ARMv8.1-VHE)
- *  + Secure EL1 & 0 stage 1
- *  + Secure EL1 & 0 stage 2 (FEAT_SEL2)
- *  + Secure EL2 (FEAT_SEL2)
- *  + Secure EL2 & 0 (FEAT_SEL2)
- *  + Realm EL1 & 0 stage 1 (FEAT_RME)
- *  + Realm EL1 & 0 stage 2 (FEAT_RME)
- *  + Realm EL2 (FEAT_RME)
- *  + EL3
- * If EL3 is 32-bit:
- *  + NonSecure PL1 & 0 stage 1
- *  + NonSecure PL1 & 0 stage 2
- *  + NonSecure PL2
- *  + Secure PL1 & 0
- * (reminder: for 32 bit EL3, Secure PL1 is *EL3*, not EL1.)
- *
- * For QEMU, an mmu_idx is not quite the same as a translation regime because:
- *  1. we need to split the "EL1 & 0" and "EL2 & 0" regimes into two mmu_idxes,
- *     because they may differ in access permissions even if the VA->PA map is
- *     the same
- *  2. we want to cache in our TLB the full VA->IPA->PA lookup for a stage 1+2
- *     translation, which means that we have one mmu_idx that deals with two
- *     concatenated translation regimes [this sort of combined s1+2 TLB is
- *     architecturally permitted]
- *  3. we don't need to allocate an mmu_idx to translations that we won't be
- *     handling via the TLB. The only way to do a stage 1 translation without
- *     the immediate stage 2 translation is via the ATS or AT system insns,
- *     which can be slow-pathed and always do a page table walk.
- *     The only use of stage 2 translations is either as part of an s1+2
- *     lookup or when loading the descriptors during a stage 1 page table walk,
- *     and in both those cases we don't use the TLB.
- *  4. we can also safely fold together the "32 bit EL3" and "64 bit EL3"
- *     translation regimes, because they map reasonably well to each other
- *     and they can't both be active at the same time.
- *  5. we want to be able to use the TLB for accesses done as part of a
- *     stage1 page table walk, rather than having to walk the stage2 page
- *     table over and over.
- *  6. we need separate EL1/EL2 mmu_idx for handling the Privileged Access
- *     Never (PAN) bit within PSTATE.
- *  7. we fold together most secure and non-secure regimes for A-profile,
- *     because there are no banked system registers for aarch64, so the
- *     process of switching between secure and non-secure is
- *     already heavyweight.
- *  8. we cannot fold together Stage 2 Secure and Stage 2 NonSecure,
- *     because both are in use simultaneously for Secure EL2.
- *
- * This gives us the following list of cases:
- *
- * EL0 EL1&0 stage 1+2 (aka NS PL0 PL1&0 stage 1+2)
- * EL1 EL1&0 stage 1+2 (aka NS PL1 PL1&0 stage 1+2)
- * EL1 EL1&0 stage 1+2 +PAN (aka NS PL1 P1&0 stage 1+2 +PAN)
- * EL0 EL2&0
- * EL2 EL2&0
- * EL2 EL2&0 +PAN
- * EL2 (aka NS PL2)
- * EL3 (aka AArch32 S PL1 PL1&0)
- * AArch32 S PL0 PL1&0 (we call this EL30_0)
- * AArch32 S PL1 PL1&0 +PAN (we call this EL30_3_PAN)
- * Stage2 Secure
- * Stage2 NonSecure
- * plus one TLB per Physical address space: S, NS, Realm, Root
- *
- * for a total of 16 different mmu_idx.
- *
- * R profile CPUs have an MPU, but can use the same set of MMU indexes
- * as A profile. They only need to distinguish EL0 and EL1 (and
- * EL2 for cores like the Cortex-R52).
- *
- * M profile CPUs are rather different as they do not have a true MMU.
- * They have the following different MMU indexes:
- *  User
- *  Privileged
- *  User, execution priority negative (ie the MPU HFNMIENA bit may apply)
- *  Privileged, execution priority negative (ditto)
- * If the CPU supports the v8M Security Extension then there are also:
- *  Secure User
- *  Secure Privileged
- *  Secure User, execution priority negative
- *  Secure Privileged, execution priority negative
- *
- * The ARMMMUIdx and the mmu index value used by the core QEMU TLB code
- * are not quite the same -- different CPU types (most notably M profile
- * vs A/R profile) would like to use MMU indexes with different semantics,
- * but since we don't ever need to use all of those in a single CPU we
- * can avoid having to set NB_MMU_MODES to "total number of A profile MMU
- * modes + total number of M profile MMU modes". The lower bits of
- * ARMMMUIdx are the core TLB mmu index, and the higher bits are always
- * the same for any particular CPU.
- * Variables of type ARMMUIdx are always full values, and the core
- * index values are in variables of type 'int'.
- *
- * Our enumeration includes at the end some entries which are not "true"
- * mmu_idx values in that they don't have corresponding TLBs and are only
- * valid for doing slow path page table walks.
- *
- * The constant names here are patterned after the general style of the names
- * of the AT/ATS operations.
- * The values used are carefully arranged to make mmu_idx => EL lookup easy.
- * For M profile we arrange them to have a bit for priv, a bit for negpri
- * and a bit for secure.
- */
-#define ARM_MMU_IDX_A     0x10  /* A profile */
-#define ARM_MMU_IDX_NOTLB 0x20  /* does not have a TLB */
-#define ARM_MMU_IDX_M     0x40  /* M profile */
-
-/* Meanings of the bits for M profile mmu idx values */
-#define ARM_MMU_IDX_M_PRIV   0x1
-#define ARM_MMU_IDX_M_NEGPRI 0x2
-#define ARM_MMU_IDX_M_S      0x4  /* Secure */
-
-#define ARM_MMU_IDX_TYPE_MASK \
-    (ARM_MMU_IDX_A | ARM_MMU_IDX_M | ARM_MMU_IDX_NOTLB)
-#define ARM_MMU_IDX_COREIDX_MASK 0xf
-
-typedef enum ARMMMUIdx {
-    /*
-     * A-profile.
-     */
-    ARMMMUIdx_E10_0     = 0 | ARM_MMU_IDX_A,
-    ARMMMUIdx_E20_0     = 1 | ARM_MMU_IDX_A,
-    ARMMMUIdx_E10_1     = 2 | ARM_MMU_IDX_A,
-    ARMMMUIdx_E20_2     = 3 | ARM_MMU_IDX_A,
-    ARMMMUIdx_E10_1_PAN = 4 | ARM_MMU_IDX_A,
-    ARMMMUIdx_E20_2_PAN = 5 | ARM_MMU_IDX_A,
-    ARMMMUIdx_E2        = 6 | ARM_MMU_IDX_A,
-    ARMMMUIdx_E3        = 7 | ARM_MMU_IDX_A,
-    ARMMMUIdx_E30_0     = 8 | ARM_MMU_IDX_A,
-    ARMMMUIdx_E30_3_PAN = 9 | ARM_MMU_IDX_A,
-
-    /*
-     * Used for second stage of an S12 page table walk, or for descriptor
-     * loads during first stage of an S1 page table walk.  Note that both
-     * are in use simultaneously for SecureEL2: the security state for
-     * the S2 ptw is selected by the NS bit from the S1 ptw.
-     */
-    ARMMMUIdx_Stage2_S  = 10 | ARM_MMU_IDX_A,
-    ARMMMUIdx_Stage2    = 11 | ARM_MMU_IDX_A,
-
-    /* TLBs with 1-1 mapping to the physical address spaces. */
-    ARMMMUIdx_Phys_S     = 12 | ARM_MMU_IDX_A,
-    ARMMMUIdx_Phys_NS    = 13 | ARM_MMU_IDX_A,
-    ARMMMUIdx_Phys_Root  = 14 | ARM_MMU_IDX_A,
-    ARMMMUIdx_Phys_Realm = 15 | ARM_MMU_IDX_A,
-
-    /*
-     * These are not allocated TLBs and are used only for AT system
-     * instructions or for the first stage of an S12 page table walk.
-     */
-    ARMMMUIdx_Stage1_E0 = 0 | ARM_MMU_IDX_NOTLB,
-    ARMMMUIdx_Stage1_E1 = 1 | ARM_MMU_IDX_NOTLB,
-    ARMMMUIdx_Stage1_E1_PAN = 2 | ARM_MMU_IDX_NOTLB,
-
-    /*
-     * M-profile.
-     */
-    ARMMMUIdx_MUser = ARM_MMU_IDX_M,
-    ARMMMUIdx_MPriv = ARM_MMU_IDX_M | ARM_MMU_IDX_M_PRIV,
-    ARMMMUIdx_MUserNegPri = ARMMMUIdx_MUser | ARM_MMU_IDX_M_NEGPRI,
-    ARMMMUIdx_MPrivNegPri = ARMMMUIdx_MPriv | ARM_MMU_IDX_M_NEGPRI,
-    ARMMMUIdx_MSUser = ARMMMUIdx_MUser | ARM_MMU_IDX_M_S,
-    ARMMMUIdx_MSPriv = ARMMMUIdx_MPriv | ARM_MMU_IDX_M_S,
-    ARMMMUIdx_MSUserNegPri = ARMMMUIdx_MUserNegPri | ARM_MMU_IDX_M_S,
-    ARMMMUIdx_MSPrivNegPri = ARMMMUIdx_MPrivNegPri | ARM_MMU_IDX_M_S,
-} ARMMMUIdx;
-
-/*
- * Bit macros for the core-mmu-index values for each index,
- * for use when calling tlb_flush_by_mmuidx() and friends.
- */
-#define TO_CORE_BIT(NAME) \
-    ARMMMUIdxBit_##NAME = 1 << (ARMMMUIdx_##NAME & ARM_MMU_IDX_COREIDX_MASK)
-
-typedef enum ARMMMUIdxBit {
-    TO_CORE_BIT(E10_0),
-    TO_CORE_BIT(E20_0),
-    TO_CORE_BIT(E10_1),
-    TO_CORE_BIT(E10_1_PAN),
-    TO_CORE_BIT(E2),
-    TO_CORE_BIT(E20_2),
-    TO_CORE_BIT(E20_2_PAN),
-    TO_CORE_BIT(E3),
-    TO_CORE_BIT(E30_0),
-    TO_CORE_BIT(E30_3_PAN),
-    TO_CORE_BIT(Stage2),
-    TO_CORE_BIT(Stage2_S),
-
-    TO_CORE_BIT(MUser),
-    TO_CORE_BIT(MPriv),
-    TO_CORE_BIT(MUserNegPri),
-    TO_CORE_BIT(MPrivNegPri),
-    TO_CORE_BIT(MSUser),
-    TO_CORE_BIT(MSPriv),
-    TO_CORE_BIT(MSUserNegPri),
-    TO_CORE_BIT(MSPrivNegPri),
-} ARMMMUIdxBit;
-
-#undef TO_CORE_BIT
-
-#define MMU_USER_IDX 0
-
 /* Indexes used when registering address spaces with cpu_address_space_init */
 typedef enum ARMASIdx {
     ARMASIdx_NS = 0,
     ARMASIdx_S = 1,
     ARMASIdx_TagNS = 2,
     ARMASIdx_TagS = 3,
+    ARMASIdx_MAX = ARMASIdx_TagS
 } ARMASIdx;
 
 static inline ARMMMUIdx arm_space_to_phys(ARMSecuritySpace space)
@@ -2947,7 +2424,7 @@ static inline bool arm_v7m_csselr_razwi(ARMCPU *cpu)
     return (GET_IDREG(&cpu->isar, CLIDR) & R_V7M_CLIDR_CTYPE_ALL_MASK) != 0;
 }
 
-static inline bool arm_sctlr_b(CPUARMState *env)
+static inline bool arm_sctlr_b(const CPUARMState *env)
 {
     return
         /* We need not implement SCTLR.ITD in user-mode emulation, so
@@ -3008,13 +2485,6 @@ FIELD(TBFLAG_AM32, THUMB, 23, 1)         /* Not cached. */
  */
 FIELD(TBFLAG_A32, VECLEN, 0, 3)         /* Not cached. */
 FIELD(TBFLAG_A32, VECSTRIDE, 3, 2)     /* Not cached. */
-/*
- * We store the bottom two bits of the CPAR as TB flags and handle
- * checks on the other bits at runtime. This shares the same bits as
- * VECSTRIDE, which is OK as no XScale CPU has VFP.
- * Not cached, because VECLEN+VECSTRIDE are not cached.
- */
-FIELD(TBFLAG_A32, XSCALE_CPAR, 5, 2)
 FIELD(TBFLAG_A32, VFPEN, 7, 1)         /* Partially cached, minus FPEXC. */
 FIELD(TBFLAG_A32, SCTLR__B, 8, 1)      /* Cannot overlap with SCTLR_B */
 FIELD(TBFLAG_A32, HSTR_ACTIVE, 9, 1)
@@ -3076,13 +2546,19 @@ FIELD(TBFLAG_A64, ATA0, 31, 1)
 FIELD(TBFLAG_A64, NV, 32, 1)
 FIELD(TBFLAG_A64, NV1, 33, 1)
 FIELD(TBFLAG_A64, NV2, 34, 1)
-/* Set if FEAT_NV2 RAM accesses use the EL2&0 translation regime */
-FIELD(TBFLAG_A64, NV2_MEM_E20, 35, 1)
+FIELD(TBFLAG_A64, E2H, 35, 1)
 /* Set if FEAT_NV2 RAM accesses are big-endian */
 FIELD(TBFLAG_A64, NV2_MEM_BE, 36, 1)
 FIELD(TBFLAG_A64, AH, 37, 1)   /* FPCR.AH */
 FIELD(TBFLAG_A64, NEP, 38, 1)   /* FPCR.NEP */
 FIELD(TBFLAG_A64, ZT0EXC_EL, 39, 2)
+FIELD(TBFLAG_A64, GCS_EN, 41, 1)
+FIELD(TBFLAG_A64, GCS_RVCEN, 42, 1)
+FIELD(TBFLAG_A64, GCSSTR_EL, 43, 2)
+FIELD(TBFLAG_A64, FPMR_EL, 45, 2)
+FIELD(TBFLAG_A64, MTE_STORE_ONLY, 47, 1)
+FIELD(TBFLAG_A64, MTE0_STORE_ONLY, 48, 1)
+FIELD(TBFLAG_A64, MTX, 49, 2)
 
 /*
  * Helpers for using the above. Note that only the A64 accessors use
@@ -3235,7 +2711,6 @@ extern const uint64_t pred_esz_masks[5];
  */
 #define PAGE_BTI            PAGE_TARGET_1
 #define PAGE_MTE            PAGE_TARGET_2
-#define PAGE_TARGET_STICKY  PAGE_MTE
 
 /* We associate one allocation tag per 16 bytes, the minimum.  */
 #define LOG2_TAG_GRANULE 4

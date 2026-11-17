@@ -16,6 +16,7 @@
 #include "qemu/error-report.h"
 #include "qemu/lockable.h"
 #include "qemu/main-loop.h"
+#include "qemu/target-info.h"
 #include "qemu/thread.h"
 #include "io/channel-buffer.h"
 #include "migration/qemu-file.h"
@@ -44,7 +45,16 @@ bool vfio_load_config_after_iter(VFIODevice *vbasedev)
     }
 
     assert(vbasedev->migration_load_config_after_iter == ON_OFF_AUTO_AUTO);
-    return vfio_arch_wants_loading_config_after_iter();
+
+    /*
+     * Starting the config load only after all iterables were loaded (during
+     * non-iterables loading phase) is required for ARM64 due to this platform
+     * VFIO dependency on interrupt controller being loaded first.
+     *
+     * See commit d329f5032e17 ("vfio: Move the saving of the config space to
+     * the right place in VFIO migration").
+     */
+    return target_base_arm();
 }
 
 /* type safety */
@@ -725,8 +735,9 @@ vfio_multifd_save_complete_precopy_thread(SaveCompletePrecopyThreadData *d,
         data_size = read(migration->data_fd, &packet->data,
                          migration->data_buffer_size);
         if (data_size < 0) {
-            error_setg(errp, "%s: reading state buffer %" PRIu32 " failed: %d",
-                       vbasedev->name, idx, errno);
+            error_setg_errno(errp, errno,
+                             "%s: reading state buffer %" PRIu32 " failed",
+                             vbasedev->name, idx);
             goto thread_exit;
         } else if (data_size == 0) {
             break;

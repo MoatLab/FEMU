@@ -30,14 +30,6 @@ OBJECT_DECLARE_SIMPLE_TYPE(QemuFixedTextConsole, QEMU_FIXED_TEXT_CONSOLE)
 #define QEMU_IS_FIXED_TEXT_CONSOLE(c) \
     object_dynamic_cast(OBJECT(c), TYPE_QEMU_FIXED_TEXT_CONSOLE)
 
-/* keyboard/mouse support */
-
-#define MOUSE_EVENT_LBUTTON 0x01
-#define MOUSE_EVENT_RBUTTON 0x02
-#define MOUSE_EVENT_MBUTTON 0x04
-#define MOUSE_EVENT_WHEELUP 0x08
-#define MOUSE_EVENT_WHEELDN 0x10
-
 /* identical to the ps/2 keyboard bits */
 #define QEMU_SCROLL_LOCK_LED (1 << 0)
 #define QEMU_NUM_LOCK_LED    (1 << 1)
@@ -61,25 +53,6 @@ enum qemu_color_names {
 /* Convert to curses char attributes */
 #define ATTR2CHTYPE(c, fg, bg, bold) \
     ((bold) << 21 | (bg) << 11 | (fg) << 8 | (c))
-
-typedef void QEMUPutKBDEvent(void *opaque, int keycode);
-typedef void QEMUPutLEDEvent(void *opaque, int ledstate);
-typedef void QEMUPutMouseEvent(void *opaque, int dx, int dy, int dz, int buttons_state);
-
-typedef struct QEMUPutMouseEntry QEMUPutMouseEntry;
-typedef struct QEMUPutKbdEntry QEMUPutKbdEntry;
-typedef struct QEMUPutLEDEntry QEMUPutLEDEntry;
-
-QEMUPutMouseEntry *qemu_add_mouse_event_handler(QEMUPutMouseEvent *func,
-                                                void *opaque, int absolute,
-                                                const char *name);
-void qemu_remove_mouse_event_handler(QEMUPutMouseEntry *entry);
-void qemu_activate_mouse_event_handler(QEMUPutMouseEntry *entry);
-
-QEMUPutLEDEntry *qemu_add_led_event_handler(QEMUPutLEDEvent *func, void *opaque);
-void qemu_remove_led_event_handler(QEMUPutLEDEntry *entry);
-
-void kbd_put_ledstate(int ledstate);
 
 bool qemu_mouse_set(int index, Error **errp);
 
@@ -108,27 +81,16 @@ bool qemu_mouse_set(int index, Error **errp);
 #define QEMU_KEY_CTRL_PAGEDOWN   0xe407
 
 void qemu_text_console_put_keysym(QemuTextConsole *s, int keysym);
-bool qemu_text_console_put_qcode(QemuTextConsole *s, int qcode, bool ctrl);
+bool qemu_text_console_put_linux(QemuTextConsole *s, unsigned int lnx,
+                                 bool ctrl);
 void qemu_text_console_put_string(QemuTextConsole *s, const char *str, int len);
 
-/* Touch devices */
-typedef struct touch_slot {
-    int x;
-    int y;
-    int tracking_id;
-} touch_slot;
-
-void console_handle_touch_event(QemuConsole *con,
-                                struct touch_slot touch_slots[INPUT_EVENT_SLOTS_MAX],
-                                uint64_t num_slot,
-                                int width, int height,
-                                double x, double y,
-                                InputMultiTouchType type,
-                                Error **errp);
 /* consoles */
 
 struct QemuConsoleClass {
     ObjectClass parent_class;
+
+    char * (*get_label)(const QemuConsole *con);
 };
 
 typedef struct ScanoutTexture {
@@ -164,6 +126,15 @@ typedef struct QEMUCursor {
 } QEMUCursor;
 
 QEMUCursor *cursor_alloc(uint16_t width, uint16_t height);
+
+/*
+ * A cursor may be shared between the main loop, a vCPU thread and a
+ * display backend's own thread, so the refcount is atomic and these two
+ * may be called from any of them.  The object itself is not otherwise
+ * thread-safe: take a reference before publishing the pointer anywhere
+ * another thread can reach it, and never dereference a cursor you do
+ * not hold a reference to.
+ */
 QEMUCursor *cursor_ref(QEMUCursor *c);
 void cursor_unref(QEMUCursor *c);
 QEMUCursor *cursor_builtin_hidden(void);
@@ -303,57 +274,52 @@ struct DisplayGLCtx {
 
 DisplayState *init_displaystate(void);
 
-void register_displaychangelistener(DisplayChangeListener *dcl);
-void update_displaychangelistener(DisplayChangeListener *dcl,
-                                  uint64_t interval);
-void unregister_displaychangelistener(DisplayChangeListener *dcl);
+void qemu_console_register_listener(QemuConsole *con,
+                                    DisplayChangeListener *dcl,
+                                    const DisplayChangeListenerOps *ops);
+void qemu_console_listener_set_refresh(DisplayChangeListener *dcl,
+                                       uint64_t interval);
+void qemu_console_unregister_listener(DisplayChangeListener *dcl);
 
-bool dpy_ui_info_supported(const QemuConsole *con);
-const QemuUIInfo *dpy_get_ui_info(const QemuConsole *con);
-int dpy_set_ui_info(QemuConsole *con, QemuUIInfo *info, bool delay);
+bool qemu_console_ui_info_supported(const QemuConsole *con);
+const QemuUIInfo *qemu_console_get_ui_info(const QemuConsole *con);
+int qemu_console_set_ui_info(QemuConsole *con, QemuUIInfo *info, bool delay);
 
-void dpy_gfx_update(QemuConsole *con, int x, int y, int w, int h);
-void dpy_gfx_update_full(QemuConsole *con);
-void dpy_gfx_replace_surface(QemuConsole *con,
-                             DisplaySurface *surface);
-void dpy_text_cursor(QemuConsole *con, int x, int y);
-void dpy_text_update(QemuConsole *con, int x, int y, int w, int h);
-void dpy_text_resize(QemuConsole *con, int w, int h);
-void dpy_mouse_set(QemuConsole *con, int x, int y, bool on);
-void dpy_cursor_define(QemuConsole *con, QEMUCursor *cursor);
-bool dpy_gfx_check_format(QemuConsole *con,
-                          pixman_format_code_t format);
+void qemu_console_update(QemuConsole *con, int x, int y, int w, int h);
+void qemu_console_update_full(QemuConsole *con);
+void qemu_console_set_surface(QemuConsole *con,
+                              DisplaySurface *surface);
+void qemu_console_text_set_cursor(QemuConsole *con, int x, int y);
+void qemu_console_text_update(QemuConsole *con, int x, int y, int w, int h);
+void qemu_console_text_resize(QemuConsole *con, int w, int h);
+void qemu_console_set_mouse(QemuConsole *con, int x, int y, bool on);
+void qemu_console_set_cursor(QemuConsole *con, QEMUCursor *cursor);
+bool qemu_console_check_format(QemuConsole *con,
+                               pixman_format_code_t format);
 
-void dpy_gl_scanout_disable(QemuConsole *con);
-void dpy_gl_scanout_texture(QemuConsole *con,
-                            uint32_t backing_id, bool backing_y_0_top,
-                            uint32_t backing_width, uint32_t backing_height,
-                            uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                            void *d3d_tex2d);
-void dpy_gl_scanout_dmabuf(QemuConsole *con,
-                           QemuDmaBuf *dmabuf);
-void dpy_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,
-                          bool have_hot, uint32_t hot_x, uint32_t hot_y);
-void dpy_gl_cursor_position(QemuConsole *con,
-                            uint32_t pos_x, uint32_t pos_y);
-void dpy_gl_release_dmabuf(QemuConsole *con,
-                           QemuDmaBuf *dmabuf);
-void dpy_gl_update(QemuConsole *con,
-                   uint32_t x, uint32_t y, uint32_t w, uint32_t h);
+void qemu_console_gl_scanout_disable(QemuConsole *con);
+void qemu_console_gl_scanout_texture(QemuConsole *con,
+                                     uint32_t backing_id, bool backing_y_0_top,
+                                     uint32_t backing_width, uint32_t backing_height,
+                                     uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                     void *d3d_tex2d);
+void qemu_console_gl_scanout_dmabuf(QemuConsole *con,
+                                    QemuDmaBuf *dmabuf);
+void qemu_console_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,
+                                   bool have_hot, uint32_t hot_x, uint32_t hot_y);
+void qemu_console_gl_cursor_position(QemuConsole *con,
+                                     uint32_t pos_x, uint32_t pos_y);
+void qemu_console_gl_release_dmabuf(QemuConsole *con,
+                                    QemuDmaBuf *dmabuf);
+void qemu_console_gl_update(QemuConsole *con,
+                            uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 
-QEMUGLContext dpy_gl_ctx_create(QemuConsole *con,
-                                QEMUGLParams *params);
-void dpy_gl_ctx_destroy(QemuConsole *con, QEMUGLContext ctx);
-int dpy_gl_ctx_make_current(QemuConsole *con, QEMUGLContext ctx);
+QEMUGLContext qemu_console_gl_ctx_create(QemuConsole *con,
+                                         QEMUGLParams *params);
+void qemu_console_gl_ctx_destroy(QemuConsole *con, QEMUGLContext ctx);
+int qemu_console_gl_ctx_make_current(QemuConsole *con, QEMUGLContext ctx);
 
-bool console_has_gl(QemuConsole *con);
-
-typedef uint32_t console_ch_t;
-
-static inline void console_write_ch(console_ch_t *dest, uint32_t ch)
-{
-    *dest = ch;
-}
+bool qemu_console_has_gl(QemuConsole *con);
 
 enum {
     GRAPHIC_FLAGS_NONE     = 0,
@@ -366,26 +332,31 @@ enum {
 typedef struct GraphicHwOps {
     int (*get_flags)(void *opaque); /* optional, default 0 */
     void (*invalidate)(void *opaque);
-    void (*gfx_update)(void *opaque);
-    bool gfx_update_async; /* if true, calls graphic_hw_update_done() */
-    void (*text_update)(void *opaque, console_ch_t *text);
+    /*
+     * Returns true if the update is handled synchronously, false if deferred
+     * and graphic_hw_update_done() will be called when ready (to resume waiting
+     * tasks/coroutines).
+     * Optional.
+     */
+    bool (*gfx_update)(void *opaque);
+    void (*text_update)(void *opaque, uint32_t *text);
     void (*ui_info)(void *opaque, uint32_t head, QemuUIInfo *info);
     void (*gl_block)(void *opaque, bool block);
 } GraphicHwOps;
 
-QemuConsole *graphic_console_init(DeviceState *dev, uint32_t head,
-                                  const GraphicHwOps *ops,
-                                  void *opaque);
-void graphic_console_set_hwops(QemuConsole *con,
-                               const GraphicHwOps *hw_ops,
-                               void *opaque);
-void graphic_console_close(QemuConsole *con);
+QemuConsole *qemu_graphic_console_create(DeviceState *dev, uint32_t head,
+                                         const GraphicHwOps *ops,
+                                         void *opaque);
+void qemu_graphic_console_set_hwops(QemuConsole *con,
+                                    const GraphicHwOps *hw_ops,
+                                    void *opaque);
+void qemu_graphic_console_close(QemuConsole *con);
 
-void graphic_hw_update(QemuConsole *con);
-void graphic_hw_update_done(QemuConsole *con);
-void graphic_hw_invalidate(QemuConsole *con);
-void graphic_hw_text_update(QemuConsole *con, console_ch_t *chardata);
-void graphic_hw_gl_block(QemuConsole *con, bool block);
+void qemu_console_hw_update(QemuConsole *con);
+void qemu_console_hw_update_done(QemuConsole *con);
+void qemu_console_hw_invalidate(QemuConsole *con);
+void qemu_console_hw_text_update(QemuConsole *con, uint32_t *chardata);
+void qemu_console_hw_gl_block(QemuConsole *con, bool block);
 
 void qemu_console_early_init(void);
 
@@ -397,7 +368,6 @@ QemuConsole *qemu_console_lookup_by_device(DeviceState *dev, uint32_t head);
 QemuConsole *qemu_console_lookup_by_device_name(const char *device_id,
                                                 uint32_t head, Error **errp);
 QEMUCursor *qemu_console_get_cursor(QemuConsole *con);
-bool qemu_console_is_visible(QemuConsole *con);
 bool qemu_console_is_graphic(QemuConsole *con);
 bool qemu_console_is_fixedsize(QemuConsole *con);
 bool qemu_console_is_gl_blocked(QemuConsole *con);
@@ -414,7 +384,6 @@ void qemu_console_set_window_id(QemuConsole *con, int window_id);
 void qemu_console_resize(QemuConsole *con, int width, int height);
 DisplaySurface *qemu_console_surface(QemuConsole *con);
 void coroutine_fn qemu_console_co_wait_update(QemuConsole *con);
-int qemu_invalidate_text_consoles(void);
 
 /* console-gl.c */
 #ifdef CONFIG_OPENGL
@@ -423,8 +392,8 @@ bool console_gl_check_format(DisplayChangeListener *dcl,
 void surface_gl_create_texture(QemuGLShader *gls,
                                DisplaySurface *surface);
 bool surface_gl_create_texture_from_fd(DisplaySurface *surface,
-                                       int fd, GLuint *texture,
-                                       GLuint *mem_obj);
+                                       int fd, uint32_t *texture,
+                                       uint32_t *mem_obj);
 void surface_gl_update_texture(QemuGLShader *gls,
                                DisplaySurface *surface,
                                int x, int y, int w, int h);
@@ -443,6 +412,7 @@ struct QemuDisplay {
     DisplayType type;
     void (*early_init)(DisplayOptions *opts);
     void (*init)(DisplayState *ds, DisplayOptions *opts);
+    void (*cleanup)(void);
     const char *vc;
 };
 
@@ -451,21 +421,36 @@ bool qemu_display_find_default(DisplayOptions *opts);
 void qemu_display_early_init(DisplayOptions *opts);
 void qemu_display_init(DisplayState *ds, DisplayOptions *opts);
 const char *qemu_display_get_vc(DisplayOptions *opts);
+void qemu_display_cleanup(void);
 void qemu_display_help(void);
 
+/*
+ * Console notifications:
+ * Handlers must be idempotent, it may notify multiple times.
+ */
+typedef enum {
+    QEMU_CONSOLE_ADDED,
+    QEMU_CONSOLE_REMOVED,
+} QemuConsoleEventType;
+
+typedef struct QemuConsoleEvent {
+    QemuConsoleEventType type;
+    QemuConsole *con;
+} QemuConsoleEvent;
+
+void qemu_console_add_notifier(Notifier *notifier);
+void qemu_console_remove_notifier(Notifier *notifier);
+void qemu_console_notify(QemuConsoleEventType type, QemuConsole *con);
+
 /* vnc.c */
-void vnc_display_init(const char *id, Error **errp);
-void vnc_display_open(const char *id, Error **errp);
 void vnc_display_add_client(const char *id, int csock, bool skipauth);
-int vnc_display_password(const char *id, const char *password);
+int vnc_display_password(const char *id, const char *password, Error **errp);
 int vnc_display_pw_expire(const char *id, time_t expires);
 void vnc_parse(const char *str);
 int vnc_init_func(void *opaque, QemuOpts *opts, Error **errp);
 bool vnc_display_reload_certs(const char *id,  Error **errp);
 bool vnc_display_update(DisplayUpdateOptionsVNC *arg, Error **errp);
-
-/* input.c */
-int index_from_key(const char *key, size_t key_length);
+void vnc_cleanup(void);
 
 #ifdef CONFIG_LINUX
 /* udmabuf.c */

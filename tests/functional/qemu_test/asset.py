@@ -1,37 +1,47 @@
-# Test utilities for fetching & caching assets
+# SPDX-License-Identifier: GPL-2.0-or-later
 #
 # Copyright 2024 Red Hat, Inc.
 #
 # This work is licensed under the terms of the GNU GPL, version 2 or
 # later.  See the COPYING file in the top-level directory.
+'''
+Test utilities for fetching & caching assets
+'''
 
 import hashlib
 import logging
 import os
 import stat
 import sys
+import time
 import unittest
 import urllib.request
 from time import sleep
 from pathlib import Path
 from shutil import copyfileobj
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
+
 
 class AssetError(Exception):
+    '''This exception will be raised if an asset is not usable'''
     def __init__(self, asset, msg, transient=False):
         self.url = asset.url
         self.msg = msg
         self.transient = transient
 
     def __str__(self):
-        return "%s: %s" % (self.url, self.msg)
+        return f"{self.url}: {self.msg}"
 
-# Instances of this class must be declared as class level variables
-# starting with a name "ASSET_". This enables the pre-caching logic
-# to easily find all referenced assets and download them prior to
-# execution of the tests.
+
 class Asset:
-
+    '''
+    This class is used to represent an asset that gets downloaded from
+    the internet and will be stored in the local asset cache.
+    Instances of this class must be declared as class level variables
+    starting with a name "ASSET_". This enables the pre-caching logic
+    to easily find all referenced assets and download them prior to
+    execution of the tests.
+    '''
     def __init__(self, url, hashsum):
         self.url = url
         self.hash = hashsum
@@ -45,8 +55,7 @@ class Asset:
         self.log = logging.getLogger('qemu-test')
 
     def __repr__(self):
-        return "Asset: url=%s hash=%s cache=%s" % (
-            self.url, self.hash, self.cache_file)
+        return f"Asset: url={self.url} hash={self.hash} cache={self.cache_file}"
 
     def __str__(self):
         return str(self.cache_file)
@@ -56,10 +65,8 @@ class Asset:
             return True
         if len(self.hash) == 64:
             hl = hashlib.sha256()
-        elif len(self.hash) == 128:
-            hl = hashlib.sha512()
         else:
-            raise AssetError(self, "unknown hash type")
+            raise AssetError(self, "unsupported hash type")
 
         # Calculate the hash of the file:
         with open(cache_file, 'rb') as file:
@@ -72,12 +79,19 @@ class Asset:
         return self.hash == hl.hexdigest()
 
     def valid(self):
+        '''Check whether the file exists in the cache and has the right hash'''
+        if os.getenv("QEMU_TEST_REFRESH_CACHE", None) is not None:
+            self.log.info("Force refresh of asset %s", self.url)
+            return False
+
         return self.cache_file.exists() and self._check(self.cache_file)
 
     def fetchable(self):
+        '''Check whether we are allowed to download assets from the internet'''
         return not os.environ.get("QEMU_TEST_NO_DOWNLOAD", False)
 
     def available(self):
+        '''Check whether the asset is either in the cache or fetchable'''
         return self.valid() or self.fetchable()
 
     def _wait_for_other_download(self, tmp_cache_file):
@@ -107,25 +121,20 @@ class Asset:
                 return False
 
         self.log.debug("Time out while waiting for %s!", tmp_cache_file)
-        raise
+        raise TimeoutError(f"Time out while waiting for {tmp_cache_file}")
 
-    def fetch(self):
-        if not self.cache_dir.exists():
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
+    def _save_time_stamp(self):
+        '''
+        Update the time stamp of the asset in the cache. Unfortunately, we
+        cannot use the modification or access time of the asset file itself,
+        since e.g. the functional jobs in the gitlab CI reload the files
+        from the gitlab cache and thus always have recent file time stamps,
+        so we have to save our asset time stamp to a separate file instead.
+        '''
+        self.cache_file.with_suffix(".stamp").write_text(f"{int(time.time())}")
 
-        if self.valid():
-            self.log.debug("Using cached asset %s for %s",
-                           self.cache_file, self.url)
-            return str(self.cache_file)
-
-        if not self.fetchable():
-            raise AssetError(self,
-                             "Asset cache is invalid and downloads disabled")
-
-        self.log.info("Downloading %s to %s...", self.url, self.cache_file)
-        tmp_cache_file = self.cache_file.with_suffix(".download")
-
-        for retries in range(3):
+    def _try_to_fetch(self, tmp_cache_file):
+        for _retries in range(3):
             try:
                 with tmp_cache_file.open("xb") as dst:
                     with urllib.request.urlopen(self.url) as resp:
@@ -150,7 +159,7 @@ class Asset:
                                "waiting for other thread to finish...",
                                tmp_cache_file)
                 if self._wait_for_other_download(tmp_cache_file):
-                    return str(self.cache_file)
+                    return True
                 self.log.debug("%s seems to be stale, "
                                "deleting and retrying download...",
                                tmp_cache_file)
@@ -165,36 +174,83 @@ class Asset:
                 # server or networking problem
                 if e.code == 404:
                     raise AssetError(self, "Unable to download: "
-                                     "HTTP error %d" % e.code)
+                                     f"HTTP error {e.code}") from e
+                continue
+            except URLError as e:
+                # This is typically a network/service level error
+                # eg urlopen error [Errno 110] Connection timed out>
+                tmp_cache_file.unlink()
+                self.log.error("Unable to download %s: URL error %s",
+                               self.url, e.reason)
+                raise AssetError(self,
+                                 f"Unable to download: URL error{e.reason}",
+                                 transient=True) from e
+            except ConnectionError as e:
+                # A socket connection failure, such as dropped conn
+                # or refused conn
+                tmp_cache_file.unlink()
+                self.log.error("Unable to download %s: Connection error %s",
+                               self.url, e)
                 continue
             except Exception as e:
                 tmp_cache_file.unlink()
-                raise AssetError(self, "Unable to download: " % e)
+                raise AssetError(self, f"Unable to download: {e}",
+                                 transient=True) from e
+        return False
+
+    def fetch(self):
+        '''Download the asset from the internet'''
+        if not self.cache_dir.exists():
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.valid():
+            self.log.debug("Using cached asset %s for %s",
+                           self.cache_file, self.url)
+            self._save_time_stamp()
+            return str(self.cache_file)
+
+        if not self.fetchable():
+            raise AssetError(self,
+                             "Asset cache is invalid and downloads disabled")
+
+        self.log.info("Downloading %s to %s...", self.url, self.cache_file)
+        tmp_cache_file = self.cache_file.with_suffix(".download")
+
+        if self._try_to_fetch(tmp_cache_file):
+            return str(self.cache_file)
 
         if not os.path.exists(tmp_cache_file):
             raise AssetError(self, "Download retries exceeded", transient=True)
 
         try:
-            # Set these just for informational purposes
-            os.setxattr(str(tmp_cache_file), "user.qemu-asset-url",
-                        self.url.encode('utf8'))
-            os.setxattr(str(tmp_cache_file), "user.qemu-asset-hash",
-                        self.hash.encode('utf8'))
-        except Exception as e:
+            # Set these just for informational purposes. Note that
+            # setxattr is Linux-only; as this is only informational
+            # we can simply skip it on other platforms.
+            if hasattr(os, "setxattr"):
+                os.setxattr(str(tmp_cache_file), "user.qemu-asset-url",
+                            self.url.encode('utf8'))
+                os.setxattr(str(tmp_cache_file), "user.qemu-asset-hash",
+                            self.hash.encode('utf8'))
+        except OSError as e:
             self.log.debug("Unable to set xattr on %s: %s", tmp_cache_file, e)
-            pass
 
         if not self._check(tmp_cache_file):
             tmp_cache_file.unlink()
-            raise AssetError(self, "Hash does not match %s" % self.hash)
+            raise AssetError(self, f"Hash does not match {self.hash}")
         tmp_cache_file.replace(self.cache_file)
+        self._save_time_stamp()
         # Remove write perms to stop tests accidentally modifying them
         os.chmod(self.cache_file, stat.S_IRUSR | stat.S_IRGRP)
 
-        self.log.info("Cached %s at %s" % (self.url, self.cache_file))
+        self.log.info("Cached %s at %s", self.url, self.cache_file)
         return str(self.cache_file)
 
+    @staticmethod
     def precache_test(test):
+        '''
+        Look for variables starting with "ASSET_" and try to fetch the asset
+        that is specified there.
+        '''
         log = logging.getLogger('qemu-test')
         log.setLevel(logging.DEBUG)
         handler = logging.StreamHandler(sys.stdout)
@@ -204,27 +260,34 @@ class Asset:
         handler.setFormatter(formatter)
         log.addHandler(handler)
         for name, asset in vars(test.__class__).items():
-            if name.startswith("ASSET_") and type(asset) == Asset:
-                log.info("Attempting to cache '%s'" % asset)
+            if name.startswith("ASSET_") and isinstance(asset, Asset):
                 try:
                     asset.fetch()
                 except AssetError as e:
                     if not e.transient:
                         raise
-                    log.error("%s: skipping asset precache" % e)
+                    log.error("%s: skipping asset precache", e)
 
         log.removeHandler(handler)
 
+    @staticmethod
     def precache_suite(suite):
+        '''
+        Iterate through all tests/suites in a suite and precache their assets
+        '''
         for test in suite:
             if isinstance(test, unittest.TestSuite):
                 Asset.precache_suite(test)
             elif isinstance(test, unittest.TestCase):
                 Asset.precache_test(test)
 
-    def precache_suites(path, cacheTstamp):
+    @staticmethod
+    def precache_suites(path, cache_tstamp):
+        '''
+        Get the available test suite and precache their assets
+        '''
         loader = unittest.loader.defaultTestLoader
         tests = loader.loadTestsFromNames([path], None)
 
-        with open(cacheTstamp, "w") as fh:
+        with open(cache_tstamp, "w", encoding='utf-8'):
             Asset.precache_suite(tests)

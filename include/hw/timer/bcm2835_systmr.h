@@ -1,7 +1,7 @@
 /*
  * BCM2835 SYS timer emulation
  *
- * Copyright (c) 2019 Philippe Mathieu-Daudé <f4bug@amsat.org>
+ * Copyright (c) 2019 Philippe Mathieu-Daudé
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -9,8 +9,8 @@
 #ifndef BCM2835_SYSTMR_H
 #define BCM2835_SYSTMR_H
 
-#include "hw/sysbus.h"
-#include "hw/irq.h"
+#include "hw/core/sysbus.h"
+#include "hw/core/irq.h"
 #include "qemu/timer.h"
 #include "qom/object.h"
 

@@ -31,8 +31,12 @@ typedef struct CPU {
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 
-static GArray *cpus;
-static GRWLock expand_array_lock;
+/*
+ * Per-vCPU state stored in a qemu_plugin_scoreboard. The scoreboard manages
+ * per-vCPU storage automatically, eliminating the need for manual array
+ * growth, locks, or pointer-stability workarounds.
+ */
+static struct qemu_plugin_scoreboard *cpus;
 
 static GPtrArray *imatches;
 static GArray *amatches;
@@ -41,23 +45,13 @@ static bool disas_assist;
 static GMutex add_reg_name_lock;
 static GPtrArray *all_reg_names;
 
-static CPU *get_cpu(int vcpu_index)
-{
-    CPU *c;
-    g_rw_lock_reader_lock(&expand_array_lock);
-    c = &g_array_index(cpus, CPU, vcpu_index);
-    g_rw_lock_reader_unlock(&expand_array_lock);
-
-    return c;
-}
-
 /**
  * Add memory read or write information to current instruction log
  */
 static void vcpu_mem(unsigned int cpu_index, qemu_plugin_meminfo_t info,
                      uint64_t vaddr, void *udata)
 {
-    CPU *c = get_cpu(cpu_index);
+    CPU *c = qemu_plugin_scoreboard_find(cpus, cpu_index);
     GString *s = c->last_exec;
 
     /* Find vCPU in array */
@@ -91,10 +85,13 @@ static void insn_check_regs(CPU *cpu)
 {
     for (int n = 0; n < cpu->registers->len; n++) {
         Register *reg = cpu->registers->pdata[n];
-        int sz;
+        bool success = false;
+        int sz = 0;
 
         g_byte_array_set_size(reg->new, 0);
-        sz = qemu_plugin_read_register(reg->handle, reg->new);
+        success = qemu_plugin_read_register(reg->handle, reg->new);
+        g_assert(success);
+        sz = reg->new->len;
         g_assert(sz == reg->last->len);
 
         if (memcmp(reg->last->data, reg->new->data, sz)) {
@@ -114,7 +111,7 @@ static void insn_check_regs(CPU *cpu)
 /* Log last instruction while checking registers */
 static void vcpu_insn_exec_with_regs(unsigned int cpu_index, void *udata)
 {
-    CPU *cpu = get_cpu(cpu_index);
+    CPU *cpu = qemu_plugin_scoreboard_find(cpus, cpu_index);
 
     /* Print previous instruction in cache */
     if (cpu->last_exec->len) {
@@ -122,8 +119,8 @@ static void vcpu_insn_exec_with_regs(unsigned int cpu_index, void *udata)
             insn_check_regs(cpu);
         }
 
+        g_string_append_c(cpu->last_exec, '\n');
         qemu_plugin_outs(cpu->last_exec->str);
-        qemu_plugin_outs("\n");
     }
 
     /* Store new instruction in cache */
@@ -135,7 +132,7 @@ static void vcpu_insn_exec_with_regs(unsigned int cpu_index, void *udata)
 /* Log last instruction while checking registers, ignore next */
 static void vcpu_insn_exec_only_regs(unsigned int cpu_index, void *udata)
 {
-    CPU *cpu = get_cpu(cpu_index);
+    CPU *cpu = qemu_plugin_scoreboard_find(cpus, cpu_index);
 
     /* Print previous instruction in cache */
     if (cpu->last_exec->len) {
@@ -143,8 +140,8 @@ static void vcpu_insn_exec_only_regs(unsigned int cpu_index, void *udata)
             insn_check_regs(cpu);
         }
 
+        g_string_append_c(cpu->last_exec, '\n');
         qemu_plugin_outs(cpu->last_exec->str);
-        qemu_plugin_outs("\n");
     }
 
     /* reset */
@@ -154,12 +151,12 @@ static void vcpu_insn_exec_only_regs(unsigned int cpu_index, void *udata)
 /* Log last instruction without checking regs, setup next */
 static void vcpu_insn_exec(unsigned int cpu_index, void *udata)
 {
-    CPU *cpu = get_cpu(cpu_index);
+    CPU *cpu = qemu_plugin_scoreboard_find(cpus, cpu_index);
 
     /* Print previous instruction in cache */
     if (cpu->last_exec->len) {
+        g_string_append_c(cpu->last_exec, '\n');
         qemu_plugin_outs(cpu->last_exec->str);
-        qemu_plugin_outs("\n");
     }
 
     /* Store new instruction in cache */
@@ -174,7 +171,7 @@ static void vcpu_insn_exec(unsigned int cpu_index, void *udata)
  * QEMU convert code by translation block (TB). By hooking here we can then hook
  * a callback on each instruction and memory access.
  */
-static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
+static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 {
     struct qemu_plugin_insn *insn;
     bool skip = (imatches || amatches);
@@ -302,7 +299,7 @@ static Register *init_vcpu_register(qemu_plugin_reg_descriptor *desc)
 {
     Register *reg = g_new0(Register, 1);
     g_autofree gchar *lower = g_utf8_strdown(desc->name, -1);
-    int r;
+    bool success = false;
 
     reg->handle = desc->handle;
     reg->name = g_intern_string(lower);
@@ -310,8 +307,8 @@ static Register *init_vcpu_register(qemu_plugin_reg_descriptor *desc)
     reg->new = g_byte_array_new();
 
     /* read the initial value */
-    r = qemu_plugin_read_register(reg->handle, reg->last);
-    g_assert(r > 0);
+    success = qemu_plugin_read_register(reg->handle, reg->last);
+    g_assert(success);
     return reg;
 }
 
@@ -375,40 +372,47 @@ static GPtrArray *registers_init(int vcpu_index)
  *   - last_exec tracking data
  *   - list of tracked registers
  *   - initial value of registers
- *
- * As we could have multiple threads trying to do this we need to
- * serialise the expansion under a lock.
  */
-static void vcpu_init(qemu_plugin_id_t id, unsigned int vcpu_index)
+static void vcpu_init(unsigned int vcpu_index, void *userdata)
 {
-    CPU *c;
-
-    g_rw_lock_writer_lock(&expand_array_lock);
-    if (vcpu_index >= cpus->len) {
-        g_array_set_size(cpus, vcpu_index + 1);
-    }
-    g_rw_lock_writer_unlock(&expand_array_lock);
-
-    c = get_cpu(vcpu_index);
+    CPU *c = qemu_plugin_scoreboard_find(cpus, vcpu_index);
     c->last_exec = g_string_new(NULL);
     c->registers = registers_init(vcpu_index);
 }
 
 /**
- * On plugin exit, print last instruction in cache
+ * On vCPU exit, flush the last cached instruction for this vCPU.
+ *
+ * The one-instruction-delay pattern stores each instruction in last_exec and
+ * only prints it when the *next* callback fires. When a thread exits via
+ * syscall (e.g. ecall/exit), no subsequent callback fires for that vCPU and
+ * the final instruction is silently dropped. Flushing here guarantees it is
+ * written before the vCPU is torn down.
  */
-static void plugin_exit(qemu_plugin_id_t id, void *p)
+static void vcpu_exit(unsigned int vcpu_index, void *udata)
 {
-    guint i;
-    g_rw_lock_reader_lock(&expand_array_lock);
-    for (i = 0; i < cpus->len; i++) {
-        CPU *c = get_cpu(i);
-        if (c->last_exec && c->last_exec->str) {
+    CPU *c = qemu_plugin_scoreboard_find(cpus, vcpu_index);
+    if (c->last_exec && c->last_exec->len) {
+        g_string_append_c(c->last_exec, '\n');
+        qemu_plugin_outs(c->last_exec->str);
+        g_string_truncate(c->last_exec, 0);
+    }
+}
+
+/**
+ * On plugin exit, flush any remaining cached instructions and free state.
+ */
+static void plugin_exit(void *p)
+{
+    int n = qemu_plugin_num_vcpus();
+    for (int i = 0; i < n; i++) {
+        CPU *c = qemu_plugin_scoreboard_find(cpus, i);
+        if (c->last_exec && c->last_exec->len) {
+            g_string_append_c(c->last_exec, '\n');
             qemu_plugin_outs(c->last_exec->str);
-            qemu_plugin_outs("\n");
         }
     }
-    g_rw_lock_reader_unlock(&expand_array_lock);
+    qemu_plugin_scoreboard_free(cpus);
 }
 
 /* Add a match to the array of matches */
@@ -449,12 +453,8 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
                                            const qemu_info_t *info, int argc,
                                            char **argv)
 {
-    /*
-     * Initialize dynamic array to cache vCPU instruction. In user mode
-     * we don't know the size before emulation.
-     */
-    cpus = g_array_sized_new(true, true, sizeof(CPU),
-                             info->system_emulation ? info->system.max_vcpus : 1);
+    /* Initialize scoreboard to cache per-vCPU instruction state. */
+    cpus = qemu_plugin_scoreboard_new(sizeof(CPU));
 
     for (int i = 0; i < argc; i++) {
         char *opt = argv[i];
@@ -478,8 +478,9 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
     }
 
     /* Register init, translation block and exit callbacks */
-    qemu_plugin_register_vcpu_init_cb(id, vcpu_init);
-    qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
+    qemu_plugin_register_vcpu_init_cb(id, vcpu_init, NULL);
+    qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans, NULL);
+    qemu_plugin_register_vcpu_exit_cb(id, vcpu_exit, NULL);
     qemu_plugin_register_atexit_cb(id, plugin_exit, NULL);
 
     return 0;

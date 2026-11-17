@@ -801,7 +801,7 @@ class TestBlockdevReopen(iotests.QMPTestCase):
         # Now group1 is in use, it cannot be deleted
         result = self.vm.qmp('object-del', id = 'group1')
         self.assert_qmp(result, 'error/class', 'GenericError')
-        self.assert_qmp(result, 'error/desc', "object 'group1' is in use, can not be deleted")
+        self.assert_qmp(result, 'error/desc', "Cannot delete throttle group 'group1' with active references")
 
         # Default options, this switches the group back to group0
         self.reopen(opts)
@@ -809,7 +809,7 @@ class TestBlockdevReopen(iotests.QMPTestCase):
         # So now we cannot delete group0
         result = self.vm.qmp('object-del', id = 'group0')
         self.assert_qmp(result, 'error/class', 'GenericError')
-        self.assert_qmp(result, 'error/desc', "object 'group0' is in use, can not be deleted")
+        self.assert_qmp(result, 'error/desc', "Cannot delete throttle group 'group0' with active references")
 
         # But group1 is free this time, and it can be deleted
         self.vm.cmd('object-del', id = 'group1')

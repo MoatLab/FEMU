@@ -21,17 +21,17 @@
 #include "qemu/units.h"
 
 #include "elf.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/char/serial-mm.h"
 #include "hw/ide/pci.h"
 #include "hw/ide/ahci-pci.h"
-#include "hw/loader.h"
-#include "hw/loader-fit.h"
+#include "hw/core/loader.h"
+#include "hw/core/loader-fit.h"
 #include "hw/mips/bootloader.h"
 #include "hw/mips/cps.h"
 #include "hw/pci-host/xilinx-pcie.h"
-#include "hw/qdev-clock.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-clock.h"
+#include "hw/core/qdev-properties.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/guest-random.h"
@@ -68,7 +68,7 @@ struct BostonState {
     SerialMM *uart;
     Clock *cpuclk;
 
-    CharBackend lcd_display;
+    CharFrontend lcd_display;
     char lcd_content[8];
     bool lcd_inited;
 
@@ -778,7 +778,7 @@ static void boston_mach_init(MachineState *machine)
 
     if (machine->firmware) {
         fw_size = load_image_targphys(machine->firmware,
-                                      0x1fc00000, 4 * MiB);
+                                      0x1fc00000, 4 * MiB, NULL);
         if (fw_size == -1) {
             error_report("unable to load firmware image '%s'",
                           machine->firmware);

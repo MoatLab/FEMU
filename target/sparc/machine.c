@@ -1,8 +1,10 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "qemu/target-info.h"
 #include "qemu/timer.h"
 
 #include "migration/cpu.h"
+#include "migration/qemu-file-types.h"
 
 #ifdef TARGET_SPARC64
 static const VMStateDescription vmstate_cpu_timer = {
@@ -86,9 +88,13 @@ static int get_fsr(QEMUFile *f, void *opaque, size_t size,
                    const VMStateField *field)
 {
     SPARCCPU *cpu = opaque;
-    target_ulong val = qemu_get_betl(f);
 
-    cpu_put_fsr(&cpu->env, val);
+    if (target_long_bits() == 64) {
+        cpu_put_fsr(&cpu->env, qemu_get_be64(f));
+    } else {
+        cpu_put_fsr(&cpu->env, qemu_get_be32(f));
+    }
+
     return 0;
 }
 
@@ -96,9 +102,12 @@ static int put_fsr(QEMUFile *f, void *opaque, size_t size,
                    const VMStateField *field, JSONWriter *vmdesc)
 {
     SPARCCPU *cpu = opaque;
-    target_ulong val = cpu_get_fsr(&cpu->env);
 
-    qemu_put_betl(f, val);
+    if (target_long_bits() == 64) {
+        qemu_put_be64(f, cpu_get_fsr(&cpu->env));
+    } else {
+        qemu_put_be32(f, cpu_get_fsr(&cpu->env));
+    }
     return 0;
 }
 
@@ -142,6 +151,37 @@ static const VMStateInfo vmstate_xcc = {
     .get = get_xcc,
     .put = put_xcc,
 };
+
+static int get_cwp(QEMUFile *f, void *opaque, size_t size,
+                   const VMStateField *field)
+{
+    SPARCCPU *cpu = opaque;
+    CPUSPARCState *env = &cpu->env;
+    uint32_t val = qemu_get_be32(f);
+
+    /* needed to ensure that the wrapping registers are correctly updated */
+    env->cwp = 0;
+    cpu_set_cwp(env, val);
+
+    return 0;
+}
+
+static int put_cwp(QEMUFile *f, void *opaque, size_t size,
+                   const VMStateField *field, JSONWriter *vmdesc)
+{
+    SPARCCPU *cpu = opaque;
+    CPUSPARCState *env = &cpu->env;
+    uint32_t val = env->cwp;
+
+    qemu_put_be32(f, val);
+    return 0;
+}
+
+static const VMStateInfo vmstate_cwp = {
+    .name = "uint32",
+    .get = get_cwp,
+    .put = put_cwp,
+};
 #else
 static bool fq_needed(void *opaque)
 {
@@ -180,9 +220,9 @@ static int cpu_pre_save(void *opaque)
  * versions are different.
  */
 #ifndef TARGET_SPARC64
-#define SPARC_VMSTATE_VER 7
+#define SPARC_VMSTATE_VER 8
 #else
-#define SPARC_VMSTATE_VER 9
+#define SPARC_VMSTATE_VER 10
 #endif
 
 const VMStateDescription vmstate_sparc_cpu = {
@@ -193,8 +233,7 @@ const VMStateDescription vmstate_sparc_cpu = {
     .fields = (const VMStateField[]) {
         VMSTATE_UINTTL_ARRAY(env.gregs, SPARCCPU, 8),
         VMSTATE_UINT32(env.nwindows, SPARCCPU),
-        VMSTATE_VARRAY_MULTIPLY(env.regbase, SPARCCPU, env.nwindows, 16,
-                                vmstate_info_uinttl, target_ulong),
+        VMSTATE_UINTTL_ARRAY(env.regbase, SPARCCPU, MAX_NWINDOWS * 16 + 8),
         VMSTATE_CPUDOUBLE_ARRAY(env.fpr, SPARCCPU, TARGET_DPREGS),
         VMSTATE_UINTTL(env.pc, SPARCCPU),
         VMSTATE_UINTTL(env.npc, SPARCCPU),
@@ -278,7 +317,14 @@ const VMStateDescription vmstate_sparc_cpu = {
         VMSTATE_CPU_TIMER(env.hstick, SPARCCPU),
         /* On SPARC32 env.psrpil and env.cwp are migrated as part of the PSR */
         VMSTATE_UINT32(env.psrpil, SPARCCPU),
-        VMSTATE_UINT32(env.cwp, SPARCCPU),
+        {
+            .name = "env.cwp",
+            .version_id = 0,
+            .size = sizeof(uint32_t),
+            .info = &vmstate_cwp,
+            .flags = VMS_SINGLE,
+            .offset = 0,
+        },
 #endif
         VMSTATE_END_OF_LIST()
     },

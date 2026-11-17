@@ -62,7 +62,7 @@ static int xen_pt_hide_dev_cap(const XenHostPCIDevice *d, uint8_t grp_id)
 /*   find emulate register group entry */
 XenPTRegGroup *xen_pt_find_reg_grp(XenPCIPassthroughState *s, uint32_t address)
 {
-    XenPTRegGroup *entry = NULL;
+    XenPTRegGroup *entry;
 
     /* find register group entry */
     QLIST_FOREACH(entry, &s->reg_grps, entries) {
@@ -80,7 +80,7 @@ XenPTRegGroup *xen_pt_find_reg_grp(XenPCIPassthroughState *s, uint32_t address)
 /* find emulate register entry */
 XenPTReg *xen_pt_find_reg(XenPTRegGroup *reg_grp, uint32_t address)
 {
-    XenPTReg *reg_entry = NULL;
+    XenPTReg *reg_entry;
     XenPTRegInfo *reg = NULL;
     uint32_t real_offset = 0;
 

@@ -86,6 +86,8 @@ enum {
     OPTION_BITMAPS = 275,
     OPTION_FORCE = 276,
     OPTION_SKIP_BROKEN = 277,
+    OPTION_LIMITS = 278,
+    OPTION_REMOVE_ALL = 279,
 };
 
 typedef enum OutputFormat {
@@ -2243,7 +2245,7 @@ static int img_convert(const img_cmd_t *ccmd, int argc, char **argv)
     Error *local_err = NULL;
     bool writethrough, src_writethrough, image_opts = false,
          skip_create = false, progress = false, tgt_image_opts = false;
-    int64_t ret = -EINVAL;
+    int64_t ret = -EINVAL, ret2;
     bool force_share = false;
     bool explict_min_sparse = false;
     bool bitmaps = false;
@@ -2870,6 +2872,12 @@ static int img_convert(const img_cmd_t *ccmd, int argc, char **argv)
         ret = convert_copy_bitmaps(blk_bs(s.src[0]), out_bs, skip_broken);
     }
 
+    ret2 = blk_flush(s.target);
+    if (ret2 < 0) {
+        error_report("Failed to flush target image: %s", strerror(-ret2));
+        ret = ret != 0 ? ret : ret2;
+    }
+
 out:
     if (!ret) {
         qemu_progress_print(100, 0);
@@ -3002,12 +3010,23 @@ static gboolean str_equal_func(gconstpointer a, gconstpointer b)
 static BlockGraphInfoList *collect_image_info_list(bool image_opts,
                                                    const char *filename,
                                                    const char *fmt,
-                                                   bool chain, bool force_share)
+                                                   const char *cache,
+                                                   bool chain, bool limits,
+                                                   bool force_share)
 {
     BlockGraphInfoList *head = NULL;
     BlockGraphInfoList **tail = &head;
     GHashTable *filenames;
     Error *err = NULL;
+    int cache_flags = 0;
+    bool writethrough = false;
+    int ret;
+
+    ret = bdrv_parse_cache_mode(cache, &cache_flags, &writethrough);
+    if (ret < 0) {
+        error_report("Invalid cache option: %s", cache);
+        return NULL;
+    }
 
     filenames = g_hash_table_new_full(g_str_hash, str_equal_func, NULL, NULL);
 
@@ -3024,8 +3043,8 @@ static BlockGraphInfoList *collect_image_info_list(bool image_opts,
         g_hash_table_insert(filenames, (gpointer)filename, NULL);
 
         blk = img_open(image_opts, filename, fmt,
-                       BDRV_O_NO_BACKING | BDRV_O_NO_IO, false, false,
-                       force_share);
+                       BDRV_O_NO_BACKING | BDRV_O_NO_IO | cache_flags,
+                       writethrough, false, force_share);
         if (!blk) {
             goto err;
         }
@@ -3039,7 +3058,7 @@ static BlockGraphInfoList *collect_image_info_list(bool image_opts,
          * the chain manually here.
          */
         bdrv_graph_rdlock_main_loop();
-        bdrv_query_block_graph_info(bs, &info, &err);
+        bdrv_query_block_graph_info(bs, &info, limits, &err);
         bdrv_graph_rdunlock_main_loop();
 
         if (err) {
@@ -3085,9 +3104,11 @@ static int img_info(const img_cmd_t *ccmd, int argc, char **argv)
     OutputFormat output_format = OFORMAT_HUMAN;
     bool chain = false;
     const char *filename, *fmt;
+    const char *cache = BDRV_DEFAULT_CACHE;
     BlockGraphInfoList *list;
     bool image_opts = false;
     bool force_share = false;
+    bool limits = false;
 
     fmt = NULL;
     for(;;) {
@@ -3096,12 +3117,14 @@ static int img_info(const img_cmd_t *ccmd, int argc, char **argv)
             {"format", required_argument, 0, 'f'},
             {"image-opts", no_argument, 0, OPTION_IMAGE_OPTS},
             {"backing-chain", no_argument, 0, OPTION_BACKING_CHAIN},
+            {"cache", required_argument, 0, 't'},
             {"force-share", no_argument, 0, 'U'},
+            {"limits", no_argument, 0, OPTION_LIMITS},
             {"output", required_argument, 0, OPTION_OUTPUT},
             {"object", required_argument, 0, OPTION_OBJECT},
             {0, 0, 0, 0}
         };
-        c = getopt_long(argc, argv, "hf:U", long_options, NULL);
+        c = getopt_long(argc, argv, "hf:t:U", long_options, NULL);
         if (c == -1) {
             break;
         }
@@ -3117,8 +3140,12 @@ static int img_info(const img_cmd_t *ccmd, int argc, char **argv)
 "     (incompatible with -f|--format)\n"
 "  --backing-chain\n"
 "     display information about the backing chain for copy-on-write overlays\n"
+"  -t, --cache CACHE\n"
+"     cache mode for FILE (default: " BDRV_DEFAULT_CACHE ")\n"
 "  -U, --force-share\n"
 "     open image in shared mode for concurrent access\n"
+"  --limits\n"
+"     show detected block limits (may depend on options, e.g. cache mode)\n"
 "  --output human|json\n"
 "     specify output format (default: human)\n"
 "  --object OBJDEF\n"
@@ -3137,8 +3164,14 @@ static int img_info(const img_cmd_t *ccmd, int argc, char **argv)
         case OPTION_BACKING_CHAIN:
             chain = true;
             break;
+        case 't':
+            cache = optarg;
+            break;
         case 'U':
             force_share = true;
+            break;
+        case OPTION_LIMITS:
+            limits = true;
             break;
         case OPTION_OUTPUT:
             output_format = parse_output_format(argv[0], optarg);
@@ -3155,8 +3188,8 @@ static int img_info(const img_cmd_t *ccmd, int argc, char **argv)
     }
     filename = argv[optind++];
 
-    list = collect_image_info_list(image_opts, filename, fmt, chain,
-                                   force_share);
+    list = collect_image_info_list(image_opts, filename, fmt, cache, chain,
+                                   limits, force_share);
     if (!list) {
         return 1;
     }
@@ -4055,7 +4088,7 @@ static int img_rebase(const img_cmd_t *ccmd, int argc, char **argv)
             n += offset - QEMU_ALIGN_DOWN(offset, write_align);
             offset = QEMU_ALIGN_DOWN(offset, write_align);
             n += QEMU_ALIGN_UP(offset + n, write_align) - (offset + n);
-            n = MIN(n, size - offset);
+            n = MIN(n, MIN(size - offset, IO_BUF_SIZE));
             assert(!bdrv_is_allocated(unfiltered_bs, offset, n, &n_alloc) &&
                    n_alloc == n);
 
@@ -4571,9 +4604,9 @@ static int img_amend(const img_cmd_t *ccmd, int argc, char **argv)
     amend_opts = qemu_opts_append(amend_opts, bs->drv->amend_opts);
     opts = qemu_opts_create(amend_opts, NULL, 0, &error_abort);
     if (!qemu_opts_do_parse(opts, options, NULL, &err)) {
+        qemu_opts_del(opts);
         /* Try to parse options using the create options */
         amend_opts = qemu_opts_append(amend_opts, bs->drv->create_opts);
-        qemu_opts_del(opts);
         opts = qemu_opts_create(amend_opts, NULL, 0, &error_abort);
         if (qemu_opts_do_parse(opts, options, NULL, NULL)) {
             error_append_hint(&err,
@@ -4992,6 +5025,7 @@ enum ImgBitmapAct {
     BITMAP_ENABLE,
     BITMAP_DISABLE,
     BITMAP_MERGE,
+    BITMAP_REMOVE_ALL,
 };
 typedef struct ImgBitmapAction {
     enum ImgBitmapAct act;
@@ -5010,7 +5044,7 @@ static int img_bitmap(const img_cmd_t *ccmd, int argc, char **argv)
     BlockDriverState *bs = NULL, *src_bs = NULL;
     bool image_opts = false;
     int64_t granularity = 0;
-    bool add = false, merge = false;
+    bool add = false, merge = false, need_bitmap_name = false;
     QSIMPLEQ_HEAD(, ImgBitmapAction) actions;
     ImgBitmapAction *act, *act_next;
     const char *op;
@@ -5026,6 +5060,7 @@ static int img_bitmap(const img_cmd_t *ccmd, int argc, char **argv)
             {"add", no_argument, 0, OPTION_ADD},
             {"granularity", required_argument, 0, 'g'},
             {"remove", no_argument, 0, OPTION_REMOVE},
+            {"remove-all", no_argument, 0, OPTION_REMOVE_ALL},
             {"clear", no_argument, 0, OPTION_CLEAR},
             {"enable", no_argument, 0, OPTION_ENABLE},
             {"disable", no_argument, 0, OPTION_DISABLE},
@@ -5044,9 +5079,9 @@ static int img_bitmap(const img_cmd_t *ccmd, int argc, char **argv)
         switch (c) {
         case 'h':
             cmd_help(ccmd, "[-f FMT | --image-opts]\n"
-"        ( --add [-g SIZE] | --remove | --clear | --enable | --disable |\n"
-"          --merge SOURCE [-b SRC_FILE [-F SRC_FMT]] )..\n"
-"        [--object OBJDEF] FILE BITMAP\n"
+"        ( --add [-g SIZE] | --remove | --remove-all | --clear | --enable |\n"
+"          --disable | --merge SOURCE [-b SRC_FILE [-F SRC_FMT]] )..\n"
+"        [--object OBJDEF] FILE [BITMAP]\n"
 ,
 "  -f, --format FMT\n"
 "     specify FILE format explicitly (default: probing is used)\n"
@@ -5060,6 +5095,8 @@ static int img_bitmap(const img_cmd_t *ccmd, int argc, char **argv)
 "     with optional multiplier suffix (in powers of 1024)\n"
 "  --remove\n"
 "     removes BITMAP from FILE\n"
+"  --remove-all\n"
+"     removes all bitmaps from FILE\n"
 "  --clear\n"
 "     clears BITMAP in FILE\n"
 "  --enable, --disable\n"
@@ -5090,6 +5127,7 @@ static int img_bitmap(const img_cmd_t *ccmd, int argc, char **argv)
             act->act = BITMAP_ADD;
             QSIMPLEQ_INSERT_TAIL(&actions, act, next);
             add = true;
+            need_bitmap_name = true;
             break;
         case 'g':
             granularity = cvtnum("granularity", optarg, true);
@@ -5101,21 +5139,30 @@ static int img_bitmap(const img_cmd_t *ccmd, int argc, char **argv)
             act = g_new0(ImgBitmapAction, 1);
             act->act = BITMAP_REMOVE;
             QSIMPLEQ_INSERT_TAIL(&actions, act, next);
+            need_bitmap_name = true;
+            break;
+        case OPTION_REMOVE_ALL:
+            act = g_new0(ImgBitmapAction, 1);
+            act->act = BITMAP_REMOVE_ALL;
+            QSIMPLEQ_INSERT_TAIL(&actions, act, next);
             break;
         case OPTION_CLEAR:
             act = g_new0(ImgBitmapAction, 1);
             act->act = BITMAP_CLEAR;
             QSIMPLEQ_INSERT_TAIL(&actions, act, next);
+            need_bitmap_name = true;
             break;
         case OPTION_ENABLE:
             act = g_new0(ImgBitmapAction, 1);
             act->act = BITMAP_ENABLE;
             QSIMPLEQ_INSERT_TAIL(&actions, act, next);
+            need_bitmap_name = true;
             break;
         case OPTION_DISABLE:
             act = g_new0(ImgBitmapAction, 1);
             act->act = BITMAP_DISABLE;
             QSIMPLEQ_INSERT_TAIL(&actions, act, next);
+            need_bitmap_name = true;
             break;
         case OPTION_MERGE:
             act = g_new0(ImgBitmapAction, 1);
@@ -5123,6 +5170,7 @@ static int img_bitmap(const img_cmd_t *ccmd, int argc, char **argv)
             act->src = optarg;
             QSIMPLEQ_INSERT_TAIL(&actions, act, next);
             merge = true;
+            need_bitmap_name = true;
             break;
         case 'b':
             src_filename = optarg;
@@ -5139,8 +5187,8 @@ static int img_bitmap(const img_cmd_t *ccmd, int argc, char **argv)
     }
 
     if (QSIMPLEQ_EMPTY(&actions)) {
-        error_report("Need at least one of --add, --remove, --clear, "
-                     "--enable, --disable, or --merge");
+        error_report("Need at least one of --add, --remove, --remove-all, "
+                     "--clear, --enable, --disable, or --merge");
         goto out;
     }
 
@@ -5158,8 +5206,19 @@ static int img_bitmap(const img_cmd_t *ccmd, int argc, char **argv)
         goto out;
     }
 
-    if (optind != argc - 2) {
+    if (need_bitmap_name && optind != argc - 2) {
         error_report("Expecting filename and bitmap name");
+        goto out;
+    }
+
+    /*
+     * Every action other than --remove-all sets need_bitmap_name, so
+     * !need_bitmap_name means the only action(s) given were --remove-all
+     * and the BITMAP positional argument must be omitted. Combinations
+     * like '--remove-all --add foo' remain valid via the branch above.
+     */
+    if (!need_bitmap_name && optind != argc - 1) {
+        error_report("Expecting filename");
         goto out;
     }
 
@@ -5199,6 +5258,20 @@ static int img_bitmap(const img_cmd_t *ccmd, int argc, char **argv)
             qmp_block_dirty_bitmap_remove(bs->node_name, bitmap, &err);
             op = "remove";
             break;
+        case BITMAP_REMOVE_ALL: {
+            BdrvDirtyBitmap *bm;
+            while ((bm = bdrv_dirty_bitmap_first(bs))) {
+                const char *name = bdrv_dirty_bitmap_name(bm);
+                qmp_block_dirty_bitmap_remove(bs->node_name, name, &err);
+                if (err) {
+                    /* Save name for proper error reporting */
+                    bitmap = name;
+                    break;
+                }
+            }
+            op = "remove-all";
+            break;
+        }
         case BITMAP_CLEAR:
             qmp_block_dirty_bitmap_clear(bs->node_name, bitmap, &err);
             op = "clear";

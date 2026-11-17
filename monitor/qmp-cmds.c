@@ -84,6 +84,9 @@ void qmp_cont(Error **errp)
     } else if (runstate_check(RUN_STATE_FINISH_MIGRATE)) {
         error_setg(errp, "Migration is not finalized yet");
         return;
+    } else if (runstate_check(RUN_STATE_COLO)) {
+        error_setg(errp, "COLO checkpoint in progress");
+        return;
     }
 
     for (blk = blk_next(NULL); blk; blk = blk_next(blk)) {
@@ -163,12 +166,10 @@ char *qmp_human_monitor_command(const char *command_line, bool has_cpu_index,
                                 int64_t cpu_index, Error **errp)
 {
     char *output = NULL;
-    MonitorHMP hmp = {};
-
-    monitor_data_init(&hmp.common, false, true, false);
+    MonitorHMP *hmp = MONITOR_HMP(object_new(TYPE_MONITOR_HMP));
 
     if (has_cpu_index) {
-        int ret = monitor_set_cpu(&hmp.common, cpu_index);
+        int ret = monitor_set_cpu(&hmp->parent_obj, cpu_index);
         if (ret < 0) {
             error_setg(errp, QERR_INVALID_PARAMETER_VALUE, "cpu-index",
                        "a CPU number");
@@ -176,14 +177,14 @@ char *qmp_human_monitor_command(const char *command_line, bool has_cpu_index,
         }
     }
 
-    handle_hmp_command(&hmp, command_line);
+    handle_hmp_command(hmp, command_line);
 
-    WITH_QEMU_LOCK_GUARD(&hmp.common.mon_lock) {
-        output = g_strdup(hmp.common.outbuf->str);
+    WITH_QEMU_LOCK_GUARD(&hmp->parent_obj.mon_lock) {
+        output = g_strdup(hmp->parent_obj.outbuf->str);
     }
 
 out:
-    monitor_data_destroy(&hmp.common);
+    object_unref(hmp);
     return output;
 }
 

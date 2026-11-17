@@ -27,7 +27,9 @@
 #include "qemu/error-report.h"
 #include "hw/i386/pc.h"
 #include "exec/target_page.h"
-#include "cpu.h"
+#include "target/i386/cpu.h"
+#include "target/i386/sev.h"
+#include "kvm/tdx.h"
 
 #define OVMF_TABLE_FOOTER_GUID "96b582de-1fb2-45f7-baea-a366c55a082d"
 
@@ -159,4 +161,35 @@ bool pc_system_ovmf_table_find(const char *entry, uint8_t **data,
         }
     }
     return false;
+}
+
+void x86_firmware_configure(hwaddr gpa, void *ptr, int size)
+{
+    int ret;
+
+    /*
+     * OVMF places a GUIDed structures in the flash, so
+     * search for them
+     */
+    pc_system_parse_ovmf_flash(ptr, size);
+
+    if (sev_enabled()) {
+
+        /* Copy the SEV metadata table (if it exists) */
+        pc_system_parse_sev_metadata(ptr, size);
+
+        ret = sev_es_save_reset_vector(ptr, size);
+        if (ret) {
+            error_report("failed to locate and/or save reset vector");
+            exit(1);
+        }
+
+        sev_encrypt_flash(gpa, ptr, size, &error_fatal);
+    } else if (is_tdx_vm()) {
+        ret = tdx_parse_tdvf(ptr, size);
+        if (ret) {
+            error_report("failed to parse TDVF for TDX VM");
+            exit(1);
+        }
+    }
 }

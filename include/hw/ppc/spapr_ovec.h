@@ -37,7 +37,7 @@
 #ifndef SPAPR_OVEC_H
 #define SPAPR_OVEC_H
 
-#include "cpu.h"
+#include "exec/target_long.h"
 
 typedef struct SpaprOptionVector SpaprOptionVector;
 

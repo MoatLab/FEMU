@@ -13,10 +13,10 @@
 #include "hw/misc/aspeed_scu.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "trace.h"
-#include "hw/registerfields.h"
+#include "hw/core/registerfields.h"
 
 #define GPIOS_PER_GROUP 8
 
@@ -1308,6 +1308,57 @@ static void aspeed_gpio_2700_write(void *opaque, hwaddr offset,
 }
 
 /* Setup functions */
+static void aspeed_gpio_set_set(Object *obj, Visitor *v,
+                                        const char *name, void *opaque,
+                                        Error **errp)
+{
+    uint32_t set_val = 0;
+    AspeedGPIOState *s = ASPEED_GPIO(obj);
+    AspeedGPIOClass *agc = ASPEED_GPIO_GET_CLASS(s);
+    int set_idx = 0;
+
+    if (!visit_type_uint32(v, name, &set_val, errp)) {
+        return;
+    }
+
+    if (sscanf(name, "gpio-set[%d]", &set_idx) != 1) {
+        error_setg(errp, "%s: error reading %s", __func__, name);
+        return;
+    }
+
+    if (set_idx >= agc->nr_gpio_sets || set_idx < 0) {
+        error_setg(errp, "%s: invalid set_idx %s", __func__, name);
+        return;
+    }
+
+    aspeed_gpio_update(s, &s->sets[set_idx], set_val,
+                       ~s->sets[set_idx].direction);
+}
+
+static void aspeed_gpio_get_set(Object *obj, Visitor *v,
+                                        const char *name, void *opaque,
+                                        Error **errp)
+{
+    uint32_t set_val = 0;
+    AspeedGPIOState *s = ASPEED_GPIO(obj);
+    AspeedGPIOClass *agc = ASPEED_GPIO_GET_CLASS(s);
+    int set_idx = 0;
+
+    if (sscanf(name, "gpio-set[%d]", &set_idx) != 1) {
+        error_setg(errp, "%s: error reading %s", __func__, name);
+        return;
+    }
+
+    if (set_idx >= agc->nr_gpio_sets || set_idx < 0) {
+        error_setg(errp, "%s: invalid set_idx %s", __func__, name);
+        return;
+    }
+
+    set_val = s->sets[set_idx].data_value;
+    visit_type_uint32(v, name, &set_val, errp);
+}
+
+/****************** Setup functions ******************/
 static const GPIOSetProperties ast2400_set_props[ASPEED_GPIO_MAX_NR_SETS] = {
     [0] = {0xffffffff,  0xffffffff,  {"A", "B", "C", "D"} },
     [1] = {0xffffffff,  0xffffffff,  {"E", "F", "G", "H"} },
@@ -1379,9 +1430,9 @@ static const MemoryRegionOps aspeed_gpio_2700_ops = {
     .valid.max_access_size = 4,
 };
 
-static void aspeed_gpio_reset(DeviceState *dev)
+static void aspeed_gpio_reset_hold(Object *obj, ResetType type)
 {
-    AspeedGPIOState *s = ASPEED_GPIO(dev);
+    AspeedGPIOState *s = ASPEED_GPIO(obj);
 
     /* TODO: respect the reset tolerance registers */
     memset(s->sets, 0, sizeof(s->sets));
@@ -1435,6 +1486,12 @@ static void aspeed_gpio_init(Object *obj)
             g_free(name);
         }
     }
+
+    for (int i = 0; i < agc->nr_gpio_sets; i++) {
+        g_autofree char *name = g_strdup_printf("gpio-set[%d]", i);
+        object_property_add(obj, name, "uint32", aspeed_gpio_get_set,
+        aspeed_gpio_set_set, NULL, NULL);
+    }
 }
 
 static const VMStateDescription vmstate_gpio_regs = {
@@ -1476,9 +1533,10 @@ static const VMStateDescription vmstate_aspeed_gpio = {
 static void aspeed_gpio_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->realize = aspeed_gpio_realize;
-    device_class_set_legacy_reset(dc, aspeed_gpio_reset);
+    rc->phases.hold = aspeed_gpio_reset_hold;
     dc->desc = "Aspeed GPIO Controller";
     dc->vmsd = &vmstate_aspeed_gpio;
 }
@@ -1562,66 +1620,51 @@ static void aspeed_gpio_2700_class_init(ObjectClass *klass, const void *data)
     agc->reg_ops = &aspeed_gpio_2700_ops;
 }
 
-static const TypeInfo aspeed_gpio_info = {
-    .name           = TYPE_ASPEED_GPIO,
-    .parent         = TYPE_SYS_BUS_DEVICE,
-    .instance_size  = sizeof(AspeedGPIOState),
-    .class_size     = sizeof(AspeedGPIOClass),
-    .class_init     = aspeed_gpio_class_init,
-    .abstract       = true,
+static const TypeInfo aspeed_gpio_types[] = {
+    {
+        .name           = TYPE_ASPEED_GPIO,
+        .parent         = TYPE_SYS_BUS_DEVICE,
+        .instance_size  = sizeof(AspeedGPIOState),
+        .class_size     = sizeof(AspeedGPIOClass),
+        .class_init     = aspeed_gpio_class_init,
+        .abstract       = true,
+    },
+    {
+        .name           = TYPE_ASPEED_GPIO "-ast1030",
+        .parent         = TYPE_ASPEED_GPIO,
+        .class_init     = aspeed_gpio_1030_class_init,
+        .instance_init  = aspeed_gpio_init,
+    },
+    {
+        .name           = TYPE_ASPEED_GPIO "-ast2400",
+        .parent         = TYPE_ASPEED_GPIO,
+        .class_init     = aspeed_gpio_ast2400_class_init,
+        .instance_init  = aspeed_gpio_init,
+    },
+    {
+        .name           = TYPE_ASPEED_GPIO "-ast2500",
+        .parent         = TYPE_ASPEED_GPIO,
+        .class_init     = aspeed_gpio_2500_class_init,
+        .instance_init  = aspeed_gpio_init,
+    },
+    {
+        .name           = TYPE_ASPEED_GPIO "-ast2600",
+        .parent         = TYPE_ASPEED_GPIO,
+        .class_init     = aspeed_gpio_ast2600_3_3v_class_init,
+        .instance_init  = aspeed_gpio_init,
+    },
+    {
+        .name           = TYPE_ASPEED_GPIO "-ast2600-1_8v",
+        .parent         = TYPE_ASPEED_GPIO,
+        .class_init     = aspeed_gpio_ast2600_1_8v_class_init,
+        .instance_init  = aspeed_gpio_init,
+    },
+    {
+        .name           = TYPE_ASPEED_GPIO "-ast2700",
+        .parent         = TYPE_ASPEED_GPIO,
+        .class_init     = aspeed_gpio_2700_class_init,
+        .instance_init  = aspeed_gpio_init,
+    }
 };
 
-static const TypeInfo aspeed_gpio_ast2400_info = {
-    .name           = TYPE_ASPEED_GPIO "-ast2400",
-    .parent         = TYPE_ASPEED_GPIO,
-    .class_init     = aspeed_gpio_ast2400_class_init,
-    .instance_init  = aspeed_gpio_init,
-};
-
-static const TypeInfo aspeed_gpio_ast2500_info = {
-    .name           = TYPE_ASPEED_GPIO "-ast2500",
-    .parent         = TYPE_ASPEED_GPIO,
-    .class_init     = aspeed_gpio_2500_class_init,
-    .instance_init  = aspeed_gpio_init,
-};
-
-static const TypeInfo aspeed_gpio_ast2600_3_3v_info = {
-    .name           = TYPE_ASPEED_GPIO "-ast2600",
-    .parent         = TYPE_ASPEED_GPIO,
-    .class_init     = aspeed_gpio_ast2600_3_3v_class_init,
-    .instance_init  = aspeed_gpio_init,
-};
-
-static const TypeInfo aspeed_gpio_ast2600_1_8v_info = {
-    .name           = TYPE_ASPEED_GPIO "-ast2600-1_8v",
-    .parent         = TYPE_ASPEED_GPIO,
-    .class_init     = aspeed_gpio_ast2600_1_8v_class_init,
-    .instance_init  = aspeed_gpio_init,
-};
-
-static const TypeInfo aspeed_gpio_ast1030_info = {
-    .name           = TYPE_ASPEED_GPIO "-ast1030",
-    .parent         = TYPE_ASPEED_GPIO,
-    .class_init     = aspeed_gpio_1030_class_init,
-    .instance_init  = aspeed_gpio_init,
-};
-
-static const TypeInfo aspeed_gpio_ast2700_info = {
-    .name           = TYPE_ASPEED_GPIO "-ast2700",
-    .parent         = TYPE_ASPEED_GPIO,
-    .class_init     = aspeed_gpio_2700_class_init,
-    .instance_init  = aspeed_gpio_init,
-};
-
-static void aspeed_gpio_register_types(void)
-{
-    type_register_static(&aspeed_gpio_info);
-    type_register_static(&aspeed_gpio_ast2400_info);
-    type_register_static(&aspeed_gpio_ast2500_info);
-    type_register_static(&aspeed_gpio_ast2600_3_3v_info);
-    type_register_static(&aspeed_gpio_ast2600_1_8v_info);
-    type_register_static(&aspeed_gpio_ast1030_info);
-    type_register_static(&aspeed_gpio_ast2700_info);
-}
-
-type_init(aspeed_gpio_register_types);
+DEFINE_TYPES(aspeed_gpio_types)

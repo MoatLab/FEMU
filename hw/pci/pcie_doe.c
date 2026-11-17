@@ -78,14 +78,21 @@ static bool pcie_doe_discovery(DOECap *doe_cap)
     return true;
 }
 
+static void pcie_doe_reset_write_mbox(DOECap *st)
+{
+    st->write_mbox_len = 0;
+
+    memset(st->write_mbox, 0, PCI_DOE_DW_SIZE_MAX * DWORD_BYTE);
+}
+
 static void pcie_doe_reset_mbox(DOECap *st)
 {
     st->read_mbox_idx = 0;
     st->read_mbox_len = 0;
-    st->write_mbox_len = 0;
 
     memset(st->read_mbox, 0, PCI_DOE_DW_SIZE_MAX * DWORD_BYTE);
-    memset(st->write_mbox, 0, PCI_DOE_DW_SIZE_MAX * DWORD_BYTE);
+
+    pcie_doe_reset_write_mbox(st);
 }
 
 void pcie_doe_init(PCIDevice *dev, DOECap *doe_cap, uint16_t offset,
@@ -356,8 +363,20 @@ void pcie_doe_write_config(DOECap *doe_cap,
         if (size != DWORD_BYTE) {
             return;
         }
-        doe_cap->write_mbox[doe_cap->write_mbox_len] = val;
-        doe_cap->write_mbox_len++;
+        if (doe_cap->write_mbox_len < PCI_DOE_DW_SIZE_MAX) {
+            doe_cap->write_mbox[doe_cap->write_mbox_len] = val;
+            doe_cap->write_mbox_len++;
+        } else {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "Mailbox write length (%d) overflow\n",
+                          doe_cap->write_mbox_len);
+            /*
+             * Too much data has been written, it can't
+             * "match the Length indicated in DOE Data Object Header 2"
+             * so we drop the entire object.
+             */
+            pcie_doe_reset_write_mbox(doe_cap);
+        }
         break;
     case PCI_EXP_DOE_CAP:
         /* fallthrough */

@@ -24,10 +24,10 @@
 
 #include "qemu/osdep.h"
 #include "qemu/option.h"
-#include "cpu.h"
+#include "target/i386/cpu.h"
 #include "hw/nvram/fw_cfg.h"
 #include "multiboot.h"
-#include "hw/loader.h"
+#include "hw/core/loader.h"
 #include "elf.h"
 #include "exec/target_page.h"
 #include "system/system.h"
@@ -153,7 +153,6 @@ int load_multiboot(X86MachineState *x86ms,
                    int kernel_file_size,
                    uint8_t *header)
 {
-    bool multiboot_dma_enabled = X86_MACHINE_GET_CLASS(x86ms)->fwcfg_dma_enabled;
     int i, is_multiboot = 0;
     uint32_t flags = 0;
     uint32_t mh_entry_addr;
@@ -337,7 +336,7 @@ int load_multiboot(X86MachineState *x86ms,
                 *next_space = '\0';
             }
             mb_debug("multiboot loading module: %s", one_file);
-            mb_mod_length = get_image_size(one_file);
+            mb_mod_length = get_image_size(one_file, NULL);
             if (mb_mod_length < 0) {
                 error_report("Failed to open file '%s'", one_file);
                 exit(1);
@@ -402,11 +401,7 @@ int load_multiboot(X86MachineState *x86ms,
     fw_cfg_add_bytes(fw_cfg, FW_CFG_INITRD_DATA, mb_bootinfo_data,
                      sizeof(bootinfo));
 
-    if (multiboot_dma_enabled) {
-        option_rom[nb_option_roms].name = "multiboot_dma.bin";
-    } else {
-        option_rom[nb_option_roms].name = "multiboot.bin";
-    }
+    option_rom[nb_option_roms].name = "multiboot_dma.bin";
     option_rom[nb_option_roms].bootindex = 0;
     nb_option_roms++;
 

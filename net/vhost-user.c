@@ -65,7 +65,7 @@ static const int user_feature_bits[] = {
 
 typedef struct NetVhostUserState {
     NetClientState nc;
-    CharBackend chr; /* only queue index 0 */
+    CharFrontend chr; /* only queue index 0 */
     VhostUserState *vhost_user;
     VHostNetState *vhost_net;
     guint watch;
@@ -215,10 +215,7 @@ static void net_vhost_user_cleanup(NetClientState *nc)
         s->vhost_net = NULL;
     }
     if (nc->queue_index == 0) {
-        if (s->watch) {
-            g_source_remove(s->watch);
-            s->watch = 0;
-        }
+        g_clear_handle_id(&s->watch, g_source_remove);
         qemu_chr_fe_deinit(&s->chr, true);
         if (s->vhost_user) {
             vhost_user_cleanup(s->vhost_user);
@@ -356,8 +353,7 @@ static void net_vhost_user_event(void *opaque, QEMUChrEvent event)
         if (s->watch) {
             AioContext *ctx = qemu_get_current_aio_context();
 
-            g_source_remove(s->watch);
-            s->watch = 0;
+            g_clear_handle_id(&s->watch, g_source_remove);
             qemu_chr_fe_set_handlers(&s->chr, NULL, NULL, NULL, NULL,
                                      NULL, NULL, false);
 

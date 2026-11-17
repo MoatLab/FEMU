@@ -19,9 +19,17 @@
 #ifndef RISCV_NUMA_H
 #define RISCV_NUMA_H
 
-#include "hw/boards.h"
-#include "hw/sysbus.h"
+#include "hw/core/boards.h"
+#include "hw/core/sysbus.h"
 #include "system/numa.h"
+
+/**
+ * riscv_numa_enabled:
+ * @ms: pointer to machine state
+ *
+ * Returns: true if NUMA is enabled in the machine state.
+ */
+bool riscv_numa_enabled(const MachineState *ms);
 
 /**
  * riscv_socket_count:

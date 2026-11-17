@@ -1,0 +1,51 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+missing=0
+present=0
+
+grep -E '^(R|M):' MAINTAINERS | \
+sed -E -e 's/^(M|R): //' -e 's/ <.*//' | \
+sort | uniq > names.txt
+while IFS= read -r NAME
+do
+  grep "$NAME" .gitlab-map-{auto,manual} > /dev/null
+  if test $? != 0
+  then
+    echo "Missing GitLab handle for maintainer '$NAME'"
+    missing=$(($missing + 1))
+  else
+    present=$(($present + 1))
+  fi
+done < names.txt
+rm -f names.txt
+
+echo "GitLab handles missing: $missing / present: $present"
+
+# .gitlab-map-manual is to provide alternate real names
+# for cases where name in MAINTAINERS does not match
+# the GitLab account real name. As such...
+
+# ...all gitlab handles in .gitlab-map-manual must also exist
+# in .gitlab-map-auto and ....
+for HANDLE in $(grep -v '^#' .gitlab-map-manual | awk '{print $1}')
+do
+    grep -E "^$HANDLE\s" .gitlab-map-auto >/dev/null
+    if test $? != 0
+    then
+	echo "Unexpected GitLab handle '$HANDLE' is not a member"
+    fi
+done
+
+# ...and all realnames in .gitlab-map-manual must also
+# exist in MAINTAINERS
+grep -v '^#' .gitlab-map-manual | \
+awk '{ $1 = ""; print substr($0, 2) }' | \
+while IFS= read -r NAME
+do
+    grep -E "\s$NAME\s" MAINTAINERS >/dev/null
+    if test $? != 0
+    then
+	echo "Unexpected real name '$NAME' is not a maintainer"
+    fi
+done

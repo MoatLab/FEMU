@@ -229,17 +229,20 @@ uint32_t cpu_mips_get_random(CPUMIPSState *env)
 /* CP0 helpers */
 target_ulong helper_mfc0_mvpcontrol(CPUMIPSState *env)
 {
-    return env->mvp->CP0_MVPControl;
+    MIPSCPU *cpu = env_archcpu(env);
+    return cpu->mvp->CP0_MVPControl;
 }
 
 target_ulong helper_mfc0_mvpconf0(CPUMIPSState *env)
 {
-    return env->mvp->CP0_MVPConf0;
+    MIPSCPU *cpu = env_archcpu(env);
+    return cpu->mvp->CP0_MVPConf0;
 }
 
 target_ulong helper_mfc0_mvpconf1(CPUMIPSState *env)
 {
-    return env->mvp->CP0_MVPConf1;
+    MIPSCPU *cpu = env_archcpu(env);
+    return cpu->mvp->CP0_MVPConf1;
 }
 
 target_ulong helper_mfc0_random(CPUMIPSState *env)
@@ -514,6 +517,7 @@ void helper_mtc0_index(CPUMIPSState *env, target_ulong arg1)
 
 void helper_mtc0_mvpcontrol(CPUMIPSState *env, target_ulong arg1)
 {
+    MIPSCPU *cpu = env_archcpu(env);
     uint32_t mask = 0;
     uint32_t newval;
 
@@ -521,14 +525,14 @@ void helper_mtc0_mvpcontrol(CPUMIPSState *env, target_ulong arg1)
         mask |= (1 << CP0MVPCo_CPA) | (1 << CP0MVPCo_VPC) |
                 (1 << CP0MVPCo_EVP);
     }
-    if (env->mvp->CP0_MVPControl & (1 << CP0MVPCo_VPC)) {
+    if (cpu->mvp->CP0_MVPControl & (1 << CP0MVPCo_VPC)) {
         mask |= (1 << CP0MVPCo_STLB);
     }
-    newval = (env->mvp->CP0_MVPControl & ~mask) | (arg1 & mask);
+    newval = (cpu->mvp->CP0_MVPControl & ~mask) | (arg1 & mask);
 
     /* TODO: Enable/disable shared TLB, enable/disable VPEs. */
 
-    env->mvp->CP0_MVPControl = newval;
+    cpu->mvp->CP0_MVPControl = newval;
 }
 
 void helper_mtc0_vpecontrol(CPUMIPSState *env, target_ulong arg1)
@@ -616,10 +620,11 @@ void helper_mttc0_vpeconf0(CPUMIPSState *env, target_ulong arg1)
 
 void helper_mtc0_vpeconf1(CPUMIPSState *env, target_ulong arg1)
 {
+    MIPSCPU *cpu = env_archcpu(env);
     uint32_t mask = 0;
     uint32_t newval;
 
-    if (env->mvp->CP0_MVPControl & (1 << CP0MVPCo_VPC))
+    if (cpu->mvp->CP0_MVPControl & (1 << CP0MVPCo_VPC))
         mask |= (0xff << CP0VPEC1_NCX) | (0xff << CP0VPEC1_NCP2) |
                 (0xff << CP0VPEC1_NCP1);
     newval = (env->CP0_VPEConf1 & ~mask) | (arg1 & mask);
@@ -689,10 +694,11 @@ void helper_mttc0_tcstatus(CPUMIPSState *env, target_ulong arg1)
 
 void helper_mtc0_tcbind(CPUMIPSState *env, target_ulong arg1)
 {
+    MIPSCPU *cpu = env_archcpu(env);
     uint32_t mask = (1 << CP0TCBd_TBE);
     uint32_t newval;
 
-    if (env->mvp->CP0_MVPControl & (1 << CP0MVPCo_VPC)) {
+    if (cpu->mvp->CP0_MVPControl & (1 << CP0MVPCo_VPC)) {
         mask |= (1 << CP0TCBd_CurVPE);
     }
     newval = (env->active_tc.CP0_TCBind & ~mask) | (arg1 & mask);
@@ -705,8 +711,9 @@ void helper_mttc0_tcbind(CPUMIPSState *env, target_ulong arg1)
     uint32_t mask = (1 << CP0TCBd_TBE);
     uint32_t newval;
     CPUMIPSState *other = mips_cpu_map_tc(env, &other_tc);
+    MIPSCPU *other_cpu = env_archcpu(other);
 
-    if (other->mvp->CP0_MVPControl & (1 << CP0MVPCo_VPC)) {
+    if (other_cpu->mvp->CP0_MVPControl & (1 << CP0MVPCo_VPC)) {
         mask |= (1 << CP0TCBd_CurVPE);
     }
     if (other_tc == other->current_tc) {
@@ -1559,15 +1566,17 @@ target_ulong helper_emt(void)
 
 target_ulong helper_dvpe(CPUMIPSState *env)
 {
-    CPUState *other_cs = first_cpu;
-    target_ulong prev = env->mvp->CP0_MVPControl;
+    MIPSCPU *cpu = env_archcpu(env);
+    target_ulong prev = cpu->mvp->CP0_MVPControl;
 
     if (env->CP0_VPEConf0 & (1 << CP0VPEC0_MVP)) {
-        CPU_FOREACH(other_cs) {
-            MIPSCPU *other_cpu = MIPS_CPU(other_cs);
+        CPUState *cs;
+
+        CPU_FOREACH(cs) {
+            MIPSCPU *other_cpu = MIPS_CPU(cs);
             /* Turn off all VPEs except the one executing the dvpe.  */
             if (&other_cpu->env != env) {
-                other_cpu->env.mvp->CP0_MVPControl &= ~(1 << CP0MVPCo_EVP);
+                other_cpu->mvp->CP0_MVPControl &= ~(1 << CP0MVPCo_EVP);
                 mips_vpe_sleep(other_cpu);
             }
         }
@@ -1577,18 +1586,20 @@ target_ulong helper_dvpe(CPUMIPSState *env)
 
 target_ulong helper_evpe(CPUMIPSState *env)
 {
-    CPUState *other_cs = first_cpu;
-    target_ulong prev = env->mvp->CP0_MVPControl;
+    MIPSCPU *cpu = env_archcpu(env);
+    target_ulong prev = cpu->mvp->CP0_MVPControl;
 
     if (env->CP0_VPEConf0 & (1 << CP0VPEC0_MVP)) {
-        CPU_FOREACH(other_cs) {
-            MIPSCPU *other_cpu = MIPS_CPU(other_cs);
+        CPUState *cs;
+
+        CPU_FOREACH(cs) {
+            MIPSCPU *other_cpu = MIPS_CPU(cs);
 
             if (&other_cpu->env != env
                 /* If the VPE is WFI, don't disturb its sleep.  */
                 && !mips_vpe_is_wfi(other_cpu)) {
                 /* Enable the VPE.  */
-                other_cpu->env.mvp->CP0_MVPControl |= (1 << CP0MVPCo_EVP);
+                other_cpu->mvp->CP0_MVPControl |= (1 << CP0MVPCo_EVP);
                 mips_vpe_wake(other_cpu); /* And wake it up.  */
             }
         }
@@ -1599,12 +1610,13 @@ target_ulong helper_evpe(CPUMIPSState *env)
 /* R6 Multi-threading */
 target_ulong helper_dvp(CPUMIPSState *env)
 {
-    CPUState *other_cs = first_cpu;
     target_ulong prev = env->CP0_VPControl;
 
     if (!((env->CP0_VPControl >> CP0VPCtl_DIS) & 1)) {
-        CPU_FOREACH(other_cs) {
-            MIPSCPU *other_cpu = MIPS_CPU(other_cs);
+        CPUState *cpu;
+
+        CPU_FOREACH(cpu) {
+            MIPSCPU *other_cpu = MIPS_CPU(cpu);
             /* Turn off all VPs except the one executing the dvp. */
             if (&other_cpu->env != env) {
                 mips_vpe_sleep(other_cpu);
@@ -1617,12 +1629,13 @@ target_ulong helper_dvp(CPUMIPSState *env)
 
 target_ulong helper_evp(CPUMIPSState *env)
 {
-    CPUState *other_cs = first_cpu;
     target_ulong prev = env->CP0_VPControl;
 
     if ((env->CP0_VPControl >> CP0VPCtl_DIS) & 1) {
-        CPU_FOREACH(other_cs) {
-            MIPSCPU *other_cpu = MIPS_CPU(other_cs);
+        CPUState *cpu;
+
+        CPU_FOREACH(cpu) {
+            MIPSCPU *other_cpu = MIPS_CPU(cpu);
             if ((&other_cpu->env != env) && !mips_vp_is_wfi(other_cpu)) {
                 /*
                  * If the VP is WFI, don't disturb its sleep.

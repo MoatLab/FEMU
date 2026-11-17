@@ -493,12 +493,8 @@ static void test_query_cpu_model_expansion(const void *data)
         sve_tests_default(qts, "max");
         pauth_tests_default(qts, "max");
 
-        /* Test that features that depend on KVM generate errors without. */
-        assert_error(qts, "max",
-                     "'aarch64' feature cannot be disabled "
-                     "unless KVM is enabled and 32-bit EL1 "
-                     "is supported",
-                     "{ 'aarch64': false }");
+        /* TCG allows us to turn off AArch64 on the 'max' CPU type */
+        assert_set_feature(qts, "max", "aarch64", false);
     }
 
     qtest_quit(qts);
@@ -519,7 +515,6 @@ static void test_query_cpu_model_expansion_kvm(const void *data)
         bool kvm_supports_pmu;
         bool kvm_supports_steal_time;
         bool kvm_supports_sve;
-        char max_name[8], name[8];
         uint32_t max_vq, vq;
         uint64_t vls;
         QDict *resp;
@@ -573,9 +568,12 @@ static void test_query_cpu_model_expansion_kvm(const void *data)
         }
 
         if (kvm_supports_sve) {
+            g_autofree const char *max_name = NULL;
+            g_autofree const char *name = NULL;
+
             g_assert(vls != 0);
             max_vq = 64 - __builtin_clzll(vls);
-            sprintf(max_name, "sve%u", max_vq * 128);
+            max_name = g_strdup_printf("sve%u", max_vq * 128);
 
             /* Enabling a supported length is of course fine. */
             assert_sve_vls(qts, "host", vls, "{ %s: true }", max_name);
@@ -583,6 +581,9 @@ static void test_query_cpu_model_expansion_kvm(const void *data)
             /* Get the next supported length smaller than max-vq. */
             vq = 64 - __builtin_clzll(vls & ~BIT_ULL(max_vq - 1));
             if (vq) {
+                g_autofree const char *name2 =
+                    g_strdup_printf("sve%u", vq * 128);
+
                 /*
                  * We have at least one length smaller than max-vq,
                  * so we can disable max-vq.
@@ -595,11 +596,10 @@ static void test_query_cpu_model_expansion_kvm(const void *data)
                  * unless all larger, supported vector lengths are also
                  * disabled.
                  */
-                sprintf(name, "sve%u", vq * 128);
-                error = g_strdup_printf("cannot disable %s", name);
+                error = g_strdup_printf("cannot disable %s", name2);
                 assert_error(qts, "host", error,
                              "{ %s: true, %s: false }",
-                             max_name, name);
+                             max_name, name2);
                 g_free(error);
             }
 
@@ -608,7 +608,7 @@ static void test_query_cpu_model_expansion_kvm(const void *data)
              * we need at least one vector length enabled.
              */
             vq = __builtin_ffsll(vls);
-            sprintf(name, "sve%u", vq * 128);
+            name = g_strdup_printf("sve%u", vq * 128);
             error = g_strdup_printf("cannot disable %s", name);
             assert_error(qts, "host", error, "{ %s: false }", name);
             g_free(error);
@@ -620,9 +620,11 @@ static void test_query_cpu_model_expansion_kvm(const void *data)
                 }
             }
             if (vq <= SVE_MAX_VQ) {
-                sprintf(name, "sve%u", vq * 128);
-                error = g_strdup_printf("cannot enable %s", name);
-                assert_error(qts, "host", error, "{ %s: true }", name);
+                g_autofree const char *name2 =
+                    g_strdup_printf("sve%u", vq * 128);
+
+                error = g_strdup_printf("cannot enable %s", name2);
+                assert_error(qts, "host", error, "{ %s: true }", name2);
                 g_free(error);
             }
         } else {

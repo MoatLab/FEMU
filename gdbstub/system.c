@@ -18,16 +18,15 @@
 #include "gdbstub/syscalls.h"
 #include "gdbstub/commands.h"
 #include "exec/hwaddr.h"
-#include "exec/tb-flush.h"
 #include "accel/accel-ops.h"
 #include "accel/accel-cpu-ops.h"
+#include "system/address-spaces.h"
 #include "system/cpus.h"
 #include "system/runstate.h"
 #include "system/replay.h"
-#include "system/tcg.h"
 #include "hw/core/cpu.h"
 #include "hw/cpu/cluster.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "chardev/char.h"
 #include "chardev/char-fe.h"
 #include "monitor/monitor.h"
@@ -36,7 +35,7 @@
 
 /* System emulation specific state */
 typedef struct {
-    CharBackend chr;
+    CharFrontend chr;
     Chardev *mon_chr;
 } GDBSystemState;
 
@@ -126,7 +125,6 @@ static void gdb_vm_state_change(void *opaque, bool running, RunState state)
     CPUState *cpu = gdbserver_state.c_cpu;
     g_autoptr(GString) buf = g_string_new(NULL);
     g_autoptr(GString) tid = g_string_new(NULL);
-    const char *type;
     int ret;
 
     if (running || gdbserver_state.state == RS_INACTIVE) {
@@ -152,6 +150,8 @@ static void gdb_vm_state_change(void *opaque, bool running, RunState state)
     switch (state) {
     case RUN_STATE_DEBUG:
         if (cpu->watchpoint_hit) {
+            const char *type;
+
             switch (cpu->watchpoint_hit->flags & BP_MEM_ACCESS) {
             case BP_MEM_READ:
                 type = "r";
@@ -173,9 +173,6 @@ static void gdb_vm_state_change(void *opaque, bool running, RunState state)
             goto send_packet;
         } else {
             trace_gdbstub_hit_break();
-        }
-        if (tcg_enabled()) {
-            tb_flush(cpu);
         }
         ret = GDB_SIGNAL_TRAP;
         break;
@@ -230,7 +227,7 @@ static void gdb_sigterm_handler(int signal)
 }
 #endif
 
-static int gdb_monitor_write(Chardev *chr, const uint8_t *buf, int len)
+static int gdb_chr_write(Chardev *chr, const uint8_t *buf, int len)
 {
     g_autoptr(GString) hex_buf = g_string_new("O");
     gdb_memtohex(hex_buf, buf, len);
@@ -238,10 +235,10 @@ static int gdb_monitor_write(Chardev *chr, const uint8_t *buf, int len)
     return len;
 }
 
-static void gdb_monitor_open(Chardev *chr, ChardevBackend *backend,
-                             bool *be_opened, Error **errp)
+static bool gdb_chr_open(Chardev *chr, ChardevBackend *backend, Error **errp)
 {
-    *be_opened = false;
+    /* Never send CHR_EVENT_OPENED */
+    return true;
 }
 
 static void char_gdb_class_init(ObjectClass *oc, const void *data)
@@ -249,8 +246,8 @@ static void char_gdb_class_init(ObjectClass *oc, const void *data)
     ChardevClass *cc = CHARDEV_CLASS(oc);
 
     cc->internal = true;
-    cc->open = gdb_monitor_open;
-    cc->chr_write = gdb_monitor_write;
+    cc->chr_open = gdb_chr_open;
+    cc->chr_write = gdb_chr_write;
 }
 
 #define TYPE_CHARDEV_GDB "chardev-gdb"
@@ -347,7 +344,7 @@ bool gdbserver_start(const char *device, Error **errp)
         return false;
     }
 
-    if (!gdb_supports_guest_debug()) {
+    if (!accel_supports_guest_debug(current_accel())) {
         error_setg(errp, "gdbstub: current accelerator doesn't "
                    "support guest debugging");
         return false;
@@ -393,7 +390,7 @@ bool gdbserver_start(const char *device, Error **errp)
         /* Initialize a monitor terminal for gdb */
         mon_chr = qemu_chardev_new(NULL, TYPE_CHARDEV_GDB,
                                    NULL, NULL, &error_abort);
-        monitor_init_hmp(mon_chr, false, &error_abort);
+        monitor_new_hmp(NULL, mon_chr->label, false, &error_abort);
     } else {
         qemu_chr_fe_deinit(&gdbserver_system_state.chr, true);
         mon_chr = gdbserver_system_state.mon_chr;
@@ -458,12 +455,10 @@ int gdb_target_memory_rw_debug(CPUState *cpu, hwaddr addr,
                                uint8_t *buf, int len, bool is_write)
 {
     if (phy_memory_mode) {
-        if (is_write) {
-            cpu_physical_memory_write(addr, buf, len);
-        } else {
-            cpu_physical_memory_read(addr, buf, len);
-        }
-        return 0;
+        MemTxResult res = address_space_rw(&address_space_memory, addr,
+                                           MEMTXATTRS_UNSPECIFIED, buf, len,
+                                           is_write);
+        return res == MEMTX_OK ? 0 : -1;
     }
 
     if (cpu->cc->memory_rw_debug) {
@@ -481,11 +476,6 @@ unsigned int gdb_get_max_cpus(void)
 {
     MachineState *ms = MACHINE(qdev_get_machine());
     return ms->smp.max_cpus;
-}
-
-bool gdb_can_reverse(void)
-{
-    return replay_mode == REPLAY_MODE_PLAY;
 }
 
 /*
@@ -633,29 +623,22 @@ int gdb_signal_to_target(int sig)
  * Break/Watch point helpers
  */
 
-bool gdb_supports_guest_debug(void)
+int gdb_breakpoint_insert(CPUState *cs, GdbBreakpointType type,
+                          vaddr addr, vaddr len)
 {
     const AccelOpsClass *ops = cpus_get_accel();
-    if (ops->supports_guest_debug) {
-        return ops->supports_guest_debug();
-    }
-    return false;
-}
-
-int gdb_breakpoint_insert(CPUState *cs, int type, vaddr addr, vaddr len)
-{
-    const AccelOpsClass *ops = cpus_get_accel();
-    if (ops->insert_breakpoint) {
-        return ops->insert_breakpoint(cs, type, addr, len);
+    if (ops->insert_gdbstub_breakpoint) {
+        return ops->insert_gdbstub_breakpoint(cs, type, addr, len);
     }
     return -ENOSYS;
 }
 
-int gdb_breakpoint_remove(CPUState *cs, int type, vaddr addr, vaddr len)
+int gdb_breakpoint_remove(CPUState *cs, GdbBreakpointType type,
+                          vaddr addr, vaddr len)
 {
     const AccelOpsClass *ops = cpus_get_accel();
-    if (ops->remove_breakpoint) {
-        return ops->remove_breakpoint(cs, type, addr, len);
+    if (ops->remove_gdbstub_breakpoint) {
+        return ops->remove_gdbstub_breakpoint(cs, type, addr, len);
     }
     return -ENOSYS;
 }
@@ -663,7 +646,18 @@ int gdb_breakpoint_remove(CPUState *cs, int type, vaddr addr, vaddr len)
 void gdb_breakpoint_remove_all(CPUState *cs)
 {
     const AccelOpsClass *ops = cpus_get_accel();
-    if (ops->remove_all_breakpoints) {
-        ops->remove_all_breakpoints(cs);
+    if (ops->remove_all_gdbstub_breakpoints) {
+        ops->remove_all_gdbstub_breakpoints(cs);
     }
+}
+
+/*
+ * The minimal system-mode stop reply packet is:
+ *   T05core:{id};
+ */
+
+void gdb_build_stop_packet(GString *buf, CPUState *cs)
+{
+    g_string_printf(buf,
+                    "T%02xcore:%02x;", GDB_SIGNAL_TRAP, gdb_get_cpu_index(cs));
 }

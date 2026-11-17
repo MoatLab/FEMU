@@ -301,14 +301,18 @@ Command description:
   For write tests, by default a buffer filled with zeros is written. This can be
   overridden with a pattern byte specified by *PATTERN*.
 
-.. option:: bitmap (--merge SOURCE | --add | --remove | --clear | --enable | --disable)... [-b SOURCE_FILE [-F SOURCE_FMT]] [-g GRANULARITY] [--object OBJECTDEF] [--image-opts | -f FMT] FILENAME BITMAP
+.. option:: bitmap (--merge SOURCE | --add | --remove | --remove-all | --clear | --enable | --disable)... [-b SOURCE_FILE [-F SOURCE_FMT]] [-g GRANULARITY] [--object OBJECTDEF] [--image-opts | -f FMT] FILENAME [BITMAP]
 
-  Perform one or more modifications of the persistent bitmap *BITMAP*
-  in the disk image *FILENAME*.  The various modifications are:
+  Perform one or more modifications of persistent bitmaps in the disk
+  image *FILENAME*.  Most operations require *BITMAP* to be specified;
+  ``--remove-all`` operates on all bitmaps and does not take *BITMAP*.
+  The various modifications are:
 
   ``--add`` to create *BITMAP*, enabled to record future edits.
 
   ``--remove`` to remove *BITMAP*.
+
+  ``--remove-all`` to remove all bitmaps.
 
   ``--clear`` to clear *BITMAP*.
 
@@ -503,7 +507,7 @@ Command description:
 
   The size syntax is similar to :manpage:`dd(1)`'s size syntax.
 
-.. option:: info [--object OBJECTDEF] [--image-opts] [-f FMT] [--output=OFMT] [--backing-chain] [-U] FILENAME
+.. option:: info [--object OBJECTDEF] [--image-opts] [-f FMT] [--output=OFMT] [--backing-chain] [--limits] [-t CACHE] [-U] FILENAME
 
   Give information about the disk image *FILENAME*. Use it in
   particular to know the size reserved on disk which can be different
@@ -570,6 +574,10 @@ Command description:
     section is a textual representation of the respective
     ``ImageInfoSpecific*`` QAPI object (e.g. ``ImageInfoSpecificQCow2``
     for qcow2 images).
+
+  *Block limits*
+    The block limits for I/O that QEMU detected for the image.
+    This information is only shown if the ``--limits`` option was specified.
 
 .. option:: map [--object OBJECTDEF] [--image-opts] [-f FMT] [--start-offset=OFFSET] [--max-length=LEN] [--output=OFMT] [-U] FILENAME
 

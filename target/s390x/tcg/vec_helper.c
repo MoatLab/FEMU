@@ -16,7 +16,8 @@
 #include "tcg/tcg.h"
 #include "tcg/tcg-gvec-desc.h"
 #include "exec/helper-proto.h"
-#include "accel/tcg/cpu-ldst.h"
+#include "accel/tcg/cpu-ldst-common.h"
+#include "accel/tcg/cpu-mmu-index.h"
 
 void HELPER(gvec_vbperm)(void *v1, const void *v2, const void *v3,
                          uint32_t desc)
@@ -42,20 +43,26 @@ void HELPER(gvec_vbperm)(void *v1, const void *v2, const void *v3,
 
 void HELPER(vll)(CPUS390XState *env, void *v1, uint64_t addr, uint64_t bytes)
 {
+    const int mmu_idx = cpu_mmu_index(env_cpu(env), false);
+    const uintptr_t ra = GETPC();
+    MemOpIdx oi;
+
     if (likely(bytes >= 16)) {
         uint64_t t0, t1;
 
-        t0 = cpu_ldq_data_ra(env, addr, GETPC());
+        oi = make_memop_idx(MO_BE | MO_64 | MO_UNALN, mmu_idx);
+        t0 = cpu_ldq_mmu(env, addr, oi, ra);
         addr = wrap_address(env, addr + 8);
-        t1 = cpu_ldq_data_ra(env, addr, GETPC());
+        t1 = cpu_ldq_mmu(env, addr, oi, ra);
         s390_vec_write_element64(v1, 0, t0);
         s390_vec_write_element64(v1, 1, t1);
     } else {
         S390Vector tmp = {};
-        int i;
 
-        for (i = 0; i < bytes; i++) {
-            uint8_t byte = cpu_ldub_data_ra(env, addr, GETPC());
+        oi = make_memop_idx(MO_8, mmu_idx);
+        for (int i = 0; i < bytes; i++) {
+            uint8_t byte = cpu_ldb_mmu(env, addr, oi, ra);
+
 
             s390_vec_write_element8(&tmp, i, byte);
             addr = wrap_address(env, addr + 1);
@@ -191,20 +198,25 @@ void HELPER(gvec_vperm)(void *v1, const void *v2, const void *v3,
 void HELPER(vstl)(CPUS390XState *env, const void *v1, uint64_t addr,
                   uint64_t bytes)
 {
+    const int mmu_idx = cpu_mmu_index(env_cpu(env), false);
+    const uintptr_t ra = GETPC();
+    MemOpIdx oi;
+
     /* Probe write access before actually modifying memory */
     probe_write_access(env, addr, MIN(bytes, 16), GETPC());
 
     if (likely(bytes >= 16)) {
-        cpu_stq_data_ra(env, addr, s390_vec_read_element64(v1, 0), GETPC());
+        oi = make_memop_idx(MO_BE | MO_64 | MO_UNALN, mmu_idx);
+        cpu_stq_mmu(env, addr, s390_vec_read_element64(v1, 0), oi, ra);
         addr = wrap_address(env, addr + 8);
-        cpu_stq_data_ra(env, addr, s390_vec_read_element64(v1, 1), GETPC());
+        cpu_stq_mmu(env, addr, s390_vec_read_element64(v1, 1), oi, ra);
     } else {
-        int i;
+        oi = make_memop_idx(MO_8, mmu_idx);
 
-        for (i = 0; i < bytes; i++) {
+        for (int i = 0; i < bytes; i++) {
             uint8_t byte = s390_vec_read_element8(v1, i);
 
-            cpu_stb_data_ra(env, addr, byte, GETPC());
+            cpu_stb_mmu(env, addr, byte, oi, ra);
             addr = wrap_address(env, addr + 1);
         }
     }

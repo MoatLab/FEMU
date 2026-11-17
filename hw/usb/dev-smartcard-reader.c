@@ -40,8 +40,8 @@
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
-#include "hw/qdev-properties.h"
-#include "hw/usb.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/usb/usb.h"
 #include "migration/vmstate.h"
 #include "desc.h"
 
@@ -166,6 +166,7 @@ enum {
     ERROR_XFR_PARITY_ERROR  = -3,
     ERROR_XFR_OVERRUN       = -4,
     ERROR_HW_ERROR          = -5,
+    ERROR_CMD_SLOT_BUSY     = -32,
 };
 
 /* 6.2.6 RDR_to_PC_SlotStatus definitions */
@@ -570,6 +571,10 @@ static void ccid_remove_pending_answer(USBCCIDState *s,
 
 static void ccid_bulk_in_clear(USBCCIDState *s)
 {
+    if (s->current_bulk_in != NULL) {
+        s->current_bulk_in->pos = 0;
+        s->current_bulk_in = NULL;
+    }
     s->bulk_in_pending_start = 0;
     s->bulk_in_pending_end = 0;
     s->bulk_in_pending_num = 0;
@@ -580,6 +585,7 @@ static void ccid_bulk_in_release(USBCCIDState *s)
     assert(s->current_bulk_in != NULL);
     s->current_bulk_in->pos = 0;
     s->current_bulk_in = NULL;
+    s->bulk_in_pending_num--;
 }
 
 static void ccid_bulk_in_get(USBCCIDState *s)
@@ -587,8 +593,6 @@ static void ccid_bulk_in_get(USBCCIDState *s)
     if (s->current_bulk_in != NULL || s->bulk_in_pending_num == 0) {
         return;
     }
-    assert(s->bulk_in_pending_num > 0);
-    s->bulk_in_pending_num--;
     s->current_bulk_in =
         &s->bulk_in_pending[(s->bulk_in_pending_start++) % BULK_IN_PENDING_NUM];
 }
@@ -946,6 +950,13 @@ static void ccid_on_apdu_from_guest(USBCCIDState *s, CCID_XferBlock *recv)
         ccid_write_data_block_error(s, recv->hdr.bSlot, recv->hdr.bSeq);
         return;
     }
+    if (s->pending_answers_num > 0) {
+        DPRINTF(s, D_WARN,
+                "usb-ccid: slot already busy, rejecting apdu\n");
+        ccid_report_error_failed(s, ERROR_CMD_SLOT_BUSY);
+        ccid_write_data_block_error(s, recv->hdr.bSlot, recv->hdr.bSeq);
+        return;
+    }
     len = le32_to_cpu(recv->hdr.dwLength);
     DPRINTF(s, 1, "%s: seq %d, len %u\n", __func__,
                 recv->hdr.bSeq, len);
@@ -982,6 +993,7 @@ static const char *ccid_message_type_to_str(uint8_t type)
 static void ccid_handle_bulk_out(USBCCIDState *s, USBPacket *p)
 {
     CCID_Header *ccid_header;
+    uint32_t payload_len;
 
     if (p->iov.size + s->bulk_out_pos > BULK_OUT_DATA_SIZE) {
         goto err;
@@ -994,17 +1006,18 @@ static void ccid_handle_bulk_out(USBCCIDState *s, USBPacket *p)
     }
 
     ccid_header = (CCID_Header *)s->bulk_out_data;
-    if ((s->bulk_out_pos - 10 < ccid_header->dwLength) &&
+    payload_len = le32_to_cpu(ccid_header->dwLength);
+    if ((s->bulk_out_pos - 10 < payload_len) &&
         (p->iov.size == CCID_MAX_PACKET_SIZE)) {
         DPRINTF(s, D_VERBOSE,
                 "usb-ccid: bulk_in: expecting more packets (%u/%u)\n",
-                s->bulk_out_pos - 10, ccid_header->dwLength);
+                s->bulk_out_pos - 10, payload_len);
         return;
     }
-    if (s->bulk_out_pos - 10 != ccid_header->dwLength) {
+    if (s->bulk_out_pos - 10 != payload_len) {
         DPRINTF(s, 1,
                 "usb-ccid: bulk_in: message size mismatch (got %u, expected %u)\n",
-                s->bulk_out_pos - 10, ccid_header->dwLength);
+                s->bulk_out_pos - 10, payload_len);
         goto err;
     }
 
@@ -1078,6 +1091,7 @@ static void ccid_bulk_in_copy_to_guest(USBCCIDState *s, USBPacket *p,
 
     ccid_bulk_in_get(s);
     if (s->current_bulk_in != NULL) {
+        assert(s->current_bulk_in->pos <= s->current_bulk_in->len);
         len = MIN(s->current_bulk_in->len - s->current_bulk_in->pos,
                   p->iov.size);
         if (len) {
@@ -1122,6 +1136,10 @@ static void ccid_handle_data(USBDevice *dev, USBPacket *p)
             break;
         case CCID_INT_IN_EP:
             if (s->notify_slot_change) {
+                if (p->iov.size < 2) {
+                    p->status = USB_RET_STALL;
+                    break;
+                }
                 /* page 56, RDR_to_PC_NotifySlotChange */
                 buf[0] = CCID_MESSAGE_TYPE_RDR_to_PC_NotifySlotChange;
                 buf[1] = s->bmSlotICCState;
@@ -1341,6 +1359,26 @@ static void ccid_realize(USBDevice *dev, Error **errp)
 static int ccid_post_load(void *opaque, int version_id)
 {
     USBCCIDState *s = opaque;
+    int i;
+
+    if (s->bulk_in_pending_end - s->bulk_in_pending_start > BULK_IN_PENDING_NUM) {
+        return -EINVAL;
+    }
+
+    if (s->pending_answers_num > PENDING_ANSWERS_NUM) {
+        return -EINVAL;
+    }
+
+    if (s->bulk_out_pos > BULK_OUT_DATA_SIZE) {
+        return -EINVAL;
+    }
+
+    for (i = 0; i < BULK_IN_PENDING_NUM; i++) {
+        if (s->bulk_in_pending[i].len > BULK_IN_BUF_SIZE ||
+            s->bulk_in_pending[i].pos > s->bulk_in_pending[i].len) {
+            return -EINVAL;
+        }
+    }
 
     /*
      * This must be done after usb_device_attach, which sets state to ATTACHED,

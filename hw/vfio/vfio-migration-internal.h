@@ -45,11 +45,21 @@ typedef struct VFIOMigration {
     void *data_buffer;
     size_t data_buffer_size;
     uint64_t mig_flags;
+    bool precopy_info_v2_used;
+    /*
+     * NOTE: all three sizes cached are reported from VFIO's uAPI, which
+     * are defined as estimate only.  QEMU should not trust these values
+     * but only use them to do best-effort estimates.  Always be prepared
+     * that these sizes may either grow or even shrink in reality while
+     * read()ing from the VFIO fds.
+     */
     uint64_t precopy_init_size;
     uint64_t precopy_dirty_size;
+    uint64_t stopcopy_size;
     bool multifd_transfer;
     VFIOMultifd *multifd;
     bool initial_data_sent;
+    bool request_switchover_ack;
 
     bool event_save_iterate_started;
     bool event_precopy_empty_hit;

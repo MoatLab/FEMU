@@ -26,7 +26,6 @@
 #include "libqos/virtio-pci.h"
 
 #include "libqos/malloc-pc.h"
-#include "libqos/qgraph_internal.h"
 #include "hw/virtio/virtio-net.h"
 
 #include "standard-headers/linux/vhost_types.h"
@@ -156,7 +155,7 @@ typedef struct TestServer {
     gchar *mig_path;
     gchar *chr_name;
     gchar *tmpfs;
-    CharBackend chr;
+    CharFrontend chr;
     int fds_num;
     int fds[VHOST_MEMORY_MAX_NREGIONS];
     VhostUserMemory memory;
@@ -181,10 +180,10 @@ struct vhost_user_ops {
 
     /* VHOST-USER commands. */
     uint64_t (*get_features)(TestServer *s);
-    void (*set_features)(TestServer *s, CharBackend *chr,
+    void (*set_features)(TestServer *s, CharFrontend *chr,
                          VhostUserMsg *msg);
     void (*get_protocol_features)(TestServer *s,
-                                  CharBackend *chr, VhostUserMsg *msg);
+                                  CharFrontend *chr, VhostUserMsg *msg);
 };
 
 static const char *init_hugepagefs(void);
@@ -331,9 +330,8 @@ static int chr_can_read(void *opaque)
 
 static void chr_read(void *opaque, const uint8_t *buf, int size)
 {
-    g_autoptr(GError) err = NULL;
     TestServer *s = opaque;
-    CharBackend *chr = &s->chr;
+    CharFrontend *chr = &s->chr;
     VhostUserMsg msg;
     uint8_t *p = (uint8_t *) &msg;
     int fd = -1;
@@ -345,7 +343,7 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
     }
 
     if (size != VHOST_USER_HDR_SIZE) {
-        qos_printf("%s: Wrong message size received %d\n", __func__, size);
+        g_test_message("Wrong message size received %d", size);
         return;
     }
 
@@ -356,8 +354,8 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
         p += VHOST_USER_HDR_SIZE;
         size = qemu_chr_fe_read_all(chr, p, msg.size);
         if (size != msg.size) {
-            qos_printf("%s: Wrong message size received %d != %d\n",
-                       __func__, size, msg.size);
+            g_test_message("Wrong message size received %d != %d",
+                           size, msg.size);
             goto out;
         }
     }
@@ -393,7 +391,7 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
          * We don't need to do anything here, the remote is just
          * letting us know it is in charge. Just log it.
          */
-        qos_printf("set_owner: start of session\n");
+        g_test_message("set_owner: start of session");
         break;
 
     case VHOST_USER_GET_PROTOCOL_FEATURES:
@@ -419,7 +417,7 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
          * the remote end to send this. There is no handshake reply so
          * just log the details for debugging.
          */
-        qos_printf("set_protocol_features: 0x%"PRIx64 "\n", msg.payload.u64);
+        g_test_message("set_protocol_features: 0x%"PRIx64, msg.payload.u64);
         break;
 
         /*
@@ -427,11 +425,11 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
          * address of the vrings but we can simply report them.
          */
     case VHOST_USER_SET_VRING_NUM:
-        qos_printf("set_vring_num: %d/%d\n",
+        g_test_message("set_vring_num: %d/%d",
                    msg.payload.state.index, msg.payload.state.num);
         break;
     case VHOST_USER_SET_VRING_ADDR:
-        qos_printf("set_vring_addr: 0x%"PRIx64"/0x%"PRIx64"/0x%"PRIx64"\n",
+        g_test_message("set_vring_addr: 0x%"PRIx64"/0x%"PRIx64"/0x%"PRIx64,
                    msg.payload.addr.avail_user_addr,
                    msg.payload.addr.desc_user_addr,
                    msg.payload.addr.used_user_addr);
@@ -464,7 +462,7 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
     case VHOST_USER_SET_VRING_CALL:
         /* consume the fd */
         if (!qemu_chr_fe_get_msgfds(chr, &fd, 1) && fd < 0) {
-            qos_printf("call fd: %d, do not set non-blocking\n", fd);
+            g_test_message("call fd: %d, do not set non-blocking", fd);
             break;
         }
         /*
@@ -472,8 +470,7 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
          * The receive function forces it to be blocking,
          * so revert it back to non-blocking.
          */
-        g_unix_set_fd_nonblocking(fd, true, &err);
-        g_assert_no_error(err);
+        qemu_set_blocking(fd, false, &error_abort);
         break;
 
     case VHOST_USER_SET_LOG_BASE:
@@ -510,12 +507,12 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
          * fully functioning vhost-user we would enable/disable the
          * vring monitoring.
          */
-        qos_printf("set_vring(%d)=%s\n", msg.payload.state.index,
+        g_test_message("set_vring(%d)=%s", msg.payload.state.index,
                    msg.payload.state.num ? "enabled" : "disabled");
         break;
 
     default:
-        qos_printf("vhost-user: un-handled message: %d\n", msg.request);
+        g_test_message("vhost-user: un-handled message: %d", msg.request);
         break;
     }
 
@@ -539,7 +536,7 @@ static const char *init_hugepagefs(void)
     }
 
     if (access(path, R_OK | W_OK | X_OK)) {
-        qos_printf("access on path (%s): %s", path, strerror(errno));
+        g_test_message("access on path (%s): %s", path, strerror(errno));
         g_test_fail();
         return NULL;
     }
@@ -549,13 +546,13 @@ static const char *init_hugepagefs(void)
     } while (ret != 0 && errno == EINTR);
 
     if (ret != 0) {
-        qos_printf("statfs on path (%s): %s", path, strerror(errno));
+        g_test_message("statfs on path (%s): %s", path, strerror(errno));
         g_test_fail();
         return NULL;
     }
 
     if (fs.f_type != HUGETLBFS_MAGIC) {
-        qos_printf("Warning: path not on HugeTLBFS: %s", path);
+        g_test_message("Warning: path not on HugeTLBFS: %s", path);
         g_test_fail();
         return NULL;
     }
@@ -933,25 +930,41 @@ reconnect_cb(gpointer user_data)
     return FALSE;
 }
 
-static gpointer
-connect_thread(gpointer data)
+static gboolean connect_cb(gpointer user_data)
 {
-    TestServer *s = data;
+    TestServer *s = user_data;
 
-    /* wait for qemu to start before first try, to avoid extra warnings */
-    g_usleep(G_USEC_PER_SEC);
     test_server_connect(s);
 
-    return NULL;
+    /* We only need to be called once */
+    return G_SOURCE_REMOVE;
+}
+
+/* Initial delay before connect, in milliseconds (1 second) */
+#define INITIAL_CONNECT_DELAY_MS (1 * 1000)
+
+static void test_schedule_connect(TestServer *s)
+{
+    /*
+     * Wait for a bit for QEMU to start before we first try to connect,
+     * to avoid extra warnings. We must run the "connect" on the
+     * main-loop thread so it doesn't race with a callback that
+     * the socket-chardev sets up on the main-loop.
+     */
+    GSource *src = g_timeout_source_new(INITIAL_CONNECT_DELAY_MS);
+    g_source_set_callback(src, connect_cb, s, NULL);
+    g_source_attach(src, s->context);
+    g_source_unref(src);
 }
 
 static void *vhost_user_test_setup_reconnect(GString *cmd_line, void *arg)
 {
     TestServer *s = test_server_new("reconnect", arg);
 
-    g_thread_unref(g_thread_new("connect", connect_thread, s));
     append_mem_opts(s, cmd_line, 256, TEST_MEMFD_AUTO);
     s->vu_ops->append_opts(s, cmd_line, ",server=on");
+
+    test_schedule_connect(s);
 
     g_test_queue_destroy(vhost_user_test_cleanup, s);
 
@@ -986,9 +999,10 @@ static void *vhost_user_test_setup_connect_fail(GString *cmd_line, void *arg)
 
     s->test_fail = true;
 
-    g_thread_unref(g_thread_new("connect", connect_thread, s));
     append_mem_opts(s, cmd_line, 256, TEST_MEMFD_AUTO);
     s->vu_ops->append_opts(s, cmd_line, ",server=on");
+
+    test_schedule_connect(s);
 
     g_test_queue_destroy(vhost_user_test_cleanup, s);
 
@@ -1001,9 +1015,10 @@ static void *vhost_user_test_setup_flags_mismatch(GString *cmd_line, void *arg)
 
     s->test_flags = TEST_FLAGS_DISCONNECT;
 
-    g_thread_unref(g_thread_new("connect", connect_thread, s));
     append_mem_opts(s, cmd_line, 256, TEST_MEMFD_AUTO);
     s->vu_ops->append_opts(s, cmd_line, ",server=on");
+
+    test_schedule_connect(s);
 
     g_test_queue_destroy(vhost_user_test_cleanup, s);
 
@@ -1054,7 +1069,7 @@ static uint64_t vu_net_get_features(TestServer *s)
     return features;
 }
 
-static void vu_net_set_features(TestServer *s, CharBackend *chr,
+static void vu_net_set_features(TestServer *s, CharFrontend *chr,
                                 VhostUserMsg *msg)
 {
     g_assert(msg->payload.u64 & (0x1ULL << VHOST_USER_F_PROTOCOL_FEATURES));
@@ -1064,7 +1079,7 @@ static void vu_net_set_features(TestServer *s, CharBackend *chr,
     }
 }
 
-static void vu_net_get_protocol_features(TestServer *s, CharBackend *chr,
+static void vu_net_get_protocol_features(TestServer *s, CharFrontend *chr,
         VhostUserMsg *msg)
 {
     /* send back features to qemu */
@@ -1151,7 +1166,7 @@ static uint64_t vu_gpio_get_features(TestServer *s)
  * that we support VHOST_USER_PROTOCOL_F_CONFIG as gpio would use it
  * talking to a read vhost-user daemon.
  */
-static void vu_gpio_get_protocol_features(TestServer *s, CharBackend *chr,
+static void vu_gpio_get_protocol_features(TestServer *s, CharFrontend *chr,
                                           VhostUserMsg *msg)
 {
     /* send back features to qemu */
@@ -1194,7 +1209,7 @@ static uint64_t vu_scmi_get_features(TestServer *s)
         0x1ULL << VHOST_USER_F_PROTOCOL_FEATURES;
 }
 
-static void vu_scmi_get_protocol_features(TestServer *s, CharBackend *chr,
+static void vu_scmi_get_protocol_features(TestServer *s, CharFrontend *chr,
                                           VhostUserMsg *msg)
 {
     msg->flags |= VHOST_USER_REPLY_MASK;

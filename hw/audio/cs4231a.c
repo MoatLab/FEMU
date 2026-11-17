@@ -23,14 +23,14 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/audio/soundhw.h"
-#include "audio/audio.h"
-#include "hw/irq.h"
+#include "hw/audio/model.h"
+#include "qemu/audio.h"
+#include "hw/core/irq.h"
 #include "hw/isa/isa.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
-#include "qemu/timer.h"
+#include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "qom/object.h"
 
@@ -43,21 +43,21 @@
   More...
 */
 
-/* #define DEBUG */
+#define DEBUG 0
 /* #define DEBUG_XLAW */
 
 static struct {
     int aci_counter;
 } conf = {1};
 
-#ifdef DEBUG
-#define dolog(...) AUD_log ("cs4231a", __VA_ARGS__)
-#else
-#define dolog(...)
-#endif
+#define dolog(fmt, ...) do { \
+        if (DEBUG) { \
+            error_report("cs4231a: " fmt, ##__VA_ARGS__); \
+        } \
+    } while (0)
 
-#define lwarn(...) AUD_log ("cs4231a", "warning: " __VA_ARGS__)
-#define lerr(...) AUD_log ("cs4231a", "error: " __VA_ARGS__)
+#define lwarn(fmt, ...) warn_report("cs4231a: " fmt, ##__VA_ARGS__)
+#define lerr(fmt, ...) error_report("cs4231a: " fmt, ##__VA_ARGS__)
 
 #define CS_REGS 16
 #define CS_DREGS 32
@@ -69,7 +69,7 @@ DECLARE_INSTANCE_CHECKER(CSState, CS4231A,
 
 struct CSState {
     ISADevice dev;
-    QEMUSoundCard card;
+    AudioBackend *audio_be;
     MemoryRegion ioports;
     qemu_irq pic;
     uint32_t regs[CS_REGS];
@@ -284,12 +284,12 @@ static void cs_reset_voices (CSState *s, uint32_t val)
     as.freq = freqs[xtal][(val >> 1) & 7];
 
     if (as.freq == -1) {
-        lerr ("unsupported frequency (val=%#x)\n", val);
+        lerr("unsupported frequency (val=0x%x)", val);
         goto error;
     }
 
     as.nchannels = (val & (1 << 4)) ? 2 : 1;
-    as.endianness = 0;
+    as.big_endian = false;
     s->tab = NULL;
 
     switch ((val >> 5) & ((s->dregs[MODE_And_ID] & MODE2) ? 7 : 3)) {
@@ -305,12 +305,12 @@ static void cs_reset_voices (CSState *s, uint32_t val)
         s->tab = ALawDecompressTable;
     x_law:
         as.fmt = AUDIO_FORMAT_S16;
-        as.endianness = AUDIO_HOST_ENDIANNESS;
+        as.big_endian = HOST_BIG_ENDIAN;
         s->shift = as.nchannels == 2;
         break;
 
     case 6:
-        as.endianness = 1;
+        as.big_endian = true;
         /* fall through */
     case 2:
         as.fmt = AUDIO_FORMAT_S16;
@@ -319,16 +319,16 @@ static void cs_reset_voices (CSState *s, uint32_t val)
 
     case 7:
     case 4:
-        lerr ("attempt to use reserved format value (%#x)\n", val);
+        lerr("attempt to use reserved format value (0x%x)", val);
         goto error;
 
     case 5:
-        lerr ("ADPCM 4 bit IMA compatible format is not supported\n");
+        lerr("ADPCM 4 bit IMA compatible format is not supported");
         goto error;
     }
 
-    s->voice = AUD_open_out (
-        &s->card,
+    s->voice = audio_be_open_out(
+        s->audio_be,
         s->voice,
         "cs4231a",
         s,
@@ -339,7 +339,7 @@ static void cs_reset_voices (CSState *s, uint32_t val)
     if (s->dregs[Interface_Configuration] & PEN) {
         if (!s->dma_running) {
             k->hold_DREQ(s->isa_dma, s->dma);
-            AUD_set_active_out (s->voice, 1);
+            audio_be_set_active_out(s->audio_be, s->voice, 1);
             s->transferred = 0;
         }
         s->dma_running = 1;
@@ -347,7 +347,7 @@ static void cs_reset_voices (CSState *s, uint32_t val)
     else {
         if (s->dma_running) {
             k->release_DREQ(s->isa_dma, s->dma);
-            AUD_set_active_out (s->voice, 0);
+            audio_be_set_active_out(s->audio_be, s->voice, 0);
         }
         s->dma_running = 0;
     }
@@ -356,7 +356,7 @@ static void cs_reset_voices (CSState *s, uint32_t val)
  error:
     if (s->dma_running) {
         k->release_DREQ(s->isa_dma, s->dma);
-        AUD_set_active_out (s->voice, 0);
+        audio_be_set_active_out(s->audio_be, s->voice, 0);
     }
 }
 
@@ -393,7 +393,7 @@ static uint64_t cs_read (void *opaque, hwaddr addr, unsigned size)
         ret = s->regs[saddr];
         break;
     }
-    dolog ("read %d:%d -> %d\n", saddr, iaddr, ret);
+    dolog("read %d:%d -> %d", saddr, iaddr, ret);
     return ret;
 }
 
@@ -425,7 +425,7 @@ static void cs_write (void *opaque, hwaddr addr,
         case RESERVED:
         case RESERVED_2:
         case RESERVED_3:
-            lwarn ("attempt to write %#x to reserved indirect register %d\n",
+            lwarn("attempt to write 0x%x to reserved indirect register %d",
                    val, iaddr);
             break;
 
@@ -439,7 +439,7 @@ static void cs_write (void *opaque, hwaddr addr,
                     cs_reset_voices (s, val);
                 }
                 else {
-                    lwarn ("[P]MCE(%#x, %#x) is not set, val=%#x\n",
+                    lwarn("[P]MCE(0x%x, 0x%x) is not set, val=0x%x",
                            s->regs[Index_Address],
                            s->dregs[Alternate_Feature_Status],
                            val);
@@ -453,7 +453,7 @@ static void cs_write (void *opaque, hwaddr addr,
             val &= ~(1 << 5);   /* D5 is reserved */
             s->dregs[iaddr] = val;
             if (val & PPIO) {
-                lwarn ("PIO is not supported (%#x)\n", val);
+                lwarn("PIO is not supported (0x%x)", val);
                 break;
             }
             if (val & PEN) {
@@ -465,18 +465,18 @@ static void cs_write (void *opaque, hwaddr addr,
                 if (s->dma_running) {
                     IsaDmaClass *k = ISADMA_GET_CLASS(s->isa_dma);
                     k->release_DREQ(s->isa_dma, s->dma);
-                    AUD_set_active_out (s->voice, 0);
+                    audio_be_set_active_out(s->audio_be, s->voice, 0);
                     s->dma_running = 0;
                 }
             }
             break;
 
         case Error_Status_And_Initialization:
-            lwarn ("attempt to write to read only register %d\n", iaddr);
+            lwarn("attempt to write to read only register %d", iaddr);
             break;
 
         case MODE_And_ID:
-            dolog ("val=%#x\n", val);
+            dolog("val=0x%x", val);
             if (val & MODE2)
                 s->dregs[iaddr] |= MODE2;
             else
@@ -485,7 +485,7 @@ static void cs_write (void *opaque, hwaddr addr,
 
         case Alternate_Feature_Enable_I:
             if (val & TE)
-                lerr ("timer is not yet supported\n");
+                lerr("timer is not yet supported");
             s->dregs[iaddr] = val;
             break;
 
@@ -499,7 +499,7 @@ static void cs_write (void *opaque, hwaddr addr,
             break;
 
         case Version_Chip_ID:
-            lwarn ("write to Version_Chip_ID register %#x\n", val);
+            lwarn("write to Version_Chip_ID register 0x%x", val);
             s->dregs[iaddr] = val;
             break;
 
@@ -507,7 +507,7 @@ static void cs_write (void *opaque, hwaddr addr,
             s->dregs[iaddr] = val;
             break;
         }
-        dolog ("written value %#x to indirect register %d\n", val, iaddr);
+        dolog("written value 0x%x to indirect register %d", val, iaddr);
         break;
 
     case Status:
@@ -519,7 +519,7 @@ static void cs_write (void *opaque, hwaddr addr,
         break;
 
     case PIO_Data:
-        lwarn ("attempt to write value %#x to PIO register\n", val);
+        lwarn("attempt to write value 0x%x to PIO register", val);
         break;
     }
 }
@@ -551,11 +551,11 @@ static int cs_write_audio (CSState *s, int nchan, int dma_pos,
 
             for (i = 0; i < copied; ++i)
                 linbuf[i] = s->tab[tmpbuf[i]];
-            copied = AUD_write (s->voice, linbuf, copied << 1);
+            copied = audio_be_write(s->audio_be, s->voice, linbuf, copied << 1);
             copied >>= 1;
         }
         else {
-            copied = AUD_write (s->voice, tmpbuf, copied);
+            copied = audio_be_write(s->audio_be, s->voice, tmpbuf, copied);
         }
 
         temp -= copied;
@@ -614,7 +614,7 @@ static int cs4231a_pre_load (void *opaque)
     if (s->dma_running) {
         IsaDmaClass *k = ISADMA_GET_CLASS(s->isa_dma);
         k->release_DREQ(s->isa_dma, s->dma);
-        AUD_set_active_out (s->voice, 0);
+        audio_be_set_active_out(s->audio_be, s->voice, 0);
     }
     s->dma_running = 0;
     return 0;
@@ -678,7 +678,7 @@ static void cs4231a_realizefn (DeviceState *dev, Error **errp)
         return;
     }
 
-    if (!AUD_register_card ("cs4231a", &s->card, errp)) {
+    if (!audio_be_check(&s->audio_be, errp)) {
         return;
     }
 
@@ -694,7 +694,7 @@ static void cs4231a_realizefn (DeviceState *dev, Error **errp)
 }
 
 static const Property cs4231a_properties[] = {
-    DEFINE_AUDIO_PROPERTIES(CSState, card),
+    DEFINE_AUDIO_PROPERTIES(CSState, audio_be),
     DEFINE_PROP_UINT32 ("iobase",  CSState, port, 0x534),
     DEFINE_PROP_UINT32 ("irq",     CSState, irq,  9),
     DEFINE_PROP_UINT32 ("dma",     CSState, dma,  3),
@@ -723,7 +723,7 @@ static const TypeInfo cs4231a_info = {
 static void cs4231a_register_types (void)
 {
     type_register_static (&cs4231a_info);
-    deprecated_register_soundhw("cs4231a", "CS4231A", 1, TYPE_CS4231A);
+    audio_register_model("cs4231a", "CS4231A", TYPE_CS4231A);
 }
 
 type_init (cs4231a_register_types)

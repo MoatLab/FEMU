@@ -20,40 +20,58 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
-#include "hw/arm/soc_dma.h"
+#include "qemu/log.h"
+#include "system/physmem.h"
+#include "hw/dma/soc_dma.h"
 
 static void transfer_mem2mem(struct soc_dma_ch_s *ch)
 {
-    memcpy(ch->paddr[0], ch->paddr[1], ch->bytes);
-    ch->paddr[0] += ch->bytes;
-    ch->paddr[1] += ch->bytes;
-}
+    /*
+     * Memory-to-memory transfer: do the whole thing in one go.  The
+     * hardware spec says that it is invalid to program the OMAP DMA
+     * controller with addresses that don't match the port (i.e. to
+     * ask for a transfer to/from a memory port with a physaddr that
+     * isn't within that port range) and that if you do then the
+     * transfer continues and memory can be corrupted.  So we can map
+     * both source and destination, and treat short mappings and
+     * failed mappings as a guest error.
+     */
+    hwaddr srclen = ch->bytes;
+    hwaddr dstlen = ch->bytes;
+    hwaddr srcaddr = ch->vaddr[0];
+    hwaddr dstaddr = ch->vaddr[1];
+    void *srcmem, *dstmem;
+    hwaddr xferlen = 0;
 
-static void transfer_mem2fifo(struct soc_dma_ch_s *ch)
-{
-    ch->io_fn[1](ch->io_opaque[1], ch->paddr[0], ch->bytes);
-    ch->paddr[0] += ch->bytes;
-}
+    srcmem = physical_memory_map(srcaddr, &srclen, false);
+    if (!srcmem) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "soc_dma mem2mem transfer: could not map source; "
+                      "guest error programming source port/address\n");
+        return;
+    }
 
-static void transfer_fifo2mem(struct soc_dma_ch_s *ch)
-{
-    ch->io_fn[0](ch->io_opaque[0], ch->paddr[1], ch->bytes);
-    ch->paddr[1] += ch->bytes;
-}
+    dstmem = physical_memory_map(dstaddr, &dstlen, true);
+    if (!dstmem) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "soc_dma mem2mem transfer: could not map destination; "
+                      "guest error programming destination port/address\n");
+        goto unmap_src;
+    }
 
-/* This is further optimisable but isn't very important because often
- * DMA peripherals forbid this kind of transfers and even when they don't,
- * oprating systems may not need to use them.  */
-static void *fifo_buf;
-static int fifo_size;
-static void transfer_fifo2fifo(struct soc_dma_ch_s *ch)
-{
-    if (ch->bytes > fifo_size)
-        fifo_buf = g_realloc(fifo_buf, fifo_size = ch->bytes);
+    xferlen = MIN(srclen, dstlen);
+    if (xferlen < ch->bytes) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "soc_dma mem2mem transfer: could not transfer all data; "
+                      "guest error programming src or destination addresses\n");
+        /* Continue to transfer whatever did fit in the port window */
+    }
 
-    /* Implement as transfer_fifo2linear + transfer_linear2fifo.  */
-    ch->io_fn[0](ch->io_opaque[0], fifo_buf, ch->bytes);
-    ch->io_fn[1](ch->io_opaque[1], fifo_buf, ch->bytes);
+    memmove(dstmem, srcmem, xferlen);
+
+    physical_memory_unmap(dstmem, dstlen, true, xferlen);
+unmap_src:
+    physical_memory_unmap(srcmem, srclen, false, xferlen);
 }
 
 struct dma_s {
@@ -66,28 +84,24 @@ struct dma_s {
     struct memmap_entry_s {
         enum soc_dma_port_type type;
         hwaddr addr;
-        union {
-           struct {
-               void *opaque;
-               soc_dma_io_t fn;
-               int out;
-           } fifo;
-           struct {
-               void *base;
-               size_t size;
-           } mem;
-        } u;
+        struct {
+            size_t size;
+        } mem;
     } *memmap;
     int memmap_size;
 
     struct soc_dma_ch_s ch[];
 };
 
-static void soc_dma_ch_schedule(struct soc_dma_ch_s *ch, int delay_bytes)
+static void soc_dma_ch_schedule(struct soc_dma_ch_s *ch, uint64_t delay_bytes)
 {
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     struct dma_s *dma = (struct dma_s *) ch->dma;
 
+    /*
+     * Worst case delay bytes is only slightly larger than fits into
+     * a 32-bit integer, so this won't overflow.
+     */
     timer_mod(ch->timer, now + delay_bytes / dma->channel_freq);
 }
 
@@ -129,22 +143,9 @@ static inline enum soc_dma_port_type soc_dma_ch_update_type(
     struct dma_s *dma = (struct dma_s *) ch->dma;
     struct memmap_entry_s *entry = soc_dma_lookup(dma, ch->vaddr[port]);
 
-    if (entry->type == soc_dma_port_fifo) {
-        while (entry < dma->memmap + dma->memmap_size &&
-                        entry->u.fifo.out != port)
-            entry ++;
-        if (entry->addr != ch->vaddr[port] || entry->u.fifo.out != port)
-            return soc_dma_port_other;
-
-        if (ch->type[port] != soc_dma_access_const)
-            return soc_dma_port_other;
-
-        ch->io_fn[port] = entry->u.fifo.fn;
-        ch->io_opaque[port] = entry->u.fifo.opaque;
-        return soc_dma_port_fifo;
-    } else if (entry->type == soc_dma_port_mem) {
+    if (entry->type == soc_dma_port_mem) {
         if (entry->addr > ch->vaddr[port] ||
-                        entry->addr + entry->u.mem.size <= ch->vaddr[port])
+                        entry->addr + entry->mem.size <= ch->vaddr[port])
             return soc_dma_port_other;
 
         /* TODO: support constant memory address for source port as used for
@@ -152,10 +153,6 @@ static inline enum soc_dma_port_type soc_dma_ch_update_type(
         if (ch->type[port] != soc_dma_access_const)
             return soc_dma_port_other;
 
-        ch->paddr[port] = (uint8_t *) entry->u.mem.base +
-                (ch->vaddr[port] - entry->addr);
-        /* TODO: save bytes left to the end of the mapping somewhere so we
-         * can check we're not reading beyond it.  */
         return soc_dma_port_mem;
     } else
         return soc_dma_port_other;
@@ -166,26 +163,14 @@ void soc_dma_ch_update(struct soc_dma_ch_s *ch)
     enum soc_dma_port_type src, dst;
 
     src = soc_dma_ch_update_type(ch, 0);
-    if (src == soc_dma_port_other) {
+    dst = soc_dma_ch_update_type(ch, 1);
+    if (src == soc_dma_port_other || dst == soc_dma_port_other) {
         ch->update = 0;
         ch->transfer_fn = ch->dma->transfer_fn;
-        return;
-    }
-    dst = soc_dma_ch_update_type(ch, 1);
-
-    /* TODO: use src and dst as array indices.  */
-    if (src == soc_dma_port_mem && dst == soc_dma_port_mem)
+    } else {
+        ch->update = 1;
         ch->transfer_fn = transfer_mem2mem;
-    else if (src == soc_dma_port_mem && dst == soc_dma_port_fifo)
-        ch->transfer_fn = transfer_mem2fifo;
-    else if (src == soc_dma_port_fifo && dst == soc_dma_port_mem)
-        ch->transfer_fn = transfer_fifo2mem;
-    else if (src == soc_dma_port_fifo && dst == soc_dma_port_fifo)
-        ch->transfer_fn = transfer_fifo2fifo;
-    else
-        ch->transfer_fn = ch->dma->transfer_fn;
-
-    ch->update = (dst != soc_dma_port_other);
+    }
 }
 
 static void soc_dma_ch_freq_update(struct dma_s *s)
@@ -251,63 +236,11 @@ struct soc_dma_s *soc_dma_init(int n)
     }
 
     soc_dma_reset(&s->soc);
-    fifo_size = 0;
 
     return &s->soc;
 }
 
-void soc_dma_port_add_fifo(struct soc_dma_s *soc, hwaddr virt_base,
-                soc_dma_io_t fn, void *opaque, int out)
-{
-    struct memmap_entry_s *entry;
-    struct dma_s *dma = (struct dma_s *) soc;
-
-    dma->memmap = g_realloc(dma->memmap, sizeof(*entry) *
-                    (dma->memmap_size + 1));
-    entry = soc_dma_lookup(dma, virt_base);
-
-    if (dma->memmap_size) {
-        if (entry->type == soc_dma_port_mem) {
-            if (entry->addr <= virt_base &&
-                            entry->addr + entry->u.mem.size > virt_base) {
-                error_report("%s: FIFO at %"PRIx64
-                             " collides with RAM region at %"PRIx64
-                             "-%"PRIx64, __func__,
-                             virt_base, entry->addr,
-                             (entry->addr + entry->u.mem.size));
-                exit(-1);
-            }
-
-            if (entry->addr <= virt_base)
-                entry ++;
-        } else
-            while (entry < dma->memmap + dma->memmap_size &&
-                            entry->addr <= virt_base) {
-                if (entry->addr == virt_base && entry->u.fifo.out == out) {
-                    error_report("%s: FIFO at %"PRIx64
-                                 " collides FIFO at %"PRIx64,
-                                 __func__, virt_base, entry->addr);
-                    exit(-1);
-                }
-
-                entry ++;
-            }
-
-        memmove(entry + 1, entry,
-                        (uint8_t *) (dma->memmap + dma->memmap_size ++) -
-                        (uint8_t *) entry);
-    } else
-        dma->memmap_size ++;
-
-    entry->addr          = virt_base;
-    entry->type          = soc_dma_port_fifo;
-    entry->u.fifo.fn     = fn;
-    entry->u.fifo.opaque = opaque;
-    entry->u.fifo.out    = out;
-}
-
-void soc_dma_port_add_mem(struct soc_dma_s *soc, uint8_t *phys_base,
-                hwaddr virt_base, size_t size)
+void soc_dma_port_add_mem(struct soc_dma_s *soc, hwaddr virt_base, size_t size)
 {
     struct memmap_entry_s *entry;
     struct dma_s *dma = (struct dma_s *) soc;
@@ -320,12 +253,12 @@ void soc_dma_port_add_mem(struct soc_dma_s *soc, uint8_t *phys_base,
         if (entry->type == soc_dma_port_mem) {
             if ((entry->addr >= virt_base && entry->addr < virt_base + size) ||
                             (entry->addr <= virt_base &&
-                             entry->addr + entry->u.mem.size > virt_base)) {
+                             entry->addr + entry->mem.size > virt_base)) {
                 error_report("%s: RAM at %"PRIx64 "-%"PRIx64
                              " collides with RAM region at %"PRIx64
                              "-%"PRIx64, __func__,
                              virt_base, virt_base + size,
-                             entry->addr, entry->addr + entry->u.mem.size);
+                             entry->addr, entry->addr + entry->mem.size);
                 exit(-1);
             }
 
@@ -354,8 +287,7 @@ void soc_dma_port_add_mem(struct soc_dma_s *soc, uint8_t *phys_base,
 
     entry->addr          = virt_base;
     entry->type          = soc_dma_port_mem;
-    entry->u.mem.base    = phys_base;
-    entry->u.mem.size    = size;
+    entry->mem.size    = size;
 }
 
 /* TODO: port removal for ports like PCMCIA memory */

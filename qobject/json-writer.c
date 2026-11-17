@@ -24,13 +24,16 @@ struct JSONWriter {
     GByteArray *container_is_array;
 };
 
+/* Should cover most QMP responses without reallocation */
+#define JSON_WRITER_INITIAL_SIZE  4096
+
 JSONWriter *json_writer_new(bool pretty)
 {
     JSONWriter *writer = g_new(JSONWriter, 1);
 
     writer->pretty = pretty;
     writer->need_comma = false;
-    writer->contents = g_string_new(NULL);
+    writer->contents = g_string_sized_new(JSON_WRITER_INITIAL_SIZE);
     writer->container_is_array = g_byte_array_new();
     return writer;
 }

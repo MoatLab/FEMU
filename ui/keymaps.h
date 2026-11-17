@@ -52,8 +52,9 @@ typedef struct {
 
 typedef struct kbd_layout_t kbd_layout_t;
 
-kbd_layout_t *init_keyboard_layout(const name2keysym_t *table,
-                                   const char *language, Error **errp);
+kbd_layout_t *kbd_layout_new(const name2keysym_t *table,
+                             const char *language, Error **errp);
+void kbd_layout_free(kbd_layout_t *k);
 int keysym2scancode(kbd_layout_t *k, int keysym,
                     QKbdState *kbd, bool down);
 int keycode_is_keypad(kbd_layout_t *k, int keycode);

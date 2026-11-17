@@ -30,4 +30,6 @@ void decode_send_insn_to(Packet *packet, int start, int newloc);
 int decode_packet(DisasContext *ctx, int max_words, const uint32_t *words,
                   Packet *pkt, bool disas_only);
 
+bool opcode_supported(uint16_t opcode, const HexagonCPUDef *hex_def);
+
 #endif

@@ -3,18 +3,17 @@
  * with Elroy PCI bus (LBA) adapter emulation
  * Found in C3000 and similar machines
  *
- * (C) 2023 by Helge Deller <deller@gmx.de>
+ * (C) 2023-2026 by Helge Deller <deller@gmx.de>
  *
  * This work is licensed under the GNU GPL license version 2 or later.
  *
  * Chip documentation is available at:
- * https://parisc.wiki.kernel.org/index.php/Technical_Documentation
+ * https://parisc.docs.kernel.org/en/latest/technical_documentation.html
  *
  * TODO:
  * - All user-added devices are currently attached to the first
  *   Elroy (PCI bus) only for now. To fix this additional work in
  *   SeaBIOS and this driver is needed. See "user_creatable" flag below.
- * - GMMIO (Greater than 4 GB MMIO) register
  */
 
 #define TYPE_ASTRO_IOMMU_MEMORY_REGION "astro-iommu-memory-region"
@@ -25,10 +24,10 @@
 #include "qemu/module.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pci_bus.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/pci-host/astro.h"
 #include "hw/hppa/hppa_hardware.h"
 #include "migration/vmstate.h"
@@ -36,6 +35,14 @@
 #include "trace.h"
 #include "qom/object.h"
 #include "exec/target_page.h"
+
+static const int elroy_hpa_offsets[ELROY_NUM] = {
+            0x30000, 0x32000, 0x38000, 0x3c000 };
+static const char elroy_rope_nr[ELROY_NUM] = {
+            0, 1, 4, 6 }; /* busnum path, e.g. [10:6] */
+
+/* Astro version numbers */
+enum { ID_ASTRO_1_0 = 0, ID_ASTRO_2_1 = 9, ID_ASTRO_3_0 = 2 };
 
 /*
  * Helper functions
@@ -303,7 +310,7 @@ static IOMMUTLBEntry astro_translate_iommu(IOMMUMemoryRegion *iommu,
      * language which not-coincidentally matches the PSW.W=0 mapping.
      */
     if (addr <= UINT32_MAX) {
-        entry = hppa_abs_to_phys_pa2_w0(addr);
+        entry = hppa_abs_to_phys_pa2_w0(s->phys_addr_bits, addr);
     } else {
         entry = addr;
     }
@@ -424,22 +431,24 @@ static void elroy_reset(DeviceState *dev)
     }
 }
 
-static void elroy_pcihost_init(Object *obj)
+static void elroy_pcihost_realize(DeviceState *dev, Error **errp)
 {
-    ElroyState *s = ELROY_PCI_HOST_BRIDGE(obj);
-    PCIHostState *phb = PCI_HOST_BRIDGE(obj);
-    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+    ElroyState *s = ELROY_PCI_HOST_BRIDGE(dev);
+    PCIHostState *phb = PCI_HOST_BRIDGE(dev);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+    Object *obj = OBJECT(s);
+    g_autofree char *elroy_mmio_name = NULL;
 
     /* Elroy config access from CPU.  */
-    memory_region_init_io(&s->this_mem, OBJECT(s), &elroy_chip_ops,
-                          s, "elroy", 0x2000);
+    memory_region_init_io(&s->this_mem, obj, &elroy_chip_ops,
+                          s, dev->id, 0x2000);
 
     /* Elroy PCI config. */
-    memory_region_init_io(&phb->conf_mem, OBJECT(phb),
-                          &elroy_config_addr_ops, DEVICE(s),
+    memory_region_init_io(&phb->conf_mem, obj,
+                          &elroy_config_addr_ops, dev,
                           "pci-conf-idx", 8);
-    memory_region_init_io(&phb->data_mem, OBJECT(phb),
-                          &elroy_config_data_ops, DEVICE(s),
+    memory_region_init_io(&phb->data_mem, obj,
+                          &elroy_config_data_ops, dev,
                           "pci-conf-data", 8);
     memory_region_add_subregion(&s->this_mem, 0x40,
                                 &phb->conf_mem);
@@ -447,8 +456,9 @@ static void elroy_pcihost_init(Object *obj)
                                 &phb->data_mem);
 
     /* Elroy PCI bus memory.  */
-    memory_region_init(&s->pci_mmio, OBJECT(s), "pci-mmio", UINT64_MAX);
-    memory_region_init_io(&s->pci_io, OBJECT(s), &unassigned_io_ops, obj,
+    elroy_mmio_name = g_strdup_printf("%s-pci-mmio", dev->id);
+    memory_region_init(&s->pci_mmio, obj, elroy_mmio_name, UINT64_MAX);
+    memory_region_init_io(&s->pci_io, obj, &unassigned_io_ops, obj,
                             "pci-isa-mmio",
                             ((uint32_t) IOS_DIST_BASE_SIZE) / ROPES_PER_IOC);
 
@@ -459,7 +469,7 @@ static void elroy_pcihost_init(Object *obj)
 
     sysbus_init_mmio(sbd, &s->this_mem);
 
-    qdev_init_gpio_in(DEVICE(obj), elroy_set_irq, ELROY_IRQS);
+    qdev_init_gpio_in(dev, elroy_set_irq, ELROY_IRQS);
 }
 
 static const VMStateDescription vmstate_elroy = {
@@ -487,6 +497,7 @@ static void elroy_pcihost_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_legacy_reset(dc, elroy_reset);
+    dc->realize = elroy_pcihost_realize;
     dc->vmsd = &vmstate_elroy;
     dc->user_creatable = false;
 }
@@ -494,7 +505,6 @@ static void elroy_pcihost_class_init(ObjectClass *klass, const void *data)
 static const TypeInfo elroy_pcihost_info = {
     .name          = TYPE_ELROY_PCI_HOST_BRIDGE,
     .parent        = TYPE_PCI_HOST_BRIDGE,
-    .instance_init = elroy_pcihost_init,
     .instance_size = sizeof(ElroyState),
     .class_init    = elroy_pcihost_class_init,
 };
@@ -522,13 +532,89 @@ static ElroyState *elroy_init(int num)
  * Astro Runway chip.
  */
 
+static void adjust_LMMIO_mapping(AstroState *s)
+{
+    MemoryRegion *lmmio;
+    uint64_t map_addr, map_size, align_mask;
+    uint32_t map_route, map_enabled, i;
+
+    lmmio = &s->lmmio;
+
+    /* read LMMIO distributed route and calculate size */
+    map_route = s->ioc_ranges[(0x370 - 0x300) / 8] >> 58;
+    map_route = MIN(MAX(map_route, 20), 23);
+
+    /* calculate size of each mapping, sum of all is 8-64 MB */
+    map_size  = 1ULL << map_route;
+    align_mask = ~(map_size - 1);
+
+    /* read LMMIO_DIST_BASE for mapping address */
+    map_addr  = s->ioc_ranges[(0x360 - 0x300) / 8];
+    map_enabled = map_addr & 1;
+    map_addr  &= MAKE_64BIT_MASK(24, 5);
+    map_addr  |= MAKE_64BIT_MASK(29, 36);
+    map_addr  &= align_mask;
+    s->ioc_ranges[(0x360 - 0x300) / 8] = map_addr | map_enabled;
+
+    /* make sure the lmmio region is initially turned off */
+    if (lmmio->enabled) {
+        memory_region_set_enabled(lmmio, false);
+    }
+
+    /* exit if range is not enabled */
+    if (!map_enabled) {
+        return;
+    }
+
+    if (!lmmio->name) {
+        memory_region_init_io(lmmio, OBJECT(s), &unassigned_io_ops, s,
+                    "LMMIO", ROPES_PER_IOC * map_size);
+        memory_region_add_subregion_overlap(get_system_memory(),
+                    map_addr, lmmio, 1);
+    }
+
+    memory_region_set_address(lmmio, map_addr);
+    memory_region_set_size(lmmio, ROPES_PER_IOC * map_size);
+    memory_region_set_enabled(lmmio, true);
+
+    for (i = 0; i < ELROY_NUM; i++) {
+        MemoryRegion *alias;
+        ElroyState *elroy;
+        int rope;
+
+        elroy = s->elroy[i];
+        alias = &elroy->lmmio_alias;
+        rope = elroy_rope_nr[i];
+        if (alias->enabled) {
+            memory_region_set_enabled(alias, false);
+        }
+
+        if (!alias->name) {
+            memory_region_init_alias(alias, OBJECT(elroy),
+                 "lmmio-alias", &elroy->pci_mmio, 0, map_size);
+            memory_region_add_subregion_overlap(lmmio, rope * map_size,
+                 alias, 2);
+        }
+
+        memory_region_set_address(alias, rope * map_size);
+        memory_region_set_alias_offset(alias,
+                (uint32_t) (map_addr + rope * map_size));
+        memory_region_set_size(alias, map_size);
+        memory_region_set_enabled(alias, true);
+    }
+}
+
 static void adjust_LMMIO_DIRECT_mapping(AstroState *s, unsigned int reg_index)
 {
     MemoryRegion *lmmio_alias;
     unsigned int lmmio_index, map_route;
     hwaddr map_addr;
-    uint32_t map_size;
+    uint32_t map_size, map_enabled;
     struct ElroyState *elroy;
+
+    /* each LMMIO may access from 1 MB up to 64 MB */
+    const unsigned int lmmio_mask = ~(1 * MiB - 1);
+    const unsigned int lmmio_max_size = 64 * MiB;
 
     /* pointer to LMMIO_DIRECT entry */
     lmmio_index = reg_index / 3;
@@ -542,30 +628,104 @@ static void adjust_LMMIO_DIRECT_mapping(AstroState *s, unsigned int reg_index)
     map_route &= (ELROY_NUM - 1);
     elroy = s->elroy[map_route];
 
+    /* make sure the lmmio region is initially turned off */
     if (lmmio_alias->enabled) {
         memory_region_set_enabled(lmmio_alias, false);
     }
 
+    /* do sanity checks and calculate mmio size */
+    map_enabled = map_addr & 1;
+    map_addr &= lmmio_mask;
+    map_size &= lmmio_mask;
+    map_size = MIN(map_size, lmmio_max_size);
     map_addr = F_EXTEND(map_addr);
-    map_addr &= TARGET_PAGE_MASK;
-    map_size = (~map_size) + 1;
-    map_size &= TARGET_PAGE_MASK;
 
-    /* exit if disabled or zero map size */
-    if (!(map_addr & 1) || !map_size) {
+    /* exit if disabled or has zero size. */
+    if (!map_enabled || !map_size) {
         return;
     }
 
-    if (!memory_region_size(lmmio_alias)) {
+    if (!lmmio_alias->name) {
+        char lmmio_name[32];
+        snprintf(lmmio_name, sizeof(lmmio_name),
+                 "LMMIO-DIRECT-%u", lmmio_index);
         memory_region_init_alias(lmmio_alias, OBJECT(elroy),
-                        "pci-lmmmio-alias", &elroy->pci_mmio,
+                        lmmio_name, &elroy->pci_mmio,
                         (uint32_t) map_addr, map_size);
-        memory_region_add_subregion(get_system_memory(), map_addr,
-                                 lmmio_alias);
-    } else {
-        memory_region_set_alias_offset(lmmio_alias, map_addr);
-        memory_region_set_size(lmmio_alias, map_size);
-        memory_region_set_enabled(lmmio_alias, true);
+        memory_region_add_subregion_overlap(get_system_memory(),
+                        map_addr, lmmio_alias, 3);
+    }
+
+    memory_region_set_address(lmmio_alias, map_addr);
+    memory_region_set_alias_offset(lmmio_alias, (uint32_t) map_addr);
+    memory_region_set_size(lmmio_alias, map_size);
+    memory_region_set_enabled(lmmio_alias, true);
+}
+
+static void adjust_GMMIO_mapping(AstroState *s)
+{
+    MemoryRegion *gmmio;
+    uint64_t map_addr, map_size, align_mask;
+    uint32_t map_route, map_enabled, i;
+
+    gmmio = &s->gmmio;
+    map_addr  = s->ioc_ranges[(0x378 - 0x300) / 8];       /* GMMIO_DIST_BASE */
+    map_enabled = map_addr & 1;
+    map_addr  &= MAKE_64BIT_MASK(32, 8);
+    s->ioc_ranges[(0x378 - 0x300) / 8] = map_addr | map_enabled;
+
+    map_route = s->ioc_ranges[(0x388 - 0x300) / 8] >> 58; /* GMMIO_DIST_ROUTE */
+    map_route = MIN(MAX(map_route, 29), 33); /* between 4-16 GB total */
+    map_size  = 1ULL << map_route;      /* size of each mapping */
+    align_mask = ~(map_size - 1);
+
+    /* make sure the lmmio region is initially turned off */
+    if (gmmio->enabled) {
+        memory_region_set_enabled(gmmio, false);
+    }
+
+    /* do sanity checks and calculate mmio size */
+    map_addr &= align_mask;
+
+    /* exit if disabled */
+    if (!map_enabled) {
+        return;
+    }
+
+    if (!gmmio->name) {
+        memory_region_init_io(gmmio, OBJECT(s), &unassigned_io_ops, s,
+                "GMMIO", ROPES_PER_IOC * map_size);
+        memory_region_add_subregion_overlap(get_system_memory(),
+                map_addr, gmmio, 1);
+    }
+
+    memory_region_set_address(gmmio, map_addr);
+    memory_region_set_size(gmmio, ROPES_PER_IOC * map_size);
+    memory_region_set_enabled(gmmio, true);
+
+    for (i = 0; i < ELROY_NUM; i++) {
+        MemoryRegion *alias;
+        ElroyState *elroy;
+        int rope;
+
+        elroy = s->elroy[i];
+        alias = &elroy->gmmio_alias;
+        rope = elroy_rope_nr[i];
+        if (alias->enabled) {
+            memory_region_set_enabled(alias, false);
+        }
+
+        if (!alias->name) {
+            memory_region_init_alias(alias, OBJECT(elroy),
+                 "gmmio-alias", &elroy->pci_mmio, 0, map_size);
+            memory_region_add_subregion_overlap(gmmio, rope * map_size,
+                 alias, 2);
+        }
+
+        memory_region_set_address(alias, rope * map_size);
+        memory_region_set_alias_offset(alias, map_addr + rope * map_size);
+        memory_region_set_size(alias, map_size);
+        memory_region_set_enabled(alias, true);
     }
 }
 
@@ -581,7 +741,7 @@ static MemTxResult astro_chip_read_with_attrs(void *opaque, hwaddr addr,
     switch ((addr >> 3) << 3) {
     /* R2I registers */
     case 0x0000:        /* ID */
-        val = (0x01 << 3) | 0x01ULL;
+        val = ID_ASTRO_2_1;
         break;
     case 0x0008:        /* IOC_CTRL */
         val = s->ioc_ctrl;
@@ -680,6 +840,12 @@ static MemTxResult astro_chip_write_with_attrs(void *opaque, hwaddr addr,
         /* check if one of the 4 LMMIO_DIRECT regs, each using 3 entries. */
         if (index < LMMIO_DIRECT_RANGES * 3) {
             adjust_LMMIO_DIRECT_mapping(s, index);
+        }
+        if (addr >= 0x360 && addr <= 0x370 + 7) {
+            adjust_LMMIO_mapping(s);
+        }
+        if (addr >= 0x378 && addr <= 0x388 + 7) {
+            adjust_GMMIO_mapping(s);
         }
         break;
     case 0x10200:
@@ -796,13 +962,13 @@ static void astro_reset(DeviceState *dev)
      * The LBA BASE/MASK registers control IO -> System routing (in Elroy)
      */
     memset(&s->ioc_ranges, 0, sizeof(s->ioc_ranges));
-    s->ioc_ranges[(0x360 - 0x300) / 8] = LMMIO_DIST_BASE_ADDR | 0x01; /* LMMIO_DIST_BASE (SBA) */
+    s->ioc_ranges[(0x360 - 0x300) / 8] = F_EXTEND(LMMIO_DIST_BASE_ADDR) | 0x01;
     s->ioc_ranges[(0x368 - 0x300) / 8] = 0xfc000000;          /* LMMIO_DIST_MASK */
     s->ioc_ranges[(0x370 - 0x300) / 8] = 0;                   /* LMMIO_DIST_ROUTE */
-    s->ioc_ranges[(0x390 - 0x300) / 8] = IOS_DIST_BASE_ADDR | 0x01; /* IOS_DIST_BASE */
+    s->ioc_ranges[(0x390 - 0x300) / 8] = F_EXTEND(IOS_DIST_BASE_ADDR) | 0x01;
     s->ioc_ranges[(0x398 - 0x300) / 8] = 0xffffff0000;        /* IOS_DIST_MASK    */
     s->ioc_ranges[(0x3a0 - 0x300) / 8] = 0x3400000000000000ULL; /* IOS_DIST_ROUTE */
-    s->ioc_ranges[(0x3c0 - 0x300) / 8] = 0xfffee00000;        /* IOS_DIRECT_BASE  */
+    s->ioc_ranges[(0x3c0 - 0x300) / 8] = IOS_DIST_BASE_ADDR;  /* IOS_DIRECT_BASE  */
     s->ioc_ranges[(0x3c8 - 0x300) / 8] = 0xffffff0000;        /* IOS_DIRECT_MASK  */
     s->ioc_ranges[(0x3d0 - 0x300) / 8] = 0x0;                 /* IOS_DIRECT_ROUTE */
 
@@ -840,10 +1006,6 @@ static void astro_realize(DeviceState *obj, Error **errp)
 
     /* Create Elroys (PCI host bus chips).  */
     for (i = 0; i < ELROY_NUM; i++) {
-        static const int elroy_hpa_offsets[ELROY_NUM] = {
-                    0x30000, 0x32000, 0x38000, 0x3c000 };
-        static const char elroy_rope_nr[ELROY_NUM] = {
-                    0, 1, 4, 6 }; /* busnum path, e.g. [10:6] */
         int addr_offset;
         ElroyState *elroy;
         hwaddr map_addr;
@@ -888,15 +1050,6 @@ static void astro_realize(DeviceState *obj, Error **errp)
         elroy->mmio_base[(0x0240 - 0x200) / 8] = rope * map_size | 0x01;
         elroy->mmio_base[(0x0248 - 0x200) / 8] = 0x0000e000;
 
-        /* map elroys mmio */
-        map_size = LMMIO_DIST_BASE_SIZE / ROPES_PER_IOC;
-        map_addr = F_EXTEND(LMMIO_DIST_BASE_ADDR + rope * map_size);
-        memory_region_init_alias(&elroy->pci_mmio_alias, OBJECT(elroy),
-                                 "pci-mmio-alias",
-                                 &elroy->pci_mmio, (uint32_t) map_addr, map_size);
-        memory_region_add_subregion(get_system_memory(), map_addr,
-                                 &elroy->pci_mmio_alias);
-
         /* map elroys io */
         map_size = IOS_DIST_BASE_SIZE / ROPES_PER_IOC;
         map_addr = F_EXTEND(IOS_DIST_BASE_ADDR + rope * map_size);
@@ -908,6 +1061,10 @@ static void astro_realize(DeviceState *obj, Error **errp)
                                  elroy);
     }
 }
+
+static const Property astro_props[] = {
+    DEFINE_PROP_UINT8("phys-addr-bits", AstroState, phys_addr_bits, 32),
+};
 
 static void astro_class_init(ObjectClass *klass, const void *data)
 {
@@ -921,6 +1078,8 @@ static void astro_class_init(ObjectClass *klass, const void *data)
      * be created without that hardware
      */
     dc->user_creatable = false;
+
+    device_class_set_props(dc, astro_props);
 }
 
 static const TypeInfo astro_chip_info = {

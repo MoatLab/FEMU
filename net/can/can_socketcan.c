@@ -319,11 +319,19 @@ static void can_host_socketcan_class_init(ObjectClass *klass,
     chc->disconnect = can_host_socketcan_disconnect;
 }
 
+static void can_host_socketcan_finalize(Object *obj)
+{
+    CanHostSocketCAN *c = CAN_HOST_SOCKETCAN(obj);
+
+    g_free(c->ifname);
+}
+
 static const TypeInfo can_host_socketcan_info = {
     .parent = TYPE_CAN_HOST,
     .name = TYPE_CAN_HOST_SOCKETCAN,
     .instance_size = sizeof(CanHostSocketCAN),
     .instance_init = can_host_socketcan_instance_init,
+    .instance_finalize = can_host_socketcan_finalize,
     .class_init = can_host_socketcan_class_init,
 };
 

@@ -11,12 +11,12 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pci_host.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/intc/i8259.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "system/address-spaces.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
@@ -108,7 +108,6 @@ static void mv64361_pcihost_class_init(ObjectClass *klass, const void *data)
 
     dc->realize = mv64361_pcihost_realize;
     device_class_set_props(dc, mv64361_pcihost_props);
-    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
 }
 
 static const TypeInfo mv64361_pcihost_info = {

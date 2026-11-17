@@ -11,7 +11,7 @@
 
 #include "system/memory.h"
 #include "qom/object.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/pci-host/gpex.h"
 #include "hw/xen/xen-hvm-common.h"
 
@@ -84,6 +84,8 @@ struct XenPVHMachineState {
         /* PCI */
         MemMapEntry pci_ecam, pci_mmio, pci_mmio_high;
         uint32_t pci_intx_irq_base;
+
+        bool mapcache;
     } cfg;
 };
 

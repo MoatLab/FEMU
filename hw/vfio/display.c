@@ -264,7 +264,7 @@ static void vfio_display_free_one_dmabuf(VFIODisplay *dpy, VFIODMABuf *dmabuf)
     QTAILQ_REMOVE(&dpy->dmabuf.bufs, dmabuf, next);
 
     qemu_dmabuf_close(dmabuf->buf);
-    dpy_gl_release_dmabuf(dpy->con, dmabuf->buf);
+    qemu_console_gl_release_dmabuf(dpy->con, dmabuf->buf);
     g_clear_pointer(&dmabuf->buf, qemu_dmabuf_free);
     g_free(dmabuf);
 }
@@ -285,7 +285,7 @@ static void vfio_display_free_dmabufs(VFIOPCIDevice *vdev)
     }
 }
 
-static void vfio_display_dmabuf_update(void *opaque)
+static bool vfio_display_dmabuf_update(void *opaque)
 {
     VFIOPCIDevice *vdev = opaque;
     VFIODisplay *dpy = vdev->dpy;
@@ -298,7 +298,7 @@ static void vfio_display_dmabuf_update(void *opaque)
         if (dpy->ramfb) {
             ramfb_display_update(dpy->con, dpy->ramfb);
         }
-        return;
+        return true;
     }
 
     width = qemu_dmabuf_get_width(primary->buf);
@@ -307,7 +307,7 @@ static void vfio_display_dmabuf_update(void *opaque)
     if (dpy->dmabuf.primary != primary) {
         dpy->dmabuf.primary = primary;
         qemu_console_resize(dpy->con, width, height);
-        dpy_gl_scanout_dmabuf(dpy->con, primary->buf);
+        qemu_console_gl_scanout_dmabuf(dpy->con, primary->buf);
         free_bufs = true;
     }
 
@@ -321,25 +321,27 @@ static void vfio_display_dmabuf_update(void *opaque)
     if (cursor && (new_cursor || cursor->hot_updates)) {
         bool have_hot = (cursor->hot_x != 0xffffffff &&
                          cursor->hot_y != 0xffffffff);
-        dpy_gl_cursor_dmabuf(dpy->con, cursor->buf, have_hot,
-                             cursor->hot_x, cursor->hot_y);
+        qemu_console_gl_cursor_dmabuf(dpy->con, cursor->buf, have_hot,
+                                      cursor->hot_x, cursor->hot_y);
         cursor->hot_updates = 0;
     } else if (!cursor && new_cursor) {
-        dpy_gl_cursor_dmabuf(dpy->con, NULL, false, 0, 0);
+        qemu_console_gl_cursor_dmabuf(dpy->con, NULL, false, 0, 0);
     }
 
     if (cursor && cursor->pos_updates) {
-        dpy_gl_cursor_position(dpy->con,
+        qemu_console_gl_cursor_position(dpy->con,
                                cursor->pos_x,
                                cursor->pos_y);
         cursor->pos_updates = 0;
     }
 
-    dpy_gl_update(dpy->con, 0, 0, width, height);
+    qemu_console_gl_update(dpy->con, 0, 0, width, height);
 
     if (free_bufs) {
         vfio_display_free_dmabufs(vdev);
     }
+
+    return true;
 }
 
 static int vfio_display_get_flags(void *opaque)
@@ -361,7 +363,7 @@ static bool vfio_display_dmabuf_init(VFIOPCIDevice *vdev, Error **errp)
     }
 
     vdev->dpy = g_new0(VFIODisplay, 1);
-    vdev->dpy->con = graphic_console_init(DEVICE(vdev), 0,
+    vdev->dpy->con = qemu_graphic_console_create(DEVICE(vdev), 0,
                                           &vfio_display_dmabuf_ops,
                                           vdev);
     if (vdev->enable_ramfb) {
@@ -394,12 +396,12 @@ void vfio_display_reset(VFIOPCIDevice *vdev)
         return;
     }
 
-    dpy_gl_scanout_disable(vdev->dpy->con);
+    qemu_console_gl_scanout_disable(vdev->dpy->con);
     vfio_display_dmabuf_exit(vdev->dpy);
-    dpy_gfx_update_full(vdev->dpy->con);
+    qemu_console_update_full(vdev->dpy->con);
 }
 
-static void vfio_display_region_update(void *opaque)
+static bool vfio_display_region_update(void *opaque)
 {
     VFIOPCIDevice *vdev = opaque;
     VFIODisplay *dpy = vdev->dpy;
@@ -414,18 +416,18 @@ static void vfio_display_region_update(void *opaque)
     if (ret < 0) {
         error_report("ioctl VFIO_DEVICE_QUERY_GFX_PLANE: %s",
                      strerror(errno));
-        return;
+        return true;
     }
     if (!plane.drm_format || !plane.size) {
         if (dpy->ramfb) {
             ramfb_display_update(dpy->con, dpy->ramfb);
             dpy->region.surface = NULL;
         }
-        return;
+        return true;
     }
     format = qemu_drm_format_to_pixman(plane.drm_format);
     if (!format) {
-        return;
+        return true;
     }
 
     if (dpy->region.buffer.size &&
@@ -446,13 +448,13 @@ static void vfio_display_region_update(void *opaque)
 
     if (!dpy->region.buffer.size) {
         /* mmap region */
+        Error *error = NULL;
         ret = vfio_region_setup(OBJECT(vdev), &vdev->vbasedev,
                                 &dpy->region.buffer,
                                 plane.region_index,
-                                "display");
+                                "display", &error);
         if (ret != 0) {
-            error_report("%s: vfio_region_setup(%d): %s",
-                         __func__, plane.region_index, strerror(-ret));
+            error_report_err(error);
             goto err;
         }
         ret = vfio_region_mmap(&dpy->region.buffer);
@@ -469,18 +471,19 @@ static void vfio_display_region_update(void *opaque)
         dpy->region.surface = qemu_create_displaysurface_from
             (plane.width, plane.height, format,
              plane.stride, dpy->region.buffer.mmaps[0].mmap);
-        dpy_gfx_replace_surface(dpy->con, dpy->region.surface);
+        qemu_console_set_surface(dpy->con, dpy->region.surface);
     }
 
     /* full screen update */
-    dpy_gfx_update(dpy->con, 0, 0,
-                   surface_width(dpy->region.surface),
-                   surface_height(dpy->region.surface));
-    return;
+    qemu_console_update(dpy->con, 0, 0,
+                        surface_width(dpy->region.surface),
+                        surface_height(dpy->region.surface));
+    return true;
 
 err:
     vfio_region_exit(&dpy->region.buffer);
     vfio_region_finalize(&dpy->region.buffer);
+    return true;
 }
 
 static const GraphicHwOps vfio_display_region_ops = {
@@ -490,7 +493,7 @@ static const GraphicHwOps vfio_display_region_ops = {
 static bool vfio_display_region_init(VFIOPCIDevice *vdev, Error **errp)
 {
     vdev->dpy = g_new0(VFIODisplay, 1);
-    vdev->dpy->con = graphic_console_init(DEVICE(vdev), 0,
+    vdev->dpy->con = qemu_graphic_console_create(DEVICE(vdev), 0,
                                           &vfio_display_region_ops,
                                           vdev);
     if (vdev->enable_ramfb) {
@@ -502,15 +505,6 @@ static bool vfio_display_region_init(VFIOPCIDevice *vdev, Error **errp)
     return true;
 }
 
-static void vfio_display_region_exit(VFIODisplay *dpy)
-{
-    if (!dpy->region.buffer.size) {
-        return;
-    }
-
-    vfio_region_exit(&dpy->region.buffer);
-    vfio_region_finalize(&dpy->region.buffer);
-}
 
 /* ---------------------------------------------------------------------- */
 
@@ -544,17 +538,31 @@ bool vfio_display_probe(VFIOPCIDevice *vdev, Error **errp)
     return false;
 }
 
+void vfio_display_exit(VFIOPCIDevice *vdev)
+{
+    if (!vdev->dpy) {
+        return;
+    }
+
+    vfio_display_dmabuf_exit(vdev->dpy);
+    qemu_graphic_console_close(vdev->dpy->con);
+    if (vdev->dpy->region.buffer.size) {
+        vfio_region_exit(&vdev->dpy->region.buffer);
+    }
+}
+
 void vfio_display_finalize(VFIOPCIDevice *vdev)
 {
     if (!vdev->dpy) {
         return;
     }
 
-    graphic_console_close(vdev->dpy->con);
-    vfio_display_dmabuf_exit(vdev->dpy);
-    vfio_display_region_exit(vdev->dpy);
+    if (vdev->dpy->region.buffer.size) {
+        vfio_region_finalize(&vdev->dpy->region.buffer);
+    }
     vfio_display_edid_exit(vdev->dpy);
     g_free(vdev->dpy);
+    vdev->dpy = NULL;
 }
 
 static bool migrate_needed(void *opaque)

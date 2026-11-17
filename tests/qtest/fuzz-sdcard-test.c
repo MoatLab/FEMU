@@ -1,7 +1,7 @@
 /*
  * QTest fuzzer-generated testcase for sdcard device
  *
- * Copyright (c) 2021 Philippe Mathieu-Daudé <f4bug@amsat.org>
+ * Copyright (c) 2021 Philippe Mathieu-Daudé
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */

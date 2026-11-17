@@ -125,7 +125,6 @@ static QEMUFile *qemu_file_new_impl(QIOChannel *ioc, bool is_writable)
 
 /*
  * Result: QEMUFile* for a 'return path' for comms in the opposite direction
- *         NULL if not available
  */
 QEMUFile *qemu_file_get_return_path(QEMUFile *f)
 {
@@ -296,7 +295,7 @@ int qemu_fflush(QEMUFile *f)
             qemu_file_set_error_obj(f, -EIO, local_error);
         } else {
             uint64_t size = iov_size(f->iov, f->iovcnt);
-            stat64_add(&mig_stats.qemu_file_transferred, size);
+            qatomic_add(&mig_stats.qemu_file_transferred, size);
         }
 
         qemu_iovec_release_ram(f);
@@ -340,25 +339,18 @@ static ssize_t coroutine_mixed_fn qemu_fill_buffer(QEMUFile *f)
 
     do {
         struct iovec iov = { f->buf + pending, IO_BUF_SIZE - pending };
-        len = qio_channel_readv_full(f->ioc, &iov, 1, pfds, pnfd, 0,
+        len = qio_channel_readv_full(f->ioc, &iov, 1, pfds, pnfd,
+                                     QIO_CHANNEL_READ_FLAG_FD_PRESERVE_BLOCKING,
                                      &local_error);
         if (len == QIO_CHANNEL_ERR_BLOCK) {
-            if (qemu_in_coroutine()) {
-                qio_channel_yield(f->ioc, G_IO_IN);
-            } else {
-                qio_channel_wait(f->ioc, G_IO_IN);
-            }
-        } else if (len < 0) {
-            len = -EIO;
+            qio_channel_wait_cond(f->ioc, G_IO_IN);
         }
     } while (len == QIO_CHANNEL_ERR_BLOCK);
 
     if (len > 0) {
         f->buf_size += len;
-    } else if (len == 0) {
-        qemu_file_set_error_obj(f, -EIO, local_error);
     } else {
-        qemu_file_set_error_obj(f, len, local_error);
+        qemu_file_set_error_obj(f, -EIO, local_error);
     }
 
     for (int i = 0; i < nfd; i++) {
@@ -393,32 +385,41 @@ int qemu_file_put_fd(QEMUFile *f, int fd)
     return ret;
 }
 
-int qemu_file_get_fd(QEMUFile *f)
+int qemu_file_get_fd(QEMUFile *f, int *fd)
 {
-    int fd = -1;
     FdEntry *fde;
+    Error *err = NULL;
+    int service_byte;
 
     if (!f->can_pass_fd) {
-        Error *err = NULL;
         error_setg(&err, "%s does not support fd passing", f->ioc->name);
-        error_report_err(error_copy(err));
-        qemu_file_set_error_obj(f, -EIO, err);
-        goto out;
+        goto fail;
     }
 
-    /* Force the dummy byte and its fd passenger to appear. */
-    qemu_peek_byte(f, 0);
+    service_byte = qemu_get_byte(f);
+    if (service_byte != ' ') {
+        error_setg(&err, "%s unexpected service byte: %d(%c)", f->ioc->name,
+                   service_byte, service_byte);
+        goto fail;
+    }
 
     fde = QTAILQ_FIRST(&f->fds);
-    if (fde) {
-        qemu_get_byte(f);       /* Drop the dummy byte */
-        fd = fde->fd;
-        QTAILQ_REMOVE(&f->fds, fde, entry);
-        g_free(fde);
+    if (!fde) {
+        error_setg(&err, "%s no FD come with service byte", f->ioc->name);
+        goto fail;
     }
-out:
-    trace_qemu_file_get_fd(f->ioc->name, fd);
-    return fd;
+
+    *fd = fde->fd;
+    QTAILQ_REMOVE(&f->fds, fde, entry);
+    g_free(fde);
+
+    trace_qemu_file_get_fd(f->ioc->name, *fd);
+    return 0;
+
+fail:
+    error_report_err(error_copy(err));
+    qemu_file_set_error_obj(f, -EIO, err);
+    return -1;
 }
 
 /** Closes the file
@@ -534,65 +535,36 @@ void qemu_put_buffer_at(QEMUFile *f, const uint8_t *buf, size_t buflen,
                         off_t pos)
 {
     Error *err = NULL;
-    size_t ret;
 
     if (f->last_error) {
         return;
     }
 
     qemu_fflush(f);
-    ret = qio_channel_pwrite(f->ioc, (char *)buf, buflen, pos, &err);
-
-    if (err) {
+    if (qio_channel_pwrite_all(f->ioc, buf, buflen, pos, &err) < 0) {
         qemu_file_set_error_obj(f, -EIO, err);
         return;
     }
 
-    if ((ssize_t)ret == QIO_CHANNEL_ERR_BLOCK) {
-        qemu_file_set_error_obj(f, -EAGAIN, NULL);
-        return;
-    }
-
-    if (ret != buflen) {
-        error_setg(&err, "Partial write of size %zu, expected %zu", ret,
-                   buflen);
-        qemu_file_set_error_obj(f, -EIO, err);
-        return;
-    }
-
-    stat64_add(&mig_stats.qemu_file_transferred, buflen);
+    qatomic_add(&mig_stats.qemu_file_transferred, buflen);
 }
 
 
-size_t qemu_get_buffer_at(QEMUFile *f, const uint8_t *buf, size_t buflen,
+size_t qemu_get_buffer_at(QEMUFile *f, uint8_t *buf, size_t buflen,
                           off_t pos)
 {
     Error *err = NULL;
-    size_t ret;
 
     if (f->last_error) {
         return 0;
     }
 
-    ret = qio_channel_pread(f->ioc, (char *)buf, buflen, pos, &err);
-
-    if ((ssize_t)ret == -1 || err) {
+    if (qio_channel_pread_all(f->ioc, buf, buflen, pos, &err) < 0) {
         qemu_file_set_error_obj(f, -EIO, err);
         return 0;
     }
 
-    if ((ssize_t)ret == QIO_CHANNEL_ERR_BLOCK) {
-        qemu_file_set_error_obj(f, -EAGAIN, NULL);
-        return 0;
-    }
-
-    if (ret != buflen) {
-        error_setg(&err, "Partial read of size %zu, expected %zu", ret, buflen);
-        qemu_file_set_error_obj(f, -EIO, err);
-        return 0;
-    }
-
-    return ret;
+    return buflen;
 }
 
 void qemu_set_offset(QEMUFile *f, off_t off, int whence)
@@ -793,7 +765,7 @@ int coroutine_mixed_fn qemu_get_byte(QEMUFile *f)
 
 uint64_t qemu_file_transferred(QEMUFile *f)
 {
-    uint64_t ret = stat64_get(&mig_stats.qemu_file_transferred);
+    uint64_t ret = qatomic_read(&mig_stats.qemu_file_transferred);
     int i;
 
     g_assert(qemu_file_is_writable(f));
@@ -858,7 +830,8 @@ uint64_t qemu_get_be64(QEMUFile *f)
  *          else 0
  *          (Note a 0 length string will return 0 either way)
  */
-size_t coroutine_fn qemu_get_counted_string(QEMUFile *f, char buf[256])
+size_t coroutine_mixed_fn
+qemu_get_counted_string(QEMUFile *f, char buf[QEMU_COUNTED_STRING_SIZE])
 {
     size_t len = qemu_get_byte(f);
     size_t res = qemu_get_buffer(f, (uint8_t *)buf, len);
@@ -876,7 +849,7 @@ void qemu_put_counted_string(QEMUFile *f, const char *str)
 {
     size_t len = strlen(str);
 
-    assert(len < 256);
+    assert(len < QEMU_COUNTED_STRING_SIZE);
     qemu_put_byte(f, len);
     qemu_put_buffer(f, (const uint8_t *)str, len);
 }
@@ -887,9 +860,9 @@ void qemu_put_counted_string(QEMUFile *f, const char *str)
  *       both directions, and thus changing the blocking on the main
  *       QEMUFile can also affect the return path.
  */
-void qemu_file_set_blocking(QEMUFile *f, bool block)
+bool qemu_file_set_blocking(QEMUFile *f, bool block, Error **errp)
 {
-    qio_channel_set_blocking(f->ioc, block, NULL);
+    return qio_channel_set_blocking(f->ioc, block, errp);
 }
 
 /*

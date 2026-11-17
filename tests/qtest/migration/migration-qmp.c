@@ -173,6 +173,13 @@ void migrate_incoming_qmp(QTestState *to, const char *uri, QObject *channels,
     /* This function relies on the event to work, make sure it's enabled */
     migrate_set_capability(to, "events", true);
 
+    /*
+     * Set the incoming migration to never exit QEMU abruptly during
+     * the tests. It causes issues when running sanitizers and
+     * expecting a failure exit code can mask other issues.
+     */
+    g_assert(!qdict_haskey(args, "exit-on-error"));
+    qdict_put_bool(args, "exit-on-error", false);
     rsp = qtest_qmp(to, "{ 'execute': 'migrate-incoming', 'arguments': %p}",
                     args);
 
@@ -241,7 +248,8 @@ void wait_for_migration_fail(QTestState *from, bool allow_active)
     do {
         status = migrate_query_status(from);
         bool result = !strcmp(status, "setup") || !strcmp(status, "failed") ||
-            (allow_active && !strcmp(status, "active"));
+            (allow_active && !strcmp(status, "active")) ||
+            !strcmp(status, "failing");
         if (!result) {
             fprintf(stderr, "%s: unexpected status status=%s allow_active=%d\n",
                     __func__, status, allow_active);
@@ -440,6 +448,31 @@ void migrate_set_parameter_str(QTestState *who, const char *parameter,
                              "'arguments': { %s: %s } }",
                              parameter, value);
     migrate_check_parameter_str(who, parameter, value);
+}
+
+void migrate_set_parameter_strv(QTestState *who, const char *parameter,
+                                char **strv)
+{
+    g_autofree char *args = g_strjoinv("\",\"", strv);
+    g_autoptr(GString) value = g_string_new("");
+    g_autofree char *command = NULL;
+
+    g_string_printf(value, "\"%s\"", args);
+
+    command = g_strdup_printf("{ 'execute': 'migrate-set-parameters',"
+                              "'arguments': { %%s: [ %s ]}}",
+                              value->str);
+
+    qtest_qmp_assert_success(who, command, parameter);
+}
+
+void migrate_set_parameter_null(QTestState *who, const char *parameter)
+{
+    qtest_qmp_assert_success(who,
+                             "{ 'execute': 'migrate-set-parameters',"
+                             "'arguments': { %s: null } }",
+                             parameter);
+    migrate_check_parameter_str(who, parameter, "");
 }
 
 static long long migrate_get_parameter_bool(QTestState *who,

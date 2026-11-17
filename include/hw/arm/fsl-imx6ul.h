@@ -33,8 +33,9 @@
 #include "hw/net/imx_fec.h"
 #include "hw/usb/chipidea.h"
 #include "hw/usb/imx-usb-phy.h"
+#include "hw/display/imx6ul_lcdif.h"
 #include "system/memory.h"
-#include "cpu.h"
+#include "target/arm/cpu.h"
 #include "qom/object.h"
 #include "qemu/units.h"
 
@@ -84,6 +85,7 @@ struct FslIMX6ULState {
     IMX2WdtState       wdt[FSL_IMX6UL_NUM_WDTS];
     IMXUSBPHYState     usbphy[FSL_IMX6UL_NUM_USB_PHYS];
     ChipideaState      usb[FSL_IMX6UL_NUM_USBS];
+    IMX6ULLCDIFState   lcdif;
     MemoryRegion       rom;
     MemoryRegion       caam;
     MemoryRegion       ocram;
@@ -143,7 +145,7 @@ enum FslIMX6ULMemoryMap {
     FSL_IMX6UL_PXP_SIZE             = (16 * KiB),
 
     FSL_IMX6UL_LCDIF_ADDR           = 0x021C8000,
-    FSL_IMX6UL_LCDIF_SIZE           = 0x100,
+    FSL_IMX6UL_LCDIF_SIZE           = (16 * KiB),
 
     FSL_IMX6UL_CSI_ADDR             = 0x021C4000,
     FSL_IMX6UL_CSI_SIZE             = 0x100,

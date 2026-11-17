@@ -25,9 +25,9 @@
 #ifndef ETSEC_H
 #define ETSEC_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "net/net.h"
-#include "hw/ptimer.h"
+#include "hw/core/ptimer.h"
 #include "qom/object.h"
 
 /* Buffer Descriptors */
@@ -130,7 +130,6 @@ struct eTSEC {
     /* Whether we should flush the rx queue when buffer becomes available. */
     bool need_flush;
 };
-typedef struct eTSEC eTSEC;
 
 #define TYPE_ETSEC_COMMON "eTSEC"
 OBJECT_DECLARE_SIMPLE_TYPE(eTSEC, ETSEC_COMMON)

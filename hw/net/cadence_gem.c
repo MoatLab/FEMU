@@ -25,10 +25,10 @@
 #include "qemu/osdep.h"
 #include <zlib.h> /* for crc32 */
 
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/net/cadence_gem.h"
-#include "hw/qdev-properties.h"
-#include "hw/registerfields.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/registerfields.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
@@ -1469,6 +1469,8 @@ static void gem_reset(DeviceState *d)
 
     /* Set post reset register values */
     memset(&s->regs[0], 0, sizeof(s->regs));
+    memset(&s->rx_desc_addr[0], 0, sizeof(s->rx_desc_addr));
+    memset(&s->tx_desc_addr[0], 0, sizeof(s->tx_desc_addr));
     s->regs[R_NWCFG] = 0x00080000;
     s->regs[R_NWSTATUS] = 0x00000006;
     s->regs[R_DMACFG] = 0x00020784;
@@ -1477,7 +1479,10 @@ static void gem_reset(DeviceState *d)
     s->regs[R_TXPARTIALSF] = 0x000003ff;
     s->regs[R_RXPARTIALSF] = 0x000003ff;
     s->regs[R_MODID] = s->revision;
-    s->regs[R_DESCONF] = 0x02D00111;
+    s->regs[R_DESCONF] = 0x02D00110;
+    if (!s->pcs_enabled) {
+        s->regs[R_DESCONF] |= 0x00000001;
+    }
     s->regs[R_DESCONF2] = 0x2ab10000 | s->jumbo_max_len;
     s->regs[R_DESCONF5] = 0x002f2045;
     s->regs[R_DESCONF6] = R_DESCONF6_DMA_ADDR_64B_MASK;
@@ -1541,12 +1546,20 @@ static void gem_handle_phy_access(CadenceGEMState *s)
 {
     uint32_t val = s->regs[R_PHYMNTNC];
     uint32_t phy_addr, reg_num;
+    CadenceGEMState *ps = s;
+    uint32_t op;
 
     phy_addr = FIELD_EX32(val, PHYMNTNC, PHY_ADDR);
+    op = FIELD_EX32(val, PHYMNTNC, OP);
 
-    if (phy_addr != s->phy_addr) {
-        /* no phy at this address */
-        if (FIELD_EX32(val, PHYMNTNC, OP) == MDIO_OP_READ) {
+    /* Switch phy to consumer interface if there is an address match */
+    if (s->phy_consumer && phy_addr == s->phy_consumer->phy_addr) {
+        ps = s->phy_consumer;
+    }
+
+    if (!s->phy_connected || phy_addr != ps->phy_addr) {
+        /* phy not connected or no phy at this address */
+        if (op == MDIO_OP_READ) {
             s->regs[R_PHYMNTNC] = FIELD_DP32(val, PHYMNTNC, DATA, 0xffff);
         }
         return;
@@ -1554,14 +1567,14 @@ static void gem_handle_phy_access(CadenceGEMState *s)
 
     reg_num = FIELD_EX32(val, PHYMNTNC, REG_ADDR);
 
-    switch (FIELD_EX32(val, PHYMNTNC, OP)) {
+    switch (op) {
     case MDIO_OP_READ:
         s->regs[R_PHYMNTNC] = FIELD_DP32(val, PHYMNTNC, DATA,
-                                         gem_phy_read(s, reg_num));
+                                         gem_phy_read(ps, reg_num));
         break;
 
     case MDIO_OP_WRITE:
-        gem_phy_write(s, reg_num, val);
+        gem_phy_write(ps, reg_num, val);
         break;
 
     default:
@@ -1582,9 +1595,22 @@ static uint64_t gem_read(void *opaque, hwaddr offset, unsigned size)
     offset >>= 2;
     retval = s->regs[offset];
 
-    DB_PRINT("offset: 0x%04x read: 0x%08x\n", (unsigned)offset*4, retval);
+    DB_PRINT("offset: 0x%04x read: 0x%08x\n", (unsigned)offset * 4,
+             retval);
 
     switch (offset) {
+    case R_RXQBASE:
+        retval = s->rx_desc_addr[0];
+        break;
+    case R_TXQBASE:
+        retval = s->tx_desc_addr[0];
+        break;
+    case R_TRANSMIT_Q1_PTR ... R_TRANSMIT_Q7_PTR:
+        retval = s->tx_desc_addr[offset - R_TRANSMIT_Q1_PTR + 1];
+        break;
+    case R_RECEIVE_Q1_PTR ... R_RECEIVE_Q7_PTR:
+        retval = s->rx_desc_addr[offset - R_RECEIVE_Q1_PTR + 1];
+        break;
     case R_ISR:
         DB_PRINT("lowering irqs on ISR read\n");
         /* The interrupts get updated at the end of the function. */
@@ -1813,6 +1839,12 @@ static const Property gem_properties[] = {
                       num_type2_screeners, 4),
     DEFINE_PROP_UINT16("jumbo-max-len", CadenceGEMState,
                        jumbo_max_len, 10240),
+    DEFINE_PROP_BOOL("pcs-enabled", CadenceGEMState,
+                       pcs_enabled, false),
+    DEFINE_PROP_BOOL("phy-connected", CadenceGEMState, phy_connected, true),
+    DEFINE_PROP_LINK("phy-consumer", CadenceGEMState, phy_consumer,
+                     TYPE_CADENCE_GEM, CadenceGEMState *),
+
     DEFINE_PROP_LINK("dma", CadenceGEMState, dma_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
 };

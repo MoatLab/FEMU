@@ -68,6 +68,11 @@ typedef struct Xen9pfsDev {
 
 static void xen_9pfs_disconnect(struct XenLegacyDevice *xendev);
 
+static void xen_9pfs_disconnect_bh(void *opaque)
+{
+    xen_9pfs_disconnect(opaque);
+}
+
 static void xen_9pfs_in_sg(Xen9pfsRing *ring,
                            struct iovec *in_sg,
                            int *num,
@@ -131,10 +136,10 @@ static void xen_9pfs_out_sg(Xen9pfsRing *ring,
     }
 }
 
-static ssize_t xen_9pfs_pdu_vmarshal(V9fsPDU *pdu,
-                                     size_t offset,
-                                     const char *fmt,
-                                     va_list ap)
+static ssize_t coroutine_fn xen_9pfs_pdu_vmarshal(V9fsPDU *pdu,
+                                                  size_t offset,
+                                                  const char *fmt,
+                                                  va_list ap)
 {
     Xen9pfsDev *xen_9pfs = container_of(pdu->s, Xen9pfsDev, state);
     struct iovec in_sg[2];
@@ -150,15 +155,16 @@ static ssize_t xen_9pfs_pdu_vmarshal(V9fsPDU *pdu,
                       "Failed to encode VirtFS reply type %d\n",
                       pdu->id + 1);
         xen_be_set_state(&xen_9pfs->xendev, XenbusStateClosing);
-        xen_9pfs_disconnect(&xen_9pfs->xendev);
+        aio_bh_schedule_oneshot(qemu_get_aio_context(),
+                                xen_9pfs_disconnect_bh, &xen_9pfs->xendev);
     }
     return ret;
 }
 
-static ssize_t xen_9pfs_pdu_vunmarshal(V9fsPDU *pdu,
-                                       size_t offset,
-                                       const char *fmt,
-                                       va_list ap)
+static ssize_t coroutine_fn xen_9pfs_pdu_vunmarshal(V9fsPDU *pdu,
+                                                    size_t offset,
+                                                    const char *fmt,
+                                                    va_list ap)
 {
     Xen9pfsDev *xen_9pfs = container_of(pdu->s, Xen9pfsDev, state);
     struct iovec out_sg[2];
@@ -173,15 +179,16 @@ static ssize_t xen_9pfs_pdu_vunmarshal(V9fsPDU *pdu,
         xen_pv_printf(&xen_9pfs->xendev, 0,
                       "Failed to decode VirtFS request type %d\n", pdu->id);
         xen_be_set_state(&xen_9pfs->xendev, XenbusStateClosing);
-        xen_9pfs_disconnect(&xen_9pfs->xendev);
+        aio_bh_schedule_oneshot(qemu_get_aio_context(),
+                                xen_9pfs_disconnect_bh, &xen_9pfs->xendev);
     }
     return ret;
 }
 
-static void xen_9pfs_init_out_iov_from_pdu(V9fsPDU *pdu,
-                                           struct iovec **piov,
-                                           unsigned int *pniov,
-                                           size_t size)
+static void coroutine_fn xen_9pfs_init_out_iov_from_pdu(V9fsPDU *pdu,
+                                                        struct iovec **piov,
+                                                        unsigned int *pniov,
+                                                        size_t size)
 {
     Xen9pfsDev *xen_9pfs = container_of(pdu->s, Xen9pfsDev, state);
     Xen9pfsRing *ring = &xen_9pfs->rings[pdu->tag % xen_9pfs->num_rings];
@@ -195,10 +202,10 @@ static void xen_9pfs_init_out_iov_from_pdu(V9fsPDU *pdu,
     *pniov = num;
 }
 
-static void xen_9pfs_init_in_iov_from_pdu(V9fsPDU *pdu,
-                                          struct iovec **piov,
-                                          unsigned int *pniov,
-                                          size_t size)
+static void coroutine_fn xen_9pfs_init_in_iov_from_pdu(V9fsPDU *pdu,
+                                                       struct iovec **piov,
+                                                       unsigned int *pniov,
+                                                       size_t size)
 {
     Xen9pfsDev *xen_9pfs = container_of(pdu->s, Xen9pfsDev, state);
     Xen9pfsRing *ring = &xen_9pfs->rings[pdu->tag % xen_9pfs->num_rings];
@@ -227,7 +234,7 @@ again:
     *pniov = num;
 }
 
-static void xen_9pfs_push_and_notify(V9fsPDU *pdu)
+static void coroutine_fn xen_9pfs_push_and_notify(V9fsPDU *pdu)
 {
     RING_IDX prod;
     Xen9pfsDev *priv = container_of(pdu->s, Xen9pfsDev, state);
@@ -250,12 +257,43 @@ static void xen_9pfs_push_and_notify(V9fsPDU *pdu)
     qemu_bh_schedule(ring->bh);
 }
 
+static size_t xen_9p_msize_limit(V9fsState *s)
+{
+    Xen9pfsDev *xen_9pfs = container_of(s, Xen9pfsDev, state);
+    size_t limit;
+    int i;
+
+    if (!xen_9pfs->num_rings) {
+        return 0;
+    }
+
+    limit = XEN_FLEX_RING_SIZE(xen_9pfs->rings[0].ring_order);
+    for (i = 1; i < xen_9pfs->num_rings; i++) {
+        limit = MIN(limit, XEN_FLEX_RING_SIZE(xen_9pfs->rings[i].ring_order));
+    }
+
+    return limit;
+}
+
+static size_t xen_9pfs_response_buffer_size(V9fsPDU *pdu)
+{
+    Xen9pfsDev *priv = container_of(pdu->s, Xen9pfsDev, state);
+    Xen9pfsRing *ring = &priv->rings[pdu->tag % priv->num_rings];
+    struct iovec in_sg[2];
+    int num;
+
+    xen_9pfs_in_sg(ring, in_sg, &num, pdu->idx, 0);
+    return iov_size(in_sg, num);
+}
+
 static const V9fsTransport xen_9p_transport = {
     .pdu_vmarshal = xen_9pfs_pdu_vmarshal,
     .pdu_vunmarshal = xen_9pfs_pdu_vunmarshal,
     .init_in_iov_from_pdu = xen_9pfs_init_in_iov_from_pdu,
     .init_out_iov_from_pdu = xen_9pfs_init_out_iov_from_pdu,
     .push_and_notify = xen_9pfs_push_and_notify,
+    .msize_limit = xen_9p_msize_limit,
+    .response_buffer_size = xen_9pfs_response_buffer_size,
 };
 
 static int xen_9pfs_init(struct XenLegacyDevice *xendev)
@@ -310,7 +348,7 @@ static void xen_9pfs_bh(void *opaque)
 
 again:
     wait = ring->co != NULL && qemu_coroutine_entered(ring->co);
-    /* paired with the smb_wmb barriers in xen_9pfs_init_in_iov_from_pdu */
+    /* paired with the smp_wmb barriers in xen_9pfs_init_in_iov_from_pdu */
     smp_rmb();
     if (wait) {
         cpu_relax();
@@ -337,9 +375,15 @@ static void xen_9pfs_evtchn_event(void *opaque)
 static void xen_9pfs_disconnect(struct XenLegacyDevice *xendev)
 {
     Xen9pfsDev *xen_9pdev = container_of(xendev, Xen9pfsDev, xendev);
+    V9fsState *s = &xen_9pdev->state;
     int i;
 
     trace_xen_9pfs_disconnect(xendev->name);
+
+    if (s->transport) {
+        v9fs_reset(s); /* cancel all in-flight PDUs to prevent UAF */
+        v9fs_device_unrealize_common(s);
+    }
 
     for (i = 0; i < xen_9pdev->num_rings; i++) {
         if (xen_9pdev->rings[i].evtchndev != NULL) {

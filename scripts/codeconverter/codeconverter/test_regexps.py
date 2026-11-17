@@ -57,7 +57,7 @@ def test_res() -> None:
 
     print(RE_TYPEINFO_START)
     assert re.search(RE_TYPEINFO_START, r'''
-    cc->open = qmp_chardev_open_file;
+    cc->chr_open = file_chr_open;
 }
 
 static const TypeInfo char_file_type_info = {
@@ -202,7 +202,6 @@ typedef struct {
     uint64_t dexp[2];
     SWVoiceOut *voice;
     int left, pos, samples;
-    QEMUAudioTimeStamp ats;
     FM_OPL *opl;
     PortioList port_list;
 } AdlibState;
@@ -264,8 +263,8 @@ def test_initial_includes():
 #define SILENT_ES1370
 
 #include "qemu/osdep.h"
-#include "hw/audio/soundhw.h"
-#include "audio/audio.h"
+#include "hw/audio/model.h"
+#include "qemu/audio.h"
 #include "hw/pci/pci.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"

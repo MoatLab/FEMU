@@ -19,7 +19,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -71,7 +71,7 @@ static uint64_t allwinner_r40_ccu_read(void *opaque, hwaddr offset,
     const uint32_t idx = REG_INDEX(offset);
 
     switch (offset) {
-    case 0x324 ... AW_R40_CCU_IOSIZE:
+    case 0x324 ... AW_R40_CCU_IOSIZE - 4:
         qemu_log_mask(LOG_GUEST_ERROR, "%s: out-of-bounds offset 0x%04x\n",
                       __func__, (uint32_t)offset);
         return 0;
@@ -113,10 +113,10 @@ static void allwinner_r40_ccu_write(void *opaque, hwaddr offset,
             val |= REG_PLL_LOCK;
         }
         break;
-    case 0x324 ... AW_R40_CCU_IOSIZE:
+    case 0x324 ... AW_R40_CCU_IOSIZE - 4:
         qemu_log_mask(LOG_GUEST_ERROR, "%s: out-of-bounds offset 0x%04x\n",
                       __func__, (uint32_t)offset);
-        break;
+        return;
     default:
         qemu_log_mask(LOG_UNIMP, "%s: unimplemented write offset 0x%04x\n",
                       __func__, (uint32_t)offset);

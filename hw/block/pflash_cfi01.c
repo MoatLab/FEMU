@@ -39,8 +39,8 @@
 #include "qemu/osdep.h"
 #include "hw/block/block.h"
 #include "hw/block/flash.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "system/block-backend.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -48,7 +48,7 @@
 #include "qemu/host-utils.h"
 #include "qemu/log.h"
 #include "qemu/option.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
 #include "system/blockdev.h"
 #include "system/runstate.h"
@@ -84,7 +84,6 @@ struct PFlashCFI01 {
     char *name;
     void *storage;
     VMChangeStateEntry *vmstate;
-    bool old_multiple_chip_handling;
 
     /* block update buffer */
     unsigned char *blk_bytes;
@@ -703,13 +702,8 @@ static void pflash_cfi01_fill_cfi_table(PFlashCFI01 *pfl)
      * in the cfi_table[].
      */
     num_devices = pfl->device_width ? (pfl->bank_width / pfl->device_width) : 1;
-    if (pfl->old_multiple_chip_handling) {
-        blocks_per_device = pfl->nb_blocs / num_devices;
-        sector_len_per_device = pfl->sector_len;
-    } else {
-        blocks_per_device = pfl->nb_blocs;
-        sector_len_per_device = pfl->sector_len / num_devices;
-    }
+    blocks_per_device = pfl->nb_blocs;
+    sector_len_per_device = pfl->sector_len / num_devices;
     device_len = sector_len_per_device * blocks_per_device;
 
     /* Hardcoded CFI table */
@@ -765,7 +759,7 @@ static void pflash_cfi01_fill_cfi_table(PFlashCFI01 *pfl)
         pfl->cfi_table[0x2A] = 0x0B;
     }
     pfl->writeblock_size = 1 << pfl->cfi_table[0x2A];
-    if (!pfl->old_multiple_chip_handling && num_devices > 1) {
+    if (num_devices > 1) {
         pfl->writeblock_size *= num_devices;
     }
 
@@ -930,8 +924,6 @@ static const Property pflash_cfi01_properties[] = {
     DEFINE_PROP_UINT16("id2", PFlashCFI01, ident2, 0),
     DEFINE_PROP_UINT16("id3", PFlashCFI01, ident3, 0),
     DEFINE_PROP_STRING("name", PFlashCFI01, name),
-    DEFINE_PROP_BOOL("old-multiple-chip-handling", PFlashCFI01,
-                     old_multiple_chip_handling, false),
 };
 
 static void pflash_cfi01_class_init(ObjectClass *klass, const void *data)
@@ -1037,6 +1029,16 @@ static void postload_update_cb(void *opaque, bool running, RunState state)
 static int pflash_post_load(void *opaque, int version_id)
 {
     PFlashCFI01 *pfl = opaque;
+
+    /*
+     * ROMD mode is not in the VMState; derive it from the migrated
+     * cmd and wcycle.  Only (wcycle == 0, cmd == 0x00) is read-array.
+     */
+    if (pfl->wcycle == 0 && pfl->cmd == 0x00) {
+        memory_region_rom_device_set_romd(&pfl->mem, true);
+    } else {
+        memory_region_rom_device_set_romd(&pfl->mem, false);
+    }
 
     if (!pfl->ro) {
         pfl->vmstate = qemu_add_vm_change_state_handler(postload_update_cb,

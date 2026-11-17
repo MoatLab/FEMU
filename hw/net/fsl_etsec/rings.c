@@ -26,6 +26,8 @@
 #include "qemu/log.h"
 #include "etsec.h"
 #include "registers.h"
+#include "system/physmem.h"
+#include "exec/cpu-common.h"
 
 /* #define ETSEC_RING_DEBUG */
 /* #define HEX_DUMP */
@@ -110,7 +112,7 @@ static void read_buffer_descriptor(eTSEC         *etsec,
     assert(bd != NULL);
 
     RING_DEBUG("READ Buffer Descriptor @ 0x" HWADDR_FMT_plx"\n", addr);
-    cpu_physical_memory_read(addr,
+    physical_memory_read(addr,
                              bd,
                              sizeof(eTSEC_rxtx_bd));
 
@@ -142,7 +144,7 @@ static void write_buffer_descriptor(eTSEC         *etsec,
     }
 
     RING_DEBUG("Write Buffer Descriptor @ 0x" HWADDR_FMT_plx"\n", addr);
-    cpu_physical_memory_write(addr,
+    physical_memory_write(addr,
                               bd,
                               sizeof(eTSEC_rxtx_bd));
 }
@@ -175,15 +177,30 @@ static void tx_padding_and_crc(eTSEC *etsec, uint32_t min_frame_len)
 static void process_tx_fcb(eTSEC *etsec)
 {
     uint8_t flags = (uint8_t)(*etsec->tx_buffer);
-    /* L3 header offset from start of frame */
+    /* L3 header offset from start of frame (FCB byte 3) */
     uint8_t l3_header_offset = (uint8_t)*(etsec->tx_buffer + 3);
-    /* L4 header offset from start of L3 header */
+    /* L4 header offset from start of L3 header (FCB byte 2) */
     uint8_t l4_header_offset = (uint8_t)*(etsec->tx_buffer + 2);
-    /* L3 header */
-    uint8_t *l3_header = etsec->tx_buffer + 8 + l3_header_offset;
-    /* L4 header */
-    uint8_t *l4_header = l3_header + l4_header_offset;
+    uint8_t *l3_header;
+    uint8_t *l4_header;
     int csum = 0;
+
+    /*
+     * Validate FCB header offsets before pointer arithmetic. The highest
+     * byte accessed is l4_header[7], at offset
+     *   8 (FCB size) + l3_header_offset + l4_header_offset + 7
+     * from tx_buffer. Drop the frame if this exceeds the buffer length.
+     */
+    if (etsec->tx_buffer_len < 8u + l3_header_offset + l4_header_offset + 8u) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "eTSEC: FCB offsets exceed frame length, dropping\n");
+        return;
+    }
+
+    /* L3 header */
+    l3_header = etsec->tx_buffer + 8 + l3_header_offset;
+    /* L4 header */
+    l4_header = l3_header + l4_header_offset;
 
     /* if packet is IP4 and IP checksum is requested */
     if (flags & FCB_TX_IP && flags & FCB_TX_CIP) {
@@ -239,7 +256,7 @@ static void process_tx_bd(eTSEC         *etsec,
     etsec->tx_buffer = g_realloc(etsec->tx_buffer,
                                     etsec->tx_buffer_len + bd->length);
     tmp_buff = etsec->tx_buffer + etsec->tx_buffer_len;
-    cpu_physical_memory_read(bd->bufptr + tbdbth, tmp_buff, bd->length);
+    physical_memory_read(bd->bufptr + tbdbth, tmp_buff, bd->length);
 
     /* Update buffer length */
     etsec->tx_buffer_len += bd->length;
@@ -400,7 +417,7 @@ static void fill_rx_bd(eTSEC          *etsec,
     /* This operation will only write FCB */
     if (etsec->rx_fcb_size != 0) {
 
-        cpu_physical_memory_write(bufptr, etsec->rx_fcb, etsec->rx_fcb_size);
+        physical_memory_write(bufptr, etsec->rx_fcb, etsec->rx_fcb_size);
 
         bufptr             += etsec->rx_fcb_size;
         bd->length         += etsec->rx_fcb_size;
@@ -416,7 +433,7 @@ static void fill_rx_bd(eTSEC          *etsec,
 
     /* This operation can only write packet data and no padding */
     if (to_write > 0) {
-        cpu_physical_memory_write(bufptr, *buf, to_write);
+        physical_memory_write(bufptr, *buf, to_write);
 
         *buf   += to_write;
         bufptr += to_write;
@@ -438,7 +455,7 @@ static void fill_rx_bd(eTSEC          *etsec,
             etsec->rx_padding -= rem;
             *size             -= rem;
             bd->length        += rem;
-            cpu_physical_memory_write(bufptr, padd, rem);
+            physical_memory_write(bufptr, padd, rem);
         }
     }
 }

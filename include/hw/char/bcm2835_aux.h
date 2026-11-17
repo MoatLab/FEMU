@@ -9,7 +9,7 @@
 #ifndef BCM2835_AUX_H
 #define BCM2835_AUX_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "chardev/char-fe.h"
 #include "qom/object.h"
 
@@ -24,7 +24,7 @@ struct BCM2835AuxState {
     /*< public >*/
 
     MemoryRegion iomem;
-    CharBackend chr;
+    CharFrontend chr;
     qemu_irq irq;
 
     uint8_t read_fifo[BCM2835_AUX_RX_FIFO_LEN];

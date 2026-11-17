@@ -12,6 +12,7 @@
 #include "qemu/log.h"
 
 #include "hw/misc/imx8mp_analog.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 
 #define ANALOG_PLL_LOCK BIT(31)
@@ -51,7 +52,10 @@ static void imx8mp_analog_reset(DeviceState *dev)
     s->analog[ANALOG_VPU_PLL_LOCKD_CTRL] = 0x0010003f;
     s->analog[ANALOG_VPU_PLL_MNIT_CTRL] = 0x00280081;
     s->analog[ANALOG_ARM_PLL_GEN_CTRL] = 0x00000810;
-    s->analog[ANALOG_ARM_PLL_FDIV_CTL0] = 0x000fa031;
+
+    /* Use property value instead of hardcoded */
+    s->analog[ANALOG_ARM_PLL_FDIV_CTL0] = s->arm_pll_fdiv_ctl0_reset;
+
     s->analog[ANALOG_ARM_PLL_LOCKD_CTRL] = 0x0010003f;
     s->analog[ANALOG_ARM_PLL_MNIT_CTRL] = 0x00280081;
     s->analog[ANALOG_SYS_PLL1_GEN_CTRL] = 0x0aaaa810;
@@ -138,11 +142,17 @@ static const VMStateDescription imx8mp_analog_vmstate = {
     },
 };
 
+static const Property imx8mp_analog_properties[] = {
+    DEFINE_PROP_UINT32("arm-pll-fdiv-ctl0-reset", IMX8MPAnalogState,
+                       arm_pll_fdiv_ctl0_reset, 0x000fa031), /* imx8mp default */
+};
+
 static void imx8mp_analog_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_legacy_reset(dc, imx8mp_analog_reset);
+    device_class_set_props(dc, imx8mp_analog_properties);
     dc->vmsd  = &imx8mp_analog_vmstate;
     dc->desc  = "i.MX 8M Plus Analog Module";
 }

@@ -8,7 +8,7 @@
  * See the COPYING file in the top-level directory.
  */
 #include "qemu/osdep.h"
-#include "block/aio.h"
+#include "qemu/aio.h"
 #include "qemu/queue.h"
 #include "block/block.h"
 #include "block/raw-aio.h"
@@ -36,14 +36,37 @@
 /* Maximum number of requests in a batch. (default value) */
 #define DEFAULT_MAX_BATCH 32
 
+/*
+ * Bound on how deep ioq_submit() may recurse on a single LaioQueue via the
+ * ioq_submit -> qemu_laio_process_completions -> defer_call_end ->
+ * laio_deferred_fn -> ioq_submit cycle. The cycle terminates naturally
+ * when io_submit(2) returns asynchronously (O_DIRECT), but can grow
+ * without bound when submissions complete synchronously. On overflow
+ * the caller returns without submitting; the outermost
+ * qemu_laio_process_completions() has already scheduled s->completion_bh
+ * (via qemu_bh_schedule() at the top of that function), which resumes
+ * submission from the next event-loop dispatch.
+ */
+#define IOQ_SUBMIT_MAX_DEPTH 8
+
 struct qemu_laiocb {
     Coroutine *co;
     LinuxAioState *ctx;
     struct iocb iocb;
     ssize_t ret;
+    off_t offset;
     size_t nbytes;
     QEMUIOVector *qiov;
-    bool is_read;
+
+    /* For handling short reads/writes */
+    size_t total_done;
+    QEMUIOVector resubmit_qiov;
+
+    int fd;
+    int type;
+    BdrvRequestFlags flags;
+
+    uint64_t dev_max_batch;
     QSIMPLEQ_ENTRY(qemu_laiocb) next;
 };
 
@@ -51,6 +74,7 @@ typedef struct {
     unsigned int in_queue;
     unsigned int in_flight;
     bool blocked;
+    unsigned int submit_depth;
     QSIMPLEQ_HEAD(, qemu_laiocb) pending;
 } LaioQueue;
 
@@ -68,10 +92,31 @@ struct LinuxAioState {
 };
 
 static void ioq_submit(LinuxAioState *s);
+static int laio_do_submit(struct qemu_laiocb *laiocb);
 
 static inline ssize_t io_event_ret(struct io_event *ev)
 {
     return (ssize_t)(((uint64_t)ev->res2 << 32) | ev->res);
+}
+
+/**
+ * Retry tail of short requests.
+ */
+static int laio_resubmit_short_io(struct qemu_laiocb *laiocb, size_t done)
+{
+    QEMUIOVector *resubmit_qiov = &laiocb->resubmit_qiov;
+
+    laiocb->total_done += done;
+
+    if (!resubmit_qiov->iov) {
+        qemu_iovec_init(resubmit_qiov, laiocb->qiov->niov);
+    } else {
+        qemu_iovec_reset(resubmit_qiov);
+    }
+    qemu_iovec_concat(resubmit_qiov, laiocb->qiov,
+                      laiocb->total_done, laiocb->nbytes - laiocb->total_done);
+
+    return laio_do_submit(laiocb);
 }
 
 /*
@@ -79,17 +124,29 @@ static inline ssize_t io_event_ret(struct io_event *ev)
  */
 static void qemu_laio_process_completion(struct qemu_laiocb *laiocb)
 {
-    int ret;
+    ssize_t ret;
 
     ret = laiocb->ret;
     if (ret != -ECANCELED) {
-        if (ret == laiocb->nbytes) {
+        if (ret == laiocb->nbytes - laiocb->total_done) {
             ret = 0;
+        } else if (ret > 0 && (laiocb->type == QEMU_AIO_READ ||
+                               laiocb->type == QEMU_AIO_WRITE)) {
+            ret = laio_resubmit_short_io(laiocb, ret);
+            if (!ret) {
+                return;
+            }
         } else if (ret >= 0) {
-            /* Short reads mean EOF, pad with zeros. */
-            if (laiocb->is_read) {
-                qemu_iovec_memset(laiocb->qiov, ret, 0,
-                    laiocb->qiov->size - ret);
+            /*
+             * For normal reads and writes, we only get here if ret == 0, which
+             * means EOF for reads and ENOSPC for writes.
+             * For zone-append, we get here with any ret >= 0, which we just
+             * treat as ENOSPC, too (safer than resubmitting, probably, but not
+             * 100 % clear).
+             */
+            if (laiocb->type == QEMU_AIO_READ) {
+                qemu_iovec_memset(laiocb->qiov, laiocb->total_done, 0,
+                                  laiocb->qiov->size - laiocb->total_done);
             } else {
                 ret = -ENOSPC;
             }
@@ -97,6 +154,9 @@ static void qemu_laio_process_completion(struct qemu_laiocb *laiocb)
     }
 
     laiocb->ret = ret;
+    if (laiocb->resubmit_qiov.iov) {
+        qemu_iovec_destroy(&laiocb->resubmit_qiov);
+    }
 
     /*
      * If the coroutine is already entered it must be in ioq_submit() and
@@ -285,6 +345,7 @@ static void ioq_init(LaioQueue *io_q)
     io_q->in_queue = 0;
     io_q->in_flight = 0;
     io_q->blocked = false;
+    io_q->submit_depth = 0;
 }
 
 static void ioq_submit(LinuxAioState *s)
@@ -293,6 +354,11 @@ static void ioq_submit(LinuxAioState *s)
     struct qemu_laiocb *aiocb;
     QEMU_UNINITIALIZED struct iocb *iocbs[MAX_EVENTS];
     QSIMPLEQ_HEAD(, qemu_laiocb) completed;
+
+    if (s->io_q.submit_depth >= IOQ_SUBMIT_MAX_DEPTH) {
+        return;
+    }
+    s->io_q.submit_depth++;
 
     do {
         if (s->io_q.in_flight >= MAX_EVENTS) {
@@ -339,6 +405,8 @@ static void ioq_submit(LinuxAioState *s)
          * pended requests will be submitted from there.
          */
     }
+
+    s->io_q.submit_depth--;
 }
 
 static uint64_t laio_max_batch(LinuxAioState *s, uint64_t dev_max_batch)
@@ -367,23 +435,27 @@ static void laio_deferred_fn(void *opaque)
     }
 }
 
-static int laio_do_submit(int fd, struct qemu_laiocb *laiocb, off_t offset,
-                          int type, BdrvRequestFlags flags,
-                          uint64_t dev_max_batch)
+static int laio_do_submit(struct qemu_laiocb *laiocb)
 {
     LinuxAioState *s = laiocb->ctx;
     struct iocb *iocbs = &laiocb->iocb;
     QEMUIOVector *qiov = laiocb->qiov;
+    int fd = laiocb->fd;
+    off_t offset = laiocb->offset + laiocb->total_done;
 
-    switch (type) {
+    if (laiocb->resubmit_qiov.iov) {
+        qiov = &laiocb->resubmit_qiov;
+    }
+
+    switch (laiocb->type) {
     case QEMU_AIO_WRITE:
 #ifdef HAVE_IO_PREP_PWRITEV2
     {
-        int laio_flags = (flags & BDRV_REQ_FUA) ? RWF_DSYNC : 0;
+        int laio_flags = (laiocb->flags & BDRV_REQ_FUA) ? RWF_DSYNC : 0;
         io_prep_pwritev2(iocbs, fd, qiov->iov, qiov->niov, offset, laio_flags);
     }
 #else
-        assert(flags == 0);
+        assert(laiocb->flags == 0);
         io_prep_pwritev(iocbs, fd, qiov->iov, qiov->niov, offset);
 #endif
         break;
@@ -399,7 +471,7 @@ static int laio_do_submit(int fd, struct qemu_laiocb *laiocb, off_t offset,
     /* Currently Linux kernel does not support other operations */
     default:
         fprintf(stderr, "%s: invalid AIO request type 0x%x.\n",
-                        __func__, type);
+                        __func__, laiocb->type);
         return -EIO;
     }
     io_set_eventfd(&laiocb->iocb, event_notifier_get_fd(&s->e));
@@ -407,7 +479,7 @@ static int laio_do_submit(int fd, struct qemu_laiocb *laiocb, off_t offset,
     QSIMPLEQ_INSERT_TAIL(&s->io_q.pending, laiocb, next);
     s->io_q.in_queue++;
     if (!s->io_q.blocked) {
-        if (s->io_q.in_queue >= laio_max_batch(s, dev_max_batch)) {
+        if (s->io_q.in_queue >= laio_max_batch(s, laiocb->dev_max_batch)) {
             ioq_submit(s);
         } else {
             defer_call(laio_deferred_fn, s);
@@ -425,14 +497,18 @@ int coroutine_fn laio_co_submit(int fd, uint64_t offset, QEMUIOVector *qiov,
     AioContext *ctx = qemu_get_current_aio_context();
     struct qemu_laiocb laiocb = {
         .co         = qemu_coroutine_self(),
+        .offset     = offset,
         .nbytes     = qiov ? qiov->size : 0,
         .ctx        = aio_get_linux_aio(ctx),
         .ret        = -EINPROGRESS,
-        .is_read    = (type == QEMU_AIO_READ),
         .qiov       = qiov,
+        .fd         = fd,
+        .type       = type,
+        .flags      = flags,
+        .dev_max_batch = dev_max_batch,
     };
 
-    ret = laio_do_submit(fd, &laiocb, offset, type, flags, dev_max_batch);
+    ret = laio_do_submit(&laiocb);
     if (ret < 0) {
         return ret;
     }

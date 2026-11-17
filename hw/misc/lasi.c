@@ -14,7 +14,7 @@
 #include "qemu/log.h"
 #include "qapi/error.h"
 #include "trace.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "system/system.h"
 #include "system/runstate.h"
 #include "migration/vmstate.h"
@@ -43,7 +43,7 @@ static bool lasi_chip_mem_valid(void *opaque, hwaddr addr,
     case LASI_LAN + 12: /* LASI LAN MAC */
     case LASI_RTC:
     case LASI_FDC:
-
+    case LASI_SCSI ... LASI_SCSI + 0xFF:
     case LASI_PCR ... LASI_AMR:
         ret = true;
     }
@@ -62,7 +62,15 @@ static MemTxResult lasi_chip_read_with_attrs(void *opaque, hwaddr addr,
 
     switch (addr) {
     case LASI_IRR:
-        val = s->irr;
+        /*
+         * The interrupt request register reports the interrupts that are both
+         * pending and unmasked, derived live from IPR and IMR rather than
+         * latched, so masking or deasserting a source removes it immediately.
+         * The parisc core I/O interrupt dispatcher reads IRR; a latched bit
+         * that never cleared would be redelivered forever as a phantom
+         * "unexpected" interrupt.
+         */
+        val = s->ipr & s->imr;
         break;
     case LASI_IMR:
         val = s->imr;
@@ -84,6 +92,7 @@ static MemTxResult lasi_chip_read_with_attrs(void *opaque, hwaddr addr,
     case LASI_LAN:
     case LASI_LAN + 12:
     case LASI_FDC:
+    case LASI_SCSI ... LASI_SCSI + 0xFF:
         val = 0;
         break;
     case LASI_RTC:
@@ -155,6 +164,9 @@ static MemTxResult lasi_chip_write_with_attrs(void *opaque, hwaddr addr,
         break;
     case LASI_UART:
         /* XXX: reset serial port */
+        break;
+    case LASI_SCSI ... LASI_SCSI + 0xFF:
+        /* XXX: reset SCSI Controller */
         break;
     case LASI_LAN:
         /* XXX: reset LAN card */
@@ -230,13 +242,18 @@ static void lasi_set_irq(void *opaque, int irq, int level)
 
     if (level) {
         s->ipr |= bit;
-        if (bit & s->imr) {
+        if ((bit & s->imr) && (s->icr & ICR_BUS_ERROR_BIT) == 0) {
             uint32_t iar = s->iar;
-            s->irr |= bit;
-            if ((s->icr & ICR_BUS_ERROR_BIT) == 0) {
-                stl_be_phys(&address_space_memory, iar & -32, iar & 31);
-            }
+            stl_be_phys(&address_space_memory, iar & -32, iar & 31);
         }
+    } else {
+        /*
+         * The interrupt sources are level triggered, so a source that drops
+         * its request must clear its pending bit.  Otherwise the bit stays set
+         * in IPR (and hence IRR) and is redelivered as a phantom "unexpected"
+         * core I/O interrupt on every later interrupt.
+         */
+        s->ipr &= ~bit;
     }
 }
 

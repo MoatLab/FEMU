@@ -74,10 +74,7 @@ static void encode_header(char *buf, size_t len, uint32_t size) {
 static void tdx_generate_quote_cleanup(TdxGenerateQuoteTask *task)
 {
     timer_del(&task->timer);
-
-    if (task->watch) {
-        g_source_remove(task->watch);
-    }
+    g_clear_handle_id(&task->watch, g_source_remove);
     qio_channel_close(QIO_CHANNEL(task->sioc), NULL);
     object_unref(OBJECT(task->sioc));
 

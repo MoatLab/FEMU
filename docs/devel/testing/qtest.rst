@@ -91,3 +91,47 @@ libqtest API reference
 ----------------------
 
 .. kernel-doc:: tests/qtest/libqtest.h
+
+
+QTest valid environment variables
+---------------------------------
+
+A few environment variables are used to point QTest at artifacts to be
+used in the tests, mostly QEMU binaries or to control the behavior of
+the tests. Environment variables are set automatically by the build
+system, but it can be useful to alter them when running tests
+manually. The following are the environment variables recognized by
+QTest, not including test-specific ones:
+
+``QTEST_QEMU_BINARY``
+    The QEMU binary itself (generally a ``qemu-system-<arch>`` binary).
+
+``QTEST_QEMU_ARGS``
+    Extra arguments for the QEMU command line.
+
+``QTEST_QEMU_IMG``
+    The ``qemu-img`` binary.
+
+``QTEST_QEMU_STORAGE_DAEMON_BINARY``
+    The ``qemu-storage-daemon`` binary.
+
+``QTEST_STOP``
+    Instruct QTest to stop the QEMU process with SIGSTOP before continuing
+    execution.
+
+``QTEST_LOG``
+    Comma-separated list of log domains to allow verbose logging.
+    The currently-defined log domains are:
+
+    ``qmp``
+        controls verbose output of QMP command invocations.
+
+    ``qtest``
+        controls verbose output of QTest operations.
+
+    ``test``
+        controls verbose output of tests.
+
+    A dash ``-`` used in front of a log domain name has the effect
+    of enabling verbose logging for all other domains while
+    keeping it disabled for the specified domain.

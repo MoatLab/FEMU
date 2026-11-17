@@ -31,11 +31,11 @@
 
 #include "qemu/osdep.h"
 #include "qemu/module.h"
-#include "hw/qdev-properties.h"
-#include "hw/usb.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/usb/usb.h"
 #include "migration/vmstate.h"
 #include "desc.h"
-#include "audio/audio.h"
+#include "qemu/audio.h"
 #include "qom/object.h"
 
 static void usb_audio_reinit(USBDevice *dev, unsigned channels);
@@ -635,7 +635,7 @@ static uint8_t *streambuf_get(struct streambuf *buf, size_t *len)
 struct USBAudioState {
     /* qemu interfaces */
     USBDevice dev;
-    QEMUSoundCard card;
+    AudioBackend *audio_be;
 
     /* state */
     struct {
@@ -669,7 +669,7 @@ static void output_callback(void *opaque, int avail)
             return;
         }
 
-        written = AUD_write(s->out.voice, data, len);
+        written = audio_be_write(s->audio_be, s->out.voice, data, len);
         avail -= written;
         s->out.buf.cons += written;
 
@@ -683,7 +683,7 @@ static int usb_audio_set_output_altset(USBAudioState *s, int altset)
 {
     switch (altset) {
     case ALTSET_OFF:
-        AUD_set_active_out(s->out.voice, false);
+        audio_be_set_active_out(s->audio_be, s->out.voice, false);
         break;
     case ALTSET_STEREO:
     case ALTSET_51:
@@ -692,7 +692,7 @@ static int usb_audio_set_output_altset(USBAudioState *s, int altset)
             usb_audio_reinit(USB_DEVICE(s), altset_channels[altset]);
         }
         streambuf_init(&s->out.buf, s->buffer, s->out.channels);
-        AUD_set_active_out(s->out.voice, true);
+        audio_be_set_active_out(s->audio_be, s->out.voice, true);
         break;
     default:
         return -1;
@@ -805,7 +805,7 @@ static int usb_audio_set_control(USBAudioState *s, uint8_t attrib,
             }
             fprintf(stderr, "\n");
         }
-        audio_set_volume_out(s->out.voice, &s->out.vol);
+        audio_be_set_volume_out(s->audio_be, s->out.voice, &s->out.vol);
     }
 
     return ret;
@@ -931,8 +931,7 @@ static void usb_audio_unrealize(USBDevice *dev)
     }
 
     usb_audio_set_output_altset(s, ALTSET_OFF);
-    AUD_close_out(&s->card, s->out.voice);
-    AUD_remove_card(&s->card);
+    audio_be_close_out(s->audio_be, s->out.voice);
 
     streambuf_fini(&s->out.buf);
 }
@@ -942,7 +941,7 @@ static void usb_audio_realize(USBDevice *dev, Error **errp)
     USBAudioState *s = USB_AUDIO(dev);
     int i;
 
-    if (!AUD_register_card(TYPE_USB_AUDIO, &s->card, errp)) {
+    if (!audio_be_check(&s->audio_be, errp)) {
         return;
     }
 
@@ -976,13 +975,13 @@ static void usb_audio_reinit(USBDevice *dev, unsigned channels)
     s->out.as.freq       = USBAUDIO_SAMPLE_RATE;
     s->out.as.nchannels  = s->out.channels;
     s->out.as.fmt        = AUDIO_FORMAT_S16;
-    s->out.as.endianness = 0;
+    s->out.as.big_endian = false;
     streambuf_init(&s->out.buf, s->buffer, s->out.channels);
 
-    s->out.voice = AUD_open_out(&s->card, s->out.voice, TYPE_USB_AUDIO,
+    s->out.voice = audio_be_open_out(s->audio_be, s->out.voice, TYPE_USB_AUDIO,
                                 s, output_callback, &s->out.as);
-    audio_set_volume_out(s->out.voice, &s->out.vol);
-    AUD_set_active_out(s->out.voice, 0);
+    audio_be_set_volume_out(s->audio_be, s->out.voice, &s->out.vol);
+    audio_be_set_active_out(s->audio_be, s->out.voice, 0);
 }
 
 static const VMStateDescription vmstate_usb_audio = {
@@ -991,7 +990,7 @@ static const VMStateDescription vmstate_usb_audio = {
 };
 
 static const Property usb_audio_properties[] = {
-    DEFINE_AUDIO_PROPERTIES(USBAudioState, card),
+    DEFINE_AUDIO_PROPERTIES(USBAudioState, audio_be),
     DEFINE_PROP_UINT32("debug", USBAudioState, debug, 0),
     DEFINE_PROP_UINT32("buffer", USBAudioState, buffer_user, 0),
     DEFINE_PROP_BOOL("multi", USBAudioState, multi, false),

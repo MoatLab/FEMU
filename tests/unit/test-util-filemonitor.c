@@ -27,6 +27,10 @@
 
 #include <utime.h>
 
+#ifdef __FreeBSD__
+#include <osreldate.h>
+#endif
+
 enum {
     QFILE_MONITOR_TEST_OP_ADD_WATCH,
     QFILE_MONITOR_TEST_OP_DEL_WATCH,
@@ -221,6 +225,24 @@ qemu_file_monitor_test_expect(QFileMonitorTestData *data,
 }
 
 
+static bool
+expect_broken_ignored(void)
+{
+#if defined(__FreeBSD__) && __FreeBSD_version >= 1500051
+    int osreldate;
+
+    osreldate = getosreldate();
+    if (osreldate == -1) {
+        g_printerr("Unable to call getosreldate: %s\n", strerror(errno));
+        abort();
+    }
+    return osreldate < 1501501 || (osreldate >= 1600000 && osreldate < 1600019);
+#else
+    return false;
+#endif
+}
+
+
 static void
 test_file_monitor_events(void)
 {
@@ -360,7 +382,7 @@ test_file_monitor_events(void)
         { .type = QFILE_MONITOR_TEST_OP_EVENT,
           .filesrc = "one.txt", .watchid = &watch4,
           .eventid = QFILE_MONITOR_EVENT_DELETED },
-#ifdef __FreeBSD__
+#if defined(__FreeBSD__) && __FreeBSD_version < 1500051
         { .type = QFILE_MONITOR_TEST_OP_EVENT,
           .filesrc = "two.txt", .watchid = &watch0,
           .eventid = QFILE_MONITOR_EVENT_DELETED },
@@ -538,6 +560,11 @@ test_file_monitor_events(void)
             if (debug) {
                 g_printerr("Event id=%" PRIx64 " event=%d file=%s\n",
                            *op->watchid, op->eventid, op->filesrc);
+            }
+            if (op->eventid == QFILE_MONITOR_EVENT_IGNORED &&
+                expect_broken_ignored()) {
+                g_printerr("Expect ignored event to be broken, skipping\n");
+                break;
             }
             if (!qemu_file_monitor_test_expect(&data, *op->watchid,
                                                op->eventid, op->filesrc,

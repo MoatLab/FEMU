@@ -32,7 +32,8 @@
 
 #include "exec/hwaddr.h"
 #include "qemu/notify.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
+#include "hw/acpi/ghes.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/bsa.h"
 #include "hw/block/flash.h"
@@ -40,6 +41,7 @@
 #include "system/kvm.h"
 #include "hw/intc/arm_gicv3_common.h"
 #include "qom/object.h"
+#include "hw/core/cpu.h"
 
 #define NUM_GICV2M_SPIS       64
 #define NUM_VIRTIO_TRANSPORTS 32
@@ -50,6 +52,8 @@
 
 /* GPIO pins */
 #define GPIO_PIN_POWER_BUTTON  3
+
+#define CPU_MAX_CACHES 16
 
 enum {
     VIRT_FLASH,
@@ -62,6 +66,18 @@ enum {
     VIRT_GIC_VCPU,
     VIRT_GIC_ITS,
     VIRT_GIC_REDIST,
+    VIRT_GICV5_IRS_S,
+    VIRT_GICV5_IRS_NS,
+    VIRT_GICV5_IRS_EL3,
+    VIRT_GICV5_IRS_REALM,
+    VIRT_GICV5_ITS_S,
+    VIRT_GICV5_ITS_NS,
+    VIRT_GICV5_ITS_EL3,
+    VIRT_GICV5_ITS_REALM,
+    VIRT_GICV5_ITS_TR_S,
+    VIRT_GICV5_ITS_TR_NS,
+    VIRT_GICV5_ITS_TR_EL3,
+    VIRT_GICV5_ITS_TR_REALM,
     VIRT_SMMU,
     VIRT_UART0,
     VIRT_MMIO,
@@ -81,6 +97,9 @@ enum {
     VIRT_NVDIMM_ACPI,
     VIRT_PVTIME,
     VIRT_ACPI_PCIHP,
+    VIRT_GWDT_WS0,
+    VIRT_GWDT_REFRESH,
+    VIRT_GWDT_CONTROL,
     VIRT_LOWMEMMAP_LAST,
 };
 
@@ -100,6 +119,10 @@ typedef enum VirtIOMMUType {
 
 typedef enum VirtMSIControllerType {
     VIRT_MSI_CTRL_NONE,
+    /* This value is overridden at runtime.*/
+    VIRT_MSI_CTRL_AUTO,
+    /* Legacy option: its=off provides a GICv2m when using GICv2 */
+    VIRT_MSI_LEGACY_OPT_ITS_OFF,
     VIRT_MSI_CTRL_GICV2M,
     VIRT_MSI_CTRL_ITS,
 } VirtMSIControllerType;
@@ -111,19 +134,19 @@ typedef enum VirtGICType {
     VIRT_GIC_VERSION_2 = 2,
     VIRT_GIC_VERSION_3 = 3,
     VIRT_GIC_VERSION_4 = 4,
+    VIRT_GIC_VERSION_5 = 5,
     VIRT_GIC_VERSION_NOSEL,
 } VirtGICType;
 
 #define VIRT_GIC_VERSION_2_MASK BIT(VIRT_GIC_VERSION_2)
 #define VIRT_GIC_VERSION_3_MASK BIT(VIRT_GIC_VERSION_3)
 #define VIRT_GIC_VERSION_4_MASK BIT(VIRT_GIC_VERSION_4)
+#define VIRT_GIC_VERSION_5_MASK BIT(VIRT_GIC_VERSION_5)
 
 struct VirtMachineClass {
     MachineClass parent;
     bool no_tcg_its;
     bool no_highmem_compact;
-    bool no_ged;   /* Machines < 4.2 have no support for ACPI GED device */
-    bool kvm_no_adjvtime;
     bool no_kvm_steal_time;
     bool acpi_expose_flash;
     bool no_secure_gpio;
@@ -132,6 +155,8 @@ struct VirtMachineClass {
     bool no_tcg_lpa2;
     bool no_ns_el2_virt_timer_irq;
     bool no_nested_smmu;
+    /* HVF specific: support for kernel-irqchip=on introduced in QEMU 11.1 */
+    bool hvf_no_kernel_irqchip_default;
 };
 
 struct VirtMachineState {
@@ -147,7 +172,6 @@ struct VirtMachineState {
     bool highmem_ecam;
     bool highmem_mmio;
     bool highmem_redists;
-    bool its;
     bool tcg_its;
     bool virt;
     bool ras;
@@ -169,16 +193,24 @@ struct VirtMachineState {
     uint32_t gic_phandle;
     uint32_t msi_phandle;
     uint32_t iommu_phandle;
+    uint32_t *cpu_phandles;
     int psci_conduit;
+    uint8_t virtio_transports;
     hwaddr highest_gpa;
     DeviceState *gic;
     DeviceState *acpi_dev;
     Notifier powerdown_notifier;
+    Notifier generic_error_notifier;
     PCIBus *bus;
     char *oem_id;
     char *oem_table_id;
     bool ns_el2_virt_timer_irq;
     CXLState cxl_devices_state;
+    bool legacy_smmuv3_present;
+    MemoryRegion *sysmem;
+    MemoryRegion *secure_sysmem;
+    bool pci_preserve_config;
+    GPtrArray *smmuv3_devices;
 };
 
 #define VIRT_ECAM_ID(high) (high ? VIRT_HIGH_PCIE_ECAM : VIRT_PCIE_ECAM)
@@ -187,7 +219,19 @@ struct VirtMachineState {
 OBJECT_DECLARE_TYPE(VirtMachineState, VirtMachineClass, VIRT_MACHINE)
 
 void virt_acpi_setup(VirtMachineState *vms);
-bool virt_is_acpi_enabled(VirtMachineState *vms);
+bool virt_is_acpi_enabled(const VirtMachineState *vms);
+
+#define CLIDR_CTYPE_NO_CACHE 0x00
+#define CLIDR_CTYPE_I_CACHE 0x01
+#define CLIDR_CTYPE_D_CACHE 0x02
+#define CLIDR_CTYPE_SEPARATE_I_D_CACHES 0x03
+#define CLIDR_CTYPE_UNIFIED_CACHE 0x04
+#define CLIDR_CTYPE_MAX_CACHE_LEVEL 7
+
+unsigned int virt_get_caches(const VirtMachineState *vms,
+                             CPUCoreCaches *caches);
+void set_cpu_cache(CPUCoreCaches *cpu_cache, enum CacheType cache_type,
+                   int cache_level, bool is_i_cache);
 
 /* Return number of redistributors that fit in the specified region */
 static uint32_t virt_redist_capacity(VirtMachineState *vms, int region)

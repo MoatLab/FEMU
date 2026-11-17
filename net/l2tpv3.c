@@ -29,6 +29,7 @@
 #include "net/net.h"
 #include "clients.h"
 #include "qapi/error.h"
+#include "qemu/bswap.h"
 #include "qemu/error-report.h"
 #include "qemu/option.h"
 #include "qemu/sockets.h"
@@ -639,13 +640,14 @@ int net_init_l2tpv3(const Netdev *netdev,
     }
     fd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
     if (fd == -1) {
-        fd = -errno;
-        error_setg(errp, "socket creation failed, errno = %d",
-                   -fd);
+        error_setg_errno(errp, errno, "socket creation failed");
         goto outerr;
     }
     if (bind(fd, (struct sockaddr *) result->ai_addr, result->ai_addrlen)) {
-        error_setg(errp, "could not bind socket err=%i", errno);
+        error_setg_errno(errp, errno, "could not bind socket");
+        goto outerr;
+    }
+    if (!qemu_set_blocking(fd, false, errp)) {
         goto outerr;
     }
 
@@ -708,8 +710,6 @@ int net_init_l2tpv3(const Netdev *netdev,
     s->msgvec = build_l2tpv3_vector(s, MAX_L2TPV3_MSGCNT);
     s->vec = g_new(struct iovec, MAX_L2TPV3_IOVCNT);
     s->header_buf = g_malloc(s->header_size);
-
-    qemu_socket_set_nonblock(fd);
 
     s->fd = fd;
     s->counter = 0;

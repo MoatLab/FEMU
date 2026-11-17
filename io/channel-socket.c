@@ -37,6 +37,12 @@
 
 #define SOCKET_MAX_FDS 16
 
+#ifdef QEMU_MSG_ZEROCOPY
+static int qio_channel_socket_flush_internal(QIOChannel *ioc,
+                                             bool block,
+                                             Error **errp);
+#endif
+
 SocketAddress *
 qio_channel_socket_get_local_address(QIOChannelSocket *ioc,
                                      Error **errp)
@@ -65,6 +71,8 @@ qio_channel_socket_new(void)
     sioc->fd = -1;
     sioc->zero_copy_queued = 0;
     sioc->zero_copy_sent = 0;
+    sioc->blocking = false;
+    sioc->zero_copy_fallback = false;
 
     ioc = QIO_CHANNEL(sioc);
     qio_channel_set_feature(ioc, QIO_CHANNEL_FEATURE_SHUTDOWN);
@@ -454,7 +462,7 @@ static void qio_channel_socket_finalize(Object *obj)
             }
         }
 #ifdef WIN32
-        qemu_socket_unselect(ioc->fd, NULL);
+        qemu_socket_unselect_nofail(ioc->fd);
 #endif
         close(ioc->fd);
         ioc->fd = -1;
@@ -472,7 +480,7 @@ static void qio_channel_socket_copy_fds(struct msghdr *msg,
     *fds = NULL;
 
     for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
-        int fd_size, i;
+        int fd_size;
         int gotfds;
 
         if (cmsg->cmsg_len < CMSG_LEN(sizeof(int)) ||
@@ -490,22 +498,53 @@ static void qio_channel_socket_copy_fds(struct msghdr *msg,
         gotfds = fd_size / sizeof(int);
         *fds = g_renew(int, *fds, *nfds + gotfds);
         memcpy(*fds + *nfds, CMSG_DATA(cmsg), fd_size);
-
-        for (i = 0; i < gotfds; i++) {
-            int fd = (*fds)[*nfds + i];
-            if (fd < 0) {
-                continue;
-            }
-
-            /* O_NONBLOCK is preserved across SCM_RIGHTS so reset it */
-            qemu_socket_set_block(fd);
-
-#ifndef MSG_CMSG_CLOEXEC
-            qemu_set_cloexec(fd);
-#endif
-        }
         *nfds += gotfds;
     }
+}
+
+static bool qio_channel_handle_fds(int *fds, size_t nfds,
+                                   bool preserve_blocking, Error **errp)
+{
+    int *end = fds + nfds, *fd;
+
+#ifdef MSG_CMSG_CLOEXEC
+    if (preserve_blocking) {
+        /* Nothing to do */
+        return true;
+    }
+#endif
+
+    for (fd = fds; fd != end; fd++) {
+        if (*fd < 0) {
+            continue;
+        }
+
+        if (!preserve_blocking) {
+            /* O_NONBLOCK is preserved across SCM_RIGHTS so reset it */
+            if (!qemu_set_blocking(*fd, true, errp)) {
+                return false;
+            }
+        }
+
+#ifndef MSG_CMSG_CLOEXEC
+        qemu_set_cloexec(*fd);
+#endif
+    }
+
+    return true;
+}
+
+static void qio_channel_cleanup_fds(int **fds, size_t *nfds)
+{
+    for (size_t i = 0; i < *nfds; i++) {
+        if ((*fds)[i] < 0) {
+            continue;
+        }
+        close((*fds)[i]);
+    }
+
+    g_clear_pointer(fds, g_free);
+    *nfds = 0;
 }
 
 
@@ -556,7 +595,16 @@ static ssize_t qio_channel_socket_readv(QIOChannel *ioc,
     }
 
     if (fds && nfds) {
+        bool preserve_blocking =
+            flags & QIO_CHANNEL_READ_FLAG_FD_PRESERVE_BLOCKING;
+
         qio_channel_socket_copy_fds(&msg, fds, nfds);
+
+        if (!qio_channel_handle_fds(*fds, *nfds,
+                                    preserve_blocking, errp)) {
+            qio_channel_cleanup_fds(fds, nfds);
+            return -1;
+        }
     }
 
     return ret;
@@ -577,6 +625,10 @@ static ssize_t qio_channel_socket_writev(QIOChannel *ioc,
     size_t fdsize = sizeof(int) * nfds;
     struct cmsghdr *cmsg;
     int sflags = 0;
+#ifdef QEMU_MSG_ZEROCOPY
+    bool blocking = sioc->blocking;
+    bool zerocopy_flushed_once = false;
+#endif
 
     memset(control, 0, CMSG_SPACE(sizeof(int) * SOCKET_MAX_FDS));
 
@@ -615,19 +667,36 @@ static ssize_t qio_channel_socket_writev(QIOChannel *ioc,
 
  retry:
     ret = sendmsg(sioc->fd, &msg, sflags);
-    if (ret <= 0) {
+    if (ret < 0) {
         switch (errno) {
         case EAGAIN:
             return QIO_CHANNEL_ERR_BLOCK;
         case EINTR:
             goto retry;
+#ifdef QEMU_MSG_ZEROCOPY
         case ENOBUFS:
             if (flags & QIO_CHANNEL_WRITE_FLAG_ZERO_COPY) {
-                error_setg_errno(errp, errno,
-                                 "Process can't lock enough memory for using MSG_ZEROCOPY");
-                return -1;
+                /**
+                 * Socket error queueing may exhaust the OPTMEM limit. Try
+                 * flushing the error queue once.
+                 */
+                if (!zerocopy_flushed_once) {
+                    ret = qio_channel_socket_flush_internal(ioc, blocking,
+                                                            errp);
+                    if (ret < 0) {
+                        return -1;
+                    }
+                    zerocopy_flushed_once = true;
+                    goto retry;
+                } else {
+                    error_setg_errno(errp, errno,
+                                     "Process can't lock enough memory for "
+                                     "using MSG_ZEROCOPY");
+                    return -1;
+                }
             }
             break;
+#endif
         }
 
         error_setg_errno(errp, errno,
@@ -736,8 +805,9 @@ static ssize_t qio_channel_socket_writev(QIOChannel *ioc,
 
 
 #ifdef QEMU_MSG_ZEROCOPY
-static int qio_channel_socket_flush(QIOChannel *ioc,
-                                    Error **errp)
+static int qio_channel_socket_flush_internal(QIOChannel *ioc,
+                                             bool block,
+                                             Error **errp)
 {
     QIOChannelSocket *sioc = QIO_CHANNEL_SOCKET(ioc);
     struct msghdr msg = {};
@@ -745,7 +815,6 @@ static int qio_channel_socket_flush(QIOChannel *ioc,
     struct cmsghdr *cm;
     char control[CMSG_SPACE(sizeof(*serr))];
     int received;
-    int ret;
 
     if (sioc->zero_copy_queued == sioc->zero_copy_sent) {
         return 0;
@@ -755,16 +824,25 @@ static int qio_channel_socket_flush(QIOChannel *ioc,
     msg.msg_controllen = sizeof(control);
     memset(control, 0, sizeof(control));
 
-    ret = 1;
-
     while (sioc->zero_copy_sent < sioc->zero_copy_queued) {
         received = recvmsg(sioc->fd, &msg, MSG_ERRQUEUE);
         if (received < 0) {
             switch (errno) {
             case EAGAIN:
-                /* Nothing on errqueue, wait until something is available */
-                qio_channel_wait(ioc, G_IO_ERR);
-                continue;
+                if (block) {
+                    /*
+                     * Nothing on errqueue, wait until something is
+                     * available.
+                     *
+                     * Use G_IO_ERR instead of G_IO_IN since MSG_ERRQUEUE reads
+                     * are signaled via POLLERR, not POLLIN, as the kernel
+                     * sets POLLERR when zero-copy notificatons appear on the
+                     * socket error queue.
+                     */
+                    qio_channel_wait(ioc, G_IO_ERR);
+                    continue;
+                }
+                return 0;
             case EINTR:
                 continue;
             default:
@@ -802,13 +880,32 @@ static int qio_channel_socket_flush(QIOChannel *ioc,
         /* No errors, count successfully finished sendmsg()*/
         sioc->zero_copy_sent += serr->ee_data - serr->ee_info + 1;
 
-        /* If any sendmsg() succeeded using zero copy, return 0 at the end */
-        if (serr->ee_code != SO_EE_CODE_ZEROCOPY_COPIED) {
-            ret = 0;
+        if (serr->ee_code == SO_EE_CODE_ZEROCOPY_COPIED) {
+            /* If any sendmsg() fell back to a copy, mark fallback as true */
+            sioc->zero_copy_fallback = true;
         }
     }
 
-    return ret;
+    return 0;
+}
+
+static int qio_channel_socket_flush(QIOChannel *ioc,
+                                    Error **errp)
+{
+    QIOChannelSocket *sioc = QIO_CHANNEL_SOCKET(ioc);
+    int ret;
+
+    ret = qio_channel_socket_flush_internal(ioc, true, errp);
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (sioc->zero_copy_fallback) {
+        sioc->zero_copy_fallback = false;
+        return 1;
+    }
+
+    return 0;
 }
 
 #endif /* QEMU_MSG_ZEROCOPY */
@@ -819,12 +916,12 @@ qio_channel_socket_set_blocking(QIOChannel *ioc,
                                 Error **errp)
 {
     QIOChannelSocket *sioc = QIO_CHANNEL_SOCKET(ioc);
+    sioc->blocking = enabled;
 
-    if (enabled) {
-        qemu_socket_set_block(sioc->fd);
-    } else {
-        qemu_socket_set_nonblock(sioc->fd);
+    if (!qemu_set_blocking(sioc->fd, enabled, errp)) {
+        return -1;
     }
+
     return 0;
 }
 
@@ -849,6 +946,12 @@ qio_channel_socket_set_cork(QIOChannel *ioc,
     QIOChannelSocket *sioc = QIO_CHANNEL_SOCKET(ioc);
     int v = enabled ? 1 : 0;
 
+    /*
+     * We can ignore the error return from socket_set_cork() because
+     * at the QIO API level set_cork is only a hint, and so
+     * qio_channel_set_cork() can never fail even if it didn't
+     * actually do anything.
+     */
     socket_set_cork(sioc->fd, v);
 }
 
@@ -890,7 +993,7 @@ qio_channel_socket_close(QIOChannel *ioc,
 
     if (sioc->fd != -1) {
 #ifdef WIN32
-        qemu_socket_unselect(sioc->fd, NULL);
+        qemu_socket_unselect_nofail(sioc->fd);
 #endif
         if (qio_channel_has_feature(ioc, QIO_CHANNEL_FEATURE_LISTEN)) {
             socket_listen_cleanup(sioc->fd, errp);

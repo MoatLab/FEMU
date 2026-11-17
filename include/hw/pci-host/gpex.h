@@ -21,7 +21,7 @@
 #define HW_GPEX_H
 
 #include "exec/hwaddr.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pcie_host.h"
 #include "qom/object.h"
@@ -46,6 +46,7 @@ struct GPEXConfig {
     int         irq;
     PCIBus      *bus;
     bool        pci_native_hotplug;
+    bool        preserve_config;
 };
 
 typedef struct GPEXIrq GPEXIrq;

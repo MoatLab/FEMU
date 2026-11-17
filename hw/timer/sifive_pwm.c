@@ -26,10 +26,10 @@
 
 #include "qemu/osdep.h"
 #include "trace.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/timer/sifive_pwm.h"
-#include "hw/qdev-properties.h"
-#include "hw/registerfields.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/registerfields.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -388,7 +388,7 @@ static void sifive_pwm_reset(DeviceState *dev)
 static const MemoryRegionOps sifive_pwm_ops = {
     .read = sifive_pwm_read,
     .write = sifive_pwm_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
 static const VMStateDescription vmstate_sifive_pwm = {

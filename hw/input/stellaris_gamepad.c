@@ -10,23 +10,22 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "hw/input/stellaris_gamepad.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "ui/console.h"
 
 static void stellaris_gamepad_event(DeviceState *dev, QemuConsole *src,
-                                    InputEvent *evt)
+                                    QemuInputEvent *evt)
 {
     StellarisGamepad *s = STELLARIS_GAMEPAD(dev);
-    InputKeyEvent *key = evt->u.key.data;
-    int qcode = qemu_input_key_value_to_qcode(key->key);
+    int qcode = qemu_input_linux_to_qcode(evt->key.key);
     int i;
 
     for (i = 0; i < s->num_buttons; i++) {
-        if (s->keycodes[i] == qcode && s->pressed[i] != key->down) {
-            s->pressed[i] = key->down;
-            qemu_set_irq(s->irqs[i], key->down);
+        if (s->keycodes[i] == qcode && s->pressed[i] != evt->key.down) {
+            s->pressed[i] = evt->key.down;
+            qemu_set_irq(s->irqs[i], evt->key.down);
         }
     }
 }
@@ -60,14 +59,16 @@ static void stellaris_gamepad_realize(DeviceState *dev, Error **errp)
     s->irqs = g_new0(qemu_irq, s->num_buttons);
     s->pressed = g_new0(uint8_t, s->num_buttons);
     qdev_init_gpio_out(dev, s->irqs, s->num_buttons);
-    qemu_input_handler_register(dev, &stellaris_gamepad_handler);
+    s->hs = qemu_input_handler_register(dev, &stellaris_gamepad_handler);
 }
 
-static void stellaris_gamepad_finalize(Object *obj)
+static void stellaris_gamepad_unrealize(DeviceState *dev)
 {
-    StellarisGamepad *s = STELLARIS_GAMEPAD(obj);
+    StellarisGamepad *s = STELLARIS_GAMEPAD(dev);
 
-    g_free(s->keycodes);
+    g_clear_pointer(&s->irqs, g_free);
+    g_clear_pointer(&s->pressed, g_free);
+    g_clear_pointer(&s->hs, qemu_input_handler_unregister);
 }
 
 static void stellaris_gamepad_reset_enter(Object *obj, ResetType type)
@@ -89,6 +90,7 @@ static void stellaris_gamepad_class_init(ObjectClass *klass, const void *data)
 
     rc->phases.enter = stellaris_gamepad_reset_enter;
     dc->realize = stellaris_gamepad_realize;
+    dc->unrealize = stellaris_gamepad_unrealize;
     dc->vmsd = &vmstate_stellaris_gamepad;
     device_class_set_props(dc, stellaris_gamepad_properties);
 }
@@ -98,7 +100,6 @@ static const TypeInfo stellaris_gamepad_info[] = {
         .name = TYPE_STELLARIS_GAMEPAD,
         .parent = TYPE_SYS_BUS_DEVICE,
         .instance_size = sizeof(StellarisGamepad),
-        .instance_finalize = stellaris_gamepad_finalize,
         .class_init = stellaris_gamepad_class_init,
     },
 };

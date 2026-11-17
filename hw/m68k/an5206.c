@@ -8,10 +8,10 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "cpu.h"
+#include "target/m68k/cpu.h"
 #include "hw/m68k/mcf.h"
-#include "hw/boards.h"
-#include "hw/loader.h"
+#include "hw/core/boards.h"
+#include "hw/core/loader.h"
 #include "elf.h"
 #include "qemu/error-report.h"
 #include "system/qtest.h"
@@ -82,7 +82,7 @@ static void an5206_init(MachineState *machine)
     }
     if (kernel_size < 0) {
         kernel_size = load_image_targphys(kernel_filename, KERNEL_LOAD_ADDR,
-                                          ram_size - KERNEL_LOAD_ADDR);
+                                          ram_size - KERNEL_LOAD_ADDR, NULL);
         entry = KERNEL_LOAD_ADDR;
     }
     if (kernel_size < 0) {

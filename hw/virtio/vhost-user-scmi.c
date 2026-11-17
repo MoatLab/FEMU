@@ -89,7 +89,7 @@ static int vu_scmi_stop(VirtIODevice *vdev)
     BusState *qbus = BUS(qdev_get_parent_bus(DEVICE(vdev)));
     VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(qbus);
     struct vhost_dev *vhost_dev = &scmi->vhost_dev;
-    int ret;
+    int ret, err;
 
     /* vhost_dev_is_started() check in the callers is not fully reliable. */
     if (!scmi->started_vu) {
@@ -103,9 +103,10 @@ static int vu_scmi_stop(VirtIODevice *vdev)
 
     ret = vhost_dev_stop(vhost_dev, vdev, true);
 
-    if (k->set_guest_notifiers(qbus->parent, vhost_dev->nvqs, false) < 0) {
-        error_report("vhost guest notifier cleanup failed: %d", ret);
-        return -1;
+    err = k->set_guest_notifiers(qbus->parent, vhost_dev->nvqs, false);
+    if (err < 0) {
+        error_report("vhost guest notifier cleanup failed: %d", err);
+        return err;
     }
     vhost_dev_disable_notifiers(vhost_dev, vdev);
     return ret;
@@ -219,11 +220,12 @@ static void vu_scmi_event(void *opaque, QEMUChrEvent event)
     }
 }
 
-static void do_vhost_user_cleanup(VirtIODevice *vdev, VHostUserSCMI *scmi)
+static void do_vhost_user_cleanup(VirtIODevice *vdev, VHostUserSCMI *scmi,
+                                  struct vhost_virtqueue *vhost_vqs)
 {
     virtio_delete_queue(scmi->cmd_vq);
     virtio_delete_queue(scmi->event_vq);
-    g_free(scmi->vhost_dev.vqs);
+    g_free(vhost_vqs);
     virtio_cleanup(vdev);
     vhost_user_cleanup(&scmi->vhost_user);
 }
@@ -232,6 +234,7 @@ static void vu_scmi_device_realize(DeviceState *dev, Error **errp)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
     VHostUserSCMI *scmi = VHOST_USER_SCMI(dev);
+    struct vhost_virtqueue *vhost_vqs;
     int ret;
 
     if (!scmi->chardev.chr) {
@@ -251,13 +254,14 @@ static void vu_scmi_device_realize(DeviceState *dev, Error **errp)
     scmi->event_vq = virtio_add_queue(vdev, 256, vu_scmi_handle_output);
     scmi->vhost_dev.nvqs = 2;
     scmi->vhost_dev.vqs = g_new0(struct vhost_virtqueue, scmi->vhost_dev.nvqs);
+    vhost_vqs = scmi->vhost_dev.vqs;
 
     ret = vhost_dev_init(&scmi->vhost_dev, &scmi->vhost_user,
                          VHOST_BACKEND_TYPE_USER, 0, errp);
     if (ret < 0) {
         error_setg_errno(errp, -ret,
                          "vhost-user-scmi: vhost_dev_init() failed");
-        do_vhost_user_cleanup(vdev, scmi);
+        do_vhost_user_cleanup(vdev, scmi, vhost_vqs);
         return;
     }
 
@@ -269,10 +273,11 @@ static void vu_scmi_device_unrealize(DeviceState *dev)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(dev);
     VHostUserSCMI *scmi = VHOST_USER_SCMI(dev);
+    struct vhost_virtqueue *vhost_vqs = scmi->vhost_dev.vqs;
 
     vu_scmi_set_status(vdev, 0);
     vhost_dev_cleanup(&scmi->vhost_dev);
-    do_vhost_user_cleanup(vdev, scmi);
+    do_vhost_user_cleanup(vdev, scmi, vhost_vqs);
 }
 
 static const VMStateDescription vu_scmi_vmstate = {

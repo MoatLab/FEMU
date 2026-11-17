@@ -14,6 +14,10 @@ ifeq ($(filter %-linux-user, $(TARGET)),$(TARGET))
 VPATH 	       += $(MULTIARCH_SRC)/linux
 MULTIARCH_SRCS += $(notdir $(wildcard $(MULTIARCH_SRC)/linux/*.c))
 endif
+ifeq ($(CONFIG_PLUGIN),y)
+VPATH 	       += $(MULTIARCH_SRC)/plugin
+MULTIARCH_SRCS += $(notdir $(wildcard $(MULTIARCH_SRC)/plugin/*.c))
+endif
 MULTIARCH_TESTS = $(MULTIARCH_SRCS:.c=)
 
 #
@@ -46,6 +50,8 @@ vma-pthread: LDFLAGS+=-pthread
 sigreturn-sigmask: CFLAGS+=-pthread
 sigreturn-sigmask: LDFLAGS+=-pthread
 
+tb-link: LDFLAGS+=-lpthread
+
 # GCC versions 12/13/14/15 at least incorrectly complain about
 # "'SHA1Transform' reading 64 bytes from a region of size 0"; see the gcc bug
 # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=106709
@@ -53,15 +59,6 @@ sigreturn-sigmask: LDFLAGS+=-pthread
 # TCG test case, suppress the warning rather than trying to modify the
 # code to work around the compiler.
 sha1: CFLAGS+=-Wno-stringop-overread -Wno-unknown-warning-option
-
-# The vma-pthread seems very sensitive on gitlab and we currently
-# don't know if its exposing a real bug or the test is flaky.
-ifneq ($(GITLAB_CI),)
-run-vma-pthread: vma-pthread
-	$(call skip-test, $<, "flaky on CI?")
-run-plugin-vma-pthread-with-%: vma-pthread
-	$(call skip-test, $<, "flaky on CI?")
-endif
 
 run-test-mmap: test-mmap
 	$(call run-test, test-mmap, $(QEMU) $<, $< (default))
@@ -111,12 +108,19 @@ run-gdbstub-registers: sha512
 		--bin $< --test $(MULTIARCH_SRC)/gdbstub/registers.py, \
 	checking register enumeration)
 
+# The prot-none test was skipped on gitlab due to missing gdb-multiarch,
+# however it seems to have bitrotten. Disable, it is tracked as
+# https://gitlab.com/qemu-project/qemu/-/issues/3329
 run-gdbstub-prot-none: prot-none
+ifneq ($(GITLAB_CI),)
+	$(call skip-test, $<, "Broken on GitLab")
+else
 	$(call run-test, $@, env PROT_NONE_PY=1 $(GDB_SCRIPT) \
 		--gdb $(GDB) \
 		--qemu $(QEMU) --qargs "$(QEMU_OPTS)" \
 		--bin $< --test $(MULTIARCH_SRC)/gdbstub/prot-none.py, \
 	accessing PROT_NONE memory)
+endif
 
 run-gdbstub-catch-syscalls: catch-syscalls
 	$(call run-test, $@, $(GDB_SCRIPT) \
@@ -198,10 +202,22 @@ run-plugin-test-plugin-mem-access-with-libmem.so: \
 	PLUGIN_ARGS=$(COMMA)print-accesses=true
 run-plugin-test-plugin-mem-access-with-libmem.so: \
 	CHECK_PLUGIN_OUTPUT_COMMAND= \
-	$(SRC_PATH)/tests/tcg/multiarch/check-plugin-output.sh \
+	$(SRC_PATH)/tests/tcg/multiarch/plugin/check-plugin-output.sh \
 	$(QEMU) $<
+run-plugin-test-plugin-syscall-filter-with-libsyscall.so:
+run-plugin-test-plugin-set-pc-with-libsetpc.so:
 
-EXTRA_RUNS_WITH_PLUGIN += run-plugin-test-plugin-mem-access-with-libmem.so
+EXTRA_RUNS_WITH_PLUGIN += run-plugin-test-plugin-mem-access-with-libmem.so \
+			  run-plugin-test-plugin-syscall-filter-with-libsyscall.so \
+			  run-plugin-test-plugin-set-pc-with-libsetpc.so
+
+else # CONFIG_PLUGIN=n
+# Do not build the syscall skipping test if it's not tested with the setpc
+# plugin because it will simply fail the test.
+MULTIARCH_TESTS := $(filter-out test-plugin-set-pc, $(MULTIARCH_TESTS))
+
+# test-plugin-syscall-filter needs syscall plugin to succeed
+test-plugin-syscall-filter: CFLAGS+=-DSKIP
 endif
 
 # Update TESTS

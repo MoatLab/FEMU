@@ -25,7 +25,7 @@
 #ifndef HW_STM32F2XX_USART_H
 #define HW_STM32F2XX_USART_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "chardev/char-fe.h"
 #include "qom/object.h"
 
@@ -73,7 +73,7 @@ struct STM32F2XXUsartState {
     uint32_t usart_cr3;
     uint32_t usart_gtpr;
 
-    CharBackend chr;
+    CharFrontend chr;
     qemu_irq irq;
 };
 #endif /* HW_STM32F2XX_USART_H */

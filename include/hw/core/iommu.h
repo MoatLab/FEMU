@@ -1,0 +1,47 @@
+/*
+ * General vIOMMU flags
+ *
+ * Copyright (C) 2026 Intel Corporation.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
+#ifndef HW_IOMMU_H
+#define HW_IOMMU_H
+
+#include "qemu/bitops.h"
+
+/*
+ * Theoretical vIOMMU flags. Only determined by the vIOMMU device properties and
+ * independent on the actual host IOMMU capabilities they may depend on. Each
+ * flag can be an expectation or request to other sub-system or just a pure
+ * vIOMMU capability. vIOMMU can choose which flags to expose.
+ */
+enum viommu_flags {
+    /* vIOMMU needs nesting parent HWPT to create nested HWPT */
+    VIOMMU_FLAG_WANT_NESTING_PARENT = BIT_ULL(0),
+    /*
+     * vIOMMU supports PASID capability, VFIO checks this flag and synthesize
+     * a PASID capability.
+     */
+    VIOMMU_FLAG_PASID_SUPPORTED = BIT_ULL(1),
+    /* vIOMMU needs dirty tracking on the nesting parent HWPT for nested use */
+    VIOMMU_FLAG_WANT_NESTING_DIRTY_TRACKING = BIT_ULL(2),
+    /*
+     * vIOMMU requests other sub-system like VFIO to create a HWPT that can be
+     * used with PASID attachment. VIOMMU_FLAG_PASID_SUPPORTED can't be used
+     * for this purpose as PASID attachment is needed by VTD IOMMU but not ARM
+     * SMMU.
+     */
+    VIOMMU_FLAG_WANT_PASID_ATTACH = BIT_ULL(3),
+};
+
+/* Host IOMMU quirks. Extracted from host IOMMU capabilities */
+enum host_iommu_quirks {
+    HOST_IOMMU_QUIRK_NESTING_PARENT_BYPASS_RO = BIT_ULL(0),
+};
+
+/* ABI constant: IOMMU_NO_PASID must always be 0 (keep in sync with kernel) */
+#define IOMMU_NO_PASID 0
+
+#endif /* HW_IOMMU_H */

@@ -31,10 +31,10 @@
 #include "qemu/bitops.h"
 #include "qom/object.h"
 #include "qapi/error.h"
-#include "hw/sysbus.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/sysbus.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/misc/unimp.h"
 #include "net/net.h"
 #include "trace.h"
@@ -162,9 +162,15 @@ static void port_tx_write(void *opaque, hwaddr addr, uint64_t value,
         break;
     case TX_CTRL:
         if ((value & (CTRL_P | CTRL_S)) == CTRL_S) {
-            qemu_send_packet(qemu_get_queue(s->nic),
-                             txbuf_ptr(s, port_index),
-                             s->port[port_index].reg.tx_len);
+            uint32_t tx_size = s->port[port_index].reg.tx_len;
+
+            if (tx_size >= BUFSZ_MAX) {
+                trace_ethlite_pkt_tx_size_too_big(tx_size);
+            } else {
+                qemu_send_packet(qemu_get_queue(s->nic),
+                                 txbuf_ptr(s, port_index),
+                                 tx_size);
+            }
             if (s->port[port_index].reg.tx_ctrl & CTRL_I) {
                 eth_pulse_irq(s);
             }

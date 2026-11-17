@@ -10,11 +10,11 @@
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "qemu/log.h"
-#include "cpu.h"
-#include "hw/irq.h"
-#include "hw/sysbus.h"
+#include "target/m68k/cpu.h"
+#include "hw/core/irq.h"
+#include "hw/core/sysbus.h"
 #include "hw/m68k/mcf.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "qom/object.h"
 
 #define TYPE_MCF_INTC "mcf-intc"
@@ -175,6 +175,7 @@ static void mcf_intc_instance_init(Object *obj)
 
     memory_region_init_io(&s->iomem, obj, &mcf_intc_ops, s, "mcf", 0x100);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
+    qdev_init_gpio_in(DEVICE(s), mcf_intc_set_irq, 64);
 }
 
 static const Property mcf_intc_properties[] = {
@@ -206,9 +207,7 @@ static void mcf_intc_register_types(void)
 
 type_init(mcf_intc_register_types)
 
-qemu_irq *mcf_intc_init(MemoryRegion *sysmem,
-                        hwaddr base,
-                        M68kCPU *cpu)
+DeviceState *mcf_intc_init(MemoryRegion *sysmem, hwaddr base, M68kCPU *cpu)
 {
     DeviceState  *dev;
 
@@ -218,6 +217,5 @@ qemu_irq *mcf_intc_init(MemoryRegion *sysmem,
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     memory_region_add_subregion(sysmem, base,
                                 sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0));
-
-    return qemu_allocate_irqs(mcf_intc_set_irq, dev, 64);
+    return dev;
 }

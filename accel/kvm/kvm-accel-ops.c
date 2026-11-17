@@ -16,6 +16,7 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
+#include "exec/cpu-common.h"
 #include "accel/accel-cpu-ops.h"
 #include "system/kvm.h"
 #include "system/kvm_int.h"
@@ -47,13 +48,14 @@ static void *kvm_vcpu_thread_fn(void *arg)
     qemu_guest_random_seed_thread_part2(cpu->random_seed);
 
     do {
+        qemu_process_cpu_events(cpu);
+
         if (cpu_can_run(cpu)) {
             r = kvm_cpu_exec(cpu);
             if (r == EXCP_DEBUG) {
                 cpu_handle_guest_debug(cpu);
             }
         }
-        qemu_wait_io_event(cpu);
     } while (!cpu->unplug || cpu_can_run(cpu));
 
     kvm_destroy_vcpu(cpu);
@@ -105,10 +107,9 @@ static void kvm_accel_ops_class_init(ObjectClass *oc, const void *data)
 
 #ifdef TARGET_KVM_HAVE_GUEST_DEBUG
     ops->update_guest_debug = kvm_update_guest_debug_ops;
-    ops->supports_guest_debug = kvm_supports_guest_debug;
-    ops->insert_breakpoint = kvm_insert_breakpoint;
-    ops->remove_breakpoint = kvm_remove_breakpoint;
-    ops->remove_all_breakpoints = kvm_remove_all_breakpoints;
+    ops->insert_gdbstub_breakpoint = kvm_insert_gdbstub_breakpoint;
+    ops->remove_gdbstub_breakpoint = kvm_remove_gdbstub_breakpoint;
+    ops->remove_all_gdbstub_breakpoints = kvm_remove_all_gdbstub_breakpoints;
 #endif
 }
 

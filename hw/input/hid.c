@@ -25,6 +25,7 @@
 
 #include "qemu/osdep.h"
 #include "ui/console.h"
+#include "ui/input.h"
 #include "qemu/timer.h"
 #include "hw/input/hid.h"
 #include "migration/vmstate.h"
@@ -108,7 +109,7 @@ void hid_set_next_idle(HIDState *hs)
 }
 
 static void hid_pointer_event(DeviceState *dev, QemuConsole *src,
-                              InputEvent *evt)
+                              QemuInputEvent *evt)
 {
     static const int bmap[INPUT_BUTTON__MAX] = {
         [INPUT_BUTTON_LEFT]   = 0x01,
@@ -119,42 +120,37 @@ static void hid_pointer_event(DeviceState *dev, QemuConsole *src,
     };
     HIDState *hs = (HIDState *)dev;
     HIDPointerEvent *e;
-    InputMoveEvent *move;
-    InputBtnEvent *btn;
 
     assert(hs->n < QUEUE_LENGTH);
     e = &hs->ptr.queue[(hs->head + hs->n) & QUEUE_MASK];
 
     switch (evt->type) {
     case INPUT_EVENT_KIND_REL:
-        move = evt->u.rel.data;
-        if (move->axis == INPUT_AXIS_X) {
-            e->xdx += move->value;
-        } else if (move->axis == INPUT_AXIS_Y) {
-            e->ydy += move->value;
+        if (evt->rel.axis == INPUT_AXIS_X) {
+            e->xdx += evt->rel.value;
+        } else if (evt->rel.axis == INPUT_AXIS_Y) {
+            e->ydy += evt->rel.value;
         }
         break;
 
     case INPUT_EVENT_KIND_ABS:
-        move = evt->u.abs.data;
-        if (move->axis == INPUT_AXIS_X) {
-            e->xdx = move->value;
-        } else if (move->axis == INPUT_AXIS_Y) {
-            e->ydy = move->value;
+        if (evt->abs.axis == INPUT_AXIS_X) {
+            e->xdx = evt->abs.value;
+        } else if (evt->abs.axis == INPUT_AXIS_Y) {
+            e->ydy = evt->abs.value;
         }
         break;
 
     case INPUT_EVENT_KIND_BTN:
-        btn = evt->u.btn.data;
-        if (btn->down) {
-            e->buttons_state |= bmap[btn->button];
-            if (btn->button == INPUT_BUTTON_WHEEL_UP) {
+        if (evt->btn.down) {
+            e->buttons_state |= bmap[evt->btn.button];
+            if (evt->btn.button == INPUT_BUTTON_WHEEL_UP) {
                 e->dz--;
-            } else if (btn->button == INPUT_BUTTON_WHEEL_DOWN) {
+            } else if (evt->btn.button == INPUT_BUTTON_WHEEL_DOWN) {
                 e->dz++;
             }
         } else {
-            e->buttons_state &= ~bmap[btn->button];
+            e->buttons_state &= ~bmap[evt->btn.button];
         }
         break;
 
@@ -226,16 +222,14 @@ static void hid_pointer_sync(DeviceState *dev)
 }
 
 static void hid_keyboard_event(DeviceState *dev, QemuConsole *src,
-                               InputEvent *evt)
+                               QemuInputEvent *evt)
 {
     HIDState *hs = (HIDState *)dev;
     int scancodes[3], i, count;
     int slot;
-    InputKeyEvent *key = evt->u.key.data;
 
-    count = qemu_input_key_value_to_scancode(key->key,
-                                             key->down,
-                                             scancodes);
+    count = qemu_input_linux_to_scancode(evt->key.key, evt->key.down,
+                                         scancodes);
     if (hs->n + count > QUEUE_LENGTH) {
         trace_hid_kbd_queue_full();
         return;
@@ -477,7 +471,8 @@ int hid_keyboard_write(HIDState *hs, uint8_t *buf, int len)
         if (hs->kbd.leds & 0x02) {
             ledstate |= QEMU_CAPS_LOCK_LED;
         }
-        kbd_put_ledstate(ledstate);
+        qemu_input_handler_set_leds_mask(hs->s, ledstate);
+        return 1;
     }
     return 0;
 }

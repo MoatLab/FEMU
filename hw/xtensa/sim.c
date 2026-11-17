@@ -29,8 +29,8 @@
 #include "qapi/error.h"
 #include "system/reset.h"
 #include "system/system.h"
-#include "hw/boards.h"
-#include "hw/loader.h"
+#include "hw/core/boards.h"
+#include "hw/core/loader.h"
 #include "elf.h"
 #include "system/memory.h"
 #include "qemu/error-report.h"
@@ -40,8 +40,12 @@
 static uint64_t translate_phys_addr(void *opaque, uint64_t addr)
 {
     XtensaCPU *cpu = opaque;
+    TranslateForDebugResult tres;
 
-    return cpu_get_phys_page_debug(CPU(cpu), addr);
+    if (!cpu_translate_for_debug(CPU(cpu), addr, &tres)) {
+        return -1;
+    }
+    return tres.physaddr;
 }
 
 static void sim_reset(void *opaque)

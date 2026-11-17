@@ -203,7 +203,7 @@ static int ssd0303_event(I2CSlave *i2c, enum i2c_event event)
     return 0;
 }
 
-static void ssd0303_update_display(void *opaque)
+static bool ssd0303_update_display(void *opaque)
 {
     ssd0303_state *s = (ssd0303_state *)opaque;
     DisplaySurface *surface = qemu_console_surface(s->con);
@@ -218,11 +218,11 @@ static void ssd0303_update_display(void *opaque)
     uint8_t mask;
 
     if (!s->redraw)
-        return;
+        return true;
 
     switch (surface_bits_per_pixel(surface)) {
     case 0:
-        return;
+        return true;
     case 15:
         dest_width = 2;
         break;
@@ -237,7 +237,7 @@ static void ssd0303_update_display(void *opaque)
         break;
     default:
         BADF("Bad color depth\n");
-        return;
+        return true;
     }
     dest_width *= MAGNIFY;
     memset(colortab, 0xff, dest_width);
@@ -268,7 +268,9 @@ static void ssd0303_update_display(void *opaque)
         }
     }
     s->redraw = 0;
-    dpy_gfx_update(s->con, 0, 0, 96 * MAGNIFY, 16 * MAGNIFY);
+    qemu_console_update(s->con, 0, 0, 96 * MAGNIFY, 16 * MAGNIFY);
+
+    return true;
 }
 
 static void ssd0303_invalidate_display(void * opaque)
@@ -307,7 +309,7 @@ static void ssd0303_realize(DeviceState *dev, Error **errp)
 {
     ssd0303_state *s = SSD0303(dev);
 
-    s->con = graphic_console_init(dev, 0, &ssd0303_ops, s);
+    s->con = qemu_graphic_console_create(dev, 0, &ssd0303_ops, s);
     qemu_console_resize(s->con, 96 * MAGNIFY, 16 * MAGNIFY);
 }
 

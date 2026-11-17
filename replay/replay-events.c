@@ -13,7 +13,7 @@
 #include "qemu/error-report.h"
 #include "system/replay.h"
 #include "replay-internal.h"
-#include "block/aio.h"
+#include "qemu/aio.h"
 #include "ui/input.h"
 #include "hw/core/cpu.h"
 
@@ -41,8 +41,8 @@ static void replay_run_event(Event *event)
         ((QEMUBHFunc *)event->opaque)(event->opaque2);
         break;
     case REPLAY_ASYNC_EVENT_INPUT:
-        qemu_input_event_send_impl(NULL, (InputEvent *)event->opaque);
-        qapi_free_InputEvent((InputEvent *)event->opaque);
+        qemu_input_event_send_impl(NULL, (QemuInputEvent *)event->opaque);
+        g_free(event->opaque);
         break;
     case REPLAY_ASYNC_EVENT_INPUT_SYNC:
         qemu_input_event_sync_impl();
@@ -118,7 +118,8 @@ void replay_add_event(ReplayAsyncEventKind event_kind,
 
     g_assert(replay_mutex_locked());
     QTAILQ_INSERT_TAIL(&events_list, event, events);
-    qemu_cpu_kick(first_cpu);
+    /* Kick the TCG thread out of tcg_cpu_exec().  */
+    cpu_exit(first_cpu);
 }
 
 void replay_bh_schedule_event(QEMUBH *bh)
@@ -142,7 +143,7 @@ void replay_bh_schedule_oneshot_event(AioContext *ctx,
     }
 }
 
-void replay_add_input_event(struct InputEvent *event)
+void replay_add_input_event(QemuInputEvent *event)
 {
     replay_add_event(REPLAY_ASYNC_EVENT_INPUT, event, NULL, 0);
 }

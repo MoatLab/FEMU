@@ -51,10 +51,9 @@
  *     _be: for forced big endian
  *     _le: for forced little endian
  *
- * mmusuffix is one of the generic suffixes "data" or "code", or "mmuidx".
+ * mmusuffix is one of the generic suffixes "data" or "mmuidx".
  * The "mmuidx" suffix carries an extra mmu_idx argument that specifies
- * the index to use; the "data" and "code" suffixes take the index from
- * cpu_mmu_index().
+ * the index to use; the "data" suffix take the index from cpu_mmu_index().
  *
  * The "mmu" suffix carries the full MemOpIdx, with both mmu_idx and the
  * MemOp including alignment requirements.  The alignment will be enforced.
@@ -70,10 +69,6 @@
 #include "accel/tcg/cpu-ldst-common.h"
 #include "accel/tcg/cpu-mmu-index.h"
 #include "exec/abi_ptr.h"
-
-#if defined(CONFIG_USER_ONLY)
-#include "user/guest-host.h"
-#endif /* CONFIG_USER_ONLY */
 
 static inline uint32_t
 cpu_ldub_mmuidx_ra(CPUArchState *env, abi_ptr addr, int mmu_idx, uintptr_t ra)
@@ -428,6 +423,7 @@ cpu_stq_le_data(CPUArchState *env, abi_ptr addr, uint64_t val)
     cpu_stq_le_data_ra(env, addr, val, 0);
 }
 
+#ifndef TARGET_NOT_USING_LEGACY_NATIVE_ENDIAN_API
 #if TARGET_BIG_ENDIAN
 # define cpu_lduw_data        cpu_lduw_be_data
 # define cpu_ldsw_data        cpu_ldsw_be_data
@@ -473,33 +469,6 @@ cpu_stq_le_data(CPUArchState *env, abi_ptr addr, uint64_t val)
 # define cpu_stl_mmuidx_ra    cpu_stl_le_mmuidx_ra
 # define cpu_stq_mmuidx_ra    cpu_stq_le_mmuidx_ra
 #endif
-
-static inline uint32_t cpu_ldub_code(CPUArchState *env, abi_ptr addr)
-{
-    CPUState *cs = env_cpu(env);
-    MemOpIdx oi = make_memop_idx(MO_UB, cpu_mmu_index(cs, true));
-    return cpu_ldb_code_mmu(env, addr, oi, 0);
-}
-
-static inline uint32_t cpu_lduw_code(CPUArchState *env, abi_ptr addr)
-{
-    CPUState *cs = env_cpu(env);
-    MemOpIdx oi = make_memop_idx(MO_TEUW, cpu_mmu_index(cs, true));
-    return cpu_ldw_code_mmu(env, addr, oi, 0);
-}
-
-static inline uint32_t cpu_ldl_code(CPUArchState *env, abi_ptr addr)
-{
-    CPUState *cs = env_cpu(env);
-    MemOpIdx oi = make_memop_idx(MO_TEUL, cpu_mmu_index(cs, true));
-    return cpu_ldl_code_mmu(env, addr, oi, 0);
-}
-
-static inline uint64_t cpu_ldq_code(CPUArchState *env, abi_ptr addr)
-{
-    CPUState *cs = env_cpu(env);
-    MemOpIdx oi = make_memop_idx(MO_TEUQ, cpu_mmu_index(cs, true));
-    return cpu_ldq_code_mmu(env, addr, oi, 0);
-}
+#endif /* TARGET_NOT_USING_LEGACY_NATIVE_ENDIAN_API */
 
 #endif /* ACCEL_TCG_CPU_LDST_H */

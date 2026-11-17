@@ -25,11 +25,11 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/char/grlib_uart.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "qemu/module.h"
 #include "chardev/char-fe.h"
 
@@ -84,7 +84,7 @@ struct UART {
     MemoryRegion iomem;
     qemu_irq irq;
 
-    CharBackend chr;
+    CharFrontend chr;
 
     /* registers */
     uint32_t status;
@@ -242,7 +242,7 @@ static void grlib_apbuart_write(void *opaque, hwaddr addr,
 static const MemoryRegionOps grlib_apbuart_ops = {
     .write      = grlib_apbuart_write,
     .read       = grlib_apbuart_read,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_BIG_ENDIAN,
 };
 
 static void grlib_apbuart_realize(DeviceState *dev, Error **errp)

@@ -26,15 +26,16 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "qapi/error.h"
+#include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
-#include "hw/usb.h"
+#include "hw/usb/usb.h"
 #include "migration/vmstate.h"
-#include "hw/sysbus.h"
-#include "hw/qdev-dma.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/sysbus.h"
+#include "hw/core/qdev-dma.h"
+#include "hw/core/qdev-properties.h"
 #include "trace.h"
 #include "hcd-ohci.h"
 
@@ -576,7 +577,6 @@ static int ohci_service_iso_td(OHCIState *ohci, struct ohci_ed *ed)
     int i;
     USBDevice *dev;
     USBEndpoint *ep;
-    USBPacket *pkt;
     QEMU_UNINITIALIZED uint8_t buf[8192];
     bool int_req;
     struct ohci_iso_td iso_td;
@@ -739,24 +739,31 @@ static int ohci_service_iso_td(OHCIState *ohci, struct ohci_ed *ed)
         return 1;
     }
     ep = usb_ep_get(dev, pid, OHCI_BM(ed->flags, ED_EN));
-    pkt = g_new0(USBPacket, 1);
-    usb_packet_init(pkt);
-    int_req = relative_frame_number == frame_count &&
-              OHCI_BM(iso_td.flags, TD_DI) == 0;
-    usb_packet_setup(pkt, pid, ep, 0, addr, false, int_req);
-    usb_packet_addbuf(pkt, buf, len);
-    usb_handle_packet(dev, pkt);
-    if (pkt->status == USB_RET_ASYNC) {
-        usb_device_flush_ep_queue(dev, ep);
+    if (ep->type == USB_ENDPOINT_XFER_ISOC) {
+        USBPacket *pkt = g_new0(USBPacket, 1);
+
+        usb_packet_init(pkt);
+        int_req = relative_frame_number == frame_count &&
+            OHCI_BM(iso_td.flags, TD_DI) == 0;
+        usb_packet_setup(pkt, pid, ep, 0, addr, false, int_req);
+        usb_packet_addbuf(pkt, buf, len);
+        usb_handle_packet(dev, pkt);
+
+        /* The USB core guarantees to never defer ISO TDs. */
+        assert(pkt->status != USB_RET_ASYNC);
+
+        if (pkt->status == USB_RET_SUCCESS) {
+            ret = pkt->actual_length;
+        } else {
+            ret = pkt->status;
+        }
+        usb_packet_cleanup(pkt);
         g_free(pkt);
-        return 1;
-    }
-    if (pkt->status == USB_RET_SUCCESS) {
-        ret = pkt->actual_length;
     } else {
-        ret = pkt->status;
+        /* Attempted iso transfer to non-iso endpoint */
+        ret = USB_RET_NAK;
+        trace_usb_ohci_iso_td_to_non_iso_endpoint(ep->nr);
     }
-    g_free(pkt);
 
     trace_usb_ohci_iso_td_so(start_offset, end_offset, start_addr, end_addr,
                              str, len, ret);
@@ -956,6 +963,17 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
         if (len && dir != OHCI_TD_DIR_IN) {
             /* The endpoint may not allow us to transfer it all now */
             pktlen = (ed->flags & OHCI_ED_MPS_MASK) >> OHCI_ED_MPS_SHIFT;
+            /*
+             * The OHCI spec does not say what to do if the guest hands us
+             * an endpoint descriptor which specifies a MaximumPacketSize
+             * of zero, which would mean we can never actually make forward
+             * progress transferring data to it. We choose to treat it as
+             * an error.
+             */
+            if (pktlen == 0) {
+                ohci_die(ohci);
+                return 1;
+            }
             if (pktlen > len) {
                 pktlen = len;
             }
@@ -993,16 +1011,23 @@ static int ohci_service_td(OHCIState *ohci, struct ohci_ed *ed)
             trace_usb_ohci_td_too_many_pending(ep->nr);
             return 1;
         }
-        usb_packet_setup(&ohci->usb_packet, pid, ep, 0, addr, !flag_r,
-                         OHCI_BM(td.flags, TD_DI) == 0);
-        usb_packet_addbuf(&ohci->usb_packet, ohci->usb_buf, pktlen);
-        usb_handle_packet(dev, &ohci->usb_packet);
-        trace_usb_ohci_td_packet_status(ohci->usb_packet.status);
+        if (ep->type != USB_ENDPOINT_XFER_ISOC) {
+            usb_packet_setup(&ohci->usb_packet, pid, ep, 0, addr, !flag_r,
+                             OHCI_BM(td.flags, TD_DI) == 0);
+            usb_packet_addbuf(&ohci->usb_packet, ohci->usb_buf, pktlen);
+            usb_handle_packet(dev, &ohci->usb_packet);
+            trace_usb_ohci_td_packet_status(ohci->usb_packet.status);
 
-        if (ohci->usb_packet.status == USB_RET_ASYNC) {
-            usb_device_flush_ep_queue(dev, ep);
-            ohci->async_td = addr;
-            return 1;
+            if (ohci->usb_packet.status == USB_RET_ASYNC) {
+                usb_device_flush_ep_queue(dev, ep);
+                ohci->async_td = addr;
+                return 1;
+            }
+        } else {
+            /* Attempted non-iso transfer to iso endpoint */
+            ohci->usb_packet.status = USB_RET_NAK;
+            ohci->usb_packet.actual_length = 0;
+            trace_usb_ohci_td_to_iso_endpoint(ep->nr);
         }
     }
     if (ohci->usb_packet.status == USB_RET_SUCCESS) {
@@ -1118,6 +1143,8 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head)
         return 0;
     }
     for (cur = head; cur && link_cnt++ < ED_LINK_LIMIT; cur = next_ed) {
+        unsigned int ed_cnt = 0;
+
         if (ohci_read_ed(ohci, cur, &ed)) {
             trace_usb_ohci_ed_read_error(cur);
             ohci_die(ohci);
@@ -1160,6 +1187,13 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head)
                 if (ohci_service_iso_td(ohci, &ed)) {
                     break;
                 }
+            }
+
+            if (ed_cnt++ > ED_LINK_LIMIT) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "ohci: Too many endpoint descriptors in loop\n");
+                ohci_die(ohci);
+                return 0;
             }
         }
 
@@ -1246,6 +1280,10 @@ static void ohci_frame_boundary(void *opaque)
     hcca.frame = cpu_to_le16(ohci->frame_number);
     /* When the HC updates frame number, set pad to 0. Ref OHCI Spec 4.4.1*/
     hcca.pad = 0;
+    /* FrameNumberOverflow happens when bit 15 of frame number changes */
+    if (ohci->frame_number == 0x8000 || ohci->frame_number == 0) {
+        ohci_set_interrupt(ohci, OHCI_INTR_FNO);
+    }
 
     if (ohci->done_count == 0 && !(ohci->intr_status & OHCI_INTR_WD)) {
         if (!ohci->done) {

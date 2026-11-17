@@ -18,9 +18,7 @@
 #include <sys/signalfd.h>
 #include <linux/unistd.h>
 #include <linux/audit.h>
-#ifdef CONFIG_INOTIFY
 #include <sys/inotify.h>
-#endif
 #include <linux/netlink.h>
 #ifdef CONFIG_RTNETLINK
 #include <linux/rtnetlink.h>
@@ -482,7 +480,7 @@ static abi_long host_to_target_for_each_rtattr(struct rtattr *rtattr,
     unsigned short aligned_rta_len;
     abi_long ret;
 
-    while (len > sizeof(struct rtattr)) {
+    while (len >= sizeof(struct rtattr)) {
         rta_len = rtattr->rta_len;
         if (rta_len < sizeof(struct rtattr) ||
             rta_len > len) {
@@ -1861,8 +1859,6 @@ TargetFdTrans target_timerfd_trans = {
     .host_to_target_data = swap_data_u64,
 };
 
-#if defined(CONFIG_INOTIFY) && (defined(TARGET_NR_inotify_init) || \
-        defined(TARGET_NR_inotify_init1))
 static abi_long host_to_target_data_inotify(void *buf, size_t len)
 {
     struct inotify_event *ev;
@@ -1885,4 +1881,3 @@ static abi_long host_to_target_data_inotify(void *buf, size_t len)
 TargetFdTrans target_inotify_trans = {
     .host_to_target_data = host_to_target_data_inotify,
 };
-#endif

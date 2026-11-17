@@ -93,9 +93,6 @@ void net_tx_pkt_update_ip_hdr_checksum(struct NetTxPkt *pkt)
     uint16_t csum;
     assert(pkt);
 
-    pkt->l3_hdr.ip.ip_len = cpu_to_be16(pkt->payload_len +
-        pkt->vec[NET_TX_PKT_L3HDR_FRAG].iov_len);
-
     pkt->l3_hdr.ip.ip_sum = 0;
     csum = net_raw_checksum(pkt->l3_hdr.octets,
         pkt->vec[NET_TX_PKT_L3HDR_FRAG].iov_len);
@@ -117,7 +114,9 @@ void net_tx_pkt_update_ip_checksums(struct NetTxPkt *pkt)
 
     if (gso_type == VIRTIO_NET_HDR_GSO_TCPV4 ||
         gso_type == VIRTIO_NET_HDR_GSO_UDP) {
-        /* Calculate IP header checksum */
+        /* Set ip_len and calculate IP header checksum */
+        pkt->l3_hdr.ip.ip_len = cpu_to_be16(pkt->payload_len +
+            pkt->vec[NET_TX_PKT_L3HDR_FRAG].iov_len);
         net_tx_pkt_update_ip_hdr_checksum(pkt);
 
         /* Calculate IP pseudo header checksum */

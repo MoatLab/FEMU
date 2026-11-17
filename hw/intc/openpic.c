@@ -31,12 +31,12 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/pci/pci.h"
 #include "hw/ppc/openpic.h"
 #include "hw/ppc/ppc_e500.h"
-#include "hw/qdev-properties.h"
-#include "hw/sysbus.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
 #include "hw/pci/msi.h"
 #include "qapi/error.h"
@@ -1477,7 +1477,7 @@ static const VMStateDescription vmstate_openpic = {
         VMSTATE_UINT32(max_irq, OpenPICState),
         VMSTATE_STRUCT_VARRAY_UINT32(src, OpenPICState, max_irq, 0,
                                      vmstate_openpic_irqsource, IRQSource),
-        VMSTATE_UINT32_EQUAL(nb_cpus, OpenPICState, NULL),
+        VMSTATE_UINT32_EQUAL(nb_cpus, OpenPICState),
         VMSTATE_STRUCT_VARRAY_UINT32(dst, OpenPICState, nb_cpus, 0,
                                      vmstate_openpic_irqdest, IRQDest),
         VMSTATE_STRUCT_ARRAY(timers, OpenPICState, OPENPIC_MAX_TMR, 0,

@@ -609,12 +609,26 @@ static int chsc_sei_nt2_have_event(void)
 
 #define CHSC_SEI_NT0    (1ULL << 63)
 #define CHSC_SEI_NT2    (1ULL << 61)
+#define CHSC_SEI_0_FMT 0x0f000000
 static void ioinst_handle_chsc_sei(ChscReq *req, ChscResp *res)
 {
     uint64_t selection_mask = ldq_be_p(&req->param1);
+    uint32_t param0 = be32_to_cpu(req->param0);
     uint8_t *res_flags = (uint8_t *)res->data;
+    uint16_t len = be16_to_cpu(req->len);
+    uint16_t resp_code;
     int have_event = 0;
     int have_more = 0;
+
+    if (len != 0x0010) {
+        resp_code = 0x0003;
+        goto out_err;
+    }
+
+    if (param0 & CHSC_SEI_0_FMT) {
+        resp_code = 0x0007;
+        goto out_err;
+    }
 
     /* regarding architecture nt0 can not be masked */
     have_event = !chsc_sei_nt0_get_event(res);
@@ -642,6 +656,12 @@ static void ioinst_handle_chsc_sei(ChscReq *req, ChscResp *res)
         res->code = cpu_to_be16(0x0005);
         res->len = cpu_to_be16(CHSC_MIN_RESP_LEN);
     }
+    return;
+
+ out_err:
+    res->code = cpu_to_be16(resp_code);
+    res->len = cpu_to_be16(CHSC_MIN_RESP_LEN);
+    res->param = 0;
 }
 
 static void ioinst_handle_chsc_unimplemented(ChscResp *res)

@@ -7,10 +7,9 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/intc/loongarch_pch_pic.h"
 #include "hw/loongarch/virt.h"
-#include "hw/pci-host/ls7a.h"
 #include "system/kvm.h"
 
 static void kvm_pch_pic_access_reg(int fd, uint64_t addr, void *val, bool write)

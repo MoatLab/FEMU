@@ -1,6 +1,15 @@
 Introduction
 ============
 
+.. note::
+   QEMU supports many different target CPU architectures and many
+   different machine types for each architecture. Options, properties,
+   and command lines that work for one architecture or machine type
+   will not necessarily work on another. The examples shown in this
+   manual are specific to the architecture and machine type being
+   demonstrated. When in doubt, consult the documentation for your
+   specific target architecture and machine type.
+
 .. _Accelerators:
 
 Virtualisation Accelerators
@@ -19,16 +28,19 @@ Tiny Code Generator (TCG) capable of emulating many CPUs.
     - Host Architectures
   * - KVM
     - Linux
-    - Arm (64 bit only), MIPS, PPC, RISC-V, s390x, x86
+    - Arm, MIPS, PPC, RISC-V, s390x, x86
   * - Xen
     - Linux (as dom0)
     - Arm, x86
+  * - MSHV
+    - Linux (as dom0)
+    - x86
   * - Hypervisor Framework (hvf)
     - MacOS
-    - x86 (64 bit only), Arm (64 bit only)
+    - x86, Arm
   * - Windows Hypervisor Platform (whpx)
     - Windows
-    - x86
+    - Arm, x86
   * - NetBSD Virtual Machine Monitor (nvmm)
     - NetBSD
     - x86
@@ -162,10 +174,8 @@ names so we can override the defaults later.
     -m 4096 \
 
 We then define the 4 vCPUs using the ``max`` option which gives us all
-the Arm features QEMU is capable of emulating. We enable a more
-emulation friendly implementation of Arm's pointer authentication
-algorithm. We explicitly specify TCG acceleration even though QEMU
-would default to it anyway.
+the Arm features QEMU is capable of emulating. We explicitly specify
+TCG acceleration even though QEMU would default to it anyway.
 
 .. code::
 

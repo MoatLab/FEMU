@@ -83,20 +83,8 @@ static abi_ulong hppa_lws(CPUHPPAState *env)
                 uint64_t o64, n64, r64;
                 o64 = *(uint64_t *)g2h(cs, old);
                 n64 = *(uint64_t *)g2h(cs, new);
-#ifdef CONFIG_ATOMIC64
-                r64 = qatomic_cmpxchg__nocheck((aligned_uint64_t *)g2h(cs, addr),
-                                               o64, n64);
+                r64 = qatomic_cmpxchg((uint64_t *)g2h(cs, addr), o64, n64);
                 ret = r64 != o64;
-#else
-                start_exclusive();
-                r64 = *(uint64_t *)g2h(cs, addr);
-                ret = 1;
-                if (r64 == o64) {
-                    *(uint64_t *)g2h(cs, addr) = n64;
-                    ret = 0;
-                }
-                end_exclusive();
-#endif
             }
             break;
         default:
@@ -119,7 +107,7 @@ void cpu_loop(CPUHPPAState *env)
         cpu_exec_start(cs);
         trapnr = cpu_exec(cs);
         cpu_exec_end(cs);
-        process_queued_cpu_work(cs);
+        qemu_process_cpu_events(cs);
 
         switch (trapnr) {
         case EXCP_SYSCALL:
@@ -136,6 +124,7 @@ void cpu_loop(CPUHPPAState *env)
                 break;
             case -QEMU_ERESTARTSYS:
             case -QEMU_ESIGRETURN:
+            case -QEMU_ESETPC:
                 break;
             }
             break;
@@ -196,12 +185,16 @@ void cpu_loop(CPUHPPAState *env)
     }
 }
 
-void target_cpu_copy_regs(CPUArchState *env, target_pt_regs *regs)
+void init_main_thread(CPUState *cs, struct image_info *info)
 {
-    int i;
-    for (i = 1; i < 32; i++) {
-        env->gr[i] = regs->gr[i];
-    }
-    env->iaoq_f = regs->iaoq[0];
-    env->iaoq_b = regs->iaoq[1];
+    CPUArchState *env = cpu_env(cs);
+
+    env->iaoq_f = info->entry | PRIV_USER;
+    env->iaoq_b = env->iaoq_f + 4;
+    env->gr[23] = 0;
+    env->gr[24] = info->argv;
+    env->gr[25] = info->argc;
+    /* The top-of-stack contains a linkage buffer.  */
+    env->gr[30] = info->start_stack + 64;
+    env->gr[31] = info->entry;
 }

@@ -25,10 +25,11 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "block/aio.h"
+#include "qemu/aio.h"
 #include "block/thread-pool.h"
 #include "block/graph-lock.h"
 #include "qemu/main-loop.h"
+#include "qemu/mem-reentrancy.h"
 #include "qemu/atomic.h"
 #include "qemu/lockcnt.h"
 #include "qemu/rcu_queue.h"
@@ -290,8 +291,9 @@ static int64_t aio_compute_bh_timeout(BHList *head, int timeout)
     QEMUBH *bh;
 
     QSLIST_FOREACH_RCU(bh, head, next) {
-        if ((bh->flags & (BH_SCHEDULED | BH_DELETED)) == BH_SCHEDULED) {
-            if (bh->flags & BH_IDLE) {
+        int flags = qatomic_load_acquire(&bh->flags);
+        if ((flags & (BH_SCHEDULED | BH_DELETED)) == BH_SCHEDULED) {
+            if (flags & BH_IDLE) {
                 /* idle bottom halves will be polled at least
                  * every 10ms */
                 timeout = 10000000;
@@ -369,14 +371,16 @@ aio_ctx_check(GSource *source)
     aio_notify_accept(ctx);
 
     QSLIST_FOREACH_RCU(bh, &ctx->bh_list, next) {
-        if ((bh->flags & (BH_SCHEDULED | BH_DELETED)) == BH_SCHEDULED) {
+        int flags = qatomic_load_acquire(&bh->flags);
+        if ((flags & (BH_SCHEDULED | BH_DELETED)) == BH_SCHEDULED) {
             return true;
         }
     }
 
     QSIMPLEQ_FOREACH(s, &ctx->bh_slice_list, next) {
         QSLIST_FOREACH_RCU(bh, &s->bh_list, next) {
-            if ((bh->flags & (BH_SCHEDULED | BH_DELETED)) == BH_SCHEDULED) {
+            int flags = qatomic_load_acquire(&bh->flags);
+            if ((flags & (BH_SCHEDULED | BH_DELETED)) == BH_SCHEDULED) {
                 return true;
             }
         }
@@ -397,11 +401,15 @@ aio_ctx_dispatch(GSource     *source,
 }
 
 static void
-aio_ctx_finalize(GSource     *source)
+aio_ctx_finalize(GSource *source)
 {
     AioContext *ctx = (AioContext *) source;
     QEMUBH *bh;
     unsigned flags;
+
+    if (!ctx->initialized) {
+        return;
+    }
 
     thread_pool_free_aio(ctx->thread_pool);
 
@@ -410,14 +418,6 @@ aio_ctx_finalize(GSource     *source)
         laio_detach_aio_context(ctx->linux_aio, ctx);
         laio_cleanup(ctx->linux_aio);
         ctx->linux_aio = NULL;
-    }
-#endif
-
-#ifdef CONFIG_LINUX_IO_URING
-    if (ctx->linux_io_uring) {
-        luring_detach_aio_context(ctx->linux_io_uring, ctx);
-        luring_cleanup(ctx->linux_io_uring);
-        ctx->linux_io_uring = NULL;
     }
 #endif
 
@@ -449,10 +449,11 @@ aio_ctx_finalize(GSource     *source)
     aio_set_event_notifier(ctx, &ctx->notifier, NULL, NULL, NULL);
     event_notifier_cleanup(&ctx->notifier);
     qemu_rec_mutex_destroy(&ctx->lock);
-    qemu_lockcnt_destroy(&ctx->list_lock);
     timerlistgroup_deinit(&ctx->tlg);
     unregister_aiocontext(ctx);
     aio_context_destroy(ctx);
+    /* aio_context_destroy() still needs the lock */
+    qemu_lockcnt_destroy(&ctx->list_lock);
 }
 
 static GSourceFuncs aio_source_funcs = {
@@ -464,7 +465,6 @@ static GSourceFuncs aio_source_funcs = {
 
 GSource *aio_get_g_source(AioContext *ctx)
 {
-    aio_context_use_g_source(ctx);
     g_source_ref(&ctx->source);
     return &ctx->source;
 }
@@ -493,29 +493,6 @@ LinuxAioState *aio_get_linux_aio(AioContext *ctx)
 {
     assert(ctx->linux_aio);
     return ctx->linux_aio;
-}
-#endif
-
-#ifdef CONFIG_LINUX_IO_URING
-LuringState *aio_setup_linux_io_uring(AioContext *ctx, Error **errp)
-{
-    if (ctx->linux_io_uring) {
-        return ctx->linux_io_uring;
-    }
-
-    ctx->linux_io_uring = luring_init(errp);
-    if (!ctx->linux_io_uring) {
-        return NULL;
-    }
-
-    luring_attach_aio_context(ctx->linux_io_uring, ctx);
-    return ctx->linux_io_uring;
-}
-
-LuringState *aio_get_linux_io_uring(AioContext *ctx)
-{
-    assert(ctx->linux_io_uring);
-    return ctx->linux_io_uring;
 }
 #endif
 
@@ -608,19 +585,42 @@ static void co_schedule_bh_cb(void *opaque)
 
 AioContext *aio_context_new(Error **errp)
 {
+    ERRP_GUARD();
     int ret;
     AioContext *ctx;
 
+    /*
+     * ctx is freed by g_source_unref() (e.g. aio_context_unref()). ctx's
+     * resources are freed as follows:
+     *
+     * 1. By aio_ctx_finalize() after aio_context_new() has returned and set
+     *    ->initialized = true.
+     *
+     * 2. By manual cleanup code in this function's error paths before goto
+     *    fail.
+     *
+     * Be careful to free resources in both cases!
+     */
     ctx = (AioContext *) g_source_new(&aio_source_funcs, sizeof(AioContext));
     QSLIST_INIT(&ctx->bh_list);
     QSIMPLEQ_INIT(&ctx->bh_slice_list);
-    aio_context_setup(ctx);
 
     ret = event_notifier_init(&ctx->notifier, false);
     if (ret < 0) {
         error_setg_errno(errp, -ret, "Failed to initialize event notifier");
         goto fail;
     }
+
+    /*
+     * Resources cannot easily be freed manually after aio_context_setup(). If
+     * you add any new resources to AioContext, it's probably best to acquire
+     * them before aio_context_setup().
+     */
+    if (!aio_context_setup(ctx, errp)) {
+        event_notifier_cleanup(&ctx->notifier);
+        goto fail;
+    }
+
     g_source_set_can_recurse(&ctx->source, true);
     qemu_lockcnt_init(&ctx->list_lock);
 
@@ -635,17 +635,15 @@ AioContext *aio_context_new(Error **errp)
     ctx->linux_aio = NULL;
 #endif
 
-#ifdef CONFIG_LINUX_IO_URING
-    ctx->linux_io_uring = NULL;
-#endif
-
     ctx->thread_pool = NULL;
     qemu_rec_mutex_init(&ctx->lock);
     timerlistgroup_init(&ctx->tlg, aio_timerlist_notify, ctx);
 
     ctx->poll_max_ns = 0;
+    ctx->poll_ns = 0;
     ctx->poll_grow = 0;
     ctx->poll_shrink = 0;
+    ctx->poll_weight = 0;
 
     ctx->aio_max_batch = 0;
 
@@ -654,9 +652,11 @@ AioContext *aio_context_new(Error **errp)
 
     register_aiocontext(ctx);
 
+    ctx->initialized = true;
+
     return ctx;
 fail:
-    g_source_destroy(&ctx->source);
+    g_source_unref(&ctx->source);
     return NULL;
 }
 

@@ -45,20 +45,25 @@ static int qemu_spice_migrate_info_stub(const char *h, int p, int t,
 
 static int qemu_spice_set_passwd_stub(const char *passwd,
                                       bool fail_if_connected,
-                                      bool disconnect_if_connected)
+                                      bool disconnect_if_connected,
+                                      Error **errp)
 {
-    return -1;
+    g_assert_not_reached();
 }
 
 static int qemu_spice_set_pw_expire_stub(time_t expires)
 {
-    return -1;
+    g_assert_not_reached();
 }
 
 static int qemu_spice_display_add_client_stub(int csock, int skipauth,
                                               int tls)
 {
     return -1;
+}
+
+static void qemu_spice_cleanup_stub(void)
+{
 }
 
 struct QemuSpiceOps qemu_spice = {
@@ -68,6 +73,7 @@ struct QemuSpiceOps qemu_spice = {
     .set_passwd   = qemu_spice_set_passwd_stub,
     .set_pw_expire = qemu_spice_set_pw_expire_stub,
     .display_add_client = qemu_spice_display_add_client_stub,
+    .cleanup = qemu_spice_cleanup_stub,
 };
 
 #ifdef CONFIG_SPICE

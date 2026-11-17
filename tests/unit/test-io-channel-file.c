@@ -102,6 +102,203 @@ static void test_io_channel_fd(void)
 }
 
 
+#ifdef CONFIG_PREADV
+static void test_io_channel_pread_all(void)
+{
+    QIOChannel *ioc;
+    char write_buf[] = "Hello World, pread_all";
+    char read_buf[sizeof(write_buf)] = {0};
+    int ret;
+
+    unlink(TEST_FILE);
+    ioc = QIO_CHANNEL(qio_channel_file_new_path(
+                          TEST_FILE,
+                          O_RDWR | O_CREAT | O_TRUNC | O_BINARY,
+                          TEST_MASK,
+                          &error_abort));
+
+    ret = qio_channel_pwrite_all(ioc, write_buf, sizeof(write_buf),
+                                 0, &error_abort);
+    g_assert_cmpint(ret, ==, 0);
+
+    /* Read back at offset 0 */
+    ret = qio_channel_pread_all(ioc, read_buf, sizeof(read_buf),
+                                0, &error_abort);
+    g_assert_cmpint(ret, ==, 0);
+    g_assert_cmpmem(write_buf, sizeof(write_buf),
+                    read_buf, sizeof(read_buf));
+
+    /* Read at a non-zero offset */
+    memset(read_buf, 0, sizeof(read_buf));
+    ret = qio_channel_pread_all(ioc, read_buf, sizeof(write_buf) - 7,
+                                7, &error_abort);
+    g_assert_cmpint(ret, ==, 0);
+    g_assert_cmpmem(write_buf + 7, sizeof(write_buf) - 7,
+                    read_buf, sizeof(write_buf) - 7);
+
+    unlink(TEST_FILE);
+    object_unref(OBJECT(ioc));
+}
+
+static void test_io_channel_preadv_all(void)
+{
+    QIOChannel *ioc;
+    char write_buf[256];
+    char read_buf[256] = {0};
+    struct iovec write_iov[2];
+    struct iovec read_iov[2];
+    int ret;
+    size_t i;
+
+    for (i = 0; i < sizeof(write_buf); i++) {
+        write_buf[i] = i & 0xff;
+    }
+
+    unlink(TEST_FILE);
+    ioc = QIO_CHANNEL(qio_channel_file_new_path(
+                          TEST_FILE,
+                          O_RDWR | O_CREAT | O_TRUNC | O_BINARY,
+                          TEST_MASK,
+                          &error_abort));
+
+    /* Write using pwritev_all with 2 iovecs */
+    write_iov[0].iov_base = write_buf;
+    write_iov[0].iov_len = 128;
+    write_iov[1].iov_base = write_buf + 128;
+    write_iov[1].iov_len = 128;
+    ret = qio_channel_pwritev_all(ioc, write_iov, 2, 0, &error_abort);
+    g_assert_cmpint(ret, ==, 0);
+
+    /* Read back using preadv_all with 2 iovecs */
+    read_iov[0].iov_base = read_buf;
+    read_iov[0].iov_len = 128;
+    read_iov[1].iov_base = read_buf + 128;
+    read_iov[1].iov_len = 128;
+    ret = qio_channel_preadv_all(ioc, read_iov, 2, 0, &error_abort);
+    g_assert_cmpint(ret, ==, 0);
+
+    g_assert_cmpmem(write_buf, sizeof(write_buf),
+                    read_buf, sizeof(read_buf));
+
+    /* Read at non-zero offset with preadv_all */
+    memset(read_buf, 0, sizeof(read_buf));
+    read_iov[0].iov_base = read_buf;
+    read_iov[0].iov_len = 64;
+    read_iov[1].iov_base = read_buf + 64;
+    read_iov[1].iov_len = 64;
+    ret = qio_channel_preadv_all(ioc, read_iov, 2, 128, &error_abort);
+    g_assert_cmpint(ret, ==, 0);
+
+    g_assert_cmpmem(write_buf + 128, 128,
+                    read_buf, 128);
+
+    unlink(TEST_FILE);
+    object_unref(OBJECT(ioc));
+}
+
+static void test_io_channel_preadv_all_eof(void)
+{
+    QIOChannel *ioc;
+    char write_buf[] = "Hello World, preadv_all_eof";
+    char read_buf[sizeof(write_buf)] = {0};
+    struct iovec iov;
+    int ret;
+    Error *err = NULL;
+
+    unlink(TEST_FILE);
+    ioc = QIO_CHANNEL(qio_channel_file_new_path(
+                          TEST_FILE,
+                          O_RDWR | O_CREAT | O_TRUNC | O_BINARY,
+                          TEST_MASK,
+                          &error_abort));
+
+    ret = qio_channel_pwrite_all(ioc, write_buf, sizeof(write_buf),
+                                 0, &error_abort);
+    g_assert_cmpint(ret, ==, 0);
+
+    /* Full read succeeds: should return 1 */
+    iov.iov_base = read_buf;
+    iov.iov_len = sizeof(read_buf);
+    ret = qio_channel_preadv_all_eof(ioc, &iov, 1, 0, &error_abort);
+    g_assert_cmpint(ret, ==, 1);
+    g_assert_cmpmem(write_buf, sizeof(write_buf),
+                    read_buf, sizeof(read_buf));
+
+    /* Clean EOF: offset at file end, should return 0 */
+    iov.iov_base = read_buf;
+    iov.iov_len = 1;
+    ret = qio_channel_preadv_all_eof(ioc, &iov, 1,
+                                     sizeof(write_buf), &err);
+    g_assert_cmpint(ret, ==, 0);
+    g_assert_null(err);
+
+    /* Partial EOF: start before end, request extends past */
+    iov.iov_base = read_buf;
+    iov.iov_len = 8;
+    ret = qio_channel_preadv_all_eof(ioc, &iov, 1,
+                                     sizeof(write_buf) - 4, &err);
+    g_assert_cmpint(ret, ==, -1);
+    g_assert_nonnull(err);
+    error_free(err);
+    err = NULL;
+
+    /* Strict wrapper (preadv_all) treats clean EOF as error */
+    iov.iov_base = read_buf;
+    iov.iov_len = 1;
+    ret = qio_channel_preadv_all(ioc, &iov, 1,
+                                 sizeof(write_buf), &err);
+    g_assert_cmpint(ret, ==, -1);
+    g_assert_nonnull(err);
+    error_free(err);
+
+    unlink(TEST_FILE);
+    object_unref(OBJECT(ioc));
+}
+
+static void test_io_channel_pread_all_eof(void)
+{
+    QIOChannel *ioc;
+    char write_buf[] = "Hello World, pread_all_eof";
+    char read_buf[sizeof(write_buf)] = {0};
+    int ret;
+    Error *err = NULL;
+
+    unlink(TEST_FILE);
+    ioc = QIO_CHANNEL(qio_channel_file_new_path(
+                          TEST_FILE,
+                          O_RDWR | O_CREAT | O_TRUNC | O_BINARY,
+                          TEST_MASK,
+                          &error_abort));
+
+    ret = qio_channel_pwrite_all(ioc, write_buf, sizeof(write_buf),
+                                 0, &error_abort);
+    g_assert_cmpint(ret, ==, 0);
+
+    /* Full read succeeds: should return 1 */
+    ret = qio_channel_pread_all_eof(ioc, read_buf, sizeof(read_buf),
+                                    0, &error_abort);
+    g_assert_cmpint(ret, ==, 1);
+    g_assert_cmpmem(write_buf, sizeof(write_buf),
+                    read_buf, sizeof(read_buf));
+
+    /* Clean EOF: should return 0 */
+    ret = qio_channel_pread_all_eof(ioc, read_buf, 1,
+                                    sizeof(write_buf), &err);
+    g_assert_cmpint(ret, ==, 0);
+    g_assert_null(err);
+
+    /* Partial EOF: should return -1 */
+    ret = qio_channel_pread_all_eof(ioc, read_buf, 8,
+                                    sizeof(write_buf) - 4, &err);
+    g_assert_cmpint(ret, ==, -1);
+    g_assert_nonnull(err);
+    error_free(err);
+
+    unlink(TEST_FILE);
+    object_unref(OBJECT(ioc));
+}
+#endif /* CONFIG_PREADV */
+
 #ifndef _WIN32
 static void test_io_channel_pipe(bool async)
 {
@@ -147,6 +344,16 @@ int main(int argc, char **argv)
     g_test_add_func("/io/channel/file", test_io_channel_file);
     g_test_add_func("/io/channel/file/rdwr", test_io_channel_file_rdwr);
     g_test_add_func("/io/channel/file/fd", test_io_channel_fd);
+#ifdef CONFIG_PREADV
+    g_test_add_func("/io/channel/file/pread-all",
+                    test_io_channel_pread_all);
+    g_test_add_func("/io/channel/file/preadv-all",
+                    test_io_channel_preadv_all);
+    g_test_add_func("/io/channel/file/preadv-all-eof",
+                    test_io_channel_preadv_all_eof);
+    g_test_add_func("/io/channel/file/pread-all-eof",
+                    test_io_channel_pread_all_eof);
+#endif
 #ifndef _WIN32
     g_test_add_func("/io/channel/pipe/sync", test_io_channel_pipe_sync);
     g_test_add_func("/io/channel/pipe/async", test_io_channel_pipe_async);

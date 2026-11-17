@@ -3,7 +3,7 @@
 
 #include "chardev/char-fe.h"
 #include "chardev/char-serial.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "ui/input.h"
 #include "qom/object.h"
 
@@ -36,7 +36,7 @@ typedef struct ESCCChannelState {
     uint32_t reg;
     uint8_t wregs[ESCC_SERIAL_REGS], rregs[ESCC_SERIAL_REGS];
     ESCCSERIOQueue queue;
-    CharBackend chr;
+    CharFrontend chr;
     int e0_mode, led_mode, caps_lock_mode, num_lock_mode;
     int disabled;
     int clock;

@@ -23,12 +23,12 @@
 #include "qemu/error-report.h"
 #include "qemu/bswap.h"
 #include "system/address-spaces.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/pci/msi.h"
-#include "hw/boards.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/boards.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/intc/riscv_imsic.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "target/riscv/cpu.h"
 #include "target/riscv/cpu_bits.h"
 #include "system/system.h"
@@ -45,6 +45,19 @@
 #define IMSIC_EISTATE_ENABLED          (1U << 1)
 #define IMSIC_EISTATE_ENPEND           (IMSIC_EISTATE_ENABLED | \
                                         IMSIC_EISTATE_PENDING)
+
+static void riscv_cpu_set_geilen(CPURISCVState *env, uint8_t geilen)
+{
+    if (!riscv_has_ext(env, RVH)) {
+        return;
+    }
+
+    if (geilen > (TARGET_LONG_BITS - 1)) {
+        return;
+    }
+
+    env->geilen = geilen;
+}
 
 static uint32_t riscv_imsic_topei(RISCVIMSICState *imsic, uint32_t page)
 {
@@ -88,11 +101,11 @@ static void riscv_imsic_update(RISCVIMSICState *imsic, uint32_t page)
 }
 
 static int riscv_imsic_eidelivery_rmw(RISCVIMSICState *imsic, uint32_t page,
-                                      target_ulong *val,
-                                      target_ulong new_val,
-                                      target_ulong wr_mask)
+                                      uint64_t *val,
+                                      uint64_t new_val,
+                                      uint64_t wr_mask)
 {
-    target_ulong old_val = imsic->eidelivery[page];
+    uint32_t old_val = imsic->eidelivery[page];
 
     if (val) {
         *val = old_val;
@@ -106,11 +119,11 @@ static int riscv_imsic_eidelivery_rmw(RISCVIMSICState *imsic, uint32_t page,
 }
 
 static int riscv_imsic_eithreshold_rmw(RISCVIMSICState *imsic, uint32_t page,
-                                      target_ulong *val,
-                                      target_ulong new_val,
-                                      target_ulong wr_mask)
+                                      uint64_t *val,
+                                      uint64_t new_val,
+                                      uint64_t wr_mask)
 {
-    target_ulong old_val = imsic->eithreshold[page];
+    uint32_t old_val = imsic->eithreshold[page];
 
     if (val) {
         *val = old_val;
@@ -124,8 +137,8 @@ static int riscv_imsic_eithreshold_rmw(RISCVIMSICState *imsic, uint32_t page,
 }
 
 static int riscv_imsic_topei_rmw(RISCVIMSICState *imsic, uint32_t page,
-                                 target_ulong *val, target_ulong new_val,
-                                 target_ulong wr_mask)
+                                 uint64_t *val, uint64_t new_val,
+                                 uint64_t wr_mask)
 {
     uint32_t base, topei = riscv_imsic_topei(imsic, page);
 
@@ -149,11 +162,11 @@ static int riscv_imsic_topei_rmw(RISCVIMSICState *imsic, uint32_t page,
 
 static int riscv_imsic_eix_rmw(RISCVIMSICState *imsic,
                                uint32_t xlen, uint32_t page,
-                               uint32_t num, bool pend, target_ulong *val,
-                               target_ulong new_val, target_ulong wr_mask)
+                               uint32_t num, bool pend, uint64_t *val,
+                               uint64_t new_val, uint64_t wr_mask)
 {
     uint32_t i, base, prev;
-    target_ulong mask;
+    uint64_t mask;
     uint32_t state = (pend) ? IMSIC_EISTATE_PENDING : IMSIC_EISTATE_ENABLED;
 
     if (xlen != 32) {
@@ -178,7 +191,7 @@ static int riscv_imsic_eix_rmw(RISCVIMSICState *imsic,
             continue;
         }
 
-        mask = (target_ulong)1 << i;
+        mask = 1ull << i;
         if (wr_mask & mask) {
             if (new_val & mask) {
                 prev = qatomic_fetch_or(&imsic->eistate[base + i], state);
@@ -197,8 +210,8 @@ static int riscv_imsic_eix_rmw(RISCVIMSICState *imsic,
     return 0;
 }
 
-static int riscv_imsic_rmw(void *arg, target_ulong reg, target_ulong *val,
-                           target_ulong new_val, target_ulong wr_mask)
+static int riscv_imsic_rmw(void *arg, uint32_t reg, uint64_t *val,
+                           uint64_t new_val, uint64_t wr_mask)
 {
     RISCVIMSICState *imsic = arg;
     uint32_t isel, priv, virt, vgein, xlen, page;
@@ -342,6 +355,38 @@ static const MemoryRegionOps riscv_imsic_ops = {
     }
 };
 
+static void riscv_imsic_reset_enter(Object *obj, ResetType type)
+{
+    RISCVIMSICState *imsic = RISCV_IMSIC(obj);
+    int i;
+
+    if (kvm_irqchip_in_kernel()) {
+        return;
+    }
+
+    memset(imsic->eidelivery, 0, sizeof(uint32_t) * imsic->num_pages);
+    memset(imsic->eithreshold, 0, sizeof(uint32_t) * imsic->num_pages);
+
+    for (i = 0; i < imsic->num_eistate; i++) {
+        imsic->eistate[i] &= ~IMSIC_EISTATE_ENABLED;
+    }
+
+    for (i = 0; i < imsic->num_pages; i++) {
+        qemu_irq_lower(imsic->external_irqs[i]);
+    }
+}
+
+static void riscv_cpu_set_aia_ireg_rmw_cb(CPURISCVState *env,
+                                          privilege_mode_t priv,
+                                          aia_ireg_rmw_fn rmw_fn,
+                                          void *rmw_fn_arg)
+{
+    if (priv <= PRV_M) {
+        env->aia_ireg_rmw_cb[priv] = rmw_fn;
+        env->aia_ireg_rmw_cb_arg[priv] = rmw_fn_arg;
+    }
+}
+
 static void riscv_imsic_realize(DeviceState *dev, Error **errp)
 {
     RISCVIMSICState *imsic = RISCV_IMSIC(dev);
@@ -383,7 +428,7 @@ static void riscv_imsic_realize(DeviceState *dev, Error **errp)
         }
 
         if (!kvm_irqchip_in_kernel()) {
-            riscv_cpu_set_aia_ireg_rmw_fn(env, (imsic->mmode) ? PRV_M : PRV_S,
+            riscv_cpu_set_aia_ireg_rmw_cb(env, (imsic->mmode) ? PRV_M : PRV_S,
                                           riscv_imsic_rmw, imsic);
         }
     }
@@ -425,9 +470,11 @@ static const VMStateDescription vmstate_riscv_imsic = {
 static void riscv_imsic_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     device_class_set_props(dc, riscv_imsic_properties);
     dc->realize = riscv_imsic_realize;
+    rc->phases.enter = riscv_imsic_reset_enter;
     dc->vmsd = &vmstate_riscv_imsic;
 }
 

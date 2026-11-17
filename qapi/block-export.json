@@ -38,8 +38,8 @@
 ##
 # @NbdServerOptions:
 #
-# Keep this type consistent with the `NbdServerOptionsLegacy` type.  The
-# only intended difference is using `SocketAddress` instead of
+# Keep this type consistent with the `NbdServerOptionsLegacy` type.
+# The only intended difference is using `SocketAddress` instead of
 # `SocketAddressLegacy`.
 #
 # @addr: Address on which to listen (since 4.2).
@@ -51,8 +51,8 @@
 ##
 # @NbdServerOptionsLegacy:
 #
-# Keep this type consistent with the `NbdServerOptions` type.  The only
-# intended difference is using `SocketAddressLegacy` instead of
+# Keep this type consistent with the `NbdServerOptions` type.  The
+# only intended difference is using `SocketAddressLegacy` instead of
 # `SocketAddress`.
 #
 # @addr: Address on which to listen (since 1.3).
@@ -125,8 +125,8 @@
 # A vhost-user-blk block export.
 #
 # @addr: The vhost-user socket on which to listen.  Both 'unix' and
-#     'fd' `SocketAddress` types are supported.  Passed fds must be UNIX
-#     domain sockets.
+#     'fd' `SocketAddress` types are supported.  Passed fds must be
+#     UNIX domain sockets.
 #
 # @logical-block-size: Logical block size in bytes.  Defaults to 512
 #     bytes.
@@ -163,6 +163,11 @@
 #
 # Options for exporting a block graph node on some (file) mountpoint
 # as a raw image.
+#
+# Multi-threading note: The FUSE export supports multi-threading.
+# Currently, requests are distributed across these threads in a
+# round-robin fashion, i.e. independently of the CPU core from which a
+# request originates.
 #
 # @mountpoint: Path on which to export the block device via FUSE.
 #     This must point to an existing regular file.
@@ -363,21 +368,24 @@
 #     to the export before completion is signalled.  (since: 5.2;
 #     default: false)
 #
-# @iothread: The name of the iothread object where the export will
-#     run.  The default is to use the thread currently associated with
-#     the block node.  (since: 5.2)
+# @iothread: The name(s) of one or more iothread object(s) where the
+#     export will run.  The default is to use the thread currently
+#     associated with the block node.  (since: 5.2; multi-threading
+#     since 10.1)
 #
 # @fixed-iothread: True prevents the block node from being moved to
 #     another thread while the export is active.  If true and
 #     @iothread is given, export creation fails if the block node
-#     cannot be moved to the iothread.  The default is false.
+#     cannot be moved to the iothread.  Must not be true when giving
+#     multiple iothreads for @iothread.  The default is false.
 #     (since: 5.2)
 #
-# @allow-inactive: If true, the export allows the exported node to be inactive.
-#     If it is created for an inactive block node, the node remains inactive.  If
-#     the export type doesn't support running on an inactive node, an error is
-#     returned.  If false, inactive block nodes are automatically activated before
-#     creating the export and trying to inactivate them later fails.
+# @allow-inactive: If true, the export allows the exported node to be
+#     inactive.  If it is created for an inactive block node, the node
+#     remains inactive.  If the export type doesn't support running on
+#     an inactive node, an error is returned.  If false, inactive
+#     block nodes are automatically activated before creating the
+#     export and trying to inactivate them later fails.
 #     (since: 10.0; default: false)
 #
 # Since: 4.2
@@ -386,7 +394,7 @@
   'base': { 'type': 'BlockExportType',
             'id': 'str',
             '*fixed-iothread': 'bool',
-            '*iothread': 'str',
+            '*iothread': 'BlockExportIothreads',
             'node-name': 'str',
             '*writable': 'bool',
             '*writethrough': 'bool',
@@ -401,6 +409,30 @@
       'vduse-blk': { 'type': 'BlockExportOptionsVduseBlk',
                      'if': 'CONFIG_VDUSE_BLK_EXPORT' }
    } }
+
+##
+# @BlockExportIothreads:
+#
+# Specify a single or multiple I/O threads in which to run a block
+# export's I/O.
+#
+# @single: Run the export's I/O in the given single I/O thread.
+#
+# @multi: Use multi-threading across the given set of I/O threads,
+#     which must not be empty.  Note: Passing a single I/O thread via
+#     this variant is still treated as multi-threading, which is
+#     different from using the @single variant.  In particular, even
+#     if there only is a single I/O thread in the set, export types
+#     that do not support multi-threading will generally reject this
+#     variant, and BlockExportOptions.fixed-iothread is always
+#     incompatible with it.
+#
+# Since: 10.1
+##
+{ 'alternate': 'BlockExportIothreads',
+  'data': {
+      'single': 'str',
+      'multi': ['str'] } }
 
 ##
 # @block-export-add:
@@ -460,7 +492,8 @@
 # @node-name: The node name of the block node that is exported
 #
 # @shutting-down: True if the export is shutting down (e.g. after a
-#     `block-export-del` command, but before the shutdown has completed)
+#     `block-export-del` command, but before the shutdown has
+#     completed)
 #
 # Since: 5.2
 ##

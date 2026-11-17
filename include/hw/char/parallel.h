@@ -3,7 +3,7 @@
 
 #include "system/memory.h"
 #include "hw/isa/isa.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "chardev/char-fe.h"
 #include "chardev/char.h"
 
@@ -15,7 +15,7 @@ typedef struct ParallelState {
     uint8_t control;
     qemu_irq irq;
     int irq_pending;
-    CharBackend chr;
+    CharFrontend chr;
     int hw_driver;
     int epp_timeout;
     uint32_t last_read_offset; /* For debugging */

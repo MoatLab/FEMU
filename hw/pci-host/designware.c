@@ -26,9 +26,9 @@
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci/pci_host.h"
 #include "hw/pci/pcie_port.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/pci-host/designware.h"
 
 #define DESIGNWARE_PCIE_PORT_LINK_CONTROL          0x710
@@ -593,8 +593,6 @@ static void designware_pcie_root_class_init(ObjectClass *klass,
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
-    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
-
     k->vendor_id = PCI_VENDOR_ID_SYNOPSYS;
     k->device_id = 0xABCD;
     k->revision = 0;
@@ -736,7 +734,6 @@ static void designware_pcie_host_class_init(ObjectClass *klass,
 
     hc->root_bus_path = designware_pcie_host_root_bus_path;
     dc->realize = designware_pcie_host_realize;
-    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
     dc->fw_name = "pci";
     dc->vmsd = &vmstate_designware_pcie_host;
 }

@@ -15,8 +15,8 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "trace.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/virtio/virtio-serial.h"
 #include "qapi/error.h"
 #include "qapi/qapi-events-char.h"
@@ -30,7 +30,7 @@ DECLARE_INSTANCE_CHECKER(VirtConsole, VIRTIO_CONSOLE,
 struct VirtConsole {
     VirtIOSerialPort parent_obj;
 
-    CharBackend chr;
+    CharFrontend chr;
     guint watch;
 };
 
@@ -159,10 +159,7 @@ static void chr_event(void *opaque, QEMUChrEvent event)
         virtio_serial_open(port);
         break;
     case CHR_EVENT_CLOSED:
-        if (vcon->watch) {
-            g_source_remove(vcon->watch);
-            vcon->watch = 0;
-        }
+        g_clear_handle_id(&vcon->watch, g_source_remove);
         virtio_serial_close(port);
         break;
     case CHR_EVENT_BREAK:
@@ -255,10 +252,7 @@ static void virtconsole_realize(DeviceState *dev, Error **errp)
 static void virtconsole_unrealize(DeviceState *dev)
 {
     VirtConsole *vcon = VIRTIO_CONSOLE(dev);
-
-    if (vcon->watch) {
-        g_source_remove(vcon->watch);
-    }
+    g_clear_handle_id(&vcon->watch, g_source_remove);
 }
 
 static void virtconsole_class_init(ObjectClass *klass, const void *data)

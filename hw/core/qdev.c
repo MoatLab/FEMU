@@ -32,11 +32,12 @@
 #include "qapi/visitor.h"
 #include "qemu/error-report.h"
 #include "qemu/option.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
-#include "hw/boards.h"
-#include "hw/sysbus.h"
-#include "hw/qdev-clock.h"
+#include "qom/compat-properties.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/boards.h"
+#include "hw/core/sysbus.h"
+#include "hw/core/qdev-clock.h"
 #include "migration/vmstate.h"
 #include "trace.h"
 
@@ -409,6 +410,25 @@ char *qdev_get_dev_path(DeviceState *dev)
     }
 
     return NULL;
+}
+
+char *qdev_get_human_name(DeviceState *dev)
+{
+    if (dev->id) {
+        return g_strdup(dev->id);
+    }
+    /*
+     * Fall back to a bus-specific device path, if the bus
+     * provides one (e.g. "PCI device 0000:00:04.0").
+     */
+    g_autofree char *path = qdev_get_dev_path(dev);
+    if (path) {
+        const char *bus_type = object_get_typename(OBJECT(dev->parent_bus));
+        char *name = g_strdup_printf("%s device %s", bus_type, path);
+        return name;
+    }
+
+    return object_get_canonical_path(OBJECT(dev));
 }
 
 void qdev_add_unplug_blocker(DeviceState *dev, Error *reason)
@@ -836,14 +856,6 @@ Object *machine_get_container(const char *name)
     assert(object_dynamic_cast(container, TYPE_CONTAINER));
 
     return container;
-}
-
-char *qdev_get_human_name(DeviceState *dev)
-{
-    g_assert(dev != NULL);
-
-    return dev->id ?
-           g_strdup(dev->id) : object_get_canonical_path(OBJECT(dev));
 }
 
 static MachineInitPhase machine_phase;

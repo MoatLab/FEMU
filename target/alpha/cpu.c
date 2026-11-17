@@ -86,10 +86,10 @@ static bool alpha_cpu_has_work(CPUState *cs)
        assume that if a CPU really wants to stay asleep, it will mask
        interrupts at the chipset level, which will prevent these bits
        from being set in the first place.  */
-    return cs->interrupt_request & (CPU_INTERRUPT_HARD
-                                    | CPU_INTERRUPT_TIMER
-                                    | CPU_INTERRUPT_SMP
-                                    | CPU_INTERRUPT_MCHK);
+    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD
+                                  | CPU_INTERRUPT_TIMER
+                                  | CPU_INTERRUPT_SMP
+                                  | CPU_INTERRUPT_MCHK);
 }
 #endif /* !CONFIG_USER_ONLY */
 
@@ -98,7 +98,8 @@ static int alpha_cpu_mmu_index(CPUState *cs, bool ifetch)
     return alpha_env_mmu_index(cpu_env(cs));
 }
 
-static void alpha_cpu_disas_set_info(CPUState *cpu, disassemble_info *info)
+static void alpha_cpu_disas_set_info(const CPUState *cpu,
+                                     disassemble_info *info)
 {
     info->endian = BFD_ENDIAN_LITTLE;
     info->mach = bfd_mach_alpha_ev6;
@@ -123,6 +124,7 @@ static void alpha_cpu_realizefn(DeviceState *dev, Error **errp)
     }
 
     qemu_init_vcpu(cs);
+    cpu_reset(cs);
 
     acc->parent_realize(dev, errp);
 }
@@ -240,7 +242,7 @@ static void alpha_cpu_initfn(Object *obj)
 
 static const struct SysemuCPUOps alpha_sysemu_ops = {
     .has_work = alpha_cpu_has_work,
-    .get_phys_page_debug = alpha_cpu_get_phys_page_debug,
+    .get_phys_addr_debug = alpha_cpu_get_phys_addr_debug,
 };
 #endif
 
@@ -294,7 +296,6 @@ static void alpha_cpu_class_init(ObjectClass *oc, const void *data)
     cc->disas_set_info = alpha_cpu_disas_set_info;
 
     cc->tcg_ops = &alpha_tcg_ops;
-    cc->gdb_num_core_regs = 67;
 }
 
 #define DEFINE_ALPHA_CPU_TYPE(base_type, cpu_model, initfn) \

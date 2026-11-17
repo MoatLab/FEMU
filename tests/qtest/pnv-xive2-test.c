@@ -14,6 +14,7 @@
 #include "libqtest.h"
 
 #include "pnv-xive2-common.h"
+#include "pnv-xscom.h"
 #include "hw/intc/pnv_xive2_regs.h"
 #include "hw/ppc/xive_regs.h"
 #include "hw/ppc/xive2_regs.h"
@@ -544,14 +545,16 @@ static void test_hw_group_irq_backlog(QTestState *qts)
     g_assert_cmphex(lsmfb, ==, 0xFF);
 }
 
-static void test_xive(void)
+static void test_xive(const void *data)
 {
+    const PnvChip *chip = data;
+    const char *machine = pnv_get_machine_type(chip->chip_type);
     QTestState *qts;
 
-    qts = qtest_initf("-M powernv10 -smp %d,cores=1,threads=%d -nographic "
+    qts = qtest_initf("-M %s -smp %d,cores=1,threads=%d -nographic "
                       "-nodefaults -serial mon:stdio -S "
                       "-d guest_errors -trace '*xive*'",
-                      SMT, SMT);
+                      machine, SMT, SMT);
     init_xive(qts);
 
     test_hw_irq(qts);
@@ -580,6 +583,16 @@ static void test_xive(void)
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
-    qtest_add_func("xive2", test_xive);
+
+    for (int i = 0; i < ARRAY_SIZE(pnv_chips); i++) {
+        /* xive2 exists from Power10 onwards */
+        if (pnv_chips[i].chip_type < PNV_CHIP_POWER10) {
+            continue;
+        }
+
+        g_autofree char *tname = g_strdup_printf("pnv-xive2/%s",
+                pnv_chips[i].cpu_model);
+        qtest_add_data_func(tname, &pnv_chips[i], test_xive);
+    }
     return g_test_run();
 }

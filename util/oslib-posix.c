@@ -61,7 +61,7 @@
 #include "qemu/memalign.h"
 #include "qemu/mmap-alloc.h"
 
-#define MAX_MEM_PREALLOC_THREAD_COUNT 16
+#define MAX_MEM_PREALLOC_THREAD_COUNT 32
 
 struct MemsetThread;
 
@@ -250,21 +250,19 @@ void qemu_anon_ram_free(void *ptr, size_t size)
 #endif
 }
 
-void qemu_socket_set_block(int fd)
+bool qemu_set_blocking(int fd, bool block, Error **errp)
 {
-    g_unix_set_fd_nonblocking(fd, false, NULL);
-}
+    g_autoptr(GError) err = NULL;
 
-int qemu_socket_try_set_nonblock(int fd)
-{
-    return g_unix_set_fd_nonblocking(fd, true, NULL) ? 0 : -errno;
-}
+    if (!g_unix_set_fd_nonblocking(fd, !block, &err)) {
+        error_setg_errno(errp, errno,
+                         "Can't set file descriptor %d %s: %s", fd,
+                         block ? "blocking" : "non-blocking",
+                         err->message);
+        return false;
+    }
 
-void qemu_socket_set_nonblock(int fd)
-{
-    int f;
-    f = qemu_socket_try_set_nonblock(fd);
-    assert(f == 0);
+    return true;
 }
 
 int socket_set_fast_reuse(int fd)
@@ -305,6 +303,15 @@ int qemu_socketpair(int domain, int type, int protocol, int sv[2])
     }
 
     return ret;
+}
+
+void qemu_clear_cloexec(int fd)
+{
+    int f;
+    f = fcntl(fd, F_GETFD);
+    assert(f != -1);
+    f = fcntl(fd, F_SETFD, f & ~FD_CLOEXEC);
+    assert(f != -1);
 }
 
 char *

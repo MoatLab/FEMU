@@ -18,6 +18,7 @@
 #include <spice/enums.h>
 #endif
 #include "monitor/hmp.h"
+#include "monitor/hmp-completion.h"
 #include "monitor/monitor-internal.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-ui.h"
@@ -54,10 +55,11 @@ void hmp_mouse_move(Monitor *mon, const QDict *qdict)
 
 void hmp_mouse_button(Monitor *mon, const QDict *qdict)
 {
+    /* HMP mouse_button bitmask: 1=L, 2=R, 4=M */
     static uint32_t bmap[INPUT_BUTTON__MAX] = {
-        [INPUT_BUTTON_LEFT]       = MOUSE_EVENT_LBUTTON,
-        [INPUT_BUTTON_MIDDLE]     = MOUSE_EVENT_MBUTTON,
-        [INPUT_BUTTON_RIGHT]      = MOUSE_EVENT_RBUTTON,
+        [INPUT_BUTTON_LEFT]       = 0x01,
+        [INPUT_BUTTON_MIDDLE]     = 0x04,
+        [INPUT_BUTTON_RIGHT]      = 0x02,
     };
     int button_state = qdict_get_int(qdict, "button_state");
 
@@ -341,13 +343,28 @@ void hmp_change_vnc(Monitor *mon, const char *device, const char *target,
         return;
     }
     if (!arg) {
-        MonitorHMP *hmp_mon = container_of(mon, MonitorHMP, common);
+        MonitorHMP *hmp_mon = container_of(mon, MonitorHMP, parent_obj);
         monitor_read_password(hmp_mon, hmp_change_read_arg, NULL);
     } else {
         qmp_change_vnc_password(arg, errp);
     }
 }
 #endif
+
+static int index_from_key(const char *key, size_t key_length)
+{
+    int i;
+
+    for (i = 0; i < Q_KEY_CODE__MAX; i++) {
+        if (!strncmp(key, QKeyCode_str(i), key_length) &&
+            !QKeyCode_str(i)[key_length]) {
+            break;
+        }
+    }
+
+    /* Return Q_KEY_CODE__MAX if the key is invalid */
+    return i;
+}
 
 void hmp_sendkey(Monitor *mon, const QDict *qdict)
 {
@@ -418,7 +435,7 @@ err_out:
 void sendkey_completion(ReadLineState *rs, int nb_args, const char *str)
 {
     int i;
-    char *sep;
+    const char *sep;
     size_t len;
 
     if (nb_args != 2) {

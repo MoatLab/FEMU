@@ -20,10 +20,11 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 #include "hw/sd/sd.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
+#include "qemu/cutils.h"
 #include "sdmmc-internal.h"
 #include "trace.h"
 
@@ -41,6 +42,26 @@ static SDState *get_card(SDBus *sdbus)
         return NULL;
     }
     return SDMMC_COMMON(kid->child);
+}
+
+static void sdbus_write_dump(const char *bus_name, const void *buf, size_t len)
+{
+    g_autoptr(GString) str = NULL;
+
+    if (trace_event_get_state_backends(TRACE_SDBUS_WRITE)) {
+        str = qemu_hexdump_line(NULL, buf, len, 8, 0);
+        trace_sdbus_write(bus_name, str->str);
+    }
+}
+
+static void sdbus_read_dump(const char *bus_name, const void *buf, size_t len)
+{
+    g_autoptr(GString) str = NULL;
+
+    if (trace_event_get_state_backends(TRACE_SDBUS_READ)) {
+        str = qemu_hexdump_line(NULL, buf, len, 8, 0);
+        trace_sdbus_read(bus_name, str->str);
+    }
 }
 
 uint8_t sdbus_get_dat_lines(SDBus *sdbus)
@@ -109,25 +130,29 @@ void sdbus_write_byte(SDBus *sdbus, uint8_t value)
 {
     SDState *card = get_card(sdbus);
 
-    trace_sdbus_write(sdbus_name(sdbus), value);
+    sdbus_write_dump(sdbus_name(sdbus), &value, 1);
     if (card) {
         SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
 
-        sc->write_byte(card, value);
+        sc->write_data(card, &value, 1);
     }
 }
 
 void sdbus_write_data(SDBus *sdbus, const void *buf, size_t length)
 {
     SDState *card = get_card(sdbus);
-    const uint8_t *data = buf;
 
+    sdbus_write_dump(sdbus_name(sdbus), buf, length);
     if (card) {
         SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
 
-        for (size_t i = 0; i < length; i++) {
-            trace_sdbus_write(sdbus_name(sdbus), data[i]);
-            sc->write_byte(card, data[i]);
+        while (length > 0) {
+            size_t written = sc->write_data(card, buf, length);
+
+            g_assert(written >= 1);
+
+            buf += written;
+            length -= written;
         }
     }
 }
@@ -140,9 +165,9 @@ uint8_t sdbus_read_byte(SDBus *sdbus)
     if (card) {
         SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
 
-        value = sc->read_byte(card);
+        sc->read_data(card, &value, 1);
     }
-    trace_sdbus_read(sdbus_name(sdbus), value);
+    sdbus_read_dump(sdbus_name(sdbus), &value, 1);
 
     return value;
 }
@@ -150,16 +175,20 @@ uint8_t sdbus_read_byte(SDBus *sdbus)
 void sdbus_read_data(SDBus *sdbus, void *buf, size_t length)
 {
     SDState *card = get_card(sdbus);
-    uint8_t *data = buf;
 
     if (card) {
         SDCardClass *sc = SDMMC_COMMON_GET_CLASS(card);
 
-        for (size_t i = 0; i < length; i++) {
-            data[i] = sc->read_byte(card);
-            trace_sdbus_read(sdbus_name(sdbus), data[i]);
+        while (length > 0) {
+            size_t read = sc->read_data(card, buf, length);
+
+            g_assert(read >= 1);
+
+            buf += read;
+            length -= read;
         }
     }
+    sdbus_read_dump(sdbus_name(sdbus), buf, length);
 }
 
 bool sdbus_receive_ready(SDBus *sdbus)

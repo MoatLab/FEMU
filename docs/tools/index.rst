@@ -16,3 +16,4 @@ command line utilities and other standalone programs.
    qemu-pr-helper
    qemu-trace-stap
    qemu-vmsr-helper
+   qemu-vnc

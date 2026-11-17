@@ -14,8 +14,10 @@
 #include "hw/core/cpu.h"
 #include "system/kvm.h"
 #include "system/hvf.h"
+#include "system/mshv.h"
 #include "system/whpx.h"
 #include "system/nvmm.h"
+#include "system/nitro-accel.h"
 
 /**
  * cpu_synchronize_state:
@@ -38,5 +40,18 @@ void cpu_synchronize_pre_loadvm(CPUState *cpu);
  */
 void cpu_synchronize_post_reset(CPUState *cpu);
 void cpu_synchronize_post_init(CPUState *cpu);
+
+/**
+ * hwaccel_enabled:
+ *
+ * Returns: %true if a hardware accelerator is enabled, %false otherwise.
+ */
+static inline bool hwaccel_enabled(void)
+{
+    return hvf_enabled()
+        || kvm_enabled()
+        || nvmm_enabled()
+        || whpx_enabled();
+}
 
 #endif /* QEMU_HW_ACCEL_H */

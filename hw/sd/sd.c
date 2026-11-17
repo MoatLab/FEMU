@@ -6,7 +6,7 @@
  *
  * Copyright (c) 2006 Andrzej Zaborowski  <balrog@zabor.org>
  * Copyright (c) 2007 CodeSourcery
- * Copyright (c) 2018 Philippe Mathieu-Daudé <f4bug@amsat.org>
+ * Copyright (c) 2018 Philippe Mathieu-Daudé
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -35,15 +35,16 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "qemu/cutils.h"
-#include "hw/irq.h"
-#include "hw/registerfields.h"
+#include "qemu/bswap.h"
+#include "hw/core/irq.h"
+#include "hw/core/registerfields.h"
 #include "system/block-backend.h"
 #include "hw/sd/sd.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/bitmap.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "qemu/error-report.h"
 #include "qemu/timer.h"
 #include "qemu/log.h"
@@ -51,6 +52,7 @@
 #include "qemu/module.h"
 #include "sdmmc-internal.h"
 #include "trace.h"
+#include "crypto/hmac.h"
 
 //#define DEBUG_SD 1
 
@@ -117,6 +119,27 @@ typedef struct SDProto {
     } cmd[SDMMC_CMD_MAX], acmd[SDMMC_CMD_MAX];
 } SDProto;
 
+#define RPMB_STUFF_LEN      196
+#define RPMB_KEY_MAC_LEN    32
+#define RPMB_DATA_LEN       256     /* one RPMB block is half a sector */
+#define RPMB_NONCE_LEN      16
+#define RPMB_HASH_LEN       284
+
+typedef struct QEMU_PACKED {
+    uint8_t stuff_bytes[RPMB_STUFF_LEN];
+    uint8_t key_mac[RPMB_KEY_MAC_LEN];
+    uint8_t data[RPMB_DATA_LEN];
+    uint8_t nonce[RPMB_NONCE_LEN];
+    uint32_t write_counter;
+    uint16_t address;
+    uint16_t block_count;
+    uint16_t result;
+    uint16_t req_resp;
+} RPMBDataFrame;
+
+QEMU_BUILD_BUG_MSG(sizeof(RPMBDataFrame) != 512,
+                   "invalid RPMBDataFrame size");
+
 struct SDState {
     DeviceState parent_obj;
 
@@ -140,6 +163,7 @@ struct SDState {
 
     uint8_t spec_version;
     uint64_t boot_part_size;
+    uint64_t rpmb_part_size;
     BlockBackend *blk;
     uint8_t boot_config;
 
@@ -172,9 +196,16 @@ struct SDState {
     uint32_t data_offset;
     size_t data_size;
     uint8_t data[512];
+    struct {
+        uint32_t write_counter;
+        uint8_t key[RPMB_KEY_MAC_LEN];
+        uint8_t key_set;
+        RPMBDataFrame result;
+    } rpmb;
     QEMUTimer *ocr_power_timer;
     uint8_t dat_lines;
     bool cmd_line;
+    char *preset_auth_key;
 };
 
 static void sd_realize(DeviceState *dev, Error **errp);
@@ -195,7 +226,6 @@ static bool sd_is_emmc(SDState *sd)
 static const char *sd_version_str(enum SDPhySpecificationVersion version)
 {
     static const char *sdphy_version[] = {
-        [SD_PHY_SPECv1_10_VERS]     = "v1.10",
         [SD_PHY_SPECv2_00_VERS]     = "v2.00",
         [SD_PHY_SPECv3_01_VERS]     = "v3.01",
     };
@@ -407,11 +437,7 @@ static void sd_set_ocr(SDState *sd)
 static void sd_set_scr(SDState *sd)
 {
     sd->scr[0] = 0 << 4;        /* SCR structure version 1.0 */
-    if (sd->spec_version == SD_PHY_SPECv1_10_VERS) {
-        sd->scr[0] |= 1;        /* Spec Version 1.10 */
-    } else {
-        sd->scr[0] |= 2;        /* Spec Version 2.00 or Version 3.0X */
-    }
+    sd->scr[0] |= 2;            /* Spec Version 2.00 or Version 3.0X */
     sd->scr[1] = (2 << 4)       /* SDSC Card (Security Version 1.01) */
                  | 0b0101;      /* 1-bit or 4-bit width bus modes */
     sd->scr[2] = 0x00;          /* Extended Security is not supported. */
@@ -511,7 +537,9 @@ static void emmc_set_ext_csd(SDState *sd, uint64_t size)
     sd->ext_csd[205] = 0x46; /* Min read perf for 4bit@26Mhz */
     sd->ext_csd[EXT_CSD_CARD_TYPE] = 0b11;
     sd->ext_csd[EXT_CSD_STRUCTURE] = 2;
-    sd->ext_csd[EXT_CSD_REV] = 3;
+    sd->ext_csd[EXT_CSD_REV] = 5;
+    sd->ext_csd[EXT_CSD_RPMB_MULT] = sd->rpmb_part_size / (128 * KiB);
+    sd->ext_csd[EXT_CSD_PARTITION_SUPPORT] = 0b111;
 
     /* Mode segment (RW) */
     sd->ext_csd[EXT_CSD_PART_CONFIG] = sd->boot_config;
@@ -763,8 +791,7 @@ static size_t sd_response_size(SDState *sd, sd_rsp_type_t rtype)
 static void sd_response_r1_make(SDState *sd, uint8_t *response)
 {
     if (sd_is_spi(sd)) {
-        response[0] = sd->state == sd_idle_state
-                   && !FIELD_EX32(sd->ocr, OCR, CARD_POWER_UP);
+        response[0] = sd->state == sd_idle_state;
         response[0] |= FIELD_EX32(sd->card_status, CSR, ERASE_RESET) << 1;
         response[0] |= FIELD_EX32(sd->card_status, CSR, ILLEGAL_COMMAND) << 2;
         response[0] |= FIELD_EX32(sd->card_status, CSR, COM_CRC_ERROR) << 3;
@@ -838,14 +865,15 @@ static uint32_t sd_blk_len(SDState *sd)
 
 /*
  * This requires a disk image that has two boot partitions inserted at the
- * beginning of it. The size of the boot partitions is the "boot-size"
- * property.
+ * beginning of it, followed by an RPMB partition. The size of the boot
+ * partitions is the "boot-partition-size" property, the one of the RPMB
+ * partition is 'rpmb-partition-size'.
  */
-static uint32_t sd_bootpart_offset(SDState *sd)
+static uint32_t sd_part_offset(SDState *sd)
 {
     unsigned partition_access;
 
-    if (!sd->boot_part_size || !sd_is_emmc(sd)) {
+    if (!sd_is_emmc(sd)) {
         return 0;
     }
 
@@ -853,11 +881,13 @@ static uint32_t sd_bootpart_offset(SDState *sd)
                                  & EXT_CSD_PART_CONFIG_ACC_MASK;
     switch (partition_access) {
     case EXT_CSD_PART_CONFIG_ACC_DEFAULT:
-        return sd->boot_part_size * 2;
-    case EXT_CSD_PART_CONFIG_ACC_BOOT0:
+        return sd->boot_part_size * 2 + sd->rpmb_part_size;
+    case EXT_CSD_PART_CONFIG_ACC_BOOT1:
         return 0;
-    case EXT_CSD_PART_CONFIG_ACC_BOOT0 + 1:
+    case EXT_CSD_PART_CONFIG_ACC_BOOT2:
         return sd->boot_part_size * 1;
+    case EXT_CSD_PART_CONFIG_ACC_RPMB:
+        return sd->boot_part_size * 2;
     default:
          g_assert_not_reached();
     }
@@ -896,7 +926,7 @@ static void sd_reset(DeviceState *dev)
     }
     size = sect << HWBLOCK_SHIFT;
     if (sd_is_emmc(sd)) {
-        size -= sd->boot_part_size * 2;
+        size -= sd->boot_part_size * 2 + sd->rpmb_part_size;
     }
 
     sect = sd_addr_to_wpnum(size) + 1;
@@ -984,6 +1014,34 @@ static const VMStateDescription sd_ocr_vmstate = {
     },
 };
 
+static bool vmstate_needed_for_rpmb(void *opaque)
+{
+    SDState *sd = opaque;
+
+    return sd->rpmb_part_size > 0;
+}
+
+static const VMStateDescription emmc_rpmb_vmstate = {
+    .name = "sd-card/ext_csd_modes-state",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = vmstate_needed_for_rpmb,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(rpmb.result.key_mac, SDState, RPMB_KEY_MAC_LEN),
+        VMSTATE_UINT8_ARRAY(rpmb.result.data, SDState, RPMB_DATA_LEN),
+        VMSTATE_UINT8_ARRAY(rpmb.result.nonce, SDState, RPMB_NONCE_LEN),
+        VMSTATE_UINT32(rpmb.result.write_counter, SDState),
+        VMSTATE_UINT16(rpmb.result.address, SDState),
+        VMSTATE_UINT16(rpmb.result.block_count, SDState),
+        VMSTATE_UINT16(rpmb.result.result, SDState),
+        VMSTATE_UINT16(rpmb.result.req_resp, SDState),
+        VMSTATE_UINT32(rpmb.write_counter, SDState),
+        VMSTATE_UINT8_ARRAY(rpmb.key, SDState, 32),
+        VMSTATE_UINT8(rpmb.key_set, SDState),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static bool vmstate_needed_for_emmc(void *opaque)
 {
     SDState *sd = opaque;
@@ -1050,6 +1108,7 @@ static const VMStateDescription sd_vmstate = {
     .subsections = (const VMStateDescription * const []) {
         &sd_ocr_vmstate,
         &emmc_extcsd_vmstate,
+        &emmc_rpmb_vmstate,
         NULL
     },
 };
@@ -1057,7 +1116,7 @@ static const VMStateDescription sd_vmstate = {
 static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
 {
     trace_sdcard_read_block(addr, len);
-    addr += sd_bootpart_offset(sd);
+    addr += sd_part_offset(sd);
     if (!sd->blk || blk_pread(sd->blk, addr, len, sd->data, 0) < 0) {
         fprintf(stderr, "sd_blk_read: read error on host side\n");
     }
@@ -1066,10 +1125,195 @@ static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
 static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
 {
     trace_sdcard_write_block(addr, len);
-    addr += sd_bootpart_offset(sd);
+    addr += sd_part_offset(sd);
     if (!sd->blk || blk_pwrite(sd->blk, addr, len, sd->data, 0) < 0) {
         fprintf(stderr, "sd_blk_write: write error on host side\n");
     }
+}
+
+static bool rpmb_calc_hmac(SDState *sd, const RPMBDataFrame *frame,
+                           unsigned int num_blocks, uint8_t *mac)
+{
+    g_autoptr(QCryptoHmac) hmac = NULL;
+    size_t mac_len = RPMB_KEY_MAC_LEN;
+    bool success = true;
+    Error *err = NULL;
+    uint64_t offset;
+
+    hmac = qcrypto_hmac_new(QCRYPTO_HASH_ALGO_SHA256, sd->rpmb.key,
+                            RPMB_KEY_MAC_LEN, &err);
+    if (!hmac) {
+        error_report_err(err);
+        return false;
+    }
+
+    /*
+     * This implies a read request because we only support single-block write
+     * requests so far.
+     */
+    if (num_blocks > 1) {
+        /*
+         * Unfortunately, the underlying crypto libraries do not allow us to
+         * migrate an active QCryptoHmac state. Therefore, we have to calculate
+         * the HMAC in one run. To avoid buffering a complete read sequence in
+         * SDState, reconstruct all frames except for the last one.
+         */
+        void *buf = sd->data;
+
+        assert(RPMB_HASH_LEN <= sizeof(sd->data));
+
+        /*
+         * We will hash everything from data field to the end of RPMBDataFrame.
+         */
+        memcpy((uint8_t *)buf + RPMB_DATA_LEN,
+               (uint8_t *)frame + offsetof(RPMBDataFrame, nonce),
+               RPMB_HASH_LEN - RPMB_DATA_LEN);
+
+        offset = lduw_be_p(&frame->address) * RPMB_DATA_LEN + sd_part_offset(sd);
+        do {
+            if (blk_pread(sd->blk, offset, RPMB_DATA_LEN, buf, 0) < 0) {
+                error_report("sd_blk_read: read error on host side");
+                success = false;
+                break;
+            }
+            if (qcrypto_hmac_bytes(hmac, buf, RPMB_HASH_LEN, NULL, NULL,
+                                   &err) < 0) {
+                error_report_err(err);
+                success = false;
+                break;
+            }
+            offset += RPMB_DATA_LEN;
+        } while (--num_blocks > 1);
+    }
+
+    if (success &&
+        qcrypto_hmac_bytes(hmac, frame->data, RPMB_HASH_LEN, &mac,
+                           &mac_len, &err) < 0) {
+        error_report_err(err);
+        success = false;
+    }
+    assert(!success || mac_len == RPMB_KEY_MAC_LEN);
+
+    return success;
+}
+
+static void emmc_rpmb_blk_read(SDState *sd, uint64_t addr, uint32_t len)
+{
+    uint16_t resp = lduw_be_p(&sd->rpmb.result.req_resp);
+    uint16_t result = lduw_be_p(&sd->rpmb.result.result);
+    unsigned int curr_block = 0;
+
+    if ((result & ~RPMB_RESULT_COUTER_EXPIRED) == RPMB_RESULT_OK &&
+        resp == RPMB_RESP(RPMB_REQ_AUTH_DATA_READ)) {
+        curr_block = lduw_be_p(&sd->rpmb.result.address);
+        if (sd->rpmb.result.block_count == 0) {
+            stw_be_p(&sd->rpmb.result.block_count, sd->multi_blk_cnt);
+        } else {
+            curr_block += lduw_be_p(&sd->rpmb.result.block_count);
+            curr_block -= sd->multi_blk_cnt;
+        }
+        addr = curr_block * RPMB_DATA_LEN + sd_part_offset(sd);
+        if (blk_pread(sd->blk, addr, RPMB_DATA_LEN,
+                      sd->rpmb.result.data, 0) < 0) {
+            error_report("sd_blk_read: read error on host side");
+            memset(sd->rpmb.result.data, 0, sizeof(sd->rpmb.result.data));
+            stw_be_p(&sd->rpmb.result.result,
+                     RPMB_RESULT_READ_FAILURE
+                     | (result & RPMB_RESULT_COUTER_EXPIRED));
+        }
+        if (sd->multi_blk_cnt == 1 &&
+            !rpmb_calc_hmac(sd, &sd->rpmb.result,
+                            lduw_be_p(&sd->rpmb.result.block_count),
+                            sd->rpmb.result.key_mac)) {
+            memset(sd->rpmb.result.data, 0, sizeof(sd->rpmb.result.data));
+            stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_AUTH_FAILURE);
+        }
+    } else if (!rpmb_calc_hmac(sd, &sd->rpmb.result, 1,
+                               sd->rpmb.result.key_mac)) {
+        memset(sd->rpmb.result.data, 0, sizeof(sd->rpmb.result.data));
+        stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_AUTH_FAILURE);
+    }
+    memcpy(sd->data, &sd->rpmb.result, sizeof(sd->rpmb.result));
+
+    trace_sdcard_rpmb_read_block(resp, curr_block,
+                                 lduw_be_p(&sd->rpmb.result.result));
+}
+
+static void emmc_rpmb_blk_write(SDState *sd, uint64_t addr, uint32_t len)
+{
+    RPMBDataFrame *frame = (RPMBDataFrame *)sd->data;
+    uint16_t req = lduw_be_p(&frame->req_resp);
+    uint8_t mac[RPMB_KEY_MAC_LEN];
+
+    if (req == RPMB_REQ_READ_RESULT) {
+        /* just return the current result register */
+        goto exit;
+    }
+    memset(&sd->rpmb.result, 0, sizeof(sd->rpmb.result));
+    memcpy(sd->rpmb.result.nonce, frame->nonce, sizeof(sd->rpmb.result.nonce));
+    stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_OK);
+    stw_be_p(&sd->rpmb.result.req_resp, RPMB_RESP(req));
+
+    if (!sd->rpmb.key_set && req != RPMB_REQ_PROGRAM_AUTH_KEY) {
+        stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_NO_AUTH_KEY);
+        goto exit;
+    }
+
+    switch (req) {
+    case RPMB_REQ_PROGRAM_AUTH_KEY:
+        if (sd->rpmb.key_set) {
+            stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_WRITE_FAILURE);
+            break;
+        }
+        memcpy(sd->rpmb.key, frame->key_mac, sizeof(sd->rpmb.key));
+        sd->rpmb.key_set = 1;
+        break;
+    case RPMB_REQ_READ_WRITE_COUNTER:
+        stl_be_p(&sd->rpmb.result.write_counter, sd->rpmb.write_counter);
+        break;
+    case RPMB_REQ_AUTH_DATA_WRITE:
+        /* We only support single-block writes so far */
+        if (sd->multi_blk_cnt != 1) {
+            stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_GENERAL_FAILURE);
+            break;
+        }
+        if (sd->rpmb.write_counter == 0xffffffff) {
+            stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_WRITE_FAILURE);
+            break;
+        }
+        if (!rpmb_calc_hmac(sd, frame, 1, mac) ||
+            memcmp(frame->key_mac, mac, RPMB_KEY_MAC_LEN) != 0) {
+            stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_AUTH_FAILURE);
+            break;
+        }
+        if (ldl_be_p(&frame->write_counter) != sd->rpmb.write_counter) {
+            stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_COUNTER_FAILURE);
+            break;
+        }
+        sd->rpmb.result.address = frame->address;
+        addr = lduw_be_p(&frame->address) * RPMB_DATA_LEN + sd_part_offset(sd);
+        if (blk_pwrite(sd->blk, addr, RPMB_DATA_LEN, frame->data, 0) < 0) {
+            error_report("sd_blk_write: write error on host side");
+            stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_WRITE_FAILURE);
+        } else {
+            sd->rpmb.write_counter++;
+        }
+        stl_be_p(&sd->rpmb.result.write_counter, sd->rpmb.write_counter);
+        break;
+    case RPMB_REQ_AUTH_DATA_READ:
+        sd->rpmb.result.address = frame->address;
+        break;
+    default:
+        qemu_log_mask(LOG_UNIMP, "RPMB request %d not implemented\n", req);
+        stw_be_p(&sd->rpmb.result.result, RPMB_RESULT_GENERAL_FAILURE);
+        break;
+    }
+exit:
+    if (sd->rpmb.write_counter == 0xffffffff) {
+        stw_be_p(&sd->rpmb.result.result,
+                 lduw_be_p(&sd->rpmb.result.result) | RPMB_RESULT_COUTER_EXPIRED);
+    }
+    trace_sdcard_rpmb_write_block(req, lduw_be_p(&sd->rpmb.result.result));
 }
 
 static void sd_erase(SDState *sd)
@@ -1183,6 +1427,19 @@ static void emmc_function_switch(SDState *sd, uint32_t arg)
     case EXT_CSD_ACCESS_MODE_WRITE_BYTE:
         b = value;
         break;
+    }
+
+    if (index == EXT_CSD_PART_CONFIG) {
+        uint8_t part = b & EXT_CSD_PART_CONFIG_ACC_MASK;
+
+        if (((part == EXT_CSD_PART_CONFIG_ACC_BOOT1 ||
+              part == EXT_CSD_PART_CONFIG_ACC_BOOT2) && !sd->boot_part_size) ||
+            (part == EXT_CSD_PART_CONFIG_ACC_RPMB && !sd->rpmb_part_size)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "MMC switching to illegal partition\n");
+            sd->card_status |= R_CSR_SWITCH_ERROR_MASK;
+            return;
+        }
     }
 
     trace_sdcard_ext_csd_update(index, sd->ext_csd[index], b);
@@ -1353,7 +1610,7 @@ static sd_rsp_type_t sd_cmd_optional(SDState *sd, SDRequest req)
     return sd_illegal;
 }
 
-/* Configure fields for following sd_generic_write_byte() calls */
+/* Configure fields for following sd_generic_write_data() calls */
 static sd_rsp_type_t sd_cmd_to_receivingdata(SDState *sd, SDRequest req,
                                              uint64_t start, size_t size)
 {
@@ -1368,7 +1625,7 @@ static sd_rsp_type_t sd_cmd_to_receivingdata(SDState *sd, SDRequest req,
     return sd_r1;
 }
 
-/* Configure fields for following sd_generic_read_byte() calls */
+/* Configure fields for following sd_generic_read_data() calls */
 static sd_rsp_type_t sd_cmd_to_sendingdata(SDState *sd, SDRequest req,
                                            uint64_t start,
                                            const void *data, size_t size)
@@ -1555,9 +1812,6 @@ static sd_rsp_type_t sd_cmd_DE_SELECT_CARD(SDState *sd, SDRequest req)
 /* CMD8 */
 static sd_rsp_type_t sd_cmd_SEND_IF_COND(SDState *sd, SDRequest req)
 {
-    if (sd->spec_version < SD_PHY_SPECv2_00_VERS) {
-        return sd_cmd_illegal(sd, req);
-    }
     if (sd->state != sd_idle_state) {
         return sd_invalid_state_for_cmd(sd, req);
     }
@@ -2042,20 +2296,21 @@ static sd_rsp_type_t sd_cmd_SEND_OP_COND(SDState *sd, SDRequest req)
         }
     }
 
-    if (FIELD_EX32(sd->ocr & req.arg, OCR, VDD_VOLTAGE_WINDOW)) {
-        /*
-         * We accept any voltage.  10000 V is nothing.
-         *
-         * Once we're powered up, we advance straight to ready state
-         * unless it's an enquiry ACMD41 (bits 23:0 == 0).
-         */
-        sd->state = sd_ready_state;
-    }
-
     if (sd_is_spi(sd)) {
+        sd->state = sd_ready_state;
         return sd_r1;
+    } else {
+        if (FIELD_EX32(sd->ocr & req.arg, OCR, VDD_VOLTAGE_WINDOW)) {
+            /*
+             * We accept any voltage.  10000 V is nothing.
+             *
+             * Once we're powered up, we advance straight to ready state
+             * unless it's an enquiry ACMD41 (bits 23:0 == 0).
+             */
+            sd->state = sd_ready_state;
+        }
+        return sd_r3;
     }
-    return sd_r3;
 }
 
 /* ACMD42 */
@@ -2360,11 +2615,15 @@ send_response:
 }
 
 /* Return true if buffer is consumed. Configured by sd_cmd_to_receivingdata() */
-static bool sd_generic_write_byte(SDState *sd, uint8_t value)
+static bool sd_generic_write_data(SDState *sd, const void *buf, size_t *len)
 {
-    sd->data[sd->data_offset] = value;
+    size_t to_write = MIN(sd->data_size - sd->data_offset, *len);
 
-    if (++sd->data_offset >= sd->data_size) {
+    memcpy(&sd->data[sd->data_offset], buf, to_write);
+    sd->data_offset += to_write;
+    *len = to_write;
+
+    if (sd->data_offset >= sd->data_size) {
         sd->state = sd_transfer_state;
         return true;
     }
@@ -2372,11 +2631,15 @@ static bool sd_generic_write_byte(SDState *sd, uint8_t value)
 }
 
 /* Return true when buffer is consumed. Configured by sd_cmd_to_sendingdata() */
-static bool sd_generic_read_byte(SDState *sd, uint8_t *value)
+static bool sd_generic_read_data(SDState *sd, void *buf, size_t *len)
 {
-    *value = sd->data[sd->data_offset];
+    size_t to_read = MIN(sd->data_size - sd->data_offset, *len);
 
-    if (++sd->data_offset >= sd->data_size) {
+    memcpy(buf, &sd->data[sd->data_offset], to_read);
+    sd->data_offset += to_read;
+    *len = to_read;
+
+    if (sd->data_offset >= sd->data_size) {
         sd->state = sd_transfer_state;
         return true;
     }
@@ -2384,29 +2647,43 @@ static bool sd_generic_read_byte(SDState *sd, uint8_t *value)
     return false;
 }
 
-static void sd_write_byte(SDState *sd, uint8_t value)
+static void sdcard_write_data_dump(const char *proto, const char *cmd_desc,
+                                   uint8_t cmd, uint32_t offset,
+                                   const void *buf, size_t len)
 {
+    g_autoptr(GString) str = NULL;
+
+    if (trace_event_get_state_backends(TRACE_SDCARD_WRITE_DATA)) {
+        str = qemu_hexdump_line(NULL, buf, len, 8, 0);
+        trace_sdcard_write_data(proto, cmd_desc, cmd, offset, str->str);
+    }
+}
+
+static size_t sd_write_data(SDState *sd, const void *buf, size_t length)
+{
+    unsigned int partition_access;
     int i;
+    const uint8_t *value = buf;
 
     if (!sd->blk || !blk_is_inserted(sd->blk)) {
-        return;
+        return length;
     }
 
     if (sd->state != sd_receivingdata_state) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s: not in Receiving-Data state\n", __func__);
-        return;
+        return length;
     }
 
     if (sd->card_status & (ADDRESS_ERROR | WP_VIOLATION))
-        return;
+        return length;
 
-    trace_sdcard_write_data(sd->proto->name,
-                            sd->last_cmd_name,
-                            sd->current_cmd, sd->data_offset, value);
+    sdcard_write_data_dump(sd->proto->name,
+                           sd->last_cmd_name,
+                           sd->current_cmd, sd->data_offset, buf, length);
     switch (sd->current_cmd) {
     case 24:  /* CMD24:  WRITE_SINGLE_BLOCK */
-        if (sd_generic_write_byte(sd, value)) {
+        if (sd_generic_write_data(sd, buf, &length)) {
             /* TODO: Check CRC before committing */
             sd->state = sd_programming_state;
             sd_blk_write(sd, sd->data_start, sd->data_offset);
@@ -2418,6 +2695,12 @@ static void sd_write_byte(SDState *sd, uint8_t value)
         break;
 
     case 25:  /* CMD25:  WRITE_MULTIPLE_BLOCK */
+        /*
+         * Only read one byte at a time. We will be called again with the
+         * remaining.
+         */
+        length = 1;
+
         if (sd->data_offset == 0) {
             /* Start of the block - let's check the address is valid */
             if (!address_in_range(sd, "WRITE_MULTIPLE_BLOCK",
@@ -2431,11 +2714,17 @@ static void sd_write_byte(SDState *sd, uint8_t value)
                 }
             }
         }
-        sd->data[sd->data_offset++] = value;
+        sd->data[sd->data_offset++] = value[0];
         if (sd->data_offset >= sd->blk_len) {
             /* TODO: Check CRC before committing */
             sd->state = sd_programming_state;
-            sd_blk_write(sd, sd->data_start, sd->data_offset);
+            partition_access = sd->ext_csd[EXT_CSD_PART_CONFIG]
+                    & EXT_CSD_PART_CONFIG_ACC_MASK;
+            if (partition_access == EXT_CSD_PART_CONFIG_ACC_RPMB) {
+                emmc_rpmb_blk_write(sd, sd->data_start, sd->data_offset);
+            } else {
+                sd_blk_write(sd, sd->data_start, sd->data_offset);
+            }
             sd->blk_written++;
             sd->data_start += sd->blk_len;
             sd->data_offset = 0;
@@ -2455,7 +2744,7 @@ static void sd_write_byte(SDState *sd, uint8_t value)
         break;
 
     case 26:  /* CMD26:  PROGRAM_CID */
-        if (sd_generic_write_byte(sd, value)) {
+        if (sd_generic_write_data(sd, buf, &length)) {
             /* TODO: Check CRC before committing */
             sd->state = sd_programming_state;
             for (i = 0; i < sizeof(sd->cid); i ++)
@@ -2473,7 +2762,7 @@ static void sd_write_byte(SDState *sd, uint8_t value)
         break;
 
     case 27:  /* CMD27:  PROGRAM_CSD */
-        if (sd_generic_write_byte(sd, value)) {
+        if (sd_generic_write_data(sd, buf, &length)) {
             /* TODO: Check CRC before committing */
             sd->state = sd_programming_state;
             for (i = 0; i < sizeof(sd->csd); i ++)
@@ -2496,7 +2785,7 @@ static void sd_write_byte(SDState *sd, uint8_t value)
         break;
 
     case 42:  /* CMD42:  LOCK_UNLOCK */
-        if (sd_generic_write_byte(sd, value)) {
+        if (sd_generic_write_data(sd, buf, &length)) {
             /* TODO: Check CRC before committing */
             sd->state = sd_programming_state;
             sd_lock_command(sd);
@@ -2506,33 +2795,39 @@ static void sd_write_byte(SDState *sd, uint8_t value)
         break;
 
     case 56:  /* CMD56:  GEN_CMD */
-        sd_generic_write_byte(sd, value);
+        sd_generic_write_data(sd, buf, &length);
         break;
 
     default:
         g_assert_not_reached();
     }
+
+    return length;
 }
 
-static uint8_t sd_read_byte(SDState *sd)
+static size_t sd_read_data(SDState *sd, void *buf, size_t length)
 {
     /* TODO: Append CRCs */
     const uint8_t dummy_byte = 0x00;
-    uint8_t ret;
+    unsigned int partition_access;
     uint32_t io_len;
+    uint8_t *value = buf;
 
     if (!sd->blk || !blk_is_inserted(sd->blk)) {
-        return dummy_byte;
+        memset(buf, dummy_byte, length);
+        return length;
     }
 
     if (sd->state != sd_sendingdata_state) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s: not in Sending-Data state\n", __func__);
-        return dummy_byte;
+        memset(buf, dummy_byte, length);
+        return length;
     }
 
     if (sd->card_status & (ADDRESS_ERROR | WP_VIOLATION)) {
-        return dummy_byte;
+        memset(buf, dummy_byte, length);
+        return length;
     }
 
     io_len = sd_blk_len(sd);
@@ -2552,18 +2847,31 @@ static uint8_t sd_read_byte(SDState *sd)
     case 30: /* CMD30:  SEND_WRITE_PROT */
     case 51: /* ACMD51: SEND_SCR */
     case 56: /* CMD56:  GEN_CMD */
-        sd_generic_read_byte(sd, &ret);
+        sd_generic_read_data(sd, buf, &length);
         break;
 
     case 18:  /* CMD18:  READ_MULTIPLE_BLOCK */
+        /*
+         * We will only read one byte at a time. We will be called again with
+         * the remaining buffer.
+         */
+        length = 1;
+
         if (sd->data_offset == 0) {
             if (!address_in_range(sd, "READ_MULTIPLE_BLOCK",
                                   sd->data_start, io_len)) {
-                return dummy_byte;
+                *value = dummy_byte;
+                return length;
             }
-            sd_blk_read(sd, sd->data_start, io_len);
+            partition_access = sd->ext_csd[EXT_CSD_PART_CONFIG]
+                    & EXT_CSD_PART_CONFIG_ACC_MASK;
+            if (partition_access == EXT_CSD_PART_CONFIG_ACC_RPMB) {
+                emmc_rpmb_blk_read(sd, sd->data_start, io_len);
+            } else {
+                sd_blk_read(sd, sd->data_start, io_len);
+            }
         }
-        ret = sd->data[sd->data_offset ++];
+        *value = sd->data[sd->data_offset++];
 
         if (sd->data_offset >= io_len) {
             sd->data_start += io_len;
@@ -2582,10 +2890,10 @@ static uint8_t sd_read_byte(SDState *sd)
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "%s: DAT read illegal for command %s\n",
                                        __func__, sd->last_cmd_name);
-        return dummy_byte;
+        memset(buf, dummy_byte, length);
     }
 
-    return ret;
+    return length;
 }
 
 static bool sd_receive_ready(SDState *sd)
@@ -2767,13 +3075,35 @@ static void sd_instance_finalize(Object *obj)
     timer_free(sd->ocr_power_timer);
 }
 
+static void sd_blk_size_error(SDState *sd, int64_t blk_size,
+                              int64_t blk_size_aligned, const char *rule,
+                              Error **errp)
+{
+    const char *dev_type = sd_is_emmc(sd) ? "eMMC" : "SD card";
+    char *blk_size_str;
+
+    blk_size_str = size_to_str(blk_size);
+    error_setg(errp, "Invalid %s size: %s", dev_type, blk_size_str);
+    g_free(blk_size_str);
+
+    blk_size_str = size_to_str(blk_size_aligned);
+    error_append_hint(errp,
+                      "%s size has to be %s, e.g. %s.\n"
+                      "You can resize disk images with"
+                      " 'qemu-img resize <imagefile> <new-size>'\n"
+                      "(note that this will lose data if you make the"
+                      " image smaller than it currently is).\n",
+                      dev_type, rule, blk_size_str);
+    g_free(blk_size_str);
+}
+
 static void sd_realize(DeviceState *dev, Error **errp)
 {
     SDState *sd = SDMMC_COMMON(dev);
     int ret;
 
     switch (sd->spec_version) {
-    case SD_PHY_SPECv1_10_VERS
+    case SD_PHY_SPECv2_00_VERS
      ... SD_PHY_SPECv3_01_VERS:
         break;
     default:
@@ -2782,33 +3112,37 @@ static void sd_realize(DeviceState *dev, Error **errp)
     }
 
     if (sd->blk) {
-        int64_t blk_size;
-
         if (!blk_supports_write_perm(sd->blk)) {
             error_setg(errp, "Cannot use read-only drive as SD card");
             return;
         }
 
-        blk_size = blk_getlength(sd->blk);
-        if (blk_size > 0 && !is_power_of_2(blk_size)) {
-            int64_t blk_size_aligned = pow2ceil(blk_size);
-            char *blk_size_str;
-
-            blk_size_str = size_to_str(blk_size);
-            error_setg(errp, "Invalid SD card size: %s", blk_size_str);
-            g_free(blk_size_str);
-
-            blk_size_str = size_to_str(blk_size_aligned);
-            error_append_hint(errp,
-                              "SD card size has to be a power of 2, e.g. %s.\n"
-                              "You can resize disk images with"
-                              " 'qemu-img resize <imagefile> <new-size>'\n"
-                              "(note that this will lose data if you make the"
-                              " image smaller than it currently is).\n",
-                              blk_size_str);
-            g_free(blk_size_str);
-
-            return;
+        int64_t blk_size = blk_getlength(sd->blk);
+        if (blk_size >= 0) {
+            blk_size -= sd->boot_part_size * 2 + sd->rpmb_part_size;
+            if (blk_size > SDSC_MAX_CAPACITY) {
+                if (sd_is_emmc(sd) &&
+                    !QEMU_IS_ALIGNED(blk_size, 1 << HWBLOCK_SHIFT)) {
+                    int64_t blk_size_aligned =
+                        ((blk_size >> HWBLOCK_SHIFT) + 1) << HWBLOCK_SHIFT;
+                    sd_blk_size_error(sd, blk_size, blk_size_aligned,
+                                      "multiples of 512", errp);
+                    return;
+                } else if (!sd_is_emmc(sd) &&
+                    !QEMU_IS_ALIGNED(blk_size, 512 * KiB)) {
+                    int64_t blk_size_aligned = ((blk_size >> 19) + 1) << 19;
+                    sd_blk_size_error(sd, blk_size, blk_size_aligned,
+                                      "multiples of 512K", errp);
+                    return;
+                }
+            } else if (blk_size > 0 && !is_power_of_2(blk_size)) {
+                sd_blk_size_error(sd, blk_size, pow2ceil(blk_size),
+                                  "a power of 2", errp);
+                return;
+            } else if (blk_size < 0) {
+                error_setg(errp, "eMMC image smaller than boot partitions");
+                return;
+            }
         }
 
         ret = blk_set_perm(sd->blk, BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE,
@@ -2818,13 +3152,53 @@ static void sd_realize(DeviceState *dev, Error **errp)
         }
         blk_set_dev_ops(sd->blk, &sd_block_ops, sd);
     }
+    if (!QEMU_IS_ALIGNED(sd->boot_part_size, 128 * KiB) ||
+        sd->boot_part_size > 255 * 128 * KiB) {
+        g_autofree char *size_str = size_to_str(sd->boot_part_size);
+
+        error_setg(errp, "Invalid boot partition size: %s", size_str);
+        error_append_hint(errp,
+                          "The boot partition size must be multiples of 128K"
+                          "and not larger than 32640K.\n");
+    }
+    if (!QEMU_IS_ALIGNED(sd->rpmb_part_size, 128 * KiB) ||
+        sd->rpmb_part_size > 128 * 128 * KiB) {
+        char *size_str = size_to_str(sd->boot_part_size);
+
+        error_setg(errp, "Invalid RPMB partition size: %s", size_str);
+        g_free(size_str);
+        error_append_hint(errp,
+                          "The RPMB partition size must be multiples of 128K"
+                          "and not larger than 16384K.\n");
+    }
+    if (sd_is_emmc(sd) && sd->preset_auth_key) {
+        if (strlen(sd->preset_auth_key) != 64) {
+            error_setg(errp,
+                       "Authentication key must be 32 bytes long, "
+                       "encoded hexadecimally");
+            return;
+        }
+
+        char *pos = sd->preset_auth_key;
+        unsigned int n;
+        for (n = 0; n < RPMB_KEY_MAC_LEN; n++, pos += 2) {
+            int chrs;
+            if (sscanf(pos, "%02hhx%n", &sd->rpmb.key[n], &chrs) != 1 ||
+                chrs != 2) {
+                error_setg(errp,
+                           "Authentication key contains invalid characters");
+                return;
+            }
+        }
+        sd->rpmb.key_set = 1;
+    }
 }
 
 static void emmc_realize(DeviceState *dev, Error **errp)
 {
     SDState *sd = SDMMC_COMMON(dev);
 
-    sd->spec_version = SD_PHY_SPECv3_01_VERS; /* Actually v4.3 */
+    sd->spec_version = SD_PHY_SPECv3_01_VERS; /* Actually v4.5 */
 
     sd_realize(dev, errp);
 }
@@ -2841,6 +3215,8 @@ static const Property sd_properties[] = {
 static const Property emmc_properties[] = {
     DEFINE_PROP_UINT64("boot-partition-size", SDState, boot_part_size, 0),
     DEFINE_PROP_UINT8("boot-config", SDState, boot_config, 0x0),
+    DEFINE_PROP_UINT64("rpmb-partition-size", SDState, rpmb_part_size, 0),
+    DEFINE_PROP_STRING("auth-key", SDState, preset_auth_key),
 };
 
 static void sdmmc_common_class_init(ObjectClass *klass, const void *data)
@@ -2858,8 +3234,8 @@ static void sdmmc_common_class_init(ObjectClass *klass, const void *data)
     sc->get_dat_lines = sd_get_dat_lines;
     sc->get_cmd_line = sd_get_cmd_line;
     sc->do_command = sd_do_command;
-    sc->write_byte = sd_write_byte;
-    sc->read_byte = sd_read_byte;
+    sc->write_data = sd_write_data;
+    sc->read_data = sd_read_data;
     sc->receive_ready = sd_receive_ready;
     sc->data_ready = sd_data_ready;
     sc->get_inserted = sd_get_inserted;
@@ -2899,11 +3275,11 @@ static void emmc_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     SDCardClass *sc = SDMMC_COMMON_CLASS(klass);
 
+    assert(qcrypto_hmac_supports(QCRYPTO_HASH_ALGO_SHA256));
+
     dc->desc = "eMMC";
     dc->realize = emmc_realize;
     device_class_set_props(dc, emmc_properties);
-    /* Reason: Soldered on board */
-    dc->user_creatable = false;
 
     sc->proto = &sd_proto_emmc;
 

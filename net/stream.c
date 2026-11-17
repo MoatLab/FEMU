@@ -71,24 +71,15 @@ static gboolean net_stream_send(QIOChannel *ioc,
 static void net_stream_cleanup(NetClientState *nc)
 {
     NetStreamState *s = DO_UPCAST(NetStreamState, data.nc, nc);
-    if (s->timer_tag) {
-        g_source_remove(s->timer_tag);
-        s->timer_tag = 0;
-    }
+    g_clear_handle_id(&s->timer_tag, g_source_remove);
     if (s->addr) {
         qapi_free_SocketAddress(s->addr);
         s->addr = NULL;
     }
     if (s->data.ioc) {
         if (QIO_CHANNEL_SOCKET(s->data.ioc)->fd != -1) {
-            if (s->data.ioc_read_tag) {
-                g_source_remove(s->data.ioc_read_tag);
-                s->data.ioc_read_tag = 0;
-            }
-            if (s->data.ioc_write_tag) {
-                g_source_remove(s->data.ioc_write_tag);
-                s->data.ioc_write_tag = 0;
-            }
+            g_clear_handle_id(&s->data.ioc_read_tag, g_source_remove);
+            g_clear_handle_id(&s->data.ioc_write_tag, g_source_remove);
         }
         object_unref(OBJECT(s->data.ioc));
         s->data.ioc = NULL;
@@ -138,7 +129,6 @@ static void net_stream_server_listening(QIOTask *task, gpointer opaque)
     NetStreamData *d = opaque;
     QIOChannelSocket *listen_sioc = QIO_CHANNEL_SOCKET(d->listen_ioc);
     SocketAddress *addr;
-    int ret;
     Error *err = NULL;
 
     if (qio_task_propagate_error(task, &err)) {
@@ -149,13 +139,11 @@ static void net_stream_server_listening(QIOTask *task, gpointer opaque)
 
     addr = qio_channel_socket_get_local_address(listen_sioc, NULL);
     g_assert(addr != NULL);
-    ret = qemu_socket_try_set_nonblock(listen_sioc->fd);
-    if (addr->type == SOCKET_ADDRESS_TYPE_FD && ret < 0) {
-        qemu_set_info_str(&d->nc, "can't use file descriptor %s (errno %d)",
-                          addr->u.fd.str, -ret);
+    if (!qemu_set_blocking(listen_sioc->fd, false, &err)) {
+        qemu_set_info_str(&d->nc, "error: %s", error_get_pretty(err));
+        error_free(err);
         return;
     }
-    g_assert(ret == 0);
     qapi_free_SocketAddress(addr);
 
     d->nc.link_down = true;
@@ -277,23 +265,13 @@ int net_init_stream(const Netdev *netdev, const char *name,
     sock = &netdev->u.stream;
 
     if (!sock->has_server || !sock->server) {
-        uint32_t reconnect_ms = 0;
-
-        if (sock->has_reconnect && sock->has_reconnect_ms) {
-            error_setg(errp, "'reconnect' and 'reconnect-ms' are mutually "
-                             "exclusive");
-            return -1;
-        } else if (sock->has_reconnect_ms) {
-            reconnect_ms = sock->reconnect_ms;
-        } else if (sock->has_reconnect) {
-            reconnect_ms = sock->reconnect * 1000u;
-        }
-
         return net_stream_client_init(peer, "stream", name, sock->addr,
-                                      reconnect_ms, errp);
+                                      sock->has_reconnect_ms ?
+                                          sock->reconnect_ms : 0,
+                                      errp);
     }
-    if (sock->has_reconnect || sock->has_reconnect_ms) {
-        error_setg(errp, "'reconnect' and 'reconnect-ms' options are "
+    if (sock->has_reconnect_ms) {
+        error_setg(errp, "'reconnect-ms' option is "
                          "incompatible with socket in server mode");
         return -1;
     }

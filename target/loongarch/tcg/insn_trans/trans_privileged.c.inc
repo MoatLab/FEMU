@@ -79,10 +79,12 @@ void loongarch_csr_translate_init(void)
     SET_CSR_FUNC(ASID,  NULL, gen_helper_csrwr_asid);
     SET_CSR_FUNC(PGD,   gen_helper_csrrd_pgd, NULL);
     SET_CSR_FUNC(PWCL,  NULL, gen_helper_csrwr_pwcl);
+    SET_CSR_FUNC(PWCH,  NULL, gen_helper_csrwr_pwch);
     SET_CSR_FUNC(CPUID, gen_helper_csrrd_cpuid, NULL);
     SET_CSR_FUNC(TCFG,  NULL, gen_helper_csrwr_tcfg);
     SET_CSR_FUNC(TVAL,  gen_helper_csrrd_tval, NULL);
     SET_CSR_FUNC(TICLR, NULL, gen_helper_csrwr_ticlr);
+    SET_CSR_FUNC(MSGIR, gen_helper_csrrd_msgir, NULL);
 }
 #undef SET_CSR_FUNC
 
@@ -104,6 +106,7 @@ static bool trans_csrrd(DisasContext *ctx, arg_csrrd *a)
     TCGv dest;
     const CSRInfo *csr;
     GenCSRRead readfn;
+    tcg_target_long offset;
 
     if (check_plv(ctx)) {
         return false;
@@ -119,7 +122,8 @@ static bool trans_csrrd(DisasContext *ctx, arg_csrrd *a)
         if (readfn) {
             readfn(dest, tcg_env);
         } else {
-            tcg_gen_ld_tl(dest, tcg_env, csr->offset);
+            offset = get_csr_offset(csr, 0);
+            tcg_gen_ld_tl(dest, tcg_env, offset);
         }
     }
     gen_set_gpr(a->rd, dest, EXT_NONE);
@@ -131,6 +135,7 @@ static bool trans_csrwr(DisasContext *ctx, arg_csrwr *a)
     TCGv dest, src1;
     const CSRInfo *csr;
     GenCSRWrite writefn;
+    tcg_target_long offset;
 
     if (check_plv(ctx)) {
         return false;
@@ -152,8 +157,9 @@ static bool trans_csrwr(DisasContext *ctx, arg_csrwr *a)
         writefn(dest, tcg_env, src1);
     } else {
         dest = tcg_temp_new();
-        tcg_gen_ld_tl(dest, tcg_env, csr->offset);
-        tcg_gen_st_tl(src1, tcg_env, csr->offset);
+        offset = get_csr_offset(csr, 0);
+        tcg_gen_ld_tl(dest, tcg_env, offset);
+        tcg_gen_st_tl(src1, tcg_env, offset);
     }
     gen_set_gpr(a->rd, dest, EXT_NONE);
     return true;
@@ -164,6 +170,7 @@ static bool trans_csrxchg(DisasContext *ctx, arg_csrxchg *a)
     TCGv src1, mask, oldv, newv, temp;
     const CSRInfo *csr;
     GenCSRWrite writefn;
+    tcg_target_long offset;
 
     if (check_plv(ctx)) {
         return false;
@@ -189,7 +196,8 @@ static bool trans_csrxchg(DisasContext *ctx, arg_csrxchg *a)
     newv = tcg_temp_new();
     temp = tcg_temp_new();
 
-    tcg_gen_ld_tl(oldv, tcg_env, csr->offset);
+    offset = get_csr_offset(csr, 0);
+    tcg_gen_ld_tl(oldv, tcg_env, offset);
     tcg_gen_and_tl(newv, src1, mask);
     tcg_gen_andc_tl(temp, oldv, mask);
     tcg_gen_or_tl(newv, newv, temp);
@@ -198,7 +206,7 @@ static bool trans_csrxchg(DisasContext *ctx, arg_csrxchg *a)
     if (writefn) {
         writefn(oldv, tcg_env, newv);
     } else {
-        tcg_gen_st_tl(newv, tcg_env, csr->offset);
+        tcg_gen_st_tl(newv, tcg_env, offset);
     }
     gen_set_gpr(a->rd, oldv, EXT_NONE);
     return true;
@@ -233,11 +241,11 @@ static bool gen_iocsrwr(DisasContext *ctx, arg_rr *a,
 TRANS(iocsrrd_b, IOCSR, gen_iocsrrd, gen_helper_iocsrrd_b)
 TRANS(iocsrrd_h, IOCSR, gen_iocsrrd, gen_helper_iocsrrd_h)
 TRANS(iocsrrd_w, IOCSR, gen_iocsrrd, gen_helper_iocsrrd_w)
-TRANS(iocsrrd_d, IOCSR, gen_iocsrrd, gen_helper_iocsrrd_d)
+TRANS64(iocsrrd_d, IOCSR, gen_iocsrrd, gen_helper_iocsrrd_d)
 TRANS(iocsrwr_b, IOCSR, gen_iocsrwr, gen_helper_iocsrwr_b)
 TRANS(iocsrwr_h, IOCSR, gen_iocsrwr, gen_helper_iocsrwr_h)
 TRANS(iocsrwr_w, IOCSR, gen_iocsrwr, gen_helper_iocsrwr_w)
-TRANS(iocsrwr_d, IOCSR, gen_iocsrwr, gen_helper_iocsrwr_d)
+TRANS64(iocsrwr_d, IOCSR, gen_iocsrwr, gen_helper_iocsrwr_d)
 
 static void check_mmu_idx(DisasContext *ctx)
 {
@@ -379,7 +387,7 @@ static bool trans_lddir(DisasContext *ctx, arg_lddir *a)
     if (check_plv(ctx)) {
         return false;
     }
-    gen_helper_lddir(dest, tcg_env, src, tcg_constant_tl(a->imm), mem_idx);
+    gen_helper_lddir(dest, tcg_env, src, tcg_constant_i32(a->imm), mem_idx);
     return true;
 }
 

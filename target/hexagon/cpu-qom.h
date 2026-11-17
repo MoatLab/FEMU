@@ -11,11 +11,38 @@
 
 #include "hw/core/cpu.h"
 
+typedef enum {
+    HEX_VER_NONE = 0x00,
+    HEX_VER_V5 = 0x04,
+    HEX_VER_V55 = 0x05,
+    HEX_VER_V60 = 0x60,
+    HEX_VER_V61 = 0x61,
+    HEX_VER_V62 = 0x62,
+    HEX_VER_V65 = 0x65,
+    HEX_VER_V66 = 0x66,
+    HEX_VER_V67 = 0x67,
+    HEX_VER_V68 = 0x68,
+    HEX_VER_V69 = 0x69,
+    HEX_VER_V71 = 0x71,
+    HEX_VER_V73 = 0x73,
+    HEX_VER_ANY = 0xff,
+} HexagonVersion;
+
+typedef struct {
+    HexagonVersion hex_version;
+} HexagonCPUDef;
+
 #define TYPE_HEXAGON_CPU "hexagon-cpu"
 
 #define HEXAGON_CPU_TYPE_SUFFIX "-" TYPE_HEXAGON_CPU
 #define HEXAGON_CPU_TYPE_NAME(name) (name HEXAGON_CPU_TYPE_SUFFIX)
 
+#define TYPE_HEXAGON_CPU_V5 HEXAGON_CPU_TYPE_NAME("v5")
+#define TYPE_HEXAGON_CPU_V55 HEXAGON_CPU_TYPE_NAME("v55")
+#define TYPE_HEXAGON_CPU_V60 HEXAGON_CPU_TYPE_NAME("v60")
+#define TYPE_HEXAGON_CPU_V61 HEXAGON_CPU_TYPE_NAME("v61")
+#define TYPE_HEXAGON_CPU_V62 HEXAGON_CPU_TYPE_NAME("v62")
+#define TYPE_HEXAGON_CPU_V65 HEXAGON_CPU_TYPE_NAME("v65")
 #define TYPE_HEXAGON_CPU_V66 HEXAGON_CPU_TYPE_NAME("v66")
 #define TYPE_HEXAGON_CPU_V67 HEXAGON_CPU_TYPE_NAME("v67")
 #define TYPE_HEXAGON_CPU_V68 HEXAGON_CPU_TYPE_NAME("v68")

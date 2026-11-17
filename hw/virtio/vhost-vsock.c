@@ -17,7 +17,7 @@
 #include "hw/virtio/virtio-access.h"
 #include "qemu/error-report.h"
 #include "qemu/sockets.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/virtio/vhost-vsock.h"
 #include "monitor/monitor.h"
 
@@ -147,22 +147,17 @@ static void vhost_vsock_device_realize(DeviceState *dev, Error **errp)
             return;
         }
 
-        if (!g_unix_set_fd_nonblocking(vhostfd, true, NULL)) {
-            error_setg_errno(errp, errno,
-                             "vhost-vsock: unable to set non-blocking mode");
+        if (!qemu_set_blocking(vhostfd, false, errp)) {
             return;
         }
     } else {
         vhostfd = open("/dev/vhost-vsock", O_RDWR);
         if (vhostfd < 0) {
-            error_setg_errno(errp, errno,
-                             "vhost-vsock: failed to open vhost device");
+            error_setg_file_open(errp, errno, "/dev/vhost-vsock");
             return;
         }
 
-        if (!g_unix_set_fd_nonblocking(vhostfd, true, NULL)) {
-            error_setg_errno(errp, errno,
-                             "Failed to set FD nonblocking");
+        if (!qemu_set_blocking(vhostfd, false, errp)) {
             return;
         }
     }

@@ -8,6 +8,15 @@
 #ifndef BOOTFILE_H
 #define BOOTFILE_H
 
+/*
+ * This file is included from qtest, but also from the assembly code
+ * that generates the header file containing the guest workload. Don't
+ * expose the function declarations and non-standard types to it.
+ */
+#ifdef __ASSEMBLER__
+#define MIGRATION_GUEST_CODE
+#endif
+
 /* Common */
 #define TEST_MEM_PAGE_SIZE 4096
 
@@ -33,7 +42,14 @@
  */
 #define ARM_TEST_MAX_KERNEL_SIZE (512 * 1024)
 
+/* LoongArch64 */
+#define LOONGARCH_TEST_MEM_START (32 * 1024 * 1024)
+#define LOONGARCH_TEST_MEM_END   (100 * 1024 * 1024)
+
+#ifndef MIGRATION_GUEST_CODE
 void bootfile_delete(void);
 char *bootfile_create(const char *arch, const char *dir, bool suspend_me);
+char *bootfile_get(void);
+#endif
 
 #endif /* BOOTFILE_H */

@@ -108,7 +108,7 @@ static bool superh_io_recompile_replay_branch(CPUState *cs,
 
 static bool superh_cpu_has_work(CPUState *cs)
 {
-    return cs->interrupt_request & CPU_INTERRUPT_HARD;
+    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD);
 }
 #endif /* !CONFIG_USER_ONLY */
 
@@ -151,7 +151,7 @@ static void superh_cpu_reset_hold(Object *obj, ResetType type)
     set_flush_to_zero(1, &env->fp_status);
 #endif
     set_default_nan_mode(1, &env->fp_status);
-    set_snan_bit_is_one(true, &env->fp_status);
+    set_snan_rule(float_snan_bit_is_one, &env->fp_status);
     /* sign bit clear, set all frac bits other than msb */
     set_float_default_nan_pattern(0b00111111, &env->fp_status);
     /*
@@ -164,7 +164,8 @@ static void superh_cpu_reset_hold(Object *obj, ResetType type)
     set_float_ftz_detection(float_ftz_before_rounding, &env->fp_status);
 }
 
-static void superh_cpu_disas_set_info(CPUState *cpu, disassemble_info *info)
+static void superh_cpu_disas_set_info(const CPUState *cpu,
+                                      disassemble_info *info)
 {
     info->endian = TARGET_BIG_ENDIAN ? BFD_ENDIAN_BIG
                                      : BFD_ENDIAN_LITTLE;
@@ -255,7 +256,6 @@ static void superh_cpu_realizefn(DeviceState *dev, Error **errp)
         return;
     }
 
-    cpu_reset(cs);
     qemu_init_vcpu(cs);
 
     scc->parent_realize(dev, errp);
@@ -278,7 +278,7 @@ static const VMStateDescription vmstate_sh_cpu = {
 
 static const struct SysemuCPUOps sh4_sysemu_ops = {
     .has_work = superh_cpu_has_work,
-    .get_phys_page_debug = superh_cpu_get_phys_page_debug,
+    .get_phys_addr_debug = superh_cpu_get_phys_addr_debug,
 };
 #endif
 

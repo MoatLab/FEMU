@@ -33,9 +33,9 @@ case you need to construct one manually:
 
     qemu-system-i386 -xen-domid 3 -no-shutdown        \
       -chardev socket,id=libxl-cmd,path=/var/run/xen/qmp-libxl-3,server=on,wait=off \
-      -mon chardev=libxl-cmd,mode=control             \
+      -object monitor-qmp,id=qmp0,chardev=libxl-cmd   \
       -chardev socket,id=libxenstat-cmd,path=/var/run/xen/qmp-libxenstat-3,server=on,wait=off \
-      -mon chardev=libxenstat-cmd,mode=control        \
+      -object monitor-qmp,id=qmp1,chardev=libxenstat-cmd \
       -nodefaults                                     \
       -no-user-config                                 \
       -xen-attach -name g0                            \

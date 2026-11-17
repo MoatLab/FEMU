@@ -456,8 +456,8 @@ static inline uint8_t v9fs_request_cancelled(V9fsPDU *pdu)
 void coroutine_fn v9fs_reclaim_fd(V9fsPDU *pdu);
 void v9fs_path_init(V9fsPath *path);
 void v9fs_path_free(V9fsPath *path);
-void G_GNUC_PRINTF(2, 3) v9fs_path_sprintf(V9fsPath *path, const char *fmt,
-                                           ...);
+int G_GNUC_PRINTF(2, 3) v9fs_path_sprintf(V9fsPath *path, const char *fmt,
+                                          ...);
 void v9fs_path_copy(V9fsPath *dst, const V9fsPath *src);
 size_t v9fs_readdir_response_size(V9fsString *name);
 int v9fs_name_to_path(V9fsState *s, V9fsPath *dirpath,
@@ -472,15 +472,21 @@ void pdu_submit(V9fsPDU *pdu, P9MsgHeader *hdr);
 void v9fs_reset(V9fsState *s);
 
 struct V9fsTransport {
-    ssize_t     (*pdu_vmarshal)(V9fsPDU *pdu, size_t offset, const char *fmt,
-                                va_list ap);
-    ssize_t     (*pdu_vunmarshal)(V9fsPDU *pdu, size_t offset, const char *fmt,
-                                  va_list ap);
-    void        (*init_in_iov_from_pdu)(V9fsPDU *pdu, struct iovec **piov,
-                                        unsigned int *pniov, size_t size);
-    void        (*init_out_iov_from_pdu)(V9fsPDU *pdu, struct iovec **piov,
-                                         unsigned int *pniov, size_t size);
-    void        (*push_and_notify)(V9fsPDU *pdu);
+    ssize_t     coroutine_fn (*pdu_vmarshal)(V9fsPDU *pdu, size_t offset,
+                                             const char *fmt, va_list ap);
+    ssize_t     coroutine_fn (*pdu_vunmarshal)(V9fsPDU *pdu, size_t offset,
+                                               const char *fmt, va_list ap);
+    void        coroutine_fn (*init_in_iov_from_pdu)(V9fsPDU *pdu,
+                                                     struct iovec **piov,
+                                                     unsigned int *pniov,
+                                                     size_t size);
+    void        coroutine_fn (*init_out_iov_from_pdu)(V9fsPDU *pdu,
+                                                      struct iovec **piov,
+                                                      unsigned int *pniov,
+                                                      size_t size);
+    void        coroutine_fn (*push_and_notify)(V9fsPDU *pdu);
+    size_t      coroutine_fn (*msize_limit)(V9fsState *s);
+    size_t      coroutine_fn (*response_buffer_size)(V9fsPDU *pdu);
 };
 
 #endif

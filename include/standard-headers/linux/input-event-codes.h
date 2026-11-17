@@ -27,6 +27,7 @@
 #define INPUT_PROP_TOPBUTTONPAD		0x04	/* softbuttons at top of pad */
 #define INPUT_PROP_POINTING_STICK	0x05	/* is a pointing stick */
 #define INPUT_PROP_ACCELEROMETER	0x06	/* has accelerometer */
+#define INPUT_PROP_PRESSUREPAD		0x07	/* pressure triggers clicks */
 
 #define INPUT_PROP_MAX			0x1f
 #define INPUT_PROP_CNT			(INPUT_PROP_MAX + 1)
@@ -601,6 +602,11 @@
 #define BTN_DPAD_LEFT		0x222
 #define BTN_DPAD_RIGHT		0x223
 
+#define BTN_GRIPL		0x224
+#define BTN_GRIPR		0x225
+#define BTN_GRIPL2		0x226
+#define BTN_GRIPR2		0x227
+
 #define KEY_ALS_TOGGLE		0x230	/* Ambient light sensor */
 #define KEY_ROTATE_LOCK_TOGGLE	0x231	/* Display rotation lock */
 #define KEY_REFRESH_RATE_TOGGLE	0x232	/* Display refresh rate toggle */
@@ -624,6 +630,22 @@
 
 #define KEY_BRIGHTNESS_MIN		0x250	/* Set Brightness to Minimum */
 #define KEY_BRIGHTNESS_MAX		0x251	/* Set Brightness to Maximum */
+
+/*
+ * Keycodes for hotkeys toggling the electronic privacy screen found on some
+ * laptops on/off. Note when the embedded-controller turns on/off the eprivacy
+ * screen itself then the state should be reported through drm connecter props:
+ * https://www.kernel.org/doc/html/latest/gpu/drm-kms.html#standard-connector-properties
+ * Except when implementing the drm connecter properties API is not possible
+ * because e.g. the firmware does not allow querying the presence and/or status
+ * of the eprivacy screen at boot.
+ */
+#define KEY_EPRIVACY_SCREEN_ON		0x252
+#define KEY_EPRIVACY_SCREEN_OFF		0x253
+
+#define KEY_ACTION_ON_SELECTION		0x254	/* AL Action on Selection (HUTRR119) */
+#define KEY_CONTEXTUAL_INSERT		0x255	/* AL Contextual Insertion (HUTRR119) */
+#define KEY_CONTEXTUAL_QUERY		0x256	/* AL Contextual Query (HUTRR119) */
 
 #define KEY_KBDINPUTASSIST_PREV		0x260
 #define KEY_KBDINPUTASSIST_NEXT		0x261
@@ -765,6 +787,9 @@
 #define KEY_KBD_LCD_MENU4		0x2bb
 #define KEY_KBD_LCD_MENU5		0x2bc
 
+/* Performance Boost key (Alienware)/G-Mode key (Dell) */
+#define KEY_PERFORMANCE			0x2bd
+
 #define BTN_TRIGGER_HAPPY		0x2c0
 #define BTN_TRIGGER_HAPPY1		0x2c0
 #define BTN_TRIGGER_HAPPY2		0x2c1
@@ -870,6 +895,7 @@
 
 #define ABS_VOLUME		0x20
 #define ABS_PROFILE		0x21
+#define ABS_SND_PROFILE		0x22
 
 #define ABS_MISC		0x28
 
@@ -978,5 +1004,13 @@
 #define SND_TONE		0x02
 #define SND_MAX			0x07
 #define SND_CNT			(SND_MAX+1)
+
+/*
+ * ABS_SND_PROFILE values
+ */
+
+#define SND_PROFILE_SILENT	0x00
+#define SND_PROFILE_VIBRATE	0x01
+#define SND_PROFILE_RING	0x02
 
 #endif

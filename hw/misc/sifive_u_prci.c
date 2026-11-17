@@ -19,7 +19,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "hw/misc/sifive_u_prci.h"
@@ -112,7 +112,7 @@ static void sifive_u_prci_write(void *opaque, hwaddr addr,
 static const MemoryRegionOps sifive_u_prci_ops = {
     .read = sifive_u_prci_read,
     .write = sifive_u_prci_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
     .valid = {
         .min_access_size = 4,
         .max_access_size = 4

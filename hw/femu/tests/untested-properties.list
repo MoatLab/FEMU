@@ -8,6 +8,8 @@ persistent-memdev   inherited from QEMU cxl-type3; femu-cxl-ssd does not documen
 volatile-dc-memdev  inherited from QEMU cxl-type3; femu-cxl-ssd does not document a use
 x-speed             inherited from QEMU cxl-type3 (link speed); QEMU owns it
 x-width             inherited from QEMU cxl-type3 (link width); QEMU owns it
+hdm-db              inherited from QEMU cxl-type3 (HDM-DB back-invalidate); QEMU owns it
+x-256b-flit         inherited from QEMU cxl-type3 (256B flit mode); QEMU owns it
 cylon-emul-exit     needs a host kernel with the Cylon patch; no qtest can reach it
 max_sqes            no test yet: Identify SQES field only
 max_cqes            no test yet: Identify CQES field only

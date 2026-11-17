@@ -19,13 +19,13 @@
 
 #include "qemu/osdep.h"
 #include "hw/pci/pci.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "intel-hda.h"
 #include "migration/vmstate.h"
 #include "qemu/host-utils.h"
 #include "qemu/module.h"
 #include "intel-hda-defs.h"
-#include "audio/audio.h"
+#include "qemu/audio.h"
 #include "trace.h"
 #include "qom/object.h"
 
@@ -178,7 +178,7 @@ struct HDAAudioState {
     HDACodecDevice hda;
     const char *name;
 
-    QEMUSoundCard card;
+    AudioBackend *audio_be;
     const desc_codec *desc;
     HDAAudioStream st[4];
     bool running_compat[16];
@@ -187,7 +187,6 @@ struct HDAAudioState {
     /* properties */
     uint32_t debug;
     bool     mixer;
-    bool     use_timer;
 };
 
 static inline uint32_t hda_bytes_per_second(HDAAudioStream *st)
@@ -275,7 +274,8 @@ static void hda_audio_input_cb(void *opaque, int avail)
     while (to_transfer) {
         uint32_t start = (uint32_t) (wpos & B_MASK);
         uint32_t chunk = (uint32_t) MIN(B_SIZE - start, to_transfer);
-        uint32_t read = AUD_read(st->voice.in, st->buf + start, chunk);
+        uint32_t read = audio_be_read(st->state->audio_be, st->voice.in,
+                                      st->buf + start, chunk);
         wpos += read;
         to_transfer -= read;
         st->wpos += read;
@@ -354,7 +354,8 @@ static void hda_audio_output_cb(void *opaque, int avail)
     while (to_transfer) {
         uint32_t start = (uint32_t) (rpos & B_MASK);
         uint32_t chunk = (uint32_t) MIN(B_SIZE - start, to_transfer);
-        uint32_t written = AUD_write(st->voice.out, st->buf + start, chunk);
+        uint32_t written = audio_be_write(st->state->audio_be, st->voice.out,
+                                          st->buf + start, chunk);
         rpos += written;
         to_transfer -= written;
         st->rpos += written;
@@ -364,58 +365,6 @@ static void hda_audio_output_cb(void *opaque, int avail)
     }
 
     hda_timer_sync_adjust(st, (wpos - rpos) - (B_SIZE >> 1));
-}
-
-static void hda_audio_compat_input_cb(void *opaque, int avail)
-{
-    HDAAudioStream *st = opaque;
-    int recv = 0;
-    int len;
-    bool rc;
-
-    while (avail - recv >= sizeof(st->compat_buf)) {
-        if (st->compat_bpos != sizeof(st->compat_buf)) {
-            len = AUD_read(st->voice.in, st->compat_buf + st->compat_bpos,
-                           sizeof(st->compat_buf) - st->compat_bpos);
-            st->compat_bpos += len;
-            recv += len;
-            if (st->compat_bpos != sizeof(st->compat_buf)) {
-                break;
-            }
-        }
-        rc = hda_codec_xfer(&st->state->hda, st->stream, false,
-                            st->compat_buf, sizeof(st->compat_buf));
-        if (!rc) {
-            break;
-        }
-        st->compat_bpos = 0;
-    }
-}
-
-static void hda_audio_compat_output_cb(void *opaque, int avail)
-{
-    HDAAudioStream *st = opaque;
-    int sent = 0;
-    int len;
-    bool rc;
-
-    while (avail - sent >= sizeof(st->compat_buf)) {
-        if (st->compat_bpos == sizeof(st->compat_buf)) {
-            rc = hda_codec_xfer(&st->state->hda, st->stream, true,
-                                st->compat_buf, sizeof(st->compat_buf));
-            if (!rc) {
-                break;
-            }
-            st->compat_bpos = 0;
-        }
-        len = AUD_write(st->voice.out, st->compat_buf + st->compat_bpos,
-                        sizeof(st->compat_buf) - st->compat_bpos);
-        st->compat_bpos += len;
-        sent += len;
-        if (st->compat_bpos != sizeof(st->compat_buf)) {
-            break;
-        }
-    }
 }
 
 static void hda_audio_set_running(HDAAudioStream *st, bool running)
@@ -428,21 +377,19 @@ static void hda_audio_set_running(HDAAudioStream *st, bool running)
     }
     st->running = running;
     trace_hda_audio_running(st->node->name, st->stream, st->running);
-    if (st->state->use_timer) {
-        if (running) {
-            int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-            st->rpos = 0;
-            st->wpos = 0;
-            st->buft_start = now;
-            timer_mod_anticipate_ns(st->buft, now + HDA_TIMER_TICKS);
-        } else {
-            timer_del(st->buft);
-        }
+    if (running) {
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        st->rpos = 0;
+        st->wpos = 0;
+        st->buft_start = now;
+        timer_mod_anticipate_ns(st->buft, now + HDA_TIMER_TICKS);
+    } else {
+        timer_del(st->buft);
     }
     if (st->output) {
-        AUD_set_active_out(st->voice.out, st->running);
+        audio_be_set_active_out(st->state->audio_be, st->voice.out, st->running);
     } else {
-        AUD_set_active_in(st->voice.in, st->running);
+        audio_be_set_active_in(st->state->audio_be, st->voice.in, st->running);
     }
 }
 
@@ -466,15 +413,16 @@ static void hda_audio_set_amp(HDAAudioStream *st)
         return;
     }
     if (st->output) {
-        AUD_set_volume_out(st->voice.out, muted, left, right);
+        audio_be_set_volume_out_lr(st->state->audio_be, st->voice.out,
+                                   muted, left, right);
     } else {
-        AUD_set_volume_in(st->voice.in, muted, left, right);
+        audio_be_set_volume_in_lr(st->state->audio_be, st->voice.in,
+                                  muted, left, right);
     }
 }
 
 static void hda_audio_setup(HDAAudioStream *st)
 {
-    bool use_timer = st->state->use_timer;
     audio_callback_fn cb;
 
     if (st->node == NULL) {
@@ -485,22 +433,14 @@ static void hda_audio_setup(HDAAudioStream *st)
                            fmt2name[st->as.fmt], st->as.freq);
 
     if (st->output) {
-        if (use_timer) {
-            cb = hda_audio_output_cb;
-            timer_del(st->buft);
-        } else {
-            cb = hda_audio_compat_output_cb;
-        }
-        st->voice.out = AUD_open_out(&st->state->card, st->voice.out,
+        cb = hda_audio_output_cb;
+        timer_del(st->buft);
+        st->voice.out = audio_be_open_out(st->state->audio_be, st->voice.out,
                                      st->node->name, st, cb, &st->as);
     } else {
-        if (use_timer) {
-            cb = hda_audio_input_cb;
-            timer_del(st->buft);
-        } else {
-            cb = hda_audio_compat_input_cb;
-        }
-        st->voice.in = AUD_open_in(&st->state->card, st->voice.in,
+        cb = hda_audio_input_cb;
+        timer_del(st->buft);
+        st->voice.in = audio_be_open_in(st->state->audio_be, st->voice.in,
                                    st->node->name, st, cb, &st->as);
     }
 }
@@ -696,7 +636,7 @@ static void hda_audio_init(HDACodecDevice *hda,
     const desc_param *param;
     uint32_t i, type;
 
-    if (!AUD_register_card("hda", &a->card, errp)) {
+    if (!audio_be_check(&a->audio_be, errp)) {
         return;
     }
 
@@ -754,12 +694,11 @@ static void hda_audio_exit(HDACodecDevice *hda)
         }
         timer_free(st->buft);
         if (st->output) {
-            AUD_close_out(&a->card, st->voice.out);
+            audio_be_close_out(a->audio_be, st->voice.out);
         } else {
-            AUD_close_in(&a->card, st->voice.in);
+            audio_be_close_in(a->audio_be, st->voice.in);
         }
     }
-    AUD_remove_card(&a->card);
 }
 
 static int hda_audio_post_load(void *opaque, int version)
@@ -805,7 +744,7 @@ static void hda_audio_reset(DeviceState *dev)
 static bool vmstate_hda_audio_stream_buf_needed(void *opaque)
 {
     HDAAudioStream *st = opaque;
-    return st->state && st->state->use_timer;
+    return st->state;
 }
 
 static const VMStateDescription vmstate_hda_audio_stream_buf = {
@@ -858,10 +797,9 @@ static const VMStateDescription vmstate_hda_audio = {
 };
 
 static const Property hda_audio_properties[] = {
-    DEFINE_AUDIO_PROPERTIES(HDAAudioState, card),
+    DEFINE_AUDIO_PROPERTIES(HDAAudioState, audio_be),
     DEFINE_PROP_UINT32("debug", HDAAudioState, debug,   0),
     DEFINE_PROP_BOOL("mixer", HDAAudioState, mixer,  true),
-    DEFINE_PROP_BOOL("use-timer", HDAAudioState, use_timer,  true),
 };
 
 static void hda_audio_init_output(HDACodecDevice *hda, Error **errp)

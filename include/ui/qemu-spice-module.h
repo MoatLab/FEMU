@@ -26,10 +26,12 @@ typedef struct SpiceInfo SpiceInfo;
 
 struct QemuSpiceOps {
     void (*init)(void);
+    void (*cleanup)(void);
     void (*display_init)(void);
     int (*migrate_info)(const char *h, int p, int t, const char *s);
     int (*set_passwd)(const char *passwd,
-                      bool fail_if_connected, bool disconnect_if_connected);
+                      bool fail_if_connected, bool disconnect_if_connected,
+                      Error **errp);
     int (*set_pw_expire)(time_t expires);
     int (*display_add_client)(int csock, int skipauth, int tls);
 #ifdef CONFIG_SPICE

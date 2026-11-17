@@ -28,7 +28,7 @@
  */
 
 #ifndef SIGNED
-#define HALF (IN_MAX >> 1)
+#define BIAS ((IN_T)1 << (SHIFT - 1))
 #endif
 
 #define ET glue (ENDIAN_CONVERSION, glue (glue (glue (_, ITYPE), BSIZE), _t))
@@ -43,13 +43,13 @@ static inline mixeng_real glue (conv_, ET) (IN_T v)
 #ifdef SIGNED
     return nv * (2.f / ((mixeng_real)IN_MAX - IN_MIN));
 #else
-    return (nv - HALF) * (2.f / (mixeng_real)IN_MAX);
+    return ((mixeng_real)nv - BIAS) * (1.f / BIAS);
 #endif
 #else  /* !RECIPROCAL */
 #ifdef SIGNED
     return nv / (((mixeng_real)IN_MAX - IN_MIN) / 2.f);
 #else
-    return (nv - HALF) / ((mixeng_real)IN_MAX / 2.f);
+    return ((mixeng_real)nv - BIAS) / BIAS;
 #endif
 #endif
 }
@@ -65,7 +65,7 @@ static inline IN_T glue (clip_, ET) (mixeng_real v)
 #ifdef SIGNED
     return ENDIAN_CONVERT((IN_T)(v * (((mixeng_real)IN_MAX - IN_MIN) / 2.f)));
 #else
-    return ENDIAN_CONVERT((IN_T)((v * ((mixeng_real)IN_MAX / 2.f)) + HALF));
+    return ENDIAN_CONVERT(MIN((int64_t)(v * BIAS) + BIAS, IN_MAX));
 #endif
 }
 
@@ -77,7 +77,7 @@ static inline int64_t glue (conv_, ET) (IN_T v)
 #ifdef SIGNED
     return ((int64_t) nv) << (32 - SHIFT);
 #else
-    return ((int64_t) nv - HALF) << (32 - SHIFT);
+    return ((int64_t) nv - BIAS) << (32 - SHIFT);
 #endif
 }
 
@@ -92,7 +92,7 @@ static inline IN_T glue (clip_, ET) (int64_t v)
 #ifdef SIGNED
     return ENDIAN_CONVERT ((IN_T) (v >> (32 - SHIFT)));
 #else
-    return ENDIAN_CONVERT ((IN_T) ((v >> (32 - SHIFT)) + HALF));
+    return ENDIAN_CONVERT((IN_T)((v >> (32 - SHIFT)) + BIAS));
 #endif
 }
 #endif
@@ -148,5 +148,5 @@ static void glue (glue (clip_, ET), _from_mono)
 }
 
 #undef ET
-#undef HALF
+#undef BIAS
 #undef IN_T

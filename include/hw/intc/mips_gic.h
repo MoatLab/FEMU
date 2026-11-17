@@ -13,8 +13,8 @@
 
 #include "qemu/units.h"
 #include "hw/timer/mips_gictimer.h"
-#include "hw/sysbus.h"
-#include "cpu.h"
+#include "hw/core/sysbus.h"
+#include "target/mips/cpu.h"
 #include "qom/object.h"
 /*
  * GIC Specific definitions

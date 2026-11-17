@@ -6,7 +6,7 @@ all: a-b-bootblock.h
 
 a-b-bootblock.h: x86.bootsect x86.o
 	echo "$$__note" > header.tmp
-	xxd -i $< | sed -e 's/.*int.*//' >> header.tmp
+	xxd -i $< | sed -e '/.*int.*/d' >> header.tmp
 	nm x86.o | awk '{print "#define SYM_"$$3" 0x"$$1}' >> header.tmp
 	mv header.tmp $@
 
@@ -20,4 +20,4 @@ x86.o: a-b-bootblock.S
 	$(CROSS_PREFIX)gcc -I.. -m32 -march=i486 -c $< -o $@
 
 clean:
-	@rm -rf *.boot *.o *.bootsect
+	@rm -rf *.boot *.o *.bootsect *.h

@@ -12,7 +12,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/net/ftgmac100.h"
 #include "system/dma.h"
 #include "qapi/error.h"
@@ -21,7 +21,7 @@
 #include "net/checksum.h"
 #include "net/eth.h"
 #include "hw/net/mii.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 
 #include <zlib.h> /* for crc32 */
@@ -498,7 +498,7 @@ static int ftgmac100_write_bd(FTGMAC100Desc *bd, dma_addr_t addr)
 }
 
 static int ftgmac100_insert_vlan(FTGMAC100State *s, int frame_size,
-                                  uint8_t vlan_tci)
+                                 uint16_t vlan_tci)
 {
     uint8_t *vlan_hdr = s->frame + (ETH_ALEN * 2);
     uint8_t *payload = vlan_hdr + sizeof(struct vlan_header);
@@ -624,7 +624,10 @@ static void ftgmac100_do_tx(FTGMAC100State *s, uint64_t tx_ring,
         bd.des0 &= ~FTGMAC100_TXDES0_TXDMA_OWN;
 
         /* Write back the modified descriptor.  */
-        ftgmac100_write_bd(&bd, addr);
+        if (ftgmac100_write_bd(&bd, addr)) {
+            s->isr |= FTGMAC100_INT_AHB_ERR;
+            break;
+        }
         /* Advance to the next descriptor.  */
         if (bd.des0 & s->txdes0_edotr) {
             addr = tx_ring;
@@ -720,9 +723,9 @@ static void ftgmac100_do_reset(FTGMAC100State *s, bool sw_reset)
     phy_reset(s);
 }
 
-static void ftgmac100_reset(DeviceState *d)
+static void ftgmac100_reset_hold(Object *obj, ResetType type)
 {
-    ftgmac100_do_reset(FTGMAC100(d), false);
+    ftgmac100_do_reset(FTGMAC100(obj), false);
 }
 
 static uint64_t ftgmac100_read(void *opaque, hwaddr addr, unsigned size)
@@ -1134,7 +1137,10 @@ static ssize_t ftgmac100_receive(NetClientState *nc, const uint8_t *buf,
             bd.des0 |= flags | FTGMAC100_RXDES0_LRS;
             s->isr |= FTGMAC100_INT_RPKT_BUF;
         }
-        ftgmac100_write_bd(&bd, addr);
+        if (ftgmac100_write_bd(&bd, addr)) {
+            s->isr |= FTGMAC100_INT_AHB_ERR;
+            break;
+        }
         if (bd.des0 & s->rxdes0_edorr) {
             addr = s->rx_ring;
         } else {
@@ -1263,21 +1269,16 @@ static const Property ftgmac100_properties[] = {
 static void ftgmac100_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->vmsd = &vmstate_ftgmac100;
-    device_class_set_legacy_reset(dc, ftgmac100_reset);
+    rc->phases.hold = ftgmac100_reset_hold;
     device_class_set_props(dc, ftgmac100_properties);
     set_bit(DEVICE_CATEGORY_NETWORK, dc->categories);
     dc->realize = ftgmac100_realize;
     dc->desc = "Faraday FTGMAC100 Gigabit Ethernet emulation";
 }
 
-static const TypeInfo ftgmac100_info = {
-    .name = TYPE_FTGMAC100,
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(FTGMAC100State),
-    .class_init = ftgmac100_class_init,
-};
 
 /*
  * AST2600 MII controller
@@ -1381,9 +1382,9 @@ static const MemoryRegionOps aspeed_mii_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
-static void aspeed_mii_reset(DeviceState *dev)
+static void aspeed_mii_reset_hold(Object *obj, ResetType type)
 {
-    AspeedMiiState *s = ASPEED_MII(dev);
+    AspeedMiiState *s = ASPEED_MII(obj);
 
     s->phycr = 0;
     s->phydata = 0;
@@ -1422,25 +1423,28 @@ static const Property aspeed_mii_properties[] = {
 static void aspeed_mii_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->vmsd = &vmstate_aspeed_mii;
-    device_class_set_legacy_reset(dc, aspeed_mii_reset);
+    rc->phases.hold = aspeed_mii_reset_hold;
     dc->realize = aspeed_mii_realize;
     dc->desc = "Aspeed MII controller";
     device_class_set_props(dc, aspeed_mii_properties);
 }
 
-static const TypeInfo aspeed_mii_info = {
-    .name = TYPE_ASPEED_MII,
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(AspeedMiiState),
-    .class_init = aspeed_mii_class_init,
+static const TypeInfo ftgmac100_types[] = {
+    {
+        .name          = TYPE_FTGMAC100,
+        .parent        = TYPE_SYS_BUS_DEVICE,
+        .instance_size = sizeof(FTGMAC100State),
+        .class_init    = ftgmac100_class_init,
+    },
+    {
+        .name          = TYPE_ASPEED_MII,
+        .parent        = TYPE_SYS_BUS_DEVICE,
+        .instance_size = sizeof(AspeedMiiState),
+        .class_init    = aspeed_mii_class_init,
+    }
 };
 
-static void ftgmac100_register_types(void)
-{
-    type_register_static(&ftgmac100_info);
-    type_register_static(&aspeed_mii_info);
-}
-
-type_init(ftgmac100_register_types)
+DEFINE_TYPES(ftgmac100_types)

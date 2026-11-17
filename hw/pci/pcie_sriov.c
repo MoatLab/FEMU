@@ -14,7 +14,7 @@
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pcie.h"
 #include "hw/pci/pci_bus.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/range.h"
 #include "qapi/error.h"
 #include "trace.h"
@@ -195,12 +195,17 @@ bool pcie_sriov_pf_init(PCIDevice *dev, uint16_t offset,
 
 void pcie_sriov_pf_exit(PCIDevice *dev)
 {
-    uint8_t *cfg = dev->config + dev->exp.sriov_cap;
+    uint8_t *cfg;
+
+    if (dev->exp.sriov_cap == 0) {
+        return;
+    }
+    cfg = dev->config + dev->exp.sriov_cap;
 
     if (dev->exp.sriov_pf.vf_user_created) {
         uint16_t ven_id = pci_get_word(dev->config + PCI_VENDOR_ID);
-        uint16_t total_vfs = pci_get_word(dev->config + PCI_SRIOV_TOTAL_VF);
-        uint16_t vf_dev_id = pci_get_word(dev->config + PCI_SRIOV_VF_DID);
+        uint16_t total_vfs = pci_get_word(cfg + PCI_SRIOV_TOTAL_VF);
+        uint16_t vf_dev_id = pci_get_word(cfg + PCI_SRIOV_VF_DID);
 
         unregister_vfs(dev);
 
@@ -240,17 +245,6 @@ void pcie_sriov_pf_init_vf_bar(PCIDevice *dev, int region_num,
         pci_set_long(dev->cmask + addr, 0xffffffff);
     }
     dev->exp.sriov_pf.vf_bar_type[region_num] = type;
-}
-
-void pcie_sriov_vf_register_bar(PCIDevice *dev, int region_num,
-                                MemoryRegion *memory)
-{
-    uint8_t type;
-
-    assert(dev->exp.sriov_vf.pf);
-    type = dev->exp.sriov_vf.pf->exp.sriov_pf.vf_bar_type[region_num];
-
-    return pci_register_bar(dev, region_num, type, memory);
 }
 
 static gint compare_vf_devfns(gconstpointer a, gconstpointer b)

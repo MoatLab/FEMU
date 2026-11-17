@@ -35,6 +35,32 @@ malicious:
 Bugs affecting these entities are evaluated on whether they can cause damage in
 real-world use cases and treated as security bugs if this is the case.
 
+To be covered by this security support policy you must:
+
+- use a virtualization accelerator like KVM or HVF
+- use one of the machine types listed below
+
+It may be possible to use other machine types with a virtualization
+accelerator to provide improved performance with a trusted guest
+workload, but any machine type not listed here should not be
+considered to be providing guest isolation or security guarantees,
+and falls under the "non-virtualization use case".
+
+Supported machine types for the virtualization use case, by target architecture:
+
+aarch64
+  ``virt``
+i386, x86_64
+  ``microvm``, ``xenfv``, ``xenpv``, ``xenpvh``, ``pc``, ``q35``
+s390x
+  ``s390-ccw-virtio``
+loongarch64:
+  ``virt``
+ppc64:
+  ``pseries``
+riscv32, riscv64:
+  ``virt``
+
 Non-virtualization Use Case
 '''''''''''''''''''''''''''
 
@@ -48,6 +74,69 @@ requirements in mind.
 Bugs affecting the non-virtualization use case are not considered security
 bugs at this time.  Users with non-virtualization use cases must not rely on
 QEMU to provide guest isolation or any security guarantees.
+
+Security boundary scope
+'''''''''''''''''''''''
+
+Even where a flaw affects the virtualization use case described above,
+not all scenarios will be considered in scope. The following guidelines
+are used to evaluate whether to apply the full security process, or treat
+an issue as a normal bug.
+
+* **assert** / **abort**. If triggering the code path requires kernel
+  privileges (or root account access) in the guest, asserts/aborts in
+  QEMU are a self inflicted denial of service. These will **not** be
+  treated as security flaws, at most hardening bugs. If triggering the
+  code path can be done by an unprivileged guest OS account, this
+  **may** justify handling as a security bug.
+
+* **vhost-user/vfio-user backends**. The backend processes have
+  shared memory regions co-mapped with the QEMU process. The intent
+  of the process separation is operational resilience & flexibility
+  and allowing for independent software suppliers. There is not
+  considered to be security boundary between QEMU and the vhost-user
+  & vfio-user backends. Thus flaws in the backends which can cause
+  crashes / undesirable behaviour in QEMU will **not** be treated as
+  security flaws, but should be fixed as hardening bugs.
+
+* **memory allocation bounds**. There are many ways in which a QEMU
+  process can legitimately consume an amount of memory that is
+  significantly larger than the assigned guest RAM. QEMU's worst
+  case memory usage should be considered effectively unbounded. As
+  such the QEMU deployment on the host should account for the
+  possibility of large memory peaks and apply countermeasures to
+  provide continuity of host operations. It is typical for the Linux
+  OOM killer to reap the process triggering host memory overcommit
+  in the case of exccessive usage, offering a degree of protection.
+  As such, bugs which can lead to excessive/unbounded memory allocations
+  will usually not be classified as security flaws, but should be
+  fixed as hardening bugs.
+
+* **degraded guest behaviour**. There are a set of bugs which can
+  lead guest hardware devices to misbehave. For example, a flawed
+  virtual IOMMU operation may not offer the guest device isolation
+  that would otherwise be expected. If a guest triggered exploit
+  requires kernel privileges (or root account access), and leads
+  to sub-optimal behaviour of the virtual device this is considered
+  a self inflicted service degradation. These will **not** be
+  treated as security flaws, at most hardening bugs. If triggering
+  the code path can be done by an unprivileged guest OS account,
+  this may justify handling as a security bug.
+
+* **nested virtualization**. The scope for nested virtualization
+  is to prevent a level 2 guest from breaking out into a level
+  1 guest. As noted above, a number of scenarios exclude security
+  handling for flaws only exploitable by the guest kernel / root
+  account with affect the guest's own service/availability. In the
+  context of nested virtualization with PCI device assignment, it
+  may may be possible for a level 2 guest kernel to trigger flaws
+  that affect the level 0 QEMU process. While these bugs should be
+  fixed, they will not be triaged as security flaws at this time.
+
+* **low severity impact**. As a catch all rule, issues which
+  are judged to have a "low" severity impact on the system will
+  usually not justify handling as security bugs, nor assignment
+  of CVEs. They will be fixed as routine bugs when time allows.
 
 Architecture
 ------------

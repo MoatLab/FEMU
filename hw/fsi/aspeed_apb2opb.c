@@ -13,7 +13,7 @@
 #include "trace.h"
 
 #include "hw/fsi/aspeed_apb2opb.h"
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 
 #define TO_REG(x) (x >> 2)
 
@@ -273,6 +273,7 @@ static void fsi_aspeed_apb2opb_init(Object *o)
     for (i = 0; i < ASPEED_FSI_NUM; i++) {
         object_initialize_child(o, "fsi-master[*]", &s->fsi[i],
                                 TYPE_FSI_MASTER);
+        qbus_init(&s->opb[i], sizeof(s->opb[i]), TYPE_OP_BUS, DEVICE(s), NULL);
     }
 }
 
@@ -281,18 +282,6 @@ static void fsi_aspeed_apb2opb_realize(DeviceState *dev, Error **errp)
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     AspeedAPB2OPBState *s = ASPEED_APB2OPB(dev);
     int i;
-
-    /*
-     * TODO: The OPBus model initializes the OPB address space in
-     * the .instance_init handler and this is problematic for test
-     * device-introspect-test. To avoid a memory corruption and a QEMU
-     * crash, qbus_init() should be called from realize(). Something to
-     * improve. Possibly, OPBus could also be removed.
-     */
-    for (i = 0; i < ASPEED_FSI_NUM; i++) {
-        qbus_init(&s->opb[i], sizeof(s->opb[i]), TYPE_OP_BUS, DEVICE(s),
-                  NULL);
-    }
 
     sysbus_init_irq(sbd, &s->irq);
 
@@ -313,9 +302,9 @@ static void fsi_aspeed_apb2opb_realize(DeviceState *dev, Error **errp)
     }
 }
 
-static void fsi_aspeed_apb2opb_reset(DeviceState *dev)
+static void fsi_aspeed_apb2opb_reset_hold(Object *obj, ResetType type)
 {
-    AspeedAPB2OPBState *s = ASPEED_APB2OPB(dev);
+    AspeedAPB2OPBState *s = ASPEED_APB2OPB(obj);
 
     memcpy(s->regs, aspeed_apb2opb_reset, ASPEED_APB2OPB_NR_REGS);
 }
@@ -323,45 +312,62 @@ static void fsi_aspeed_apb2opb_reset(DeviceState *dev)
 static void fsi_aspeed_apb2opb_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->desc = "ASPEED APB2OPB Bridge";
     dc->realize = fsi_aspeed_apb2opb_realize;
-    device_class_set_legacy_reset(dc, fsi_aspeed_apb2opb_reset);
+    rc->phases.hold = fsi_aspeed_apb2opb_reset_hold;
 }
 
-static const TypeInfo aspeed_apb2opb_info = {
-    .name = TYPE_ASPEED_APB2OPB,
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_init = fsi_aspeed_apb2opb_init,
-    .instance_size = sizeof(AspeedAPB2OPBState),
-    .class_init = fsi_aspeed_apb2opb_class_init,
+static const TypeInfo aspeed_apb2opb_types[] = {
+    {
+        .name = TYPE_ASPEED_APB2OPB,
+        .parent = TYPE_SYS_BUS_DEVICE,
+        .instance_init = fsi_aspeed_apb2opb_init,
+        .instance_size = sizeof(AspeedAPB2OPBState),
+        .class_init = fsi_aspeed_apb2opb_class_init,
+    }
 };
 
-static void aspeed_apb2opb_register_types(void)
-{
-    type_register_static(&aspeed_apb2opb_info);
-}
-
-type_init(aspeed_apb2opb_register_types);
+DEFINE_TYPES(aspeed_apb2opb_types)
 
 static void fsi_opb_init(Object *o)
 {
     OPBus *opb = OP_BUS(o);
 
-    memory_region_init(&opb->mr, 0, TYPE_FSI_OPB, UINT32_MAX);
+    memory_region_init(&opb->mr, o, TYPE_FSI_OPB, UINT32_MAX);
+}
+
+static void fsi_opb_realize(BusState *bus, Error **errp)
+{
+    OPBus *opb = OP_BUS(bus);
+
     address_space_init(&opb->as, &opb->mr, TYPE_FSI_OPB);
 }
 
-static const TypeInfo opb_info = {
-    .name = TYPE_OP_BUS,
-    .parent = TYPE_BUS,
-    .instance_init = fsi_opb_init,
-    .instance_size = sizeof(OPBus),
-};
-
-static void fsi_opb_register_types(void)
+static void fsi_opb_unrealize(BusState *bus)
 {
-    type_register_static(&opb_info);
+    OPBus *opb = OP_BUS(bus);
+
+    address_space_destroy(&opb->as);
 }
 
-type_init(fsi_opb_register_types);
+static void fsi_opb_class_init(ObjectClass *klass, const void *data)
+{
+    BusClass *bc = BUS_CLASS(klass);
+
+    bc->realize = fsi_opb_realize;
+    bc->unrealize = fsi_opb_unrealize;
+}
+
+static const TypeInfo fsi_opb_types[] = {
+    {
+        .name = TYPE_OP_BUS,
+        .parent = TYPE_BUS,
+        .instance_init = fsi_opb_init,
+        .instance_size = sizeof(OPBus),
+        .class_init = fsi_opb_class_init,
+    }
+};
+
+DEFINE_TYPES(fsi_opb_types)

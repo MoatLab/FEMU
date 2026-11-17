@@ -40,6 +40,7 @@ enum vfio_user_command {
     VFIO_USER_DEVICE_RESET              = 13,
     VFIO_USER_DIRTY_PAGES               = 14,
     VFIO_USER_REGION_WRITE_MULTI        = 15,
+    VFIO_USER_DEVICE_FEATURE            = 16,
     VFIO_USER_MAX,
 };
 
@@ -209,7 +210,7 @@ typedef struct {
 typedef struct {
     VFIOUserHdr hdr;
     uint64_t offset;
-    uint32_t count;
+    uint64_t count;
     char data[];
 } VFIOUserDMARW;
 
@@ -238,5 +239,16 @@ typedef struct {
     uint64_t wr_cnt;
     VFIOUserWROne wrs[VFIO_USER_MULTI_MAX];
 } VFIOUserWRMulti;
+
+/*
+ * VFIO_USER_DEVICE_FEATURE
+ * imported from struct vfio_device_feature
+ */
+typedef struct {
+    VFIOUserHdr hdr;
+    uint32_t argsz;
+    uint32_t flags;
+    char data[];
+} VFIOUserDeviceFeature;
 
 #endif /* VFIO_USER_PROTOCOL_H */

@@ -330,7 +330,7 @@ static void process_options(int argc, char *argv[], bool pre_init_pass)
                 visit_free(v);
 
                 /* TODO Catch duplicate monitor IDs */
-                monitor_init(monitor, false, &error_fatal);
+                monitor_new(monitor, false, &error_fatal);
                 qapi_free_MonitorOptions(monitor);
                 break;
             }

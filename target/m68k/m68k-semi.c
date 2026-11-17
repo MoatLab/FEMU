@@ -22,13 +22,13 @@
  */
 
 #include "qemu/osdep.h"
-
+#include "exec/target_long.h"
 #include "cpu.h"
 #include "gdbstub/syscalls.h"
 #include "gdbstub/helpers.h"
 #include "semihosting/syscalls.h"
 #include "semihosting/uaccess.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "qemu/log.h"
 
 #define HOSTED_EXIT  0
@@ -45,35 +45,6 @@
 #define HOSTED_GETTIMEOFDAY 11
 #define HOSTED_ISATTY 12
 #define HOSTED_SYSTEM 13
-
-static int host_to_gdb_errno(int err)
-{
-#define E(X)  case E##X: return GDB_E##X
-    switch (err) {
-    E(PERM);
-    E(NOENT);
-    E(INTR);
-    E(BADF);
-    E(ACCES);
-    E(FAULT);
-    E(BUSY);
-    E(EXIST);
-    E(NODEV);
-    E(NOTDIR);
-    E(ISDIR);
-    E(INVAL);
-    E(NFILE);
-    E(MFILE);
-    E(FBIG);
-    E(NOSPC);
-    E(SPIPE);
-    E(ROFS);
-    E(NAMETOOLONG);
-    default:
-        return GDB_EUNKNOWN;
-    }
-#undef E
-}
 
 static void m68k_semi_u32_cb(CPUState *cs, uint64_t ret, int err)
 {

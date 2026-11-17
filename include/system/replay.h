@@ -15,7 +15,8 @@
 #include "qapi/qapi-types-misc.h"
 #include "qapi/qapi-types-run-state.h"
 #include "qapi/qapi-types-ui.h"
-#include "block/aio.h"
+#include "qemu/aio.h"
+#include "qemu/audio.h"
 
 /* replay clock kinds */
 enum ReplayClockKind {
@@ -125,7 +126,7 @@ void replay_bh_schedule_event(QEMUBH *bh);
 void replay_bh_schedule_oneshot_event(AioContext *ctx,
     QEMUBHFunc *cb, void *opaque);
 /*! Adds input event to the queue */
-void replay_input_event(QemuConsole *src, InputEvent *evt);
+void replay_input_event(QemuConsole *src, QemuInputEvent *evt);
 /*! Adds input sync event to the queue */
 void replay_input_sync_event(void);
 /*! Adds block layer event to the queue */
@@ -164,8 +165,15 @@ void replay_net_packet_event(ReplayNetState *rns, unsigned flags,
 
 /*! Saves/restores number of played samples of audio out operation. */
 void replay_audio_out(size_t *played);
-/*! Saves/restores recorded samples of audio in operation. */
-void replay_audio_in(size_t *recorded, void *samples, size_t *wpos, size_t size);
+/*
+ * Start saves/restores recorded samples of audio in operation.
+ * Must be called before replay_audio_in_sample_lr().
+ */
+void replay_audio_in_start(size_t *recorded);
+/* Saves/restores recorded samples. */
+void replay_audio_in_sample_lr(uint64_t *left, uint64_t *right);
+/* Finish saves/restores recorded samples. */
+void replay_audio_in_finish(void);
 
 /* VM state operations */
 

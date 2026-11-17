@@ -1,33 +1,20 @@
 /*
- *  process related system call shims and definitions
+ * process related system call shims and definitions
  *
- *  Copyright (c) 2013-14 Stacey D. Son
+ * Copyright (c) 2013-2014 Stacey D. Son
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
-
 #ifndef BSD_USER_FREEBSD_OS_PROC_H
 #define BSD_USER_FREEBSD_OS_PROC_H
 
 #include <sys/param.h>
 #include <sys/procctl.h>
 #include <sys/signal.h>
-#include <sys/types.h>
 #include <sys/procdesc.h>
 #include <sys/wait.h>
-#include <unistd.h>
 
+#include "accel/tcg/cpu-loop.h"
 #include "target_arch_cpu.h"
 
 pid_t safe_wait4(pid_t wpid, int *status, int options, struct rusage *rusage);

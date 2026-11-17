@@ -11,7 +11,7 @@
 #ifndef IMX_CCM_H
 #define IMX_CCM_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "qom/object.h"
 
 #define CKIL_FREQ 32768 /* nominal 32khz clock */
@@ -46,6 +46,7 @@ typedef enum  {
     CLK_EXT,
     CLK_HIGH_DIV,
     CLK_HIGH,
+    CLK_CAN,
 } IMXClk;
 
 struct IMXCCMClass {

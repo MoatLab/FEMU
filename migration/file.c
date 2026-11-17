@@ -93,36 +93,40 @@ out:
     return ret;
 }
 
-void file_start_outgoing_migration(MigrationState *s,
-                                   FileMigrationArgs *file_args, Error **errp)
+QIOChannel *file_connect_outgoing(MigrationState *s,
+                                  FileMigrationArgs *file_args, Error **errp)
 {
-    g_autoptr(QIOChannelFile) fioc = NULL;
+    QIOChannelFile *fioc = NULL;
     g_autofree char *filename = g_strdup(file_args->filename);
     uint64_t offset = file_args->offset;
-    QIOChannel *ioc;
+    QIOChannel *ioc = NULL;
 
     trace_migration_file_outgoing(filename);
 
     fioc = qio_channel_file_new_path(filename, O_CREAT | O_WRONLY, 0600, errp);
     if (!fioc) {
-        return;
+        goto out;
     }
 
     if (ftruncate(fioc->fd, offset)) {
         error_setg_errno(errp, errno,
                          "failed to truncate migration file to offset %" PRIx64,
                          offset);
-        return;
+        object_unref(OBJECT(fioc));
+        goto out;
     }
 
     outgoing_args.fname = g_strdup(filename);
 
     ioc = QIO_CHANNEL(fioc);
     if (offset && qio_channel_io_seek(ioc, offset, SEEK_SET, errp) < 0) {
-        return;
+        object_unref(OBJECT(fioc));
+        ioc = NULL;
+        goto out;
     }
     qio_channel_set_name(ioc, "migration-file-outgoing");
-    migration_channel_connect(s, ioc, NULL, NULL);
+out:
+    return ioc;
 }
 
 static gboolean file_accept_incoming_migration(QIOChannel *ioc,
@@ -173,7 +177,7 @@ static void file_create_incoming_channels(QIOChannel *ioc, char *filename,
     }
 }
 
-void file_start_incoming_migration(FileMigrationArgs *file_args, Error **errp)
+void file_connect_incoming(FileMigrationArgs *file_args, Error **errp)
 {
     g_autofree char *filename = g_strdup(file_args->filename);
     QIOChannelFile *fioc = NULL;
@@ -198,7 +202,7 @@ void file_start_incoming_migration(FileMigrationArgs *file_args, Error **errp)
 int file_write_ramblock_iov(QIOChannel *ioc, const struct iovec *iov,
                             int niov, MultiFDPages_t *pages, Error **errp)
 {
-    ssize_t ret = 0;
+    int ret = 0;
     int i, slice_idx, slice_num;
     uintptr_t base, next, offset;
     size_t len;
@@ -237,8 +241,8 @@ int file_write_ramblock_iov(QIOChannel *ioc, const struct iovec *iov,
             break;
         }
 
-        ret = qio_channel_pwritev(ioc, &iov[slice_idx], slice_num,
-                                  block->pages_offset + offset, errp);
+        ret = qio_channel_pwritev_all(ioc, &iov[slice_idx], slice_num,
+                                      block->pages_offset + offset, errp);
         if (ret < 0) {
             break;
         }
@@ -247,20 +251,21 @@ int file_write_ramblock_iov(QIOChannel *ioc, const struct iovec *iov,
         slice_num = 0;
     }
 
-    return (ret < 0) ? ret : 0;
+    return ret;
 }
 
 int multifd_file_recv_data(MultiFDRecvParams *p, Error **errp)
 {
+    ERRP_GUARD();
     MultiFDRecvData *data = p->data;
-    size_t ret;
+    int ret;
 
-    ret = qio_channel_pread(p->c, (char *) data->opaque,
-                            data->size, data->file_offset, errp);
-    if (ret != data->size) {
+    ret = qio_channel_pread_all(p->c, (char *) data->opaque,
+                                data->size, data->file_offset, errp);
+    if (ret != 0) {
         error_prepend(errp,
-                      "multifd recv (%u): read 0x%zx, expected 0x%zx",
-                      p->id, ret, data->size);
+                      "multifd recv (%u): ",
+                      p->id);
         return -1;
     }
 

@@ -11,7 +11,7 @@
 #include "qemu/cutils.h"
 #include "qemu/memalign.h"
 #include "qemu/error-report.h"
-#include "cpu.h"
+#include "target/ppc/cpu.h"
 #include "helper_regs.h"
 #include "hw/ppc/spapr.h"
 #include "mmu-hash64.h"

@@ -25,11 +25,12 @@
 #ifndef VIRTIO_BUS_H
 #define VIRTIO_BUS_H
 
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 #include "hw/virtio/virtio.h"
 #include "qom/object.h"
 
 #define TYPE_VIRTIO_BUS "virtio-bus"
+#define VIRTIO_QUEUE_SIZE_OVERRIDE "x-override-queue-size"
 typedef struct VirtioBusClass VirtioBusClass;
 typedef struct VirtioBusState VirtioBusState;
 DECLARE_OBJ_CHECKERS(VirtioBusState, VirtioBusClass,

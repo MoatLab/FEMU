@@ -14,6 +14,8 @@
 #ifdef CONFIG_USER_ONLY
 #include "qemu/interval-tree.h"
 #include "exec/target_page.h"
+#else
+#include "system/ram_addr.h"
 #endif
 
 /*
@@ -63,6 +65,7 @@ struct TranslationBlock {
      * arm: an extension of tb->flags,
      * s390x: instruction data for EXECUTE,
      * sparc: the next pc of the instruction queue (for delay slots).
+     * riscv: an extension of tb->flags,
      */
     uint64_t cs_base;
 
@@ -81,6 +84,7 @@ struct TranslationBlock {
 #define CF_NOIRQ         0x00010000 /* Generate an uninterruptible TB */
 #define CF_PCREL         0x00020000 /* Opcodes in TB are PC-relative */
 #define CF_BP_PAGE       0x00040000 /* Breakpoint present in code page */
+#define CF_STEP_ATOMIC   0x00080000 /* Running in cpu_exec_step_atomic */
 #define CF_CLUSTER_MASK  0xff000000 /* Top 8 bits are cluster ID */
 #define CF_CLUSTER_SHIFT 24
 

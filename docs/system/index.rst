@@ -39,5 +39,8 @@ or Hypervisor.Framework.
    multi-process
    confidential-guest-support
    igvm
+   nitro
+   whpx
    vm-templating
    sriov
+   qemu-colo

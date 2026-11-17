@@ -68,7 +68,7 @@ fixture_setup(TestFixture *fixture, gconstpointer data, gchar **envp)
     cmd = g_strdup_printf("%s%cqga%cqemu-ga -m unix-listen -t %s -p %s %s %s",
                           cwd, G_DIR_SEPARATOR, G_DIR_SEPARATOR,
                           fixture->test_dir, path,
-                          getenv("QTEST_LOG") ? "-v" : "",
+                          qtest_verbose("qga") ? "-v" : "",
                           extra_arg ?: "");
     g_shell_parse_argv(cmd, NULL, &argv, &error);
     g_assert_no_error(error);

@@ -19,10 +19,15 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/ctype.h"
+#include "qemu/qemu-print.h"
 #include "cpu.h"
+#include "target/riscv/tcg/csr.h"
 #include "cpu_bits.h"
 #include "monitor/monitor.h"
-#include "monitor/hmp-target.h"
+#include "monitor/hmp.h"
+#include "system/memory.h"
+#include "internals.h"
 
 #ifdef TARGET_RISCV64
 #define PTE_HEADER_FIELDS       "vaddr            paddr            "\
@@ -77,11 +82,13 @@ static void print_pte(Monitor *mon, int va_bits, target_ulong vaddr,
                    attr & PTE_D ? 'd' : '-');
 }
 
-static void walk_pte(Monitor *mon, hwaddr base, target_ulong start,
+static void walk_pte(Monitor *mon, AddressSpace *as,
+                     hwaddr base, target_ulong start,
                      int level, int ptidxbits, int ptesize, int va_bits,
                      target_ulong *vbase, hwaddr *pbase, hwaddr *last_paddr,
                      target_ulong *last_size, int *last_attr)
 {
+    const MemTxAttrs attrs = MEMTXATTRS_UNSPECIFIED;
     hwaddr pte_addr;
     hwaddr paddr;
     target_ulong last_start = -1;
@@ -100,7 +107,7 @@ static void walk_pte(Monitor *mon, hwaddr base, target_ulong start,
 
     for (idx = 0; idx < (1UL << ptidxbits); idx++) {
         pte_addr = base + idx * ptesize;
-        cpu_physical_memory_read(pte_addr, &pte, ptesize);
+        address_space_read(as, pte_addr, attrs, &pte, ptesize);
 
         paddr = (hwaddr)(pte >> PTE_PPN_SHIFT) << PGSHIFT;
         attr = pte & 0xff;
@@ -132,7 +139,7 @@ static void walk_pte(Monitor *mon, hwaddr base, target_ulong start,
                 *last_size = pgsize;
             } else {
                 /* pointer to the next level of the page table */
-                walk_pte(mon, paddr, start, level - 1, ptidxbits, ptesize,
+                walk_pte(mon, as, paddr, start, level - 1, ptidxbits, ptesize,
                          va_bits, vbase, pbase, last_paddr,
                          last_size, last_attr);
             }
@@ -145,6 +152,7 @@ static void walk_pte(Monitor *mon, hwaddr base, target_ulong start,
 
 static void mem_info_svxx(Monitor *mon, CPUArchState *env)
 {
+    AddressSpace *as = env_cpu(env)->as;
     int levels, ptidxbits, ptesize, vm, va_bits;
     hwaddr base;
     target_ulong vbase;
@@ -199,7 +207,7 @@ static void mem_info_svxx(Monitor *mon, CPUArchState *env)
     last_attr = 0;
 
     /* walk page tables, starting from address 0 */
-    walk_pte(mon, base, 0, levels - 1, ptidxbits, ptesize, va_bits,
+    walk_pte(mon, as, base, 0, levels - 1, ptidxbits, ptesize, va_bits,
              &vbase, &pbase, &last_paddr, &last_size, &last_attr);
 
     /* don't forget the last one */
@@ -236,3 +244,140 @@ void hmp_info_mem(Monitor *mon, const QDict *qdict)
 
     mem_info_svxx(mon, env);
 }
+
+#ifdef CONFIG_TCG
+static bool reg_is_ulong_integer(CPURISCVState *env, const char *name,
+                                 target_ulong *val, bool is_gprh)
+{
+    const char * const *reg_names;
+    uint64_t *vals;
+
+    if (is_gprh) {
+        reg_names = riscv_int_regnamesh;
+        vals = env->gprh;
+    } else {
+        reg_names = riscv_int_regnames;
+        vals = env->gpr;
+    }
+
+    for (int i = 0; i < 32; i++) {
+        g_auto(GStrv) reg_name = g_strsplit(reg_names[i], "/", 2);
+
+        g_assert(reg_name[0]);
+        g_assert(reg_name[1]);
+
+        if (g_ascii_strcasecmp(reg_name[0], name) == 0 ||
+            g_ascii_strcasecmp(reg_name[1], name) == 0) {
+            *val = vals[i];
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool reg_is_u64_fpu(CPURISCVState *env, const char *name, uint64_t *val)
+{
+    if (qemu_tolower(name[0]) != 'f') {
+        return false;
+    }
+
+    for (int i = 0; i < 32; i++) {
+        g_auto(GStrv) reg_name = g_strsplit(riscv_fpr_regnames[i], "/", 2);
+
+        g_assert(reg_name[0]);
+        g_assert(reg_name[1]);
+
+        if (g_ascii_strcasecmp(reg_name[0], name) == 0 ||
+            g_ascii_strcasecmp(reg_name[1], name) == 0) {
+            *val = env->fpr[i];
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool reg_is_vreg(const char *name)
+{
+    if (qemu_tolower(name[0]) != 'v' || strlen(name) > 3) {
+        return false;
+    }
+
+    for (int i = 0; i < 32; i++) {
+        if (g_ascii_strcasecmp(name, riscv_rvv_regnames[i]) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+int riscv_monitor_get_register_legacy(CPUState *cs, const char *name,
+                                      int64_t *pval)
+{
+    RISCVCPU *hart = RISCV_CPU(cs);
+    CPURISCVState *env = cpu_env(cs);
+    target_ulong val = 0;
+    uint64_t val64 = 0;
+    int i;
+
+    if (reg_is_ulong_integer(env, name, &val, false) ||
+        reg_is_ulong_integer(env, name, &val, true)) {
+        *pval = riscv_cpu_is_32bit(hart) ? (int32_t)val : val;
+        return 0;
+    }
+
+    if (reg_is_u64_fpu(env, name, &val64)) {
+        *pval = val64;
+        return 0;
+    }
+
+    if (reg_is_vreg(name)) {
+        if (!riscv_cpu_cfg(env)->ext_zve32x) {
+            return -EINVAL;
+        }
+
+        qemu_printf("Unable to print the value of vector "
+                    "vreg '%s' from this API\n", name);
+
+        /*
+         * We're returning 0 because returning -EINVAL triggers
+         * an 'unknown register' message in exp_unary() later,
+         * which feels ankward after our own error message.
+         */
+        *pval = 0;
+        return 0;
+    }
+
+    for (i = 0; i < ARRAY_SIZE(csr_ops); i++) {
+        RISCVException res;
+        int csrno = i;
+
+        /*
+         * Early skip when possible since we're going
+         * through a lot of NULL entries.
+         */
+        if (csr_ops[csrno].predicate == NULL) {
+            continue;
+        }
+
+        if (g_ascii_strcasecmp(csr_ops[csrno].name, name) != 0) {
+            continue;
+        }
+
+        res = riscv_csrrw_debug(env, csrno, &val, 0, 0);
+
+        /*
+         * Rely on the smode, hmode, etc, predicates within csr.c
+         * to do the filtering of the registers that are present.
+         */
+        if (res == RISCV_EXCP_NONE) {
+            *pval = riscv_cpu_is_32bit(hart) ? (int32_t)val : val;
+            return 0;
+        }
+    }
+
+    return -EINVAL;
+}
+#endif

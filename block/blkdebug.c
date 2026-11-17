@@ -95,6 +95,7 @@ typedef struct BlkdebugRule {
             int immediately;
             int once;
             int64_t offset;
+            int64_t delay_ns;
         } inject;
         struct {
             int new_state;
@@ -143,6 +144,10 @@ static QemuOptsList inject_error_opts = {
         {
             .name = "immediately",
             .type = QEMU_OPT_BOOL,
+        },
+        {
+            .name = "delay-ns",
+            .type = QEMU_OPT_NUMBER,
         },
         { /* end of list */ }
     },
@@ -216,6 +221,8 @@ static int add_rule(void *opaque, QemuOpts *opts, Error **errp)
         rule->options.inject.once  = qemu_opt_get_bool(opts, "once", 0);
         rule->options.inject.immediately =
             qemu_opt_get_bool(opts, "immediately", 0);
+        rule->options.inject.delay_ns =
+            qemu_opt_get_number(opts, "delay-ns", 0);
         sector = qemu_opt_get_number(opts, "sector", -1);
         rule->options.inject.offset =
             sector == -1 ? -1 : sector * BDRV_SECTOR_SIZE;
@@ -288,7 +295,7 @@ static int read_config(BDRVBlkdebugState *s, const char *filename,
     if (filename) {
         f = fopen(filename, "r");
         if (f == NULL) {
-            error_setg_errno(errp, errno, "Could not read blkdebug config file");
+            error_setg_file_open(errp, errno, filename);
             return -errno;
         }
 
@@ -591,9 +598,10 @@ static int coroutine_fn rule_check(BlockDriverState *bs, uint64_t offset,
                                    uint64_t bytes, BlkdebugIOType iotype)
 {
     BDRVBlkdebugState *s = bs->opaque;
-    BlkdebugRule *rule = NULL;
+    BlkdebugRule *rule;
     int error;
     bool immediately;
+    int64_t delay_ns;
 
     qemu_mutex_lock(&s->lock);
     QSIMPLEQ_FOREACH(rule, &s->active_rules, active_next) {
@@ -608,13 +616,14 @@ static int coroutine_fn rule_check(BlockDriverState *bs, uint64_t offset,
         }
     }
 
-    if (!rule || !rule->options.inject.error) {
+    if (!rule) {
         qemu_mutex_unlock(&s->lock);
         return 0;
     }
 
     immediately = rule->options.inject.immediately;
     error = rule->options.inject.error;
+    delay_ns  = rule->options.inject.delay_ns;
 
     if (rule->options.inject.once) {
         QSIMPLEQ_REMOVE(&s->active_rules, rule, BlkdebugRule, active_next);
@@ -622,6 +631,10 @@ static int coroutine_fn rule_check(BlockDriverState *bs, uint64_t offset,
     }
 
     qemu_mutex_unlock(&s->lock);
+
+    if (delay_ns) {
+        qemu_co_sleep_ns(QEMU_CLOCK_REALTIME, delay_ns);
+    }
     if (!immediately) {
         aio_co_schedule(qemu_get_current_aio_context(), qemu_coroutine_self());
         qemu_coroutine_yield();

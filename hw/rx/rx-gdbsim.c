@@ -22,12 +22,12 @@
 #include "qemu/guest-random.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
-#include "hw/loader.h"
+#include "hw/core/loader.h"
 #include "hw/rx/rx62n.h"
 #include "system/qtest.h"
 #include "system/device_tree.h"
 #include "system/reset.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "qom/object.h"
 
 /* Same address of GDB integrated simulator */
@@ -63,7 +63,7 @@ static void rx_load_image(RXCPU *cpu, const char *filename,
     long kernel_size;
     int i;
 
-    kernel_size = load_image_targphys(filename, start, size);
+    kernel_size = load_image_targphys(filename, start, size, NULL);
     if (kernel_size < 0) {
         fprintf(stderr, "qemu: could not load kernel '%s'\n", filename);
         exit(1);

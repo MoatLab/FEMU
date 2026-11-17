@@ -20,14 +20,14 @@
 #include "qemu/module.h"
 #include "qapi/error.h"
 #include "trace.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
-#include "hw/registerfields.h"
+#include "hw/core/registerfields.h"
 #include "chardev/char-fe.h"
 #include "chardev/char-serial.h"
 #include "hw/char/cmsdk-apb-uart.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties-system.h"
 
 REG32(DATA, 0)
 REG32(STATE, 4)
@@ -159,6 +159,10 @@ static uint64_t uart_read(void *opaque, hwaddr offset, unsigned size)
     switch (offset) {
     case A_DATA:
         r = s->rxbuf;
+        if (!(s->ctrl & R_CTRL_RX_EN_MASK)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "CMSDK APB UART: receive data read with Rx disabled\n");
+        }
         s->state &= ~R_STATE_RXFULL_MASK;
         cmsdk_apb_uart_update(s);
         qemu_chr_fe_accept_input(&s->chr);
@@ -232,10 +236,7 @@ buffer_drained:
 
 static void uart_cancel_transmit(CMSDKAPBUART *s)
 {
-    if (s->watch_tag) {
-        g_source_remove(s->watch_tag);
-        s->watch_tag = 0;
-    }
+    g_clear_handle_id(&s->watch_tag, g_source_remove);
 }
 
 static void uart_write(void *opaque, hwaddr offset, uint64_t value,
@@ -248,6 +249,10 @@ static void uart_write(void *opaque, hwaddr offset, uint64_t value,
     switch (offset) {
     case A_DATA:
         s->txbuf = value;
+        if (!(s->ctrl & R_CTRL_TX_EN_MASK)) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "CMSDK APB UART: transmit data write with Tx disabled\n");
+        }
         if (s->state & R_STATE_TXFULL_MASK) {
             /* Buffer already full -- note the overrun and let the
              * existing pending transmit callback handle the new char.

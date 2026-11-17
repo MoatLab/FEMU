@@ -25,7 +25,7 @@
 #ifndef QEMU_MAIN_LOOP_H
 #define QEMU_MAIN_LOOP_H
 
-#include "block/aio.h"
+#include "qemu/aio.h"
 #include "qom/object.h"
 #include "system/event-loop-base.h"
 
@@ -303,6 +303,24 @@ bool qemu_in_guarded_io(void);
 uint64_t qemu_guarded_io_section(void);
 
 /**
+ * mutex_is_bql:
+ *
+ * @mutex: the mutex pointer
+ *
+ * Returns whether the mutex is the BQL.
+ */
+bool mutex_is_bql(QemuMutex *mutex);
+
+/**
+ * bql_update_status:
+ *
+ * @locked: update status on whether the BQL is locked
+ *
+ * NOTE: this should normally only be invoked when the status changed.
+ */
+void bql_update_status(bool locked);
+
+/**
  * bql_block: Allow/deny releasing the BQL
  *
  * The Big QEMU Lock (BQL) is used to provide interior mutability to
@@ -445,7 +463,7 @@ void qemu_cond_timedwait_bql(QemuCond *cond, int ms);
 #define qemu_bh_new(cb, opaque) \
     qemu_bh_new_full((cb), (opaque), (stringify(cb)), NULL)
 QEMUBH *qemu_bh_new_full(QEMUBHFunc *cb, void *opaque, const char *name,
-                         MemReentrancyGuard *reentrancy_guard);
+                         struct MemReentrancyGuard *reentrancy_guard);
 void qemu_bh_schedule_idle(QEMUBH *bh);
 
 enum {

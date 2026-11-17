@@ -71,10 +71,16 @@ static inline uint64_t decode_bytes(CPUX86State *env, struct x86_decode *decode,
         VM_PANIC_EX("%s invalid size %d\n", __func__, size);
         break;
     }
-    target_ulong va  = linear_rip(env_cpu(env), env->eip) + decode->len;
-    emul_ops->read_mem(env_cpu(env), &val, va, size);
+
+    /* copy the bytes from the instruction stream, if available */
+    if (decode->stream && decode->len + size <= decode->stream->len) {
+        memcpy(&val, decode->stream->bytes + decode->len, size);
+    } else {
+        target_ulong va = linear_rip(env_cpu(env), env->eip) + decode->len;
+        x86_read_mem(env_cpu(env), &val, va, size);
+    }
     decode->len += size;
-    
+
     return val;
 }
 
@@ -1689,7 +1695,7 @@ void *get_reg_ref(CPUX86State *env, int reg, int rex_present,
 target_ulong get_reg_val(CPUX86State *env, int reg, int rex_present,
                          int is_extended, int size)
 {
-    target_ulong val = 0;
+    uint64_t val = 0;
     memcpy(&val,
            get_reg_ref(env, reg, rex_present, is_extended, size),
            size);
@@ -1845,6 +1851,12 @@ static void decode_prefix(CPUX86State *env, struct x86_decode *decode)
         case PREFIX_SS_SEG_OVERRIDE:
         case PREFIX_DS_SEG_OVERRIDE:
         case PREFIX_ES_SEG_OVERRIDE:
+            if (x86_is_long_mode(env_cpu(env))) {
+                /* ES/CS/SS/DS segment overrides are ignored in long mode */
+                decode->rex.rex = 0;
+                break;
+            }
+            /* fall through when not in long mode */
         case PREFIX_FS_SEG_OVERRIDE:
         case PREFIX_GS_SEG_OVERRIDE:
             decode->segment_override = byte;
@@ -2076,9 +2088,8 @@ static void decode_opcodes(CPUX86State *env, struct x86_decode *decode)
     }
 }
 
-uint32_t decode_instruction(CPUX86State *env, struct x86_decode *decode)
+static uint32_t decode_opcode(CPUX86State *env, struct x86_decode *decode)
 {
-    memset(decode, 0, sizeof(*decode));
     decode_prefix(env, decode);
     set_addressing_size(env, decode);
     set_operand_size(env, decode);
@@ -2086,6 +2097,20 @@ uint32_t decode_instruction(CPUX86State *env, struct x86_decode *decode)
     decode_opcodes(env, decode);
 
     return decode->len;
+}
+
+uint32_t decode_instruction(CPUX86State *env, struct x86_decode *decode)
+{
+    memset(decode, 0, sizeof(*decode));
+
+    return decode_opcode(env, decode);
+}
+
+uint32_t decode_instruction_stream(CPUX86State *env, struct x86_decode *decode,
+                                   struct x86_insn_stream *stream)
+{
+    decode->stream = stream;
+    return decode_opcode(env, decode);
 }
 
 void init_decoder(void)

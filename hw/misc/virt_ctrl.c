@@ -5,8 +5,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/qdev-properties.h"
-#include "hw/sysbus.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "trace.h"
@@ -43,7 +43,7 @@ static uint64_t virt_ctrl_read(void *opaque, hwaddr addr, unsigned size)
         break;
     }
 
-    trace_virt_ctrl_write(s, addr, size, value);
+    trace_virt_ctrl_read(s, addr, size, value);
 
     return value;
 }

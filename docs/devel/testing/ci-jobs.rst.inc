@@ -91,12 +91,6 @@ Maintainer controlled job variables
 The following variables may be set when defining a job in the
 CI configuration file.
 
-QEMU_JOB_CIRRUS
-~~~~~~~~~~~~~~~
-
-The job makes use of Cirrus CI infrastructure, requiring the
-configuration setup for cirrus-run to be present in the repository
-
 QEMU_JOB_OPTIONAL
 ~~~~~~~~~~~~~~~~~
 
@@ -130,6 +124,13 @@ QEMU_JOB_FUNCTIONAL
 ~~~~~~~~~~~~~~~~~~~
 
 The job runs the functional test suite
+
+QEMU_JOB_MACOS
+~~~~~~~~~~~~~~
+
+The job requires access to the macOS shared runners, which are
+only available to Premium/Ultimate tiers. This includes OSS project
+members, but not forks.
 
 Contributor controlled runtime variables
 ----------------------------------------
@@ -168,18 +169,17 @@ If you've got access to an aarch64 host that can be used as a gitlab-CI
 runner, you can set this variable to enable the tests that require this
 kind of host. The runner should be tagged with "aarch64".
 
-AARCH32_RUNNER_AVAILABLE
-~~~~~~~~~~~~~~~~~~~~~~~~
-If you've got access to an armhf host or an arch64 host that can run
-aarch32 EL0 code to be used as a gitlab-CI runner, you can set this
-variable to enable the tests that require this kind of host. The
-runner should be tagged with "aarch32".
-
 S390X_RUNNER_AVAILABLE
 ~~~~~~~~~~~~~~~~~~~~~~
 If you've got access to an IBM Z host that can be used as a gitlab-CI
 runner, you can set this variable to enable the tests that require this
 kind of host. The runner should be tagged with "s390x".
+
+PPC64LE_RUNNER_AVAILABLE
+~~~~~~~~~~~~~~~~~~~~~~~~
+If you've got access to an PPC64LE host that can be used as a gitlab-CI
+runner, you can set this variable to enable the tests that require this
+kind of host. The runner should be tagged with "ppc64le".
 
 CCACHE_DISABLE
 ~~~~~~~~~~~~~~

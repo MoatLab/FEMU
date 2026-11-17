@@ -172,7 +172,7 @@ fi
 # some defaults, based on the host environment
 
 # default parameters
-container_engine="auto"
+container_command=""
 cpu=""
 cross_compile="no"
 cross_prefix=""
@@ -181,6 +181,10 @@ EXTRA_CFLAGS=""
 EXTRA_CXXFLAGS=""
 EXTRA_OBJCFLAGS=""
 EXTRA_LDFLAGS=""
+
+# The value is propagated to Emscripten's "-sMEMORY64" flag.
+# https://emscripten.org/docs/tools_reference/settings_reference.html#memory64
+wasm64_memory64=1
 
 # Default value for a variable defining feature "foo".
 #  * foo="no"  feature will only be used if --enable-foo arg is given
@@ -239,10 +243,11 @@ for opt do
   ;;
   --without-default-features) default_feature="no"
   ;;
+  --wasm64-32bit-address-limit) wasm64_memory64="2"
+  ;;
   esac
 done
 
-default_cflags='-O2 -g'
 git_submodules_action="update"
 docs="auto"
 EXESUF=""
@@ -365,8 +370,9 @@ elif check_define __APPLE__; then
   host_os=darwin
 elif check_define EMSCRIPTEN ; then
   host_os=emscripten
-  cpu=wasm32
   cross_compile="yes"
+elif check_define __GNU__; then
+  host_os=gnu
 else
   # This is a fatal error, but don't report it yet, because we
   # might be going to just print the --help text, or it might
@@ -377,8 +383,6 @@ fi
 if test ! -z "$cpu" ; then
   # command line argument
   :
-elif check_define __i386__ ; then
-  cpu="i386"
 elif check_define __x86_64__ ; then
   if check_define __ILP32__ ; then
     cpu="x32"
@@ -391,40 +395,22 @@ elif check_define __sparc__ ; then
   else
     cpu="sparc"
   fi
-elif check_define _ARCH_PPC ; then
-  if check_define _ARCH_PPC64 ; then
-    if check_define _LITTLE_ENDIAN ; then
-      cpu="ppc64le"
-    else
-      cpu="ppc64"
-    fi
+elif check_define _ARCH_PPC64 ; then
+  if check_define _LITTLE_ENDIAN ; then
+    cpu="ppc64le"
   else
-    cpu="ppc"
+    cpu="ppc64"
   fi
-elif check_define __mips__ ; then
-  if check_define __mips64 ; then
-    cpu="mips64"
-  else
-    cpu="mips"
-  fi
-elif check_define __s390__ ; then
-  if check_define __s390x__ ; then
-    cpu="s390x"
-  else
-    cpu="s390"
-  fi
-elif check_define __riscv ; then
-  if check_define _LP64 ; then
-    cpu="riscv64"
-  else
-    cpu="riscv32"
-  fi
-elif check_define __arm__ ; then
-  cpu="arm"
+elif check_define __s390x__ ; then
+  cpu="s390x"
+elif check_define __riscv && check_define _LP64 ; then
+  cpu="riscv64"
 elif check_define __aarch64__ ; then
   cpu="aarch64"
 elif check_define __loongarch64 ; then
   cpu="loongarch64"
+elif check_define EMSCRIPTEN ; then
+  error_exit "wasm64 must be specified to the cpu flag"
 else
   # Using uname is really broken, but it is just a fallback for architectures
   # that are going to use TCI anyway
@@ -450,40 +436,12 @@ case "$cpu" in
     linux_arch=arm64
     ;;
 
-  armv*b|armv*l|arm)
-    cpu=arm
-    host_arch=arm
-    ;;
-
-  i386|i486|i586|i686)
-    cpu="i386"
-    host_arch=i386
-    linux_arch=x86
-    CPU_CFLAGS="-m32"
-    ;;
-
   loongarch*)
     cpu=loongarch64
     host_arch=loongarch64
     linux_arch=loongarch
     ;;
 
-  mips64*|mipsisa64*)
-    cpu=mips64
-    host_arch=mips
-    linux_arch=mips
-    ;;
-  mips*)
-    cpu=mips
-    host_arch=mips
-    linux_arch=mips
-    ;;
-
-  ppc)
-    host_arch=ppc
-    linux_arch=powerpc
-    CPU_CFLAGS="-m32"
-    ;;
   ppc64)
     host_arch=ppc64
     linux_arch=powerpc
@@ -496,15 +454,11 @@ case "$cpu" in
     CPU_CFLAGS="-m64 -mlittle-endian"
     ;;
 
-  riscv32 | riscv64)
-    host_arch=riscv
+  riscv64)
+    host_arch=riscv64
     linux_arch=riscv
     ;;
 
-  s390)
-    linux_arch=s390
-    CPU_CFLAGS="-m31"
-    ;;
   s390x)
     host_arch=s390x
     linux_arch=s390
@@ -532,8 +486,8 @@ case "$cpu" in
     linux_arch=x86
     CPU_CFLAGS="-m64"
     ;;
-  wasm32)
-    CPU_CFLAGS="-m32"
+  wasm64)
+    CPU_CFLAGS="-m64 -sMEMORY64=$wasm64_memory64"
     ;;
 esac
 
@@ -558,8 +512,8 @@ first_python=
 if test -z "${PYTHON}"; then
     # A bare 'python' is traditionally python 2.x, but some distros
     # have it as python 3.x, so check in both places.
-    for binary in python3 python python3.13 python3.12 python3.11 \
-                          python3.10 python3.9 ; do
+    for binary in python3 python python3.14 python3.13 python3.12 \
+                          python3.11 python3.10 python3.9 ; do
         if has "$binary"; then
             python=$(command -v "$binary")
             if check_py_version "$python"; then
@@ -738,7 +692,6 @@ for opt do
       meson_option_parse --enable-debug-graph-lock ""
       meson_option_parse --enable-debug-mutex ""
       meson_option_add -Doptimization=0
-      default_cflags='-O0 -g'
   ;;
   --disable-tcg) tcg="disabled"
   ;;
@@ -781,7 +734,7 @@ for opt do
   ;;
   --disable-containers) use_containers="no"
   ;;
-  --container-engine=*) container_engine="$optarg"
+  --container-command=*) container_command="$optarg"
   ;;
   --rust-target-triple=*) rust_target_triple="$optarg"
   ;;
@@ -790,6 +743,8 @@ for opt do
   --enable-rust) rust=enabled
   ;;
   --disable-rust) rust=disabled
+  ;;
+  --wasm64-32bit-address-limit)
   ;;
   # everything else has the same name in configure and meson
   --*) meson_option_parse "$opt" "$optarg"
@@ -914,8 +869,10 @@ Advanced options (experts only):
   --enable-debug           enable common debug build options
   --cpu=CPU                Build for host CPU [$cpu]
   --disable-containers     don't use containers for cross-building
-  --container-engine=TYPE  which container engine to use [$container_engine]
+  --container-command=CMD  which container command to use [autodetect]
   --gdb=GDB-path           gdb to use for gdbstub tests [$gdb_bin]
+  --wasm64-32bit-address-limit Restrict wasm64 address space to 32-bit (default
+                               is to use the whole 64-bit range).
 EOF
   meson_options_help
 cat << EOF
@@ -956,7 +913,6 @@ if ! check_py_version "$python"; then
   error_exit "Cannot use '$python', Python >= 3.9 is required." \
              "Use --python=/path/to/python to specify a supported Python." \
              "Maybe try:" \
-             "  openSUSE Leap 15.3+: zypper install python39" \
              "  CentOS: dnf install python3.12"
 fi
 
@@ -990,7 +946,9 @@ fi
 python="$python -B"
 mkvenv="$python ${source_path}/python/scripts/mkvenv.py"
 
-# Finish preparing the virtual environment using vendored .whl files
+# Finish preparing the virtual environment using vendored .whl files.
+# Even if PyPI is allowed, we disallow it here to force installation
+# from our preferred vendored versions.
 
 $mkvenv ensuregroup --dir "${source_path}/python/wheels" \
      ${source_path}/pythondeps.toml meson || exit 1
@@ -1000,14 +958,38 @@ $mkvenv ensuregroup --dir "${source_path}/python/wheels" \
 # We ignore PATH completely here: we want to use the venv's Meson
 # *exclusively*.
 
-meson="$(cd pyvenv/bin; pwd)/meson"
+# for msys2
+get_pwd() {
+    if pwd -W >/dev/null 2>&1; then
+        pwd -W
+    else
+        pwd
+    fi
+}
 
-# Conditionally ensure Sphinx is installed.
+meson="$(cd pyvenv/bin; get_pwd)/meson"
+if [ -f "$meson$EXESUF" ]; then
+  meson="$meson$EXESUF"
+fi
+
+# On Haiku, meson might show up in a "non-packaged" subfolder instead, see
+# https://github.com/haiku/haiku/blob/r1beta5/docs/user/storage/storageintro.dox
+if test "$host_os" = "haiku" && test ! -e "$meson" ; then
+    meson="$(cd pyvenv/non-packaged/bin; get_pwd)/meson"
+fi
 
 mkvenv_online_flag=""
 if test "$download" = "enabled" ; then
     mkvenv_online_flag=" --online"
 fi
+
+# Unconditionally install our tooling group. PyPI is allowed if enabled here.
+
+$mkvenv ensuregroup $mkvenv_online_flag \
+        --dir "${source_path}/python/wheels" \
+        ${source_path}/pythondeps.toml tooling || exit 1
+
+# Conditionally ensure Sphinx is installed.
 
 if test "$docs" != "disabled" ; then
     if ! $mkvenv ensuregroup \
@@ -1084,7 +1066,7 @@ static THREAD int tls_var;
 int main(void) { return tls_var; }
 EOF
 
-if test "$host_os" = windows || test "$host_os" = haiku; then
+if test "$host_os" = windows ; then
   if test "$pie" = "yes"; then
     error_exit "PIE not available due to missing OS support"
   fi
@@ -1184,12 +1166,12 @@ fi
 # detect rust triple
 
 meson_version=$($meson --version)
-if test "$rust" != disabled && ! version_ge "$meson_version" 1.8.1; then
+if test "$rust" != disabled && ! version_ge "$meson_version" 1.10.0; then
   if test "$rust" = enabled; then
     $mkvenv ensuregroup --dir "${source_path}/python/wheels" \
          ${source_path}/pythondeps.toml meson-rust || exit 1
   else
-    echo "Rust needs Meson 1.8.1, disabling" 2>&1
+    echo "Rust needs Meson 1.10.0, disabling" 2>&1
     rust=disabled
   fi
 fi
@@ -1204,8 +1186,9 @@ fi
 if test "$rust" != disabled && test -z "$rust_target_triple"; then
   # arch and os generally matches between meson and rust
   rust_arch=$host_arch
+  # default to host vendor
+  rust_vendor=$(echo "$rust_host_triple" | cut -d'-' -f2)
   rust_os=$host_os
-  rust_machine=unknown
   rust_osvariant=
 
   # tweak rust_os if needed; also, machine and variant depend on the OS
@@ -1213,7 +1196,7 @@ if test "$rust" != disabled && test -z "$rust_target_triple"; then
   case "$host_os" in
   darwin)
     # e.g. aarch64-apple-darwin
-    rust_machine=apple
+    rust_vendor=apple
     ;;
 
   linux)
@@ -1247,11 +1230,6 @@ EOF
         rust_osvariant=${rust_osvariant}eabi
       fi
       ;;
-
-    mips64)
-      # e.g. mips64-unknown-linux-gnuabi64
-      rust_osvariant=${rust_osvariant}abi64
-      ;;
     esac
     ;;
 
@@ -1261,13 +1239,13 @@ EOF
     ;;
 
   sunos)
-    rust_machine=pc
+    rust_vendor=pc
     rust_os=solaris
     ;;
 
   windows)
     # e.g. aarch64-pc-windows-gnullvm, x86_64-pc-windows-gnu (MSVC not supported)
-    rust_machine=pc
+    rust_vendor=pc
     if test "$host_arch" = aarch64; then
       rust_osvariant=gnullvm
     else
@@ -1284,13 +1262,7 @@ EOF
     test "$rust_arch" = arm && test "$rust_os" != linux && rust_arch=armv7
     ;;
 
-  mips)
-    # preserve ISA version (mipsisa64r6 etc.) and include endianness
-    rust_arch=${raw_cpu%el}
-    test "$bigendian" = no && rust_arch=${rust_arch}el
-    ;;
-
-  riscv32|riscv64)
+  riscv64)
     # e.g. riscv64gc-unknown-linux-gnu, but riscv64-linux-android
     test "$android" = no && rust_arch=${rust_arch}gc
     ;;
@@ -1298,7 +1270,7 @@ EOF
   sparc64)
     if test "$rust_os" = solaris; then
       rust_arch=sparcv9
-      rust_machine=sun
+      rust_vendor=sun
     fi
     ;;
 
@@ -1312,25 +1284,19 @@ EOF
     # e.g. aarch64-linux-android
     rust_target_triple=$rust_arch-$rust_os-$rust_osvariant
   else
-    rust_target_triple=$rust_arch-$rust_machine-$rust_os${rust_osvariant:+-$rust_osvariant}
+    rust_target_triple=$rust_arch-$rust_vendor-$rust_os${rust_osvariant:+-$rust_osvariant}
   fi
 fi
 
 ##########################################
 # functions to probe cross compilers
 
-container="no"
-runc=""
-if test $use_containers = "yes" && (has "docker" || has "podman"); then
-    case $($python "$source_path"/tests/docker/docker.py --engine "$container_engine" probe) in
-        *docker) container=docker ;;
-        podman) container=podman ;;
-        no) container=no ;;
-    esac
-    if test "$container" != "no"; then
-        docker_py="$python $source_path/tests/docker/docker.py --engine $container"
-        runc=$container
-    fi
+if test "$container_command" = ""; then
+    container_command=$($python "$source_path"/tests/docker/docker.py probe)
+    test "$container_command" = "no" && container_command=""
+fi
+if test $use_containers = "yes" && test "$container_command" != ""; then
+    docker_py="$python $source_path/tests/docker/docker.py --command $container_command"
 fi
 
 # cross compilers defaults, can be overridden with --cross-cc-ARCH
@@ -1449,7 +1415,7 @@ probe_target_compiler() {
   esac
 
   for host in $container_hosts; do
-    test "$container" != no || continue
+    test "$container_command" != "" || continue
     test "$host" = "$cpu" || continue
     case $target_arch in
       # debian-all-test-cross architectures
@@ -1458,7 +1424,7 @@ probe_target_compiler() {
         container_image=debian-all-test-cross
         container_cross_prefix=aarch64-linux-gnu-
         ;;
-      hppa|m68k|mips|riscv64|sparc64)
+      alpha|hppa|m68k|mips|mipsel|riscv64|sh4|sparc64)
         container_image=debian-all-test-cross
         ;;
       mips64)
@@ -1468,14 +1434,6 @@ probe_target_compiler() {
       ppc|ppc64|ppc64le)
         container_image=debian-all-test-cross
         container_cross_prefix=powerpc${target_arch#ppc}-linux-gnu-
-        ;;
-
-      # debian-legacy-test-cross architectures (need Debian 11)
-      # - libc6.1-dev-alpha-cross: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1054412
-      # - sh4-linux-user: binaries don't run with bookworm compiler
-
-      alpha|sh4)
-        container_image=debian-legacy-test-cross
         ;;
 
       # architectures with individual containers
@@ -1542,7 +1500,6 @@ probe_target_compiler() {
         aarch64_be:aarch64 | \
         armeb:arm | \
         i386:x86_64 | \
-        mips*:mips64 | \
         ppc*:ppc64 | \
         sparc:sparc64 | \
         "$cpu:$cpu")
@@ -1646,6 +1603,7 @@ probe_target_compiler() {
 }
 
 write_target_makefile() {
+  echo "PYTHON=$python"
   echo "EXTRA_CFLAGS=$target_cflags"
   if test -z "$target_cc" && test -z "$target_as"; then
     test -z "$container_image" && error_exit "Internal error: could not find cross compiler for $1?"
@@ -1778,8 +1736,8 @@ echo all: >> $config_host_mak
 echo "SRC_PATH=$source_path" >> $config_host_mak
 echo "TARGET_DIRS=$target_list" >> $config_host_mak
 echo "GDB=$gdb_bin" >> $config_host_mak
-if test "$container" != no; then
-    echo "RUNC=$runc" >> $config_host_mak
+if test "$container_command" != ""; then
+    echo "CONTAINER_COMMAND=$container_command" >> $config_host_mak
 fi
 echo "SUBDIRS=$subdirs" >> $config_host_mak
 if test "$rust" != disabled; then
@@ -1804,7 +1762,7 @@ if test "$plugins" = "yes" ; then
 fi
 echo "PYTHON=$python" >> tests/tcg/$config_host_mak
 
-tcg_tests_targets=
+tcg_tests_with_compilers=
 for target in $target_list; do
   arch=${target%%-*}
 
@@ -1839,6 +1797,12 @@ for target in $target_list; do
           echo "GDB=$gdb_bin" >> $config_target_mak
       fi
 
+      if test "${gdb_arches#*$arch}" != "$gdb_arches" && version_ge $gdb_version 14.1; then
+          echo "GDB_HAS_SME_TILES=y" >> $config_target_mak
+      else
+          echo "GDB_HAS_SME_TILES=n" >> $config_target_mak
+      fi
+
       if test "${gdb_arches#*aarch64}" != "$gdb_arches" && version_ge $gdb_version 15.1; then
           echo "GDB_HAS_MTE=y" >> $config_target_mak
       fi
@@ -1849,12 +1813,12 @@ for target in $target_list; do
       fi
 
       echo "run-tcg-tests-$target: $qemu\$(EXESUF)" >> Makefile.prereqs
-      tcg_tests_targets="$tcg_tests_targets $target"
+      tcg_tests_with_compilers="$tcg_tests_with_compilers $target"
   fi
 done
 
 if test "$tcg" = "enabled"; then
-    echo "TCG_TESTS_TARGETS=$tcg_tests_targets" >> $config_host_mak
+    echo "TCG_TESTS_WITH_COMPILERS=$tcg_tests_with_compilers" >> $config_host_mak
 fi
 
 if test "$skip_meson" = no; then
@@ -1872,6 +1836,13 @@ if test "$skip_meson" = no; then
       eval "c=\$devices_${a}"
       echo "${a}-softmmu = '$c'" >> $cross
   done
+  if test "$rust" != disabled; then
+      if test "$cross_compile" = "yes"; then
+          . "$source_path/scripts/rust-to-clang-target.sh"
+          clang_target=$(rust_to_clang_target "$rust_target_triple")
+          echo "bindgen_clang_arguments = [$(meson_quote --target="$clang_target")]" >> $cross
+      fi
+  fi
 
   echo "[built-in options]" >> $cross
   echo "c_args = [$(meson_quote $CFLAGS $EXTRA_CFLAGS)]" >> $cross
@@ -1879,6 +1850,7 @@ if test "$skip_meson" = no; then
   test -n "$objcc" && echo "objc_args = [$(meson_quote $OBJCFLAGS $EXTRA_OBJCFLAGS)]" >> $cross
   echo "c_link_args = [$(meson_quote $CFLAGS $LDFLAGS $EXTRA_CFLAGS $EXTRA_LDFLAGS)]" >> $cross
   echo "cpp_link_args = [$(meson_quote $CXXFLAGS $LDFLAGS $EXTRA_CXXFLAGS $EXTRA_LDFLAGS)]" >> $cross
+  test -n "$objcc" && echo "objc_link_args = [$(meson_quote $OBJCFLAGS $LDFLAGS $EXTRA_OBJCFLAGS $EXTRA_LDFLAGS)]" >> $cross
 
   # Only enable by default for git builds and on select OSes
   echo "# environment defaults, can still be overridden on " >> $cross
@@ -1932,14 +1904,7 @@ if test "$skip_meson" = no; then
   if test "$cross_compile" = "yes"; then
     echo "[host_machine]" >> $cross
     echo "system = '$host_os'" >> $cross
-    case "$cpu" in
-        i386)
-            echo "cpu_family = 'x86'" >> $cross
-            ;;
-        *)
-            echo "cpu_family = '$cpu'" >> $cross
-            ;;
-    esac
+    echo "cpu_family = '$cpu'" >> $cross
     echo "cpu = '$cpu'" >> $cross
     if test "$bigendian" = "yes" ; then
         echo "endian = 'big'" >> $cross
@@ -1952,7 +1917,7 @@ if test "$skip_meson" = no; then
     echo "[binaries]" >> $native
     echo "c = [$(meson_quote $host_cc)]" >> $native
     if test "$rust" != disabled; then
-      echo "rust = [$(meson_quote $rustc)]" >> $cross
+      echo "rust = [$(meson_quote $rustc)]" >> $native
     fi
     mv $native config-meson.native
     meson_option_add --native-file
@@ -1978,6 +1943,8 @@ if test "$skip_meson" = no; then
   test -n "${LIB_FUZZING_ENGINE+xxx}" && meson_option_add "-Dfuzzing_engine=$LIB_FUZZING_ENGINE"
   test "$plugins" = yes && meson_option_add "-Dplugins=true"
   test "$tcg" != enabled && meson_option_add "-Dtcg=$tcg"
+  test -n "$gdb_bin" && meson_option_add "-Dgdb=$gdb_bin"
+
   run_meson() {
     NINJA=$ninja $meson setup "$@" "$PWD" "$source_path"
   }

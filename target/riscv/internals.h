@@ -20,7 +20,7 @@
 #define RISCV_CPU_INTERNALS_H
 
 #include "exec/cpu-common.h"
-#include "hw/registerfields.h"
+#include "hw/core/registerfields.h"
 #include "fpu/softfloat-types.h"
 #include "target/riscv/cpu_bits.h"
 
@@ -43,9 +43,9 @@
 #define MMU_2STAGE_BIT      (1 << 2)
 #define MMU_IDX_SS_WRITE    (1 << 3)
 
-static inline int mmuidx_priv(int mmu_idx)
+static inline privilege_mode_t mmuidx_priv(int mmu_idx)
 {
-    int ret = mmu_idx & 3;
+    privilege_mode_t ret = mmu_idx & 3;
     if (ret == MMUIdx_S_SUM) {
         ret = PRV_S;
     }
@@ -62,6 +62,31 @@ static inline bool mmuidx_2stage(int mmu_idx)
     return mmu_idx & MMU_2STAGE_BIT;
 }
 
+/*
+ * Return the endianness for the current privilege
+ * level, based on the MSTATUS MBE/SBE/UBE bits.
+ */
+static inline MemOp mo_endian_env(CPURISCVState *env)
+{
+    bool be = false;
+#if !defined(CONFIG_USER_ONLY)
+    switch (env->priv) {
+    case PRV_M:
+        be = env->mstatus & MSTATUS_MBE;
+        break;
+    case PRV_S:
+        be = env->mstatus & MSTATUS_SBE;
+        break;
+    case PRV_U:
+        be = env->mstatus & MSTATUS_UBE;
+        break;
+    default:
+        g_assert_not_reached();
+    }
+#endif
+    return be ? MO_BE : MO_LE;
+}
+
 /* share data between vector helpers and decode code */
 FIELD(VDATA, VM, 0, 1)
 FIELD(VDATA, LMUL, 1, 3)
@@ -72,6 +97,7 @@ FIELD(VDATA, NF, 7, 4)
 FIELD(VDATA, WD, 7, 1)
 
 /* float point classify helpers */
+target_ulong fclass_h_bf16(uint64_t frs1);
 target_ulong fclass_h(uint64_t frs1);
 target_ulong fclass_s(uint64_t frs1);
 target_ulong fclass_d(uint64_t frs1);
@@ -160,9 +186,15 @@ static inline float16 check_nanbox_bf16(CPURISCVState *env, uint64_t f)
 
 static inline target_ulong get_xepc_mask(CPURISCVState *env)
 {
-    /* When IALIGN=32, both low bits must be zero.
-     * When IALIGN=16 (has C extension), only bit 0 must be zero. */
-    if (riscv_has_ext(env, RVC)) {
+    RISCVCPU *cpu = env_archcpu(env);
+
+    /*
+     * When IALIGN=32, both low bits must be zero.
+     * When IALIGN=16 (has C or Zc* extensions), only bit 0 must be zero.
+     */
+    if (riscv_has_ext(env, RVC) || cpu->cfg.ext_zca ||
+        cpu->cfg.ext_zcb || cpu->cfg.ext_zcd || cpu->cfg.ext_zce ||
+        cpu->cfg.ext_zcf || cpu->cfg.ext_zcmp || cpu->cfg.ext_zcmt) {
         return ~(target_ulong)1;
     } else {
         return ~(target_ulong)3;
@@ -190,7 +222,7 @@ static inline target_ulong adjust_addr_body(CPURISCVState *env,
 
     /* get pmm field depending on whether addr is */
     if (is_virt_addr) {
-        pmm = riscv_pm_get_virt_pmm(env);
+        pmm = riscv_pm_get_vm_ldst_pmm(env);
     } else {
         pmm = riscv_pm_get_pmm(env);
     }
@@ -200,11 +232,9 @@ static inline target_ulong adjust_addr_body(CPURISCVState *env,
         return addr;
     }
 
-    if (!is_virt_addr) {
-        signext = riscv_cpu_virt_mem_enabled(env);
-    }
-    addr = addr << pmlen;
+    signext = riscv_cpu_virt_mem_enabled(env, is_virt_addr);
     pmlen = riscv_pm_get_pmlen(pmm);
+    addr = addr << pmlen;
 
     /* sign/zero extend masked address by N-1 bit */
     if (signext) {
@@ -232,5 +262,8 @@ static inline int insn_len(uint16_t first_word)
 {
     return (first_word & 3) == 3 ? 4 : 2;
 }
+
+int riscv_monitor_get_register_legacy(CPUState *cs, const char *name,
+                                      int64_t *pval);
 
 #endif

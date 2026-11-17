@@ -23,10 +23,10 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/sparc/sun4m_iommu.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
 #include "system/address-spaces.h"
@@ -351,13 +351,14 @@ static void iommu_reset(DeviceState *d)
     s->regs[IOMMU_MASK_ID] = IOMMU_TS_MASK;
 }
 
-static void iommu_init(Object *obj)
+static void iommu_realize(DeviceState *ds, Error **errp)
 {
-    IOMMUState *s = SUN4M_IOMMU(obj);
-    SysBusDevice *dev = SYS_BUS_DEVICE(obj);
+    IOMMUState *s = SUN4M_IOMMU(ds);
+    SysBusDevice *dev = SYS_BUS_DEVICE(ds);
+    Object *obj = OBJECT(ds);
 
     memory_region_init_iommu(&s->iommu, sizeof(s->iommu),
-                             TYPE_SUN4M_IOMMU_MEMORY_REGION, OBJECT(dev),
+                             TYPE_SUN4M_IOMMU_MEMORY_REGION, obj,
                              "iommu-sun4m", UINT64_MAX);
     address_space_init(&s->iommu_as, MEMORY_REGION(&s->iommu), "iommu-as");
 
@@ -377,6 +378,7 @@ static void iommu_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_legacy_reset(dc, iommu_reset);
+    dc->realize = iommu_realize;
     dc->vmsd = &vmstate_iommu;
     device_class_set_props(dc, iommu_properties);
 }
@@ -385,7 +387,6 @@ static const TypeInfo iommu_info = {
     .name          = TYPE_SUN4M_IOMMU,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(IOMMUState),
-    .instance_init = iommu_init,
     .class_init    = iommu_class_init,
 };
 

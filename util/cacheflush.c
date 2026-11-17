@@ -153,7 +153,7 @@ static void arch_cache_info(int *isize, int *dsize)
     }
 }
 
-#elif defined(_ARCH_PPC) && defined(__linux__)
+#elif defined(_ARCH_PPC64) && defined(__linux__)
 # include "elf.h"
 
 static void arch_cache_info(int *isize, int *dsize)
@@ -187,7 +187,7 @@ static void fallback_cache_info(int *isize, int *dsize)
     } else if (*dsize) {
         *isize = *dsize;
     } else {
-#if defined(_ARCH_PPC)
+#if defined(_ARCH_PPC64)
         /*
          * For PPC, we're going to use the cache sizes computed for
          * flush_idcache_range.  Which means that we must use the
@@ -216,8 +216,6 @@ static void __attribute__((constructor)) init_cache_info(void)
     qemu_icache_linesize_log = ctz32(isize);
     qemu_dcache_linesize = dsize;
     qemu_dcache_linesize_log = ctz32(dsize);
-
-    qatomic64_init();
 }
 
 
@@ -225,7 +223,7 @@ static void __attribute__((constructor)) init_cache_info(void)
  * Architecture (+ OS) specific cache flushing mechanisms.
  */
 
-#if defined(__i386__) || defined(__x86_64__) || defined(__s390__)
+#if defined(__x86_64__) || defined(__s390x__)
 
 /* Caches are coherent and do not require flushing; symbol inline. */
 
@@ -302,22 +300,6 @@ void flush_idcache_range(uintptr_t rx, uintptr_t rw, size_t len)
     asm volatile("isb" : : : "memory");
 }
 #endif /* CONFIG_DARWIN */
-
-#elif defined(__mips__)
-
-#ifdef __OpenBSD__
-#include <machine/sysarch.h>
-#else
-#include <sys/cachectl.h>
-#endif
-
-void flush_idcache_range(uintptr_t rx, uintptr_t rw, size_t len)
-{
-    if (rx != rw) {
-        cacheflush((void *)rw, len, DCACHE);
-    }
-    cacheflush((void *)rx, len, ICACHE);
-}
 
 #elif defined(__powerpc__)
 

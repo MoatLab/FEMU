@@ -11,8 +11,8 @@
 #ifndef HW_MISC_XLNX_ZYNQMP_APU_CTRL_H
 #define HW_MISC_XLNX_ZYNQMP_APU_CTRL_H
 
-#include "hw/sysbus.h"
-#include "hw/register.h"
+#include "hw/core/sysbus.h"
+#include "hw/core/register.h"
 #include "target/arm/cpu-qom.h"
 
 #define TYPE_XLNX_ZYNQMP_APU_CTRL "xlnx.apu-ctrl"
@@ -85,7 +85,6 @@ struct XlnxZynqMPAPUCtrl {
     uint8_t cpu_pwrdwn_req;
     uint8_t cpu_in_wfi;
 
-    RegisterInfoArray *reg_array;
     uint32_t regs[APU_R_MAX];
     RegisterInfo regs_info[APU_R_MAX];
 };

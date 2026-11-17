@@ -18,7 +18,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 
@@ -405,4 +405,56 @@ bool machine_check_smp_cache(const MachineState *ms, Error **errp)
     }
 
     return true;
+}
+
+/*
+ * This function assumes L3 and L2 have unified cache and L1 is split L1d and
+ * L1i.
+ */
+bool machine_find_lowest_level_cache_at_topo_level(const MachineState *ms,
+                                                   int *lowest_cache_level,
+                                                   CpuTopologyLevel topo_level)
+{
+    enum CacheLevelAndType cache_level;
+    enum CpuTopologyLevel t;
+
+    for (cache_level = CACHE_LEVEL_AND_TYPE_L1D;
+         cache_level < CACHE_LEVEL_AND_TYPE__MAX; cache_level++) {
+        t = machine_get_cache_topo_level(ms, cache_level);
+        if (t == topo_level) {
+            /* Assume L1 is split into L1d and L1i caches. */
+            if (cache_level == CACHE_LEVEL_AND_TYPE_L1D ||
+                cache_level == CACHE_LEVEL_AND_TYPE_L1I) {
+                *lowest_cache_level = 1; /* L1 */
+            } else {
+                /* Assume the other caches are unified. */
+                *lowest_cache_level = cache_level;
+            }
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/*
+ * Check if there are caches defined at a particular level. It supports only
+ * L1, L2 and L3 caches, but this can be extended to more levels as needed.
+ *
+ * Return True on success, False otherwise.
+ */
+bool machine_defines_cache_at_topo_level(const MachineState *ms,
+                                         CpuTopologyLevel topology)
+{
+    enum CacheLevelAndType cache_level;
+
+    for (cache_level = CACHE_LEVEL_AND_TYPE_L1D;
+         cache_level < CACHE_LEVEL_AND_TYPE__MAX; cache_level++) {
+        if (machine_get_cache_topo_level(ms, cache_level) == topology) {
+            return true;
+        }
+    }
+
+    return false;
 }

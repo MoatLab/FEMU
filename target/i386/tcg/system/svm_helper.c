@@ -23,6 +23,7 @@
 #include "exec/helper-proto.h"
 #include "exec/cputlb.h"
 #include "accel/tcg/cpu-ldst.h"
+#include "accel/tcg/cpu-loop.h"
 #include "tcg/helper-tcg.h"
 
 /* Secure Virtual Machine helpers */
@@ -30,13 +31,13 @@
 static void svm_save_seg(CPUX86State *env, int mmu_idx, hwaddr addr,
                          const SegmentCache *sc)
 {
-    cpu_stw_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, selector),
+    cpu_stw_le_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, selector),
                       sc->selector, mmu_idx, 0);
-    cpu_stq_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, base),
+    cpu_stq_le_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, base),
                       sc->base, mmu_idx, 0);
-    cpu_stl_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, limit),
+    cpu_stl_le_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, limit),
                       sc->limit, mmu_idx, 0);
-    cpu_stw_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, attrib),
+    cpu_stw_le_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, attrib),
                       ((sc->flags >> 8) & 0xff)
                       | ((sc->flags >> 12) & 0x0f00),
                       mmu_idx, 0);
@@ -49,7 +50,7 @@ static void svm_save_seg(CPUX86State *env, int mmu_idx, hwaddr addr,
 static inline void svm_canonicalization(CPUX86State *env, target_ulong *seg_base)
 {
     uint16_t shift_amt = 64 - cpu_x86_virtual_addr_width(env);
-    *seg_base = ((((long) *seg_base) << shift_amt) >> shift_amt);
+    *seg_base = (((int64_t) *seg_base) << shift_amt) >> shift_amt;
 }
 
 static void svm_load_seg(CPUX86State *env, int mmu_idx, hwaddr addr,
@@ -58,16 +59,16 @@ static void svm_load_seg(CPUX86State *env, int mmu_idx, hwaddr addr,
     unsigned int flags;
 
     sc->selector =
-        cpu_lduw_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, selector),
+        cpu_lduw_le_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, selector),
                            mmu_idx, 0);
     sc->base =
-        cpu_ldq_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, base),
+        cpu_ldq_le_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, base),
                           mmu_idx, 0);
     sc->limit =
-        cpu_ldl_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, limit),
+        cpu_ldl_le_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, limit),
                           mmu_idx, 0);
     flags =
-        cpu_lduw_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, attrib),
+        cpu_lduw_le_mmuidx_ra(env, addr + offsetof(struct vmcb_seg, attrib),
                            mmu_idx, 0);
     sc->flags = ((flags & 0xff) << 8) | ((flags & 0x0f00) << 12);
 
@@ -128,7 +129,7 @@ static inline bool virtual_gif_enabled(CPUX86State *env)
     return false;
 }
 
-static inline bool virtual_vm_load_save_enabled(CPUX86State *env, uint32_t exit_code, uintptr_t retaddr)
+static inline bool virtual_vm_load_save_enabled(CPUX86State *env, uint64_t exit_code, uintptr_t retaddr)
 {
     uint64_t lbr_ctl;
 
@@ -403,7 +404,7 @@ void helper_vmrun(CPUX86State *env, int aflag, int next_eip_addend)
     env->hflags2 |= HF2_GIF_MASK;
 
     if (ctl_has_irq(env)) {
-        cs->interrupt_request |= CPU_INTERRUPT_VIRQ;
+        cpu_set_interrupt(cs, CPU_INTERRUPT_VIRQ);
     }
 
     if (virtual_gif_set(env)) {
@@ -507,32 +508,35 @@ void helper_vmload(CPUX86State *env, int aflag)
 
 #ifdef TARGET_X86_64
     env->kernelgsbase =
-        cpu_ldq_mmuidx_ra(env,
-                          addr + offsetof(struct vmcb, save.kernel_gs_base),
-                          mmu_idx, 0);
+        cpu_ldq_le_mmuidx_ra(env,
+                             addr + offsetof(struct vmcb, save.kernel_gs_base),
+                             mmu_idx, 0);
     env->lstar =
-        cpu_ldq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.lstar),
-                          mmu_idx, 0);
+        cpu_ldq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.lstar),
+                             mmu_idx, 0);
     env->cstar =
-        cpu_ldq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.cstar),
-                          mmu_idx, 0);
+        cpu_ldq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.cstar),
+                             mmu_idx, 0);
     env->fmask =
-        cpu_ldq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sfmask),
-                          mmu_idx, 0);
+        cpu_ldq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sfmask),
+                             mmu_idx, 0);
     svm_canonicalization(env, &env->kernelgsbase);
 #endif
     env->star =
-        cpu_ldq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.star),
-                          mmu_idx, 0);
+        cpu_ldq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.star),
+                             mmu_idx, 0);
     env->sysenter_cs =
-        cpu_ldq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sysenter_cs),
-                          mmu_idx, 0);
+        cpu_ldq_le_mmuidx_ra(env,
+                             addr + offsetof(struct vmcb, save.sysenter_cs),
+                             mmu_idx, 0);
     env->sysenter_esp =
-        cpu_ldq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sysenter_esp),
-                          mmu_idx, 0);
+        cpu_ldq_le_mmuidx_ra(env,
+                             addr + offsetof(struct vmcb, save.sysenter_esp),
+                             mmu_idx, 0);
     env->sysenter_eip =
-        cpu_ldq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sysenter_eip),
-                          mmu_idx, 0);
+        cpu_ldq_le_mmuidx_ra(env,
+                             addr + offsetof(struct vmcb, save.sysenter_eip),
+                             mmu_idx, 0);
 }
 
 void helper_vmsave(CPUX86State *env, int aflag)
@@ -567,22 +571,22 @@ void helper_vmsave(CPUX86State *env, int aflag)
                  &env->ldt);
 
 #ifdef TARGET_X86_64
-    cpu_stq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.kernel_gs_base),
+    cpu_stq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.kernel_gs_base),
                       env->kernelgsbase, mmu_idx, 0);
-    cpu_stq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.lstar),
+    cpu_stq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.lstar),
                       env->lstar, mmu_idx, 0);
-    cpu_stq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.cstar),
+    cpu_stq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.cstar),
                       env->cstar, mmu_idx, 0);
-    cpu_stq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sfmask),
+    cpu_stq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sfmask),
                       env->fmask, mmu_idx, 0);
 #endif
-    cpu_stq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.star),
+    cpu_stq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.star),
                       env->star, mmu_idx, 0);
-    cpu_stq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sysenter_cs),
+    cpu_stq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sysenter_cs),
                       env->sysenter_cs, mmu_idx, 0);
-    cpu_stq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sysenter_esp),
+    cpu_stq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sysenter_esp),
                       env->sysenter_esp, mmu_idx, 0);
-    cpu_stq_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sysenter_eip),
+    cpu_stq_le_mmuidx_ra(env, addr + offsetof(struct vmcb, save.sysenter_eip),
                       env->sysenter_eip, mmu_idx, 0);
 }
 
@@ -723,7 +727,7 @@ void helper_svm_check_io(CPUX86State *env, uint32_t port, uint32_t param,
     }
 }
 
-void cpu_vmexit(CPUX86State *env, uint32_t exit_code, uint64_t exit_info_1,
+void cpu_vmexit(CPUX86State *env, uint64_t exit_code, uint64_t exit_info_1,
                 uintptr_t retaddr)
 {
     CPUState *cs = env_cpu(env);
@@ -732,7 +736,7 @@ void cpu_vmexit(CPUX86State *env, uint32_t exit_code, uint64_t exit_info_1,
 
     qemu_log_mask(CPU_LOG_TB_IN_ASM, "vmexit(%08x, %016" PRIx64 ", %016"
                   PRIx64 ", " TARGET_FMT_lx ")!\n",
-                  exit_code, exit_info_1,
+                  (uint32_t)exit_code, exit_info_1,
                   x86_ldq_phys(cs, env->vm_vmcb + offsetof(struct vmcb,
                                                    control.exit_info_2)),
                   env->eip);
@@ -742,7 +746,7 @@ void cpu_vmexit(CPUX86State *env, uint32_t exit_code, uint64_t exit_info_1,
              exit_code);
 
     x86_stq_phys(cs, env->vm_vmcb + offsetof(struct vmcb,
-                                             control.exit_info_1), exit_info_1),
+                                             control.exit_info_1), exit_info_1);
 
     /* remove any pending exception */
     env->old_exception = -1;
@@ -824,7 +828,7 @@ void do_vmexit(CPUX86State *env)
     env->intercept_exceptions = 0;
 
     /* Clears the V_IRQ and V_INTR_MASKING bits inside the processor. */
-    cs->interrupt_request &= ~CPU_INTERRUPT_VIRQ;
+    cpu_reset_interrupt(cs, CPU_INTERRUPT_VIRQ);
     env->int_ctl = 0;
 
     /* Clears the TSC_OFFSET inside the processor. */

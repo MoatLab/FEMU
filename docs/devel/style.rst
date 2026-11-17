@@ -433,7 +433,7 @@ We also suggest avoiding bitfields even in structures where the exact
 layout does not matter, unless you can show that they provide a significant
 usability benefit.
 
-We encourage the usage of ``include/hw/registerfields.h`` as a safe replacement
+We encourage the usage of ``include/hw/core/registerfields.h`` as a safe replacement
 for bitfields.
 
 Reserved namespaces in C and POSIX
@@ -446,8 +446,8 @@ Low level memory management
 ===========================
 
 Use of the ``malloc/free/realloc/calloc/valloc/memalign/posix_memalign``
-APIs is not allowed in the QEMU codebase. Instead of these routines,
-use the GLib memory allocation routines
+or ``alloca/g_alloca/g_newa/g_newa0`` APIs is not allowed in the QEMU codebase.
+Instead of these routines, use the GLib memory allocation routines
 ``g_malloc/g_malloc0/g_new/g_new0/g_realloc/g_free``
 or QEMU's ``qemu_memalign/qemu_blockalign/qemu_vfree`` APIs.
 
@@ -469,7 +469,7 @@ for a time/space trade-off like ``tlb_mmu_resize_locked`` in the
 SoftMMU TLB code.
 
 If the lifetime of the allocation is within the function and there are
-multiple exist paths you can also improve the readability of the code
+multiple exit paths you can also improve the readability of the code
 by using ``g_autofree`` and related annotations. See :ref:`autofree-ref`
 for more details.
 
@@ -519,7 +519,6 @@ QEMU provides other useful string functions:
 
     int strstart(const char *str, const char *val, const char **ptr)
     int stristart(const char *str, const char *val, const char **ptr)
-    int qemu_strnlen(const char *s, int max_len)
 
 There are also replacement character processing macros for isxyz and toxyz,
 so instead of e.g. isalnum you should use qemu_isalnum.
@@ -784,10 +783,10 @@ error, non-negative / -errno, non-null / null, or Error objects.
 Example: when a function returns a non-null pointer on success, and it
 can fail only in one way (as far as the caller is concerned), returning
 null on failure is just fine, and certainly simpler and a lot easier on
-the eyes than propagating an Error object through an Error ``*````*`` parameter.
+the eyes than propagating an Error object through an ``Error **`` parameter.
 
 Example: when a function's callers need to report details on failure
-only the function really knows, use Error ``*````*``, and set suitable errors.
+only the function really knows, use ``Error **``, and set suitable errors.
 
 Do not report an error to the user when you're also returning an error
 for somebody else to handle.  Leave the reporting to the place that

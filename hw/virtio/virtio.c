@@ -28,9 +28,11 @@
 #include "migration/qemu-file-types.h"
 #include "qemu/atomic.h"
 #include "hw/virtio/virtio-bus.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/virtio/virtio-access.h"
 #include "system/dma.h"
+#include "system/iothread.h"
+#include "system/memory.h"
 #include "system/runstate.h"
 #include "virtio-qmp.h"
 
@@ -46,6 +48,7 @@
 #include "standard-headers/linux/virtio_iommu.h"
 #include "standard-headers/linux/virtio_mem.h"
 #include "standard-headers/linux/virtio_vsock.h"
+#include "standard-headers/linux/virtio_spi.h"
 
 /*
  * Maximum size of virtio device config space
@@ -194,7 +197,8 @@ const char *virtio_device_names[] = {
     [VIRTIO_ID_PARAM_SERV] = "virtio-param-serv",
     [VIRTIO_ID_AUDIO_POLICY] = "virtio-audio-pol",
     [VIRTIO_ID_BT] = "virtio-bluetooth",
-    [VIRTIO_ID_GPIO] = "virtio-gpio"
+    [VIRTIO_ID_GPIO] = "virtio-gpio",
+    [VIRTIO_ID_SPI] = "virtio-spi"
 };
 
 static const char *virtio_id_to_name(uint16_t device_id)
@@ -211,6 +215,27 @@ static void virtio_check_indirect_feature(VirtIODevice *vdev)
         qemu_log_mask(LOG_GUEST_ERROR,
                       "Device %s: indirect_desc was not negotiated!\n",
                       vdev->name);
+    }
+}
+
+static inline uint16_t virtio_lduw_phys_cached(VirtIODevice *vdev,
+                                               MemoryRegionCache *cache,
+                                               hwaddr pa)
+{
+    if (virtio_vdev_is_big_endian(vdev)) {
+        return lduw_be_phys_cached(cache, pa);
+    }
+    return lduw_le_phys_cached(cache, pa);
+}
+
+static inline void virtio_stw_phys_cached(VirtIODevice *vdev,
+                                          MemoryRegionCache *cache,
+                                          hwaddr pa, uint16_t value)
+{
+    if (virtio_vdev_is_big_endian(vdev)) {
+        stw_be_phys_cached(cache, pa, value);
+    } else {
+        stw_le_phys_cached(cache, pa, value);
     }
 }
 
@@ -256,7 +281,12 @@ void virtio_init_region_cache(VirtIODevice *vdev, int n)
     len = address_space_cache_init(&new->desc, vdev->dma_as,
                                    addr, size, packed);
     if (len < size) {
-        virtio_error(vdev, "Cannot map desc");
+        g_autofree char *devname = qdev_get_human_name(DEVICE(vdev));
+
+        virtio_error(vdev,
+                "Failed to map descriptor ring for device %s: "
+                "invalid guest physical address or corrupted queue setup",
+                devname);
         goto err_desc;
     }
 
@@ -264,7 +294,12 @@ void virtio_init_region_cache(VirtIODevice *vdev, int n)
     len = address_space_cache_init(&new->used, vdev->dma_as,
                                    vq->vring.used, size, true);
     if (len < size) {
-        virtio_error(vdev, "Cannot map used");
+        g_autofree char *devname = qdev_get_human_name(DEVICE(vdev));
+
+        virtio_error(vdev,
+                "Failed to map used ring for device %s: "
+                "possible guest misconfiguration or insufficient memory",
+                devname);
         goto err_used;
     }
 
@@ -272,7 +307,12 @@ void virtio_init_region_cache(VirtIODevice *vdev, int n)
     len = address_space_cache_init(&new->avail, vdev->dma_as,
                                    vq->vring.avail, size, false);
     if (len < size) {
-        virtio_error(vdev, "Cannot map avail");
+        g_autofree char *devname = qdev_get_human_name(DEVICE(vdev));
+
+        virtio_error(vdev,
+                "Failed to map avalaible ring for device %s: "
+                "possible queue misconfiguration or overlapping memory region",
+                devname);
         goto err_avail;
     }
 
@@ -723,6 +763,10 @@ static int virtio_queue_packed_empty_rcu(VirtQueue *vq)
     struct VRingPackedDesc desc;
     VRingMemoryRegionCaches *cache;
 
+    if (virtio_device_disabled(vq->vdev)) {
+        return 1;
+    }
+
     if (unlikely(!vq->vring.desc)) {
         return 1;
     }
@@ -946,7 +990,7 @@ static void virtqueue_ordered_fill(VirtQueue *vq, const VirtQueueElement *elem,
      * We shouldn't need to increase 'i' by more than or equal to
      * the distance between used_idx and last_avail_idx (max_steps).
      */
-    max_steps = (vq->last_avail_idx - vq->used_idx) % vq->vring.num;
+    max_steps = MIN(vq->last_avail_idx - vq->used_idx, vq->vring.num);
 
     /* Search for element in vq->used_elems */
     while (steps < max_steps) {
@@ -1435,7 +1479,7 @@ static void virtqueue_packed_get_avail_bytes(VirtQueue *vq,
         }
 
         if (desc.flags & VRING_DESC_F_INDIRECT) {
-            if (desc.len % sizeof(VRingPackedDesc)) {
+            if (!desc.len || (desc.len % sizeof(VRingPackedDesc))) {
                 virtio_error(vdev, "Invalid size for indirect buffer table");
                 goto err;
             }
@@ -1622,7 +1666,8 @@ out:
  * virtqueue_unmap_sg() can't be used).  Assumes buffers weren't written to
  * yet.
  */
-static void virtqueue_undo_map_desc(unsigned int out_num, unsigned int in_num,
+static void virtqueue_undo_map_desc(AddressSpace *as,
+                                    unsigned int out_num, unsigned int in_num,
                                     struct iovec *iov)
 {
     unsigned int i;
@@ -1630,7 +1675,7 @@ static void virtqueue_undo_map_desc(unsigned int out_num, unsigned int in_num,
     for (i = 0; i < out_num + in_num; i++) {
         int is_write = i >= out_num;
 
-        cpu_physical_memory_unmap(iov->iov_base, iov->iov_len, is_write, 0);
+        address_space_unmap(as, iov->iov_base, iov->iov_len, is_write, 0);
         iov++;
     }
 }
@@ -1832,7 +1877,7 @@ done:
     return elem;
 
 err_undo_map:
-    virtqueue_undo_map_desc(out_num, in_num, iov);
+    virtqueue_undo_map_desc(vdev->dma_as, out_num, in_num, iov);
     goto done;
 }
 
@@ -1886,7 +1931,7 @@ static void *virtqueue_packed_pop(VirtQueue *vq, size_t sz)
     vring_packed_desc_read(vdev, &desc, desc_cache, i, true);
     id = desc.id;
     if (desc.flags & VRING_DESC_F_INDIRECT) {
-        if (desc.len % sizeof(VRingPackedDesc)) {
+        if (!desc.len || (desc.len % sizeof(VRingPackedDesc))) {
             virtio_error(vdev, "Invalid size for indirect buffer table");
             goto done;
         }
@@ -1982,7 +2027,7 @@ done:
     return elem;
 
 err_undo_map:
-    virtqueue_undo_map_desc(out_num, in_num, iov);
+    virtqueue_undo_map_desc(vdev->dma_as, out_num, in_num, iov);
     goto done;
 }
 
@@ -2282,7 +2327,7 @@ static enum virtio_device_endian virtio_default_endian(void)
 
 static enum virtio_device_endian virtio_current_cpu_endian(void)
 {
-    if (cpu_virtio_is_big_endian(current_cpu)) {
+    if (cpu_internal_is_big_endian(current_cpu)) {
         return VIRTIO_DEVICE_ENDIAN_BIG;
     } else {
         return VIRTIO_DEVICE_ENDIAN_LITTLE;
@@ -2375,6 +2420,11 @@ void virtio_queue_set_num(VirtIODevice *vdev, int n, int num)
     if (!!num != !!vdev->vq[n].vring.num ||
         num > VIRTQUEUE_MAX_SIZE ||
         num < 0) {
+        return;
+    }
+    if (num > vdev->vq[n].vring.num_default) {
+        virtio_error(vdev, "virtio: queue %d size %d exceeds max size %u",
+                     n, num, vdev->vq[n].vring.num_default);
         return;
     }
     vdev->vq[n].vring.num = num;
@@ -2527,6 +2577,17 @@ VirtQueue *virtio_add_queue(VirtIODevice *vdev, int queue_size,
     if (i == VIRTIO_QUEUE_MAX || queue_size > VIRTQUEUE_MAX_SIZE)
         abort();
 
+    BusState *qbus = qdev_get_parent_bus(DEVICE(vdev));
+    if (qbus && qbus->parent &&
+        object_property_find(OBJECT(qbus->parent), VIRTIO_QUEUE_SIZE_OVERRIDE)) {
+        int override = object_property_get_int(OBJECT(qbus->parent),
+                                               VIRTIO_QUEUE_SIZE_OVERRIDE,
+                                               &error_abort);
+        if (override) {
+            queue_size = override;
+        }
+    }
+
     vdev->vq[i].vring.num = queue_size;
     vdev->vq[i].vring.num_default = queue_size;
     vdev->vq[i].vring.align = VIRTIO_PCI_VRING_ALIGN;
@@ -2654,16 +2715,8 @@ static void virtio_notify_irqfd_deferred_fn(void *opaque)
     event_notifier_set(notifier);
 }
 
-void virtio_notify_irqfd(VirtIODevice *vdev, VirtQueue *vq)
+static void virtio_irq(VirtQueue *vq)
 {
-    WITH_RCU_READ_LOCK_GUARD() {
-        if (!virtio_should_notify(vdev, vq)) {
-            return;
-        }
-    }
-
-    trace_virtio_notify_irqfd(vdev, vq);
-
     /*
      * virtio spec 1.0 says ISR bit 0 should be ignored with MSI, but
      * windows drivers included in virtio-win 1.8.0 (circa 2015) are
@@ -2680,13 +2733,18 @@ void virtio_notify_irqfd(VirtIODevice *vdev, VirtQueue *vq)
      * to an atomic operation.
      */
     virtio_set_isr(vq->vdev, 0x1);
-    defer_call(virtio_notify_irqfd_deferred_fn, &vq->guest_notifier);
-}
 
-static void virtio_irq(VirtQueue *vq)
-{
-    virtio_set_isr(vq->vdev, 0x1);
-    virtio_notify_vector(vq->vdev, vq->vector);
+    /*
+     * The interrupt code path requires the Big QEMU Lock (BQL), so use the
+     * notifier instead when in an IOThread. This assumes that device models
+     * have already called ->set_guest_notifiers() sometime before calling this
+     * function.
+     */
+    if (qemu_in_iothread()) {
+        defer_call(virtio_notify_irqfd_deferred_fn, &vq->guest_notifier);
+    } else {
+        virtio_notify_vector(vq->vdev, vq->vector);
+    }
 }
 
 void virtio_notify(VirtIODevice *vdev, VirtQueue *vq)
@@ -2708,7 +2766,12 @@ void virtio_notify_config(VirtIODevice *vdev)
 
     virtio_set_isr(vdev, 0x3);
     vdev->generation++;
-    virtio_notify_vector(vdev, vdev->config_vector);
+
+    if (qemu_in_iothread()) {
+        defer_call(virtio_notify_irqfd_deferred_fn, &vdev->config_notifier);
+    } else {
+        virtio_notify_vector(vdev, vdev->config_vector);
+    }
 }
 
 static bool virtio_device_endian_needed(void *opaque)
@@ -2716,7 +2779,7 @@ static bool virtio_device_endian_needed(void *opaque)
     VirtIODevice *vdev = opaque;
 
     assert(vdev->device_endian != VIRTIO_DEVICE_ENDIAN_UNKNOWN);
-    if (!virtio_vdev_has_feature(vdev, VIRTIO_F_VERSION_1)) {
+    if (virtio_vdev_is_legacy(vdev)) {
         return vdev->device_endian != virtio_default_endian();
     }
     /* Devices conforming to VIRTIO 1.0 or later are always LE. */
@@ -2746,14 +2809,6 @@ static bool virtio_packed_virtqueue_needed(void *opaque)
 
 static bool virtio_ringsize_needed(void *opaque)
 {
-    VirtIODevice *vdev = opaque;
-    int i;
-
-    for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
-        if (vdev->vq[i].vring.num != vdev->vq[i].vring.num_default) {
-            return true;
-        }
-    }
     return false;
 }
 
@@ -2842,7 +2897,7 @@ static const VMStateDescription vmstate_ringsize = {
     .version_id = 1,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
-        VMSTATE_UINT32(vring.num_default, struct VirtQueue),
+        VMSTATE_UNUSED(sizeof(uint32_t)),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -2964,6 +3019,30 @@ static const VMStateDescription vmstate_virtio_disabled = {
     }
 };
 
+static bool virtio_128bit_features_needed(void *opaque)
+{
+    VirtIODevice *vdev = opaque;
+
+    return virtio_features_use_ex(vdev->host_features_ex);
+}
+
+static const VMStateDescription vmstate_virtio_128bit_features = {
+    .name = "virtio/128bit_features",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = &virtio_128bit_features_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64(guest_features_ex[1], VirtIODevice),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+/*
+ * Avoid silently breaking migration should the feature space increase
+ * even more in the (far away) future
+ */
+QEMU_BUILD_BUG_ON(VIRTIO_FEATURES_NU64S != 2);
+
 static const VMStateDescription vmstate_virtio = {
     .name = "virtio",
     .version_id = 1,
@@ -2973,6 +3052,7 @@ static const VMStateDescription vmstate_virtio = {
     },
     .subsections = (const VMStateDescription * const []) {
         &vmstate_virtio_device_endian,
+        &vmstate_virtio_128bit_features,
         &vmstate_virtio_64bit_features,
         &vmstate_virtio_virtqueues,
         &vmstate_virtio_ringsize,
@@ -2991,7 +3071,8 @@ int virtio_save(VirtIODevice *vdev, QEMUFile *f)
     VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(qbus);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
     uint32_t guest_features_lo = (vdev->guest_features & 0xffffffff);
-    int i;
+    int i, ret;
+    Error *local_err = NULL;
 
     if (k->save_config) {
         k->save_config(qbus->parent, f);
@@ -3035,14 +3116,186 @@ int virtio_save(VirtIODevice *vdev, QEMUFile *f)
     }
 
     if (vdc->vmsd) {
-        int ret = vmstate_save_state(f, vdc->vmsd, vdev, NULL);
+        ret = vmstate_save_state(f, vdc->vmsd, vdev, NULL, &local_err);
         if (ret) {
+            error_report_err(local_err);
             return ret;
         }
     }
 
     /* Subsections */
-    return vmstate_save_state(f, &vmstate_virtio, vdev, NULL);
+    ret = vmstate_save_state(f, &vmstate_virtio, vdev, NULL, &local_err);
+    if (ret < 0) {
+        error_report_err(local_err);
+    }
+    return ret;
+}
+
+VirtioSharedMemory *virtio_new_shmem_region(VirtIODevice *vdev, uint8_t shmid, uint64_t size)
+{
+    VirtioSharedMemory *elem;
+    g_autofree char *name = NULL;
+
+    elem = g_new0(VirtioSharedMemory, 1);
+    elem->shmid = shmid;
+
+    /* Initialize embedded MemoryRegion as container for shmem mappings */
+    name = g_strdup_printf("virtio-shmem-%d", shmid);
+    memory_region_init(&elem->mr, OBJECT(vdev), name, size);
+    QTAILQ_INIT(&elem->mmaps);
+    QSIMPLEQ_INSERT_TAIL(&vdev->shmem_list, elem, entry);
+    return elem;
+}
+
+VirtioSharedMemory *virtio_find_shmem_region(VirtIODevice *vdev, uint8_t shmid)
+{
+    VirtioSharedMemory *shmem, *next;
+    QSIMPLEQ_FOREACH_SAFE(shmem, &vdev->shmem_list, entry, next) {
+        if (shmem->shmid == shmid) {
+            return shmem;
+        }
+    }
+    return NULL;
+}
+
+static void virtio_shared_memory_mapping_instance_init(Object *obj)
+{
+    VirtioSharedMemoryMapping *mapping = VIRTIO_SHARED_MEMORY_MAPPING(obj);
+
+    mapping->shmid = 0;
+    mapping->offset = 0;
+    mapping->len = 0;
+    mapping->mr = NULL;
+}
+
+static void virtio_shared_memory_mapping_instance_finalize(Object *obj)
+{
+    VirtioSharedMemoryMapping *mapping = VIRTIO_SHARED_MEMORY_MAPPING(obj);
+
+    /* Clean up MemoryRegion if it exists */
+    if (mapping->mr) {
+        /* Unparent the MemoryRegion to trigger cleanup */
+        object_unparent(OBJECT(mapping->mr));
+        mapping->mr = NULL;
+    }
+}
+
+VirtioSharedMemoryMapping *virtio_shared_memory_mapping_new(uint8_t shmid,
+                                                            int fd,
+                                                            uint64_t fd_offset,
+                                                            uint64_t shm_offset,
+                                                            uint64_t len,
+                                                            bool allow_write)
+{
+    VirtioSharedMemoryMapping *mapping;
+    MemoryRegion *mr;
+    g_autoptr(GString) mr_name = g_string_new(NULL);
+    uint32_t ram_flags;
+    Error *local_err = NULL;
+
+    if (len == 0) {
+        error_report("Shared memory mapping size cannot be zero");
+        return NULL;
+    }
+
+    fd = dup(fd);
+    if (fd < 0) {
+        error_report("Failed to duplicate fd: %s", strerror(errno));
+        return NULL;
+    }
+
+    /* Determine RAM flags */
+    ram_flags = RAM_SHARED;
+    if (!allow_write) {
+        ram_flags |= RAM_READONLY_FD;
+    }
+
+    /* Create the VirtioSharedMemoryMapping */
+    mapping = VIRTIO_SHARED_MEMORY_MAPPING(
+        object_new(TYPE_VIRTIO_SHARED_MEMORY_MAPPING));
+
+    /* Set up object properties */
+    mapping->shmid = shmid;
+    mapping->offset = shm_offset;
+    mapping->len = len;
+
+    /* Create MemoryRegion as a child of this object */
+    mr = g_new0(MemoryRegion, 1);
+    g_string_printf(mr_name, "virtio-shmem-%d-%" PRIx64, shmid, shm_offset);
+
+    /* Initialize MemoryRegion with file descriptor */
+    if (!memory_region_init_ram_from_fd(mr, OBJECT(mapping), mr_name->str,
+                                        len, ram_flags, fd, fd_offset,
+                                        &local_err)) {
+        error_report_err(local_err);
+        g_free(mr);
+        close(fd);
+        object_unref(OBJECT(mapping));
+        return NULL;
+    }
+
+    mapping->mr = mr;
+    return mapping;
+}
+
+int virtio_add_shmem_map(VirtioSharedMemory *shmem,
+                         VirtioSharedMemoryMapping *mapping)
+{
+    if (!mapping) {
+        error_report("VirtioSharedMemoryMapping cannot be NULL");
+        return -1;
+    }
+    if (!mapping->mr) {
+        error_report("VirtioSharedMemoryMapping has no MemoryRegion");
+        return -1;
+    }
+
+    /* Validate boundaries against the VIRTIO shared memory region */
+    if (mapping->offset + mapping->len > memory_region_size(&shmem->mr)) {
+        error_report("Memory exceeds the shared memory boundaries");
+        return -1;
+    }
+
+    /* Add as subregion to the VIRTIO shared memory */
+    memory_region_add_subregion(&shmem->mr, mapping->offset, mapping->mr);
+
+    /* Add to the mapped regions list */
+    QTAILQ_INSERT_TAIL(&shmem->mmaps, mapping, link);
+
+    return 0;
+}
+
+VirtioSharedMemoryMapping *virtio_find_shmem_map(VirtioSharedMemory *shmem,
+                                          hwaddr offset, uint64_t size)
+{
+    VirtioSharedMemoryMapping *mapping;
+    QTAILQ_FOREACH(mapping, &shmem->mmaps, link) {
+        if (mapping->offset == offset && mapping->len == size) {
+            return mapping;
+        }
+    }
+    return NULL;
+}
+
+void virtio_del_shmem_map(VirtioSharedMemory *shmem, hwaddr offset,
+                          uint64_t size)
+{
+    VirtioSharedMemoryMapping *mapping = virtio_find_shmem_map(shmem, offset, size);
+    if (mapping == NULL) {
+        return;
+    }
+
+    /*
+     * Remove from memory region first
+     */
+    memory_region_del_subregion(&shmem->mr, mapping->mr);
+
+    /*
+     * Remove from list and unref the mapping which will trigger automatic cleanup
+     * when the reference count reaches zero.
+     */
+    QTAILQ_REMOVE(&shmem->mmaps, mapping, link);
+    object_unref(OBJECT(mapping));
 }
 
 /* A wrapper for use as a VMState .put function */
@@ -3069,23 +3322,30 @@ const VMStateInfo  virtio_vmstate_info = {
     .put = virtio_device_put,
 };
 
-static int virtio_set_features_nocheck(VirtIODevice *vdev, uint64_t val)
+static int virtio_set_features_nocheck(VirtIODevice *vdev, const uint64_t *val)
 {
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
-    bool bad = (val & ~(vdev->host_features)) != 0;
+    uint64_t tmp[VIRTIO_FEATURES_NU64S];
+    bool bad;
 
-    val &= vdev->host_features;
-    if (k->set_features) {
-        k->set_features(vdev, val);
+    bad = virtio_features_andnot(tmp, val, vdev->host_features_ex);
+    virtio_features_and(tmp, val, vdev->host_features_ex);
+
+    if (k->set_features_ex) {
+        k->set_features_ex(vdev, tmp);
+    } else if (k->set_features) {
+        bad = bad || virtio_features_use_ex(tmp);
+        k->set_features(vdev, tmp[0]);
     }
-    vdev->guest_features = val;
+
+    virtio_features_copy(vdev->guest_features_ex, tmp);
     return bad ? -1 : 0;
 }
 
 typedef struct VirtioSetFeaturesNocheckData {
     Coroutine *co;
     VirtIODevice *vdev;
-    uint64_t val;
+    uint64_t val[VIRTIO_FEATURES_NU64S];
     int ret;
 } VirtioSetFeaturesNocheckData;
 
@@ -3098,14 +3358,15 @@ static void virtio_set_features_nocheck_bh(void *opaque)
 }
 
 static int coroutine_mixed_fn
-virtio_set_features_nocheck_maybe_co(VirtIODevice *vdev, uint64_t val)
+virtio_set_features_nocheck_maybe_co(VirtIODevice *vdev,
+                                     const uint64_t *val)
 {
     if (qemu_in_coroutine()) {
         VirtioSetFeaturesNocheckData data = {
             .co = qemu_coroutine_self(),
             .vdev = vdev,
-            .val = val,
         };
+        virtio_features_copy(data.val, val);
         aio_bh_schedule_oneshot(qemu_get_current_aio_context(),
                                 virtio_set_features_nocheck_bh, &data);
         qemu_coroutine_yield();
@@ -3117,6 +3378,14 @@ virtio_set_features_nocheck_maybe_co(VirtIODevice *vdev, uint64_t val)
 
 int virtio_set_features(VirtIODevice *vdev, uint64_t val)
 {
+    uint64_t features[VIRTIO_FEATURES_NU64S];
+
+    virtio_features_from_u64(features, val);
+    return virtio_set_features_ex(vdev, features);
+}
+
+int virtio_set_features_ex(VirtIODevice *vdev, const uint64_t *features)
+{
     int ret;
     /*
      * The driver must not attempt to set features after feature negotiation
@@ -3126,13 +3395,13 @@ int virtio_set_features(VirtIODevice *vdev, uint64_t val)
         return -EINVAL;
     }
 
-    if (val & (1ull << VIRTIO_F_BAD_FEATURE)) {
+    if (features[0] & (1ull << VIRTIO_F_BAD_FEATURE)) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "%s: guest driver for %s has enabled UNUSED(30) feature bit!\n",
                       __func__, vdev->name);
     }
 
-    ret = virtio_set_features_nocheck(vdev, val);
+    ret = virtio_set_features_nocheck(vdev, features);
     if (virtio_vdev_has_feature(vdev, VIRTIO_RING_F_EVENT_IDX)) {
         /* VIRTIO_RING_F_EVENT_IDX changes the size of the caches.  */
         int i;
@@ -3151,10 +3420,11 @@ int virtio_set_features(VirtIODevice *vdev, uint64_t val)
     return ret;
 }
 
-void virtio_reset(void *opaque)
+void virtio_reset(VirtIODevice *vdev)
 {
-    VirtIODevice *vdev = opaque;
     VirtioDeviceClass *k = VIRTIO_DEVICE_GET_CLASS(vdev);
+    VirtioSharedMemory *shmem;
+    uint64_t features[VIRTIO_FEATURES_NU64S];
     int i;
 
     virtio_set_status(vdev, 0);
@@ -3181,7 +3451,8 @@ void virtio_reset(void *opaque)
     vdev->start_on_kick = false;
     vdev->started = false;
     vdev->broken = false;
-    virtio_set_features_nocheck(vdev, 0);
+    virtio_features_clear(features);
+    virtio_set_features_nocheck(vdev, features);
     vdev->queue_sel = 0;
     vdev->status = 0;
     vdev->disabled = false;
@@ -3191,6 +3462,15 @@ void virtio_reset(void *opaque)
 
     for (i = 0; i < VIRTIO_QUEUE_MAX; i++) {
         __virtio_queue_reset(vdev, i);
+    }
+
+    /* Mappings are removed to prevent stale fds from remaining open. */
+    QSIMPLEQ_FOREACH(shmem, &vdev->shmem_list, entry) {
+        while (!QTAILQ_EMPTY(&shmem->mmaps)) {
+            VirtioSharedMemoryMapping *mapping = QTAILQ_FIRST(&shmem->mmaps);
+            virtio_del_shmem_map(shmem, mapping->offset,
+                                 memory_region_size(mapping->mr));
+        }
     }
 }
 
@@ -3229,12 +3509,13 @@ int coroutine_mixed_fn
 virtio_load(VirtIODevice *vdev, QEMUFile *f, int version_id)
 {
     int i, ret;
-    int32_t config_len;
+    uint32_t config_len;
     uint32_t num;
     uint32_t features;
     BusState *qbus = qdev_get_parent_bus(DEVICE(vdev));
     VirtioBusClass *k = VIRTIO_BUS_GET_CLASS(qbus);
     VirtioDeviceClass *vdc = VIRTIO_DEVICE_GET_CLASS(vdev);
+    Error *local_err = NULL;
 
     /*
      * We poison the endianness to ensure it does not get used before
@@ -3264,7 +3545,7 @@ virtio_load(VirtIODevice *vdev, QEMUFile *f, int version_id)
      * Note: devices should always test host features in future - don't create
      * new dependencies like this.
      */
-    vdev->guest_features = features;
+    virtio_features_from_u64(vdev->guest_features_ex, features);
 
     config_len = qemu_get_be32(f);
 
@@ -3276,6 +3557,9 @@ virtio_load(VirtIODevice *vdev, QEMUFile *f, int version_id)
     qemu_get_buffer(f, vdev->config, MIN(config_len, vdev->config_len));
 
     while (config_len > vdev->config_len) {
+        if (qemu_file_get_error(f)) {
+            return -1;
+        }
         qemu_get_byte(f);
         config_len--;
     }
@@ -3296,6 +3580,12 @@ virtio_load(VirtIODevice *vdev, QEMUFile *f, int version_id)
 
     for (i = 0; i < num; i++) {
         vdev->vq[i].vring.num = qemu_get_be32(f);
+        if (vdev->vq[i].vring.num > vdev->vq[i].vring.num_default) {
+            error_report("VQ %d vring.num %u exceeds allocated max %u",
+                         i, vdev->vq[i].vring.num,
+                         vdev->vq[i].vring.num_default);
+            return -1;
+        }
         if (k->has_variable_vring_alignment) {
             vdev->vq[i].vring.align = qemu_get_be32(f);
         }
@@ -3327,15 +3617,17 @@ virtio_load(VirtIODevice *vdev, QEMUFile *f, int version_id)
     }
 
     if (vdc->vmsd) {
-        ret = vmstate_load_state(f, vdc->vmsd, vdev, version_id);
+        ret = vmstate_load_state(f, vdc->vmsd, vdev, version_id, &local_err);
         if (ret) {
+            error_report_err(local_err);
             return ret;
         }
     }
 
     /* Subsections */
-    ret = vmstate_load_state(f, &vmstate_virtio, vdev, 1);
+    ret = vmstate_load_state(f, &vmstate_virtio, vdev, 1, &local_err);
     if (ret) {
+        error_report_err(local_err);
         return ret;
     }
 
@@ -3343,26 +3635,17 @@ virtio_load(VirtIODevice *vdev, QEMUFile *f, int version_id)
         vdev->device_endian = virtio_default_endian();
     }
 
-    if (virtio_64bit_features_needed(vdev)) {
-        /*
-         * Subsection load filled vdev->guest_features.  Run them
-         * through virtio_set_features to sanity-check them against
-         * host_features.
-         */
-        uint64_t features64 = vdev->guest_features;
-        if (virtio_set_features_nocheck_maybe_co(vdev, features64) < 0) {
-            error_report("Features 0x%" PRIx64 " unsupported. "
-                         "Allowed features: 0x%" PRIx64,
-                         features64, vdev->host_features);
-            return -1;
-        }
-    } else {
-        if (virtio_set_features_nocheck_maybe_co(vdev, features) < 0) {
-            error_report("Features 0x%x unsupported. "
-                         "Allowed features: 0x%" PRIx64,
-                         features, vdev->host_features);
-            return -1;
-        }
+    /*
+     * guest_features_ex is fully initialized with u32 features and upper
+     * bits have been filled as needed by the later load.
+     */
+    if (virtio_set_features_nocheck_maybe_co(vdev,
+                                             vdev->guest_features_ex) < 0) {
+        error_report("Features 0x" VIRTIO_FEATURES_FMT " unsupported. "
+                     "Allowed features: 0x" VIRTIO_FEATURES_FMT,
+                     VIRTIO_FEATURES_PR(vdev->guest_features_ex),
+                     VIRTIO_FEATURES_PR(vdev->host_features_ex));
+        return -1;
     }
 
     if (!virtio_device_started(vdev, vdev->status) &&
@@ -3381,10 +3664,10 @@ virtio_load(VirtIODevice *vdev, QEMUFile *f, int version_id)
              * to calculate used and avail ring addresses based on the desc
              * address.
              */
-            if (virtio_vdev_has_feature(vdev, VIRTIO_F_VERSION_1)) {
-                virtio_init_region_cache(vdev, i);
-            } else {
+            if (virtio_vdev_is_legacy(vdev)) {
                 virtio_queue_update_rings(vdev, i);
+            } else {
+                virtio_init_region_cache(vdev, i);
             }
 
             if (virtio_vdev_has_feature(vdev, VIRTIO_F_RING_PACKED)) {
@@ -3521,6 +3804,7 @@ void virtio_init(VirtIODevice *vdev, uint16_t device_id, size_t config_size)
             NULL, virtio_vmstate_change, vdev);
     vdev->device_endian = virtio_default_endian();
     vdev->use_guest_notifier_mask = true;
+    QSIMPLEQ_INIT(&vdev->shmem_list);
 }
 
 /*
@@ -3750,37 +4034,37 @@ static void virtio_config_guest_notifier_read(EventNotifier *n)
         virtio_notify_config(vdev);
     }
 }
-void virtio_queue_set_guest_notifier_fd_handler(VirtQueue *vq, bool assign,
-                                                bool with_irqfd)
-{
-    if (assign && !with_irqfd) {
-        event_notifier_set_handler(&vq->guest_notifier,
-                                   virtio_queue_guest_notifier_read);
-    } else {
-        event_notifier_set_handler(&vq->guest_notifier, NULL);
-    }
-    if (!assign) {
-        /* Test and clear notifier before closing it,
-         * in case poll callback didn't have time to run. */
-        virtio_queue_guest_notifier_read(&vq->guest_notifier);
-    }
-}
 
-void virtio_config_set_guest_notifier_fd_handler(VirtIODevice *vdev,
-                                                 bool assign, bool with_irqfd)
+int virtio_set_guest_notifier(VirtIODevice *vdev, int n, bool assign,
+                              bool with_irqfd)
 {
-    EventNotifier *n;
-    n = &vdev->config_notifier;
-    if (assign && !with_irqfd) {
-        event_notifier_set_handler(n, virtio_config_guest_notifier_read);
-    } else {
-        event_notifier_set_handler(n, NULL);
+    bool is_config = n == VIRTIO_CONFIG_IRQ_IDX;
+    VirtQueue *vq = is_config ? NULL : virtio_get_queue(vdev, n);
+    EventNotifier *notifier = is_config ?
+        virtio_config_get_guest_notifier(vdev) :
+        virtio_queue_get_guest_notifier(vq);
+    EventNotifierHandler *read_fn = is_config ?
+        virtio_config_guest_notifier_read :
+        virtio_queue_guest_notifier_read;
+
+    if (assign) {
+        int r = event_notifier_init(notifier, 0);
+        if (r < 0) {
+            return r;
+        }
     }
+
+    event_notifier_set_handler(notifier,
+                               (assign && !with_irqfd) ? read_fn : NULL);
+
     if (!assign) {
         /* Test and clear notifier before closing it,*/
         /* in case poll callback didn't have time to run. */
-        virtio_config_guest_notifier_read(n);
+        read_fn(notifier);
+        event_notifier_cleanup(notifier);
     }
+
+    return 0;
 }
 
 EventNotifier *virtio_queue_get_guest_notifier(VirtQueue *vq)
@@ -4032,11 +4316,25 @@ static void virtio_device_free_virtqueues(VirtIODevice *vdev)
 static void virtio_device_instance_finalize(Object *obj)
 {
     VirtIODevice *vdev = VIRTIO_DEVICE(obj);
+    VirtioSharedMemory *shmem;
 
     virtio_device_free_virtqueues(vdev);
 
     g_free(vdev->config);
     g_free(vdev->vector_queues);
+    while (!QSIMPLEQ_EMPTY(&vdev->shmem_list)) {
+        shmem = QSIMPLEQ_FIRST(&vdev->shmem_list);
+        while (!QTAILQ_EMPTY(&shmem->mmaps)) {
+            VirtioSharedMemoryMapping *mapping = QTAILQ_FIRST(&shmem->mmaps);
+            virtio_del_shmem_map(shmem, mapping->offset,
+                                 memory_region_size(mapping->mr));
+        }
+
+        /* Clean up the embedded MemoryRegion */
+        object_unparent(OBJECT(&shmem->mr));
+        QSIMPLEQ_REMOVE_HEAD(&vdev->shmem_list, entry);
+        g_free(shmem);
+    }
 }
 
 static const Property virtio_properties[] = {
@@ -4402,9 +4700,18 @@ static const TypeInfo virtio_device_info = {
     .class_size = sizeof(VirtioDeviceClass),
 };
 
+static const TypeInfo virtio_shared_memory_mapping_info = {
+    .name = TYPE_VIRTIO_SHARED_MEMORY_MAPPING,
+    .parent = TYPE_OBJECT,
+    .instance_size = sizeof(VirtioSharedMemoryMapping),
+    .instance_init = virtio_shared_memory_mapping_instance_init,
+    .instance_finalize = virtio_shared_memory_mapping_instance_finalize,
+};
+
 static void virtio_register_types(void)
 {
     type_register_static(&virtio_device_info);
+    type_register_static(&virtio_shared_memory_mapping_info);
 }
 
 type_init(virtio_register_types)
@@ -4417,4 +4724,14 @@ QEMUBH *virtio_bh_new_guarded_full(DeviceState *dev,
 
     return qemu_bh_new_full(cb, opaque, name,
                             &transport->mem_reentrancy_guard);
+}
+
+QEMUBH *virtio_bh_io_new_guarded_full(DeviceState *dev,
+                                      QEMUBHFunc *cb, void *opaque,
+                                      const char *name)
+{
+    DeviceState *transport = qdev_get_parent_bus(dev)->parent;
+
+    return aio_bh_new_full(iohandler_get_aio_context(), cb, opaque, name,
+                           &transport->mem_reentrancy_guard);
 }

@@ -27,11 +27,11 @@
 
 #include "qemu/osdep.h"
 #include "hw/char/ibex_uart.h"
-#include "hw/irq.h"
-#include "hw/qdev-clock.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
-#include "hw/registerfields.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
+#include "hw/core/registerfields.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -470,7 +470,7 @@ static void fifo_trigger_update(void *opaque)
 static const MemoryRegionOps ibex_uart_ops = {
     .read = ibex_uart_read,
     .write = ibex_uart_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
     .impl.min_access_size = 4,
     .impl.max_access_size = 4,
 };

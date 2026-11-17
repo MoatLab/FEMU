@@ -30,14 +30,16 @@
 
 #include "system/block-backend.h"
 #include "system/device_tree.h"
+#include "system/physmem.h"
 #include "system/system.h"
 #include "system/runstate.h"
 #include "migration/vmstate.h"
 #include "hw/nvram/chrp_nvram.h"
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_vio.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
+#include "exec/cpu-common.h"
 #include "qom/object.h"
 
 struct SpaprNvram {
@@ -88,9 +90,9 @@ static void rtas_nvram_fetch(PowerPCCPU *cpu, SpaprMachineState *spapr,
 
     assert(nvram->buf);
 
-    membuf = cpu_physical_memory_map(buffer, &len, true);
+    membuf = physical_memory_map(buffer, &len, true);
     memcpy(membuf, nvram->buf + offset, len);
-    cpu_physical_memory_unmap(membuf, len, 1, len);
+    physical_memory_unmap(membuf, len, 1, len);
 
     rtas_st(rets, 0, RTAS_OUT_SUCCESS);
     rtas_st(rets, 1, len);
@@ -126,7 +128,7 @@ static void rtas_nvram_store(PowerPCCPU *cpu, SpaprMachineState *spapr,
         return;
     }
 
-    membuf = cpu_physical_memory_map(buffer, &len, false);
+    membuf = physical_memory_map(buffer, &len, false);
 
     ret = 0;
     if (nvram->blk) {
@@ -136,7 +138,7 @@ static void rtas_nvram_store(PowerPCCPU *cpu, SpaprMachineState *spapr,
     assert(nvram->buf);
     memcpy(nvram->buf + offset, membuf, len);
 
-    cpu_physical_memory_unmap(membuf, len, 0, len);
+    physical_memory_unmap(membuf, len, 0, len);
 
     rtas_st(rets, 0, (ret < 0) ? RTAS_OUT_HW_ERROR : RTAS_OUT_SUCCESS);
     rtas_st(rets, 1, (ret < 0) ? 0 : len);

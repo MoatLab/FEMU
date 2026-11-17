@@ -17,14 +17,21 @@
 #include "qemu-thread-common.h"
 #include <process.h>
 
-static bool name_threads;
-
 typedef HRESULT (WINAPI *pSetThreadDescription) (HANDLE hThread,
                                                  PCWSTR lpThreadDescription);
+typedef HRESULT (WINAPI *pGetThreadDescription) (HANDLE hThread,
+                                                 PWSTR *lpThreadDescription);
 static pSetThreadDescription SetThreadDescriptionFunc;
+static pGetThreadDescription GetThreadDescriptionFunc;
 static HMODULE kernel32_module;
 
-static bool load_set_thread_description(void)
+static void __attribute__((__constructor__(QEMU_CONSTRUCTOR_EARLY)))
+qemu_thread_init(void)
+{
+    qemu_thread_set_name("main");
+}
+
+static bool load_thread_description(void)
 {
     static gsize _init_once = 0;
 
@@ -34,24 +41,17 @@ static bool load_set_thread_description(void)
             SetThreadDescriptionFunc =
                 (pSetThreadDescription)GetProcAddress(kernel32_module,
                                                       "SetThreadDescription");
-            if (!SetThreadDescriptionFunc) {
+            GetThreadDescriptionFunc =
+                (pGetThreadDescription)GetProcAddress(kernel32_module,
+                                                      "GetThreadDescription");
+            if (!SetThreadDescriptionFunc || !GetThreadDescriptionFunc) {
                 FreeLibrary(kernel32_module);
             }
         }
         g_once_init_leave(&_init_once, 1);
     }
 
-    return !!SetThreadDescriptionFunc;
-}
-
-void qemu_thread_naming(bool enable)
-{
-    name_threads = enable;
-
-    if (enable && !load_set_thread_description()) {
-        fprintf(stderr, "qemu: thread naming not supported on this host\n");
-        name_threads = false;
-    }
+    return (SetThreadDescriptionFunc && GetThreadDescriptionFunc);
 }
 
 static void error_exit(int err, const char *msg)
@@ -237,11 +237,12 @@ struct QemuThreadData {
     void             *arg;
     short             mode;
     NotifierList      exit;
+    char             *name; /* Freed in win32_start_routine */
 
     /* Only used for joinable threads. */
     bool              exited;
     void             *ret;
-    CRITICAL_SECTION  cs;
+    SRWLOCK           lock;
 };
 
 static bool atexit_registered;
@@ -278,6 +279,10 @@ static unsigned __stdcall win32_start_routine(void *arg)
     void *(*start_routine)(void *) = data->start_routine;
     void *thread_arg = data->arg;
 
+    if (data->name) {
+        qemu_thread_set_name(data->name);
+        g_clear_pointer(&data->name, g_free);
+    }
     qemu_thread_data = data;
     qemu_thread_exit(start_routine(thread_arg));
     abort();
@@ -290,9 +295,9 @@ void qemu_thread_exit(void *arg)
     notifier_list_notify(&data->exit, NULL);
     if (data->mode == QEMU_THREAD_JOINABLE) {
         data->ret = arg;
-        EnterCriticalSection(&data->cs);
+        AcquireSRWLockExclusive(&data->lock);
         data->exited = true;
-        LeaveCriticalSection(&data->cs);
+        ReleaseSRWLockExclusive(&data->lock);
     } else {
         g_free(data);
     }
@@ -323,28 +328,24 @@ void *qemu_thread_join(QemuThread *thread)
         CloseHandle(handle);
     }
     ret = data->ret;
-    DeleteCriticalSection(&data->cs);
     g_free(data);
     return ret;
 }
 
-static bool set_thread_description(HANDLE h, const char *name)
+void qemu_thread_set_name(const char *name)
 {
-    HRESULT hr;
     g_autofree wchar_t *namew = NULL;
 
-    if (!load_set_thread_description()) {
-        return false;
+    if (!load_thread_description()) {
+        return;
     }
 
     namew = g_utf8_to_utf16(name, -1, NULL, NULL, NULL);
     if (!namew) {
-        return false;
+        return;
     }
 
-    hr = SetThreadDescriptionFunc(h, namew);
-
-    return SUCCEEDED(hr);
+    SetThreadDescriptionFunc(GetCurrentThread(), namew);
 }
 
 void qemu_thread_create(QemuThread *thread, const char *name,
@@ -355,23 +356,18 @@ void qemu_thread_create(QemuThread *thread, const char *name,
     struct QemuThreadData *data;
 
     data = g_malloc(sizeof *data);
+    InitializeSRWLock(&data->lock);
     data->start_routine = start_routine;
     data->arg = arg;
     data->mode = mode;
     data->exited = false;
+    data->name = g_strdup(name);
     notifier_list_init(&data->exit);
-
-    if (data->mode != QEMU_THREAD_DETACHED) {
-        InitializeCriticalSection(&data->cs);
-    }
 
     hThread = (HANDLE) _beginthreadex(NULL, 0, win32_start_routine,
                                       data, 0, &thread->tid);
     if (!hThread) {
         error_exit(GetLastError(), __func__);
-    }
-    if (name_threads && name && !set_thread_description(hThread, name)) {
-        fprintf(stderr, "qemu: failed to set thread description: %s\n", name);
     }
     CloseHandle(hThread);
 
@@ -406,18 +402,53 @@ HANDLE qemu_thread_get_handle(QemuThread *thread)
         return NULL;
     }
 
-    EnterCriticalSection(&data->cs);
+    AcquireSRWLockExclusive(&data->lock);
     if (!data->exited) {
         handle = OpenThread(SYNCHRONIZE | THREAD_SUSPEND_RESUME |
                             THREAD_SET_CONTEXT, FALSE, thread->tid);
     } else {
         handle = NULL;
     }
-    LeaveCriticalSection(&data->cs);
+    ReleaseSRWLockExclusive(&data->lock);
     return handle;
 }
 
 bool qemu_thread_is_self(QemuThread *thread)
 {
     return GetCurrentThreadId() == thread->tid;
+}
+
+static __thread char namebuf[64];
+
+const char *qemu_thread_get_name(void)
+{
+    HRESULT hr;
+    wchar_t *namew = NULL;
+    g_autofree char *name = NULL;
+
+    if (namebuf[0] != '\0') {
+        return namebuf;
+    }
+
+    if (!load_thread_description()) {
+        goto error;
+    }
+
+    hr = GetThreadDescriptionFunc(GetCurrentThread(), &namew);
+    if (!SUCCEEDED(hr)) {
+        goto error;
+    }
+
+    name = g_utf16_to_utf8(namew, -1, NULL, NULL, NULL);
+    LocalFree(namew);
+    if (!name) {
+        goto error;
+    }
+
+    g_strlcpy(namebuf, name, G_N_ELEMENTS(namebuf));
+    return namebuf;
+
+ error:
+    g_strlcpy(namebuf, "unnamed", G_N_ELEMENTS(namebuf));
+    return namebuf;
 }

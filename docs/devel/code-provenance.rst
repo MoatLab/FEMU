@@ -99,13 +99,13 @@ Other commit tags
 While the ``Signed-off-by`` tag is mandatory, there are a number of other tags
 that are commonly used during QEMU development:
 
- * **``Reviewed-by``**: when a QEMU community member reviews a patch on the
+ * **Reviewed-by**: when a QEMU community member reviews a patch on the
    mailing list, if they consider the patch acceptable, they should send an
    email reply containing a ``Reviewed-by`` tag. Subsystem maintainers who
    review a patch should add this even if they are also adding their
    ``Signed-off-by`` to the same commit.
 
- * **``Acked-by``**: when a QEMU subsystem maintainer approves a patch that
+ * **Acked-by**: when a QEMU subsystem maintainer approves a patch that
    touches their subsystem, but intends to allow a different maintainer to
    queue it and send a pull request, they would send a mail containing a
    ``Acked-by`` tag. Where a patch touches multiple subsystems, ``Acked-by``
@@ -113,18 +113,18 @@ that are commonly used during QEMU development:
    maintainer wants to indicate they have done a full review they should use
    a ``Reviewed-by`` tag.
 
- * **``Tested-by``**: when a QEMU community member has functionally tested the
+ * **Tested-by**: when a QEMU community member has functionally tested the
    behaviour of the patch in some manner, they should send an email reply
    containing a ``Tested-by`` tag.
 
- * **``Reported-by``**: when a QEMU community member reports a problem via the
+ * **Reported-by**: when a QEMU community member reports a problem via the
    mailing list, or some other informal channel that is not the issue tracker,
    it is good practice to credit them by including a ``Reported-by`` tag on
    any patch fixing the issue. When the problem is reported via the GitLab
    issue tracker, however, it is sufficient to just include a link to the
    issue.
 
- * **``Suggested-by``**: when a reviewer or other 3rd party makes non-trivial
+ * **Suggested-by**: when a reviewer or other 3rd party makes non-trivial
    suggestions for how to change a patch, it is good practice to credit them
    by including a ``Suggested-by`` tag.
 
@@ -213,7 +213,7 @@ The general principles when picking up abandoned work are:
  * Indicate where the original patch was obtained from (mailing list, bug
    tracker, author's git repo, etc) when sending it for review
  * Acknowledge the extra work of the new contributor by including their
-   ``Signed-off-by`` in the patch in addition to the orignal author's
+   ``Signed-off-by`` in the patch in addition to the original author's
  * Indicate who is responsible for what parts of the patch. This is typically
    done via a note in the commit message, just prior to the new contributor's
    ``Signed-off-by``::
@@ -259,7 +259,7 @@ process. A non-exhaustive list of examples is:
    container images from a clean git checkout.
 
  * eBPF: QEMU includes some generated eBPF machine code, since the required
-   eBPF compilation tools are not broadly available on all targetted OS
+   eBPF compilation tools are not broadly available on all targeted OS
    distributions. The corresponding eBPF C code for the binary is also
    provided. This is a time-limited exception until the eBPF toolchain is
    sufficiently broadly available in distros.
@@ -285,14 +285,18 @@ Such tools are acceptable to use, provided there is clearly defined copyright
 and licensing for their output. Note in particular the caveats applying to AI
 content generators below.
 
-Use of AI content generators
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Use of AI-generated content
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 TL;DR:
 
   **Current QEMU project policy is to DECLINE any contributions which are
   believed to include or derive from AI generated content. This includes
   ChatGPT, Claude, Copilot, Llama and similar tools.**
+
+  **This policy does not apply to other uses of AI, such as researching APIs
+  or algorithms, static analysis, or debugging, provided their output is not
+  included in contributions.**
 
 The increasing prevalence of AI-assisted software development results in a
 number of difficult legal questions and risks for software projects, including
@@ -322,17 +326,24 @@ The QEMU project thus requires that contributors refrain from using AI content
 generators on patches intended to be submitted to the project, and will
 decline any contribution if use of AI is either known or suspected.
 
-This policy does not apply to other uses of AI, such as researching APIs or
-algorithms, static analysis, or debugging, provided their output is not to be
-included in contributions.
-
 Examples of tools impacted by this policy includes GitHub's CoPilot, OpenAI's
 ChatGPT, Anthropic's Claude, and Meta's Code Llama, and code/content
 generation agents which are built on top of such tools.
 
 This policy may evolve as AI tools mature and the legal situation is
-clarifed. In the meanwhile, requests for exceptions to this policy will be
-evaluated by the QEMU project on a case by case basis. To be granted an
-exception, a contributor will need to demonstrate clarity of the license and
-copyright status for the tool's output in relation to its training model and
-code, to the satisfaction of the project maintainers.
+clarified.
+
+Exceptions
+^^^^^^^^^^
+
+The QEMU project welcomes discussion on any exceptions to this policy,
+or more general revisions. This can be done by contacting the qemu-devel
+mailing list with details of a proposed tool, model, usage scenario, etc.
+that is beneficial to QEMU, while still mitigating issues around compliance
+with the DCO.  After discussion, any exception will be listed below.
+
+Exceptions do not remove the need for authors to comply with all other
+requirements for contribution.  In particular, the "Signed-off-by"
+label in a patch submission is a statement that the author takes
+responsibility for the entire contents of the patch, including any parts
+that were generated or assisted by AI tools or other tools.

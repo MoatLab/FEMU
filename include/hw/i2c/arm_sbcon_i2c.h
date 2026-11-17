@@ -5,7 +5,7 @@
  *
  * Copyright (c) 2006-2007 CodeSourcery.
  * Copyright (c) 2012 Oskar Andero <oskar.andero@gmail.com>
- * Copyright (C) 2020 Philippe Mathieu-Daudé <f4bug@amsat.org>
+ * Copyright (C) 2020 Philippe Mathieu-Daudé
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -13,7 +13,7 @@
 #ifndef HW_I2C_ARM_SBCON_I2C_H
 #define HW_I2C_ARM_SBCON_I2C_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/i2c/bitbang_i2c.h"
 #include "qom/object.h"
 

@@ -31,8 +31,6 @@
 # define TCG_PHYS_ADDR_BITS 36
 #endif
 
-QEMU_BUILD_BUG_ON(TCG_PHYS_ADDR_BITS > TARGET_PHYS_ADDR_SPACE_BITS);
-
 /**
  * x86_cpu_do_interrupt:
  * @cpu: vCPU the interrupt is to be handled by.
@@ -99,7 +97,7 @@ void cpu_load_eflags(CPUX86State *env, int eflags, int update_mask);
 
 /* system/svm_helper.c */
 #ifndef CONFIG_USER_ONLY
-G_NORETURN void cpu_vmexit(CPUX86State *nenv, uint32_t exit_code,
+G_NORETURN void cpu_vmexit(CPUX86State *nenv, uint64_t exit_code,
                            uint64_t exit_info_1, uintptr_t retaddr);
 void do_vmexit(CPUX86State *env);
 #endif

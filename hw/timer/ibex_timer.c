@@ -29,8 +29,8 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "hw/timer/ibex_timer.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "target/riscv/cpu.h"
 #include "migration/vmstate.h"
 
@@ -193,6 +193,7 @@ static void ibex_timer_write(void *opaque, hwaddr addr,
         break;
     case R_CTRL:
         s->timer_ctrl = val;
+        ibex_timer_update_irqs(s);
         break;
     case R_CFG0:
         qemu_log_mask(LOG_UNIMP, "Changing prescale or step not supported");
@@ -234,7 +235,7 @@ static void ibex_timer_write(void *opaque, hwaddr addr,
 static const MemoryRegionOps ibex_timer_ops = {
     .read = ibex_timer_read,
     .write = ibex_timer_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
     .impl.min_access_size = 4,
     .impl.max_access_size = 4,
 };

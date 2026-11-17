@@ -12,6 +12,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/bswap.h"
 #include "qapi/error.h"
 #include "qga-qapi-commands.h"
 #include "qapi/error.h"
@@ -400,10 +401,11 @@ static bool build_guest_fsinfo_for_pci_dev(char const *syspath,
                                            Error **errp)
 {
     unsigned int pci[4], host, hosts[8], tgt[3];
-    int i, nhosts = 0, pcilen;
+    int i, offset, nhosts = 0, pcilen;
     GuestPCIAddress *pciaddr = disk->pci_controller;
     bool has_ata = false, has_host = false, has_tgt = false;
-    char *p, *q, *driver = NULL;
+    const char *p;
+    char *driver = NULL;
     bool ret = false;
 
     p = strstr(syspath, "/devices/pci");
@@ -445,13 +447,13 @@ static bool build_guest_fsinfo_for_pci_dev(char const *syspath,
 
     p = strstr(syspath, "/ata");
     if (p) {
-        q = p + 4;
+        offset = 4;
         has_ata = true;
     } else {
         p = strstr(syspath, "/host");
-        q = p + 5;
+        offset = 5;
     }
-    if (p && sscanf(q, "%u", &host) == 1) {
+    if (p && sscanf(p + offset, "%u", &host) == 1) {
         has_host = true;
         nhosts = build_hosts(syspath, p, has_ata, hosts,
                              ARRAY_SIZE(hosts), errp);
@@ -543,7 +545,7 @@ static bool build_guest_fsinfo_for_nonpci_virtio(char const *syspath,
                                                  Error **errp)
 {
     unsigned int tgt[3];
-    char *p;
+    const char *p;
 
     if (!strstr(syspath, "/virtio") || !strstr(syspath, "/block")) {
         g_debug("Unsupported virtio device '%s'", syspath);
@@ -575,7 +577,7 @@ static bool build_guest_fsinfo_for_ccw_dev(char const *syspath,
                                            Error **errp)
 {
     unsigned int cssid, ssid, subchno, devno;
-    char *p;
+    const char *p;
 
     p = strstr(syspath, "/devices/css");
     if (!p || sscanf(p + 12, "%*x/%x.%x.%x/%*x.%*x.%x/",
@@ -1502,14 +1504,15 @@ static void transfer_vcpu(GuestLogicalProcessor *vcpu, bool sys2vcpu,
 
     dirfd = open(dirpath, O_RDONLY | O_DIRECTORY);
     if (dirfd == -1) {
-        error_setg_errno(errp, errno, "open(\"%s\")", dirpath);
+        error_setg_file_open(errp, errno, dirpath);
         return;
     }
 
     fd = openat(dirfd, fn, sys2vcpu ? O_RDONLY : O_RDWR);
     if (fd == -1) {
         if (errno != ENOENT) {
-            error_setg_errno(errp, errno, "open(\"%s/%s\")", dirpath, fn);
+            error_setg_errno(errp, errno, "could not open %s/%s",
+                             dirpath, fn);
         } else if (sys2vcpu) {
             vcpu->online = true;
             vcpu->can_offline = false;
@@ -1711,7 +1714,7 @@ static void transfer_memory_block(GuestMemoryBlock *mem_blk, bool sys2memblk,
     dirfd = open(dirpath, O_RDONLY | O_DIRECTORY);
     if (dirfd == -1) {
         if (sys2memblk) {
-            error_setg_errno(errp, errno, "open(\"%s\")", dirpath);
+            error_setg_file_open(errp, errno, dirpath);
         } else {
             if (errno == ENOENT) {
                 result->response = GUEST_MEMORY_BLOCK_RESPONSE_TYPE_NOT_FOUND;
@@ -1936,7 +1939,7 @@ static GuestDiskStatsInfoList *guest_get_diskstats(Error **errp)
 
     fp = fopen(diskstats, "r");
     if (fp  == NULL) {
-        error_setg_errno(errp, errno, "open(\"%s\")", diskstats);
+        error_setg_file_open(errp, errno, diskstats);
         return NULL;
     }
 
@@ -2047,7 +2050,7 @@ GuestCpuStatsList *qmp_guest_get_cpustats(Error **errp)
 
     fp = fopen(cpustats, "r");
     if (fp  == NULL) {
-        error_setg_errno(errp, errno, "open(\"%s\")", cpustats);
+        error_setg_file_open(errp, errno, cpustats);
         return NULL;
     }
 

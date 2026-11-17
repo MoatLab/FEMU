@@ -415,7 +415,7 @@ Devices:
 ### Generic PCI device properties
 
 Common to every QEMU PCI device and documented by QEMU: `acpi-index`, `addr`, `busnr`, `failover_pair_id`, `multifunction`, `rombar`, `romfile`, `romsize`, `sriov-pf`.
-QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ari-nextfn-1`, `x-pcie-err-unc-mask`, `x-pcie-ext-tag`, `x-pcie-extcap-init`, `x-pcie-lnksta-dllla`) are not listed.
+QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ari-nextfn-1`, `x-pcie-err-unc-mask`, `x-pcie-ext-tag`, `x-pcie-lnksta-dllla`) are not listed.
 
 ## `femu-subsys`: NVMe subsystem
 
@@ -447,7 +447,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 ## `femu-cxl-ssd`: CXL Type-3 SSD
 
-`-device femu-cxl-ssd` has 28 properties of its own, 10 inherited from `cxl-type3` and 80 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu-cxl-ssd` has 28 properties of its own, 12 inherited from `cxl-type3` and 80 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Cache
 
@@ -504,6 +504,7 @@ These belong to QEMU's `cxl-type3` device. The descriptions say how `femu-cxl-ss
 | Property | Type | Default | Description |
 | --- | --- | --- | --- |
 | `cdat` | `str` | unset | Host file holding the CDAT table returned over DOE; unset builds a table from the backends; femu-cxl-ssd leaves it unchanged |
+| `hdm-db` | `bool` | `off` | Report HDM-DB back-invalidation in the HDM decoders; needs x-256b-flit=on; femu-cxl-ssd leaves it unchanged |
 | `lsa` | `link<memory-backend>` | unset | Label storage area backend served by Get and Set LSA; femu-cxl-ssd accepts it only with lsa-control=off |
 | `memdev` | `link<memory-backend>` | unset | Legacy persistent memory backend of cxl-type3; femu-cxl-ssd refuses it at realize |
 | `num-dc-regions` | `uint8` | `0` | Number of dynamic capacity regions; femu-cxl-ssd requires it to stay 0 |
@@ -511,13 +512,14 @@ These belong to QEMU's `cxl-type3` device. The descriptions say how `femu-cxl-ss
 | `sn` | `uint64` | `18446744073709551615` | PCIe Device Serial Number; the default (2^64 - 1) means unset, which gives no serial number capability; femu-cxl-ssd leaves it unchanged |
 | `volatile-dc-memdev` | `link<memory-backend>` | unset | Dynamic capacity memory backend; femu-cxl-ssd refuses it at realize |
 | `volatile-memdev` | `link<memory-backend>` | unset | Required: ID of the host memory backend that holds the device data, a non-zero multiple of 256 MiB, at most 120 GiB; der=cylon needs a hugetlbfs file backend with share=on and prealloc=on, or direct mapping falls back to MMIO with a warning |
+| `x-256b-flit` | `bool` | `off` | Run the CXL link in 256-byte flit mode; femu-cxl-ssd leaves it unchanged |
 | `x-speed` | `PCIELinkSpeed` | `32` | PCIe link speed the device reports; femu-cxl-ssd leaves it unchanged and its timing does not depend on it |
 | `x-width` | `PCIELinkWidth` | `16` | PCIe link width the device reports; femu-cxl-ssd leaves it unchanged and its timing does not depend on it |
 
 ### Generic PCI device properties
 
 Common to every QEMU PCI device and documented by QEMU: `acpi-index`, `addr`, `busnr`, `failover_pair_id`, `multifunction`, `rombar`, `romfile`, `romsize`, `sriov-pf`.
-QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ari-nextfn-1`, `x-pcie-err-unc-mask`, `x-pcie-ext-tag`, `x-pcie-extcap-init`, `x-pcie-lnksta-dllla`) are not listed.
+QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ari-nextfn-1`, `x-pcie-err-unc-mask`, `x-pcie-ext-tag`, `x-pcie-lnksta-dllla`) are not listed.
 
 ## Test-only properties
 

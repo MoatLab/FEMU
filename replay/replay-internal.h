@@ -85,6 +85,7 @@ enum ReplayEvents {
  * @file_offset: offset into replay log at replay snapshot
  * @block_request_id: current serialised block request id
  * @read_event_id: current async read event id
+ * @n_audio_samples: expected audio samples
  */
 typedef struct ReplayState {
     int64_t cached_clock[REPLAY_CLOCK_COUNT];
@@ -96,6 +97,7 @@ typedef struct ReplayState {
     uint64_t file_offset;
     uint64_t block_request_id;
     uint64_t read_event_id;
+    size_t n_audio_samples;
 } ReplayState;
 extern ReplayState replay_state;
 
@@ -169,11 +171,11 @@ void replay_add_event(ReplayAsyncEventKind event_kind, void *opaque,
 /* Input events */
 
 /*! Saves input event to the log */
-void replay_save_input_event(InputEvent *evt);
+void replay_save_input_event(QemuInputEvent *evt);
 /*! Reads input event from the log */
-InputEvent *replay_read_input_event(void);
+QemuInputEvent *replay_read_input_event(void);
 /*! Adds input event to the queue */
-void replay_add_input_event(struct InputEvent *event);
+void replay_add_input_event(QemuInputEvent *event);
 /*! Adds input sync event to the queue */
 void replay_add_input_sync_event(void);
 

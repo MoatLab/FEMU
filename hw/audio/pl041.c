@@ -21,9 +21,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
-#include "hw/sysbus.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/sysbus.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 
@@ -626,7 +626,7 @@ static const VMStateDescription vmstate_pl041 = {
 };
 
 static const Property pl041_device_properties[] = {
-    DEFINE_AUDIO_PROPERTIES(PL041State, codec.card),
+    DEFINE_AUDIO_PROPERTIES(PL041State, codec.audio_be),
     /* Non-compact FIFO depth property */
     DEFINE_PROP_UINT32("nc_fifo_depth", PL041State, fifo_depth,
                        DEFAULT_FIFO_DEPTH),

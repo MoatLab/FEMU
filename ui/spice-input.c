@@ -20,6 +20,7 @@
 #include <spice.h>
 #include <spice/enums.h>
 
+#include "standard-headers/linux/input-event-codes.h"
 #include "ui/qemu-spice.h"
 #include "ui/console.h"
 #include "keymaps.h"
@@ -32,6 +33,7 @@ typedef struct QemuSpiceKbd {
     int ledstate;
     bool emul0;
     size_t pauseseq;
+    Notifier led_notifier;
 } QemuSpiceKbd;
 
 static void kbd_push_key(SpiceKbdInstance *sin, uint8_t frag);
@@ -61,7 +63,7 @@ static void kbd_push_key(SpiceKbdInstance *sin, uint8_t scancode)
     if (scancode == pauseseq[kbd->pauseseq]) {
         kbd->pauseseq++;
         if (kbd->pauseseq == G_N_ELEMENTS(pauseseq)) {
-            qemu_input_event_send_key_qcode(NULL, Q_KEY_CODE_PAUSE, true);
+            qemu_input_event_send_key_linux(NULL, KEY_PAUSE, true);
             kbd->pauseseq = 0;
         }
         return;
@@ -85,18 +87,20 @@ static uint8_t kbd_get_leds(SpiceKbdInstance *sin)
     return kbd->ledstate;
 }
 
-static void kbd_leds(void *opaque, int ledstate)
+static void kbd_leds(Notifier *notifier, void *data)
 {
-    QemuSpiceKbd *kbd = opaque;
+    QemuSpiceKbd *kbd = container_of(notifier, QemuSpiceKbd, led_notifier);
+    /* spice has no associated console support */
+    uint32_t leds_mask = qemu_input_get_leds_mask(NULL);
 
     kbd->ledstate = 0;
-    if (ledstate & QEMU_SCROLL_LOCK_LED) {
+    if (leds_mask & QEMU_SCROLL_LOCK_LED) {
         kbd->ledstate |= SPICE_KEYBOARD_MODIFIER_FLAGS_SCROLL_LOCK;
     }
-    if (ledstate & QEMU_NUM_LOCK_LED) {
+    if (leds_mask & QEMU_NUM_LOCK_LED) {
         kbd->ledstate |= SPICE_KEYBOARD_MODIFIER_FLAGS_NUM_LOCK;
     }
-    if (ledstate & QEMU_CAPS_LOCK_LED) {
+    if (leds_mask & QEMU_CAPS_LOCK_LED) {
         kbd->ledstate |= SPICE_KEYBOARD_MODIFIER_FLAGS_CAPS_LOCK;
     }
     spice_server_kbd_leds(&kbd->sin, kbd->ledstate);
@@ -238,23 +242,41 @@ static void mouse_mode_notifier(Notifier *notifier, void *data)
     pointer->absolute = is_absolute;
 }
 
+static QemuSpiceKbd *spice_kbd;
+static QemuSpicePointer *spice_pointer;
+
 void qemu_spice_input_init(void)
 {
-    QemuSpiceKbd *kbd;
-    QemuSpicePointer *pointer;
+    spice_kbd = g_new0(QemuSpiceKbd, 1);
+    spice_kbd->sin.base.sif = &kbd_interface.base;
+    qemu_spice.add_interface(&spice_kbd->sin.base);
+    spice_kbd->led_notifier.notify = kbd_leds;
+    qemu_input_led_notifier_add(&spice_kbd->led_notifier);
 
-    kbd = g_malloc0(sizeof(*kbd));
-    kbd->sin.base.sif = &kbd_interface.base;
-    qemu_spice.add_interface(&kbd->sin.base);
-    qemu_add_led_event_handler(kbd_leds, kbd);
+    spice_pointer = g_new0(QemuSpicePointer, 1);
+    spice_pointer->mouse.base.sif  = &mouse_interface.base;
+    spice_pointer->tablet.base.sif = &tablet_interface.base;
+    qemu_spice.add_interface(&spice_pointer->mouse.base);
 
-    pointer = g_malloc0(sizeof(*pointer));
-    pointer->mouse.base.sif  = &mouse_interface.base;
-    pointer->tablet.base.sif = &tablet_interface.base;
-    qemu_spice.add_interface(&pointer->mouse.base);
+    spice_pointer->absolute = false;
+    spice_pointer->mouse_mode.notify = mouse_mode_notifier;
+    qemu_add_mouse_mode_change_notifier(&spice_pointer->mouse_mode);
+    mouse_mode_notifier(&spice_pointer->mouse_mode, NULL);
+}
 
-    pointer->absolute = false;
-    pointer->mouse_mode.notify = mouse_mode_notifier;
-    qemu_add_mouse_mode_change_notifier(&pointer->mouse_mode);
-    mouse_mode_notifier(&pointer->mouse_mode, NULL);
+void qemu_spice_input_cleanup(void)
+{
+    if (spice_pointer) {
+        qemu_remove_mouse_mode_change_notifier(&spice_pointer->mouse_mode);
+        if (spice_pointer->absolute) {
+            spice_server_remove_interface(&spice_pointer->tablet.base);
+        }
+        spice_server_remove_interface(&spice_pointer->mouse.base);
+        g_clear_pointer(&spice_pointer, g_free);
+    }
+    if (spice_kbd) {
+        qemu_input_led_notifier_remove(&spice_kbd->led_notifier);
+        spice_server_remove_interface(&spice_kbd->sin.base);
+        g_clear_pointer(&spice_kbd, g_free);
+    }
 }

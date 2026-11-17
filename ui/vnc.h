@@ -31,7 +31,7 @@
 #include "qemu/thread.h"
 #include "ui/clipboard.h"
 #include "ui/console.h"
-#include "audio/audio.h"
+#include "qemu/audio-capture.h"
 #include "qemu/bitmap.h"
 #include "crypto/tlssession.h"
 #include "qemu/buffer.h"
@@ -46,14 +46,6 @@
 #include "vnc-enc-zrle.h"
 #include "ui/kbd-state.h"
 
-// #define _VNC_DEBUG 1
-
-#ifdef _VNC_DEBUG
-#define VNC_DEBUG(fmt, ...) do { fprintf(stderr, fmt, ## __VA_ARGS__); } while (0)
-#else
-#define VNC_DEBUG(fmt, ...) do { } while (0)
-#endif
-
 /*****************************************************************************
  *
  * Core data structures
@@ -62,6 +54,7 @@
 
 typedef struct VncState VncState;
 typedef struct VncJob VncJob;
+typedef struct VncJobQueue VncJobQueue;
 typedef struct VncRect VncRect;
 typedef struct VncRectEntry VncRectEntry;
 
@@ -92,8 +85,8 @@ typedef void VncSendHextileTile(VncState *vs,
 #define VNC_DIRTY_BPL(x) (sizeof((x)->dirty) / VNC_MAX_HEIGHT * BITS_PER_BYTE)
 
 #define VNC_STAT_RECT  64
-#define VNC_STAT_COLS (VNC_MAX_WIDTH / VNC_STAT_RECT)
-#define VNC_STAT_ROWS (VNC_MAX_HEIGHT / VNC_STAT_RECT)
+#define VNC_STAT_COLS DIV_ROUND_UP(VNC_MAX_WIDTH, VNC_STAT_RECT)
+#define VNC_STAT_ROWS DIV_ROUND_UP(VNC_MAX_HEIGHT, VNC_STAT_RECT)
 
 #define VNC_AUTH_CHALLENGE_SIZE 16
 
@@ -154,10 +147,11 @@ struct VncDisplay
     DisplayChangeListener dcl;
     kbd_layout_t *kbd_layout;
     int lock_key_sync;
-    QEMUPutLEDEntry *led;
+    Notifier led_notifier;
     int ledstate;
     QKbdState *kbd;
     QemuMutex mutex;
+    VncJobQueue *queue;
 
     int cursor_msize;
     uint8_t *cursor_mask;
@@ -166,7 +160,7 @@ struct VncDisplay
     pixman_image_t *server;    /* vnc server surface */
     int true_width; /* server surface width before rounding up */
 
-    const char *id;
+    char *id;
     QTAILQ_ENTRY(VncDisplay) next;
     char *password;
     time_t expires;
@@ -178,13 +172,12 @@ struct VncDisplay
     bool non_adaptive;
     bool power_control;
     QCryptoTLSCreds *tlscreds;
-    QAuthZ *tlsauthz;
     char *tlsauthzid;
 #ifdef CONFIG_VNC_SASL
     VncDisplaySASL sasl;
 #endif
 
-    AudioState *audio_state;
+    AudioBackend *audio_be;
 
     VMChangeStateEntry *vmstate_handler_entry;
 };
@@ -548,6 +541,9 @@ enum VncFeatures {
 #define VNC_CLIPBOARD_NOTIFY   (1 << 27)
 #define VNC_CLIPBOARD_PROVIDE  (1 << 28)
 
+VncDisplay *vnc_display_new(const char *id, Error **errp);
+void vnc_display_free(VncDisplay *vd);
+
 /*****************************************************************************
  *
  * Internal APIs
@@ -570,7 +566,6 @@ void vnc_write_u16(VncState *vs, uint16_t value);
 void vnc_write_u8(VncState *vs, uint8_t value);
 void vnc_flush(VncState *vs);
 void vnc_read_when(VncState *vs, VncReadEvent *func, size_t expecting);
-void vnc_disconnect_finish(VncState *vs);
 void vnc_start_protocol(VncState *vs);
 
 
@@ -644,5 +639,9 @@ void vnc_zrle_clear(VncWorker *worker);
 void vnc_server_cut_text_caps(VncState *vs);
 void vnc_client_cut_text(VncState *vs, size_t len, uint8_t *text);
 void vnc_client_cut_text_ext(VncState *vs, int32_t len, uint32_t flags, uint8_t *data);
+
+/* XVP events */
+void vnc_action_shutdown(VncState *vs);
+void vnc_action_reset(VncState *vs);
 
 #endif /* QEMU_VNC_H */

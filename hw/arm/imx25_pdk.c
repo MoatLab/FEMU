@@ -25,10 +25,11 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/arm/fsl-imx25.h"
 #include "hw/arm/boot.h"
-#include "hw/boards.h"
+#include "hw/arm/machines-qom.h"
+#include "hw/core/boards.h"
 #include "qemu/error-report.h"
 #include "system/qtest.h"
 #include "hw/i2c/i2c.h"
@@ -150,4 +151,4 @@ static void imx25_pdk_machine_init(MachineClass *mc)
     mc->auto_create_sdcard = true;
 }
 
-DEFINE_MACHINE("imx25-pdk", imx25_pdk_machine_init)
+DEFINE_MACHINE_ARM("imx25-pdk", imx25_pdk_machine_init)

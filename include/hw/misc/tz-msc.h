@@ -50,8 +50,8 @@
 #ifndef TZ_MSC_H
 #define TZ_MSC_H
 
-#include "hw/sysbus.h"
-#include "target/arm/idau.h"
+#include "hw/core/sysbus.h"
+#include "target/arm/tcg/idau.h"
 #include "qom/object.h"
 
 #define TYPE_TZ_MSC "tz-msc"

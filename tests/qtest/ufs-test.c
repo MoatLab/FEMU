@@ -14,6 +14,7 @@
 #include "scsi/constants.h"
 #include "block/ufs.h"
 #include "qemu/bitmap.h"
+#include "qemu/bswap.h"
 
 #define DWORD_BYTE 4
 /* Test images sizes in Bytes */
@@ -33,6 +34,8 @@
 #define TEST_QID 0
 #define QUEUE_SIZE 32
 #define UFS_MCQ_MAX_QNUM 32
+#define ACPI_PCIHP_ADDR 0xae00
+#define PCI_EJ_BASE 0x0008
 
 typedef struct QUfs QUfs;
 
@@ -166,6 +169,7 @@ __ufs_send_transfer_request_mcq(QUfs *ufs, uint8_t lun,
     cqhp = ufs_rreg(ufs, ufs->cqdao[TEST_QID]);
     cqentry_addr = ufs->cqlba[TEST_QID] + cqhp;
     qtest_memread(ufs->dev.bus->qts, cqentry_addr, &cqentry, sizeof(cqentry));
+    cqhp = (cqhp + sizeof(UfsCqEntry)) % (QUEUE_SIZE * sizeof(UfsCqEntry));
     ufs_wreg(ufs, ufs->cqdao[TEST_QID], cqhp);
 
     return cqentry.status;
@@ -206,6 +210,81 @@ static enum UtpOcsCodes ufs_send_nop_out(QUfs *ufs, UtpUpiuRsp *rsp_out)
     qtest_memread(ufs->dev.bus->qts, rsp_upiu_addr, rsp_out, sizeof(*rsp_out));
     release_cmd_desc_slot(ufs, cmd_desc_slot);
     return ret;
+}
+
+static bool ufs_mcq_sq_has_space(QUfs *ufs)
+{
+    uint32_t sqhp = ufs_rreg(ufs, ufs->sqdao[TEST_QID]);
+    uint32_t sqtp = ufs_rreg(ufs, ufs->sqdao[TEST_QID] + 0x4);
+    uint32_t next_sqtp =
+        (sqtp + sizeof(UfsSqEntry)) % (QUEUE_SIZE * sizeof(UfsSqEntry));
+    return next_sqtp != sqhp;
+}
+
+static void
+__ufs_send_transfer_request_mcq_async(QUfs *ufs, uint8_t lun,
+                                      const UtpTransferReqDesc *utrd)
+{
+    uint32_t sqtp;
+    uint64_t utrd_addr;
+
+    /* Wait for SQ space */
+    while (!ufs_mcq_sq_has_space(ufs)) {
+        qtest_clock_step(ufs->dev.bus->qts, 100);
+    }
+
+    sqtp = ufs_rreg(ufs, ufs->sqdao[TEST_QID] + 0x4);
+    utrd_addr = ufs->sqlba[TEST_QID] + sqtp;
+    qtest_memwrite(ufs->dev.bus->qts, utrd_addr, utrd, sizeof(*utrd));
+    sqtp = (sqtp + sizeof(UfsSqEntry)) % (QUEUE_SIZE * sizeof(UfsSqEntry));
+    ufs_wreg(ufs, ufs->sqdao[TEST_QID] + 0x4, sqtp);
+}
+
+static int ufs_mcq_send_nop_out_async(QUfs *ufs)
+{
+    int cmd_desc_slot = alloc_cmd_desc_slot(ufs);
+    uint64_t req_upiu_addr =
+        ufs->cmd_desc_addr + cmd_desc_slot * UTP_COMMAND_DESCRIPTOR_SIZE;
+
+    /* Build up request upiu */
+    UtpUpiuReq req_upiu = { 0 };
+    req_upiu.header.trans_type = UFS_UPIU_TRANSACTION_NOP_OUT;
+    req_upiu.header.task_tag = cmd_desc_slot;
+    qtest_memwrite(ufs->dev.bus->qts, req_upiu_addr, &req_upiu,
+                   sizeof(req_upiu));
+
+    /* Build up utp transfer request descriptor */
+    UtpTransferReqDesc utrd =
+        ufs_build_req_utrd(req_upiu_addr, UFS_UTP_NO_DATA_TRANSFER, 0);
+
+    /* Send Transfer Request */
+    __ufs_send_transfer_request_mcq_async(ufs, 0, &utrd);
+
+    return cmd_desc_slot;
+}
+
+static int ufs_mcq_poll_cq(QUfs *ufs, UfsCqEntry *cqe, uint16_t n_cqe)
+{
+    uint32_t cqhp, cqtp;
+    uint64_t cqe_addr;
+    int ix = 0;
+
+    cqhp = ufs_rreg(ufs, ufs->cqdao[TEST_QID]);
+    cqtp = ufs_rreg(ufs, ufs->cqdao[TEST_QID] + 0x4);
+
+    while (cqhp != cqtp && ix < n_cqe) {
+        /* read completion entry */
+        cqe_addr = ufs->cqlba[TEST_QID] + cqhp;
+        qtest_memread(ufs->dev.bus->qts, cqe_addr, &cqe[ix], sizeof(cqe[ix]));
+
+        /* advance completion queue head pointer */
+        cqhp = (cqhp + sizeof(UfsCqEntry)) % (QUEUE_SIZE * sizeof(UfsCqEntry));
+        ix++;
+    }
+
+    ufs_wreg(ufs, ufs->cqdao[TEST_QID], cqhp);
+
+    return ix;
 }
 
 static enum UtpOcsCodes ufs_send_query(QUfs *ufs, uint8_t query_function,
@@ -416,6 +495,7 @@ static void ufs_init(QUfs *ufs, QGuestAllocator *alloc)
     ufs_wreg(ufs, A_UTRIACR, 0);
 
     /* Enable transfer request */
+    bitmap_zero(ufs->cmd_desc_bitmap, UFS_MAX_CMD_DESC);
     ufs->cmd_desc_addr =
         guest_alloc(alloc, UFS_MAX_CMD_DESC * UTP_COMMAND_DESCRIPTOR_SIZE);
     ufs->data_buffer_addr =
@@ -557,6 +637,17 @@ static void ufstest_reg_read(void *obj, void *data, QGuestAllocator *alloc)
     qpci_iounmap(&ufs->dev, ufs->bar);
 }
 
+static void ufstest_acpi_eject(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QUfs *ufs = obj;
+    QTestState *qts = ufs->dev.bus->qts;
+
+    qtest_outl(qts, ACPI_PCIHP_ADDR + PCI_EJ_BASE, 1 << 4);
+    qtest_qmp_assert_success(qts, "{ 'execute': 'query-status' }");
+    g_usleep(3 * G_USEC_PER_SEC);
+    qtest_qmp_assert_success(qts, "{ 'execute': 'query-status' }");
+}
+
 static void ufstest_init(void *obj, void *data, QGuestAllocator *alloc)
 {
     QUfs *ufs = obj;
@@ -676,6 +767,53 @@ static void ufstest_read_write(void *obj, void *data, QGuestAllocator *alloc)
                      UFS_COMMAND_RESULT_SUCCESS);
     g_assert_cmpint(memcmp(read_buf, write_buf, block_size), ==, 0);
 
+    ufs_exit(ufs, alloc);
+}
+
+static void ufstest_mcq_cq_wraparound(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QUfs *ufs = obj;
+    UfsCqEntry cqe[QUEUE_SIZE];
+    const int num_requests = QUEUE_SIZE;
+    int i, completed = 0;
+
+    ufs_init(ufs, alloc);
+
+    /* Ensure MCQ is supported */
+    g_assert_true(ufs->support_mcq);
+
+    for (i = 0; i < num_requests; ++i) {
+        ufs_mcq_send_nop_out_async(ufs);
+    }
+
+    while (completed != num_requests) {
+        int n_cqe = ufs_mcq_poll_cq(ufs, cqe, ARRAY_SIZE(cqe));
+        if (!n_cqe) {
+            break;
+        }
+
+        for (i = 0; i < n_cqe; ++i) {
+            uint64_t ucdba;
+            uint64_t rsp_upiu_addr;
+            UtpUpiuRsp rsp_upiu;
+            uint8_t tag;
+
+            g_assert_cmpuint(cqe[i].status, ==, UFS_OCS_SUCCESS);
+
+            ucdba = le64_to_cpu(cqe[i].utp_addr) & MAKE_64BIT_MASK(7, 57);
+            rsp_upiu_addr = ucdba + UTP_RESPONSE_UPIU_OFFSET;
+            qtest_memread(ufs->dev.bus->qts, rsp_upiu_addr, &rsp_upiu,
+                          sizeof(rsp_upiu));
+
+            tag = rsp_upiu.header.task_tag;
+            release_cmd_desc_slot(ufs, tag);
+        }
+
+        completed += n_cqe;
+    }
+
+    g_assert_cmpint(completed, ==, num_requests);
     ufs_exit(ufs, alloc);
 }
 
@@ -1057,6 +1195,175 @@ static void ufstest_query_desc_request(void *obj, void *data,
     ufs_exit(ufs, alloc);
 }
 
+static void ufstest_wb_init(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QUfs *ufs = obj;
+    enum UtpOcsCodes ocs;
+    UtpUpiuRsp rsp_upiu;
+    uint8_t *desc;
+    uint32_t value;
+
+    ufs_init(ufs, alloc);
+
+    /* Read Device Descriptor */
+    ocs = ufs_send_query(ufs, UFS_UPIU_QUERY_FUNC_STANDARD_READ_REQUEST,
+                         UFS_UPIU_QUERY_OPCODE_READ_DESC,
+                         UFS_QUERY_DESC_IDN_DEVICE, 0, 0, 0, &rsp_upiu);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+    g_assert_cmpuint(rsp_upiu.header.response, ==, UFS_COMMAND_RESULT_SUCCESS);
+    g_assert_cmpuint(rsp_upiu.qr.opcode, ==, UFS_UPIU_QUERY_OPCODE_READ_DESC);
+    g_assert_cmpuint(rsp_upiu.qr.idn, ==, UFS_QUERY_DESC_IDN_DEVICE);
+    g_assert_cmpuint(rsp_upiu.qr.data[0], ==, sizeof(DeviceDescriptor));
+    g_assert_cmpuint(rsp_upiu.qr.data[1], ==, UFS_QUERY_DESC_IDN_DEVICE);
+
+    /* Check Write Booster Supportability */
+    desc = rsp_upiu.qr.data;
+
+    value = lduw_be_p(desc + UFS_DEVICE_DESC_PARAM_EXT_WB_SUP);
+    g_assert_cmpuint(value, ==, WB_RESIZE | WB_FIFO | WB_PINNED);
+
+    value = ldl_be_p(desc + UFS_DEVICE_DESC_PARAM_EXT_UFS_FEATURE_SUP);
+    g_assert_cmpuint(value & UFS_DEV_WB_SUPPORT, ==, UFS_DEV_WB_SUPPORT);
+
+    /* Read Geometry Descriptor */
+    ocs = ufs_send_query(ufs, UFS_UPIU_QUERY_FUNC_STANDARD_READ_REQUEST,
+                         UFS_UPIU_QUERY_OPCODE_READ_DESC,
+                         UFS_QUERY_DESC_IDN_GEOMETRY, 0, 0, 0, &rsp_upiu);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+    g_assert_cmpuint(rsp_upiu.header.response, ==, UFS_COMMAND_RESULT_SUCCESS);
+    g_assert_cmpuint(rsp_upiu.qr.data[0], ==, sizeof(GeometryDescriptor));
+    g_assert_cmpuint(rsp_upiu.qr.data[1], ==, UFS_QUERY_DESC_IDN_GEOMETRY);
+
+    /* Check Write Booster Configuration */
+    desc = rsp_upiu.qr.data;
+
+    value = ldl_be_p(desc + UFS_GEOMETRY_DESC_PARAM_WB_MAX_ALLOC_UNITS);
+    g_assert_cmpuint(value, ==, 1024);
+
+    value = desc[UFS_GEOMETRY_DESC_PARAM_WB_MAX_WB_LUNS];
+    g_assert_cmpuint(value, ==, 1);
+
+    value = desc[UFS_GEOMETRY_DESC_PARAM_WB_BUFF_CAP_ADJ];
+    g_assert_cmpuint(value, ==, 3);
+
+    value = desc[UFS_GEOMETRY_DESC_PARAM_WB_SUP_RED_TYPE];
+    g_assert_cmpuint(value, ==, 1);
+
+    value = desc[UFS_GEOMETRY_DESC_PARAM_WB_SUP_WB_TYPE];
+    g_assert_cmpuint(value, ==, 1);
+
+    ufs_exit(ufs, alloc);
+}
+
+static void ufstest_wb_read_write(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QUfs *ufs = obj;
+    uint8_t read_buf[4096] = { 0 };
+    uint8_t write_buf[4096] = { 0 };
+    const uint8_t read_capacity_cdb[UFS_CDB_SIZE] = {
+        /* allocation length 4096 */
+        SERVICE_ACTION_IN_16,
+        SAI_READ_CAPACITY_16,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x10,
+        0x00,
+        0x00,
+        0x00
+    };
+    const uint8_t request_sense_cdb[UFS_CDB_SIZE] = {
+        REQUEST_SENSE,
+    };
+    const uint8_t write_cdb[UFS_CDB_SIZE] = {
+        /* WRITE(10) to LBA 0, transfer length 1 */
+        WRITE_10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00
+    };
+    uint32_t block_size;
+    enum UtpOcsCodes ocs;
+    UtpUpiuRsp rsp_upiu;
+    const int test_lun = 1;
+    uint64_t end_time;
+
+    ufs_init(ufs, alloc);
+
+    /* Clear Unit Attention */
+    ocs = ufs_send_scsi_command(ufs, test_lun, request_sense_cdb, NULL, 0,
+                                read_buf, sizeof(read_buf), &rsp_upiu);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+    g_assert_cmpuint(rsp_upiu.header.scsi_status, ==, CHECK_CONDITION);
+
+    /* Read capacity */
+    ocs = ufs_send_scsi_command(ufs, test_lun, read_capacity_cdb, NULL, 0,
+                                read_buf, sizeof(read_buf), &rsp_upiu);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+    g_assert_cmpuint(rsp_upiu.header.scsi_status, ==,
+                     UFS_COMMAND_RESULT_SUCCESS);
+    block_size = ldl_be_p(&read_buf[8]);
+    g_assert_cmpuint(block_size, ==, 4096);
+
+    /* Check available buffer size */
+    ocs = ufs_send_query(ufs, UFS_UPIU_QUERY_FUNC_STANDARD_READ_REQUEST,
+                         UFS_UPIU_QUERY_OPCODE_READ_ATTR,
+                         UFS_QUERY_ATTR_IDN_AVAIL_WB_BUFF_SIZE, 0, 0, 0,
+                         &rsp_upiu);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+    g_assert_cmpuint(rsp_upiu.header.response, ==, UFS_COMMAND_RESULT_SUCCESS);
+    g_assert_cmpuint(rsp_upiu.qr.opcode, ==, UFS_UPIU_QUERY_OPCODE_READ_ATTR);
+    g_assert_cmpuint(rsp_upiu.qr.idn, ==,
+                     UFS_QUERY_ATTR_IDN_AVAIL_WB_BUFF_SIZE);
+    g_assert_cmpuint(rsp_upiu.qr.value, ==, cpu_to_be32(0xA));
+
+    /* Enable WB */
+    ocs = ufs_send_query(ufs, UFS_UPIU_QUERY_FUNC_STANDARD_WRITE_REQUEST,
+                         UFS_UPIU_QUERY_OPCODE_SET_FLAG,
+                         UFS_QUERY_FLAG_IDN_WB_EN, 0, 0, 0, &rsp_upiu);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+    g_assert_cmpuint(rsp_upiu.header.response, ==, UFS_COMMAND_RESULT_SUCCESS);
+    g_assert_cmpuint(rsp_upiu.qr.value, ==, be32_to_cpu(1));
+
+    /* Write data */
+    for (int i = 0; i < 256; i++) {
+        memset(write_buf, 0xab, block_size);
+        ocs = ufs_send_scsi_command(ufs, test_lun, write_cdb, write_buf,
+                                    block_size, NULL, 0, &rsp_upiu);
+        g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+        g_assert_cmpuint(rsp_upiu.header.scsi_status, ==,
+                         UFS_COMMAND_RESULT_SUCCESS);
+    }
+
+    end_time = g_get_monotonic_time() + TIMEOUT_SECONDS * G_TIME_SPAN_SECOND;
+    do {
+        qtest_clock_step(ufs->dev.bus->qts, 100);
+
+        /* Check available buffer size */
+        ocs = ufs_send_query(ufs, UFS_UPIU_QUERY_FUNC_STANDARD_READ_REQUEST,
+                             UFS_UPIU_QUERY_OPCODE_READ_ATTR,
+                             UFS_QUERY_ATTR_IDN_AVAIL_WB_BUFF_SIZE, 0, 0, 0,
+                             &rsp_upiu);
+        g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+        g_assert_cmpuint(rsp_upiu.header.response, ==,
+                         UFS_COMMAND_RESULT_SUCCESS);
+        g_assert_cmpuint(rsp_upiu.qr.opcode, ==,
+                         UFS_UPIU_QUERY_OPCODE_READ_ATTR);
+        g_assert_cmpuint(rsp_upiu.qr.idn, ==,
+                         UFS_QUERY_ATTR_IDN_AVAIL_WB_BUFF_SIZE);
+    } while (rsp_upiu.qr.value == cpu_to_be32(0xA) &&
+             g_get_monotonic_time() < end_time);
+
+    /* Check available buffer size */
+    g_assert_cmpuint(rsp_upiu.qr.value, ==, cpu_to_be32(0x9));
+
+    ufs_exit(ufs, alloc);
+}
+
 static void drive_destroy(void *path)
 {
     unlink(path);
@@ -1092,6 +1399,280 @@ static void *ufs_blk_test_setup(GString *cmd_line, void *arg)
     return arg;
 }
 
+/*
+ * Helper to read a single HID attribute value.
+ * Returns the host-endian attribute value; asserts OCS success.
+ */
+static uint32_t ufs_hid_read_attr(QUfs *ufs, uint8_t idn)
+{
+    enum UtpOcsCodes ocs;
+    UtpUpiuRsp rsp;
+
+    ocs = ufs_send_query(ufs, UFS_UPIU_QUERY_FUNC_STANDARD_READ_REQUEST,
+                         UFS_UPIU_QUERY_OPCODE_READ_ATTR, idn, 0, 0, 0, &rsp);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+    g_assert_cmpuint(rsp.header.response, ==, UFS_COMMAND_RESULT_SUCCESS);
+    return be32_to_cpu(rsp.qr.value);
+}
+
+/*
+ * Helper to write a single HID attribute value.
+ * Asserts OCS success.
+ */
+static void ufs_hid_write_attr(QUfs *ufs, uint8_t idn, uint32_t value)
+{
+    enum UtpOcsCodes ocs;
+    UtpUpiuRsp rsp;
+
+    ocs = ufs_send_query(ufs, UFS_UPIU_QUERY_FUNC_STANDARD_WRITE_REQUEST,
+                         UFS_UPIU_QUERY_OPCODE_WRITE_ATTR, idn, 0, 0, value,
+                         &rsp);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+    g_assert_cmpuint(rsp.header.response, ==, UFS_COMMAND_RESULT_SUCCESS);
+}
+
+static uint32_t ufs_hid_wait_leave_state(QUfs *ufs, uint32_t from)
+{
+    uint64_t end_time =
+        g_get_monotonic_time() + TIMEOUT_SECONDS * G_TIME_SPAN_SECOND;
+    uint32_t state;
+
+    do {
+        qtest_clock_step(ufs->dev.bus->qts, 100);
+        state = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_STATE);
+    } while (state == from && g_get_monotonic_time() < end_time);
+
+    return state;
+}
+
+static uint32_t ufs_hid_wait_state(QUfs *ufs, uint32_t expected)
+{
+    uint64_t end_time =
+        g_get_monotonic_time() + TIMEOUT_SECONDS * G_TIME_SPAN_SECOND;
+    uint32_t state;
+
+    do {
+        qtest_clock_step(ufs->dev.bus->qts, 100);
+        state = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_STATE);
+    } while (state != expected && g_get_monotonic_time() < end_time);
+
+    g_assert_cmpuint(state, ==, expected);
+    return state;
+}
+
+static void ufs_hid_wait_progress_complete(QUfs *ufs)
+{
+    uint64_t end_time =
+        g_get_monotonic_time() + TIMEOUT_SECONDS * G_TIME_SPAN_SECOND;
+    uint32_t val;
+
+    do {
+        qtest_clock_step(ufs->dev.bus->qts, 100);
+        val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_PROG_RATIO);
+    } while (val != 100 && g_get_monotonic_time() < end_time);
+
+    g_assert_cmpuint(val, ==, 100);
+}
+
+static void ufstest_hid(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QUfs *ufs = obj;
+    uint32_t val;
+    enum UtpOcsCodes ocs;
+    UtpUpiuRsp rsp;
+    const int test_lun = 1;
+    const uint8_t request_sense_cdb[UFS_CDB_SIZE] = {
+        REQUEST_SENSE,
+    };
+    const uint8_t write_cdb[UFS_CDB_SIZE] = {
+        /* WRITE(10) to LBA 0, transfer length 8 sectors = 1 fragment */
+        WRITE_10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00
+    };
+    uint8_t write_buf[4096];
+    uint8_t read_buf[4096];
+    int i;
+
+    ufs_init(ufs, alloc);
+
+    /* Clear Unit Attention */
+    ufs_send_scsi_command(ufs, test_lun, request_sense_cdb, NULL, 0, read_buf,
+                          sizeof(read_buf), &rsp);
+
+    /*
+     * 1. Verify HID default attribute values
+     */
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_DEFRAG_OP);
+    g_assert_cmpuint(val, ==, UFS_HID_OP_DISABLE);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_AVAIL_SIZE);
+    g_assert_cmpuint(val, ==, 0xFFFFFFFF);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_SIZE);
+    g_assert_cmpuint(val, ==, 0xFFFFFFFF);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_PROG_RATIO);
+    g_assert_cmpuint(val, ==, 0);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_STATE);
+    g_assert_cmpuint(val, ==, UFS_HID_STATE_IDLE);
+
+    /*
+     * 2. Verify read-only attributes reject writes
+     */
+    ocs = ufs_send_query(ufs, UFS_UPIU_QUERY_FUNC_STANDARD_WRITE_REQUEST,
+                         UFS_UPIU_QUERY_OPCODE_WRITE_ATTR,
+                         UFS_QUERY_ATTR_IDN_HID_AVAIL_SIZE, 0, 0, 0x100, &rsp);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_INVALID_CMD_TABLE_ATTR);
+    g_assert_cmpuint(rsp.header.response, ==, UFS_QUERY_RESULT_NOT_WRITEABLE);
+
+    ocs = ufs_send_query(ufs, UFS_UPIU_QUERY_FUNC_STANDARD_WRITE_REQUEST,
+                         UFS_UPIU_QUERY_OPCODE_WRITE_ATTR,
+                         UFS_QUERY_ATTR_IDN_HID_PROG_RATIO, 0, 0, 50, &rsp);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_INVALID_CMD_TABLE_ATTR);
+    g_assert_cmpuint(rsp.header.response, ==, UFS_QUERY_RESULT_NOT_WRITEABLE);
+
+    ocs = ufs_send_query(ufs, UFS_UPIU_QUERY_FUNC_STANDARD_WRITE_REQUEST,
+                         UFS_UPIU_QUERY_OPCODE_WRITE_ATTR,
+                         UFS_QUERY_ATTR_IDN_HID_STATE, 0, 0, 0x01, &rsp);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_INVALID_CMD_TABLE_ATTR);
+    g_assert_cmpuint(rsp.header.response, ==, UFS_QUERY_RESULT_NOT_WRITEABLE);
+
+    /*
+     * 3. Verify invalid bDefragOperation value is rejected
+     */
+    ocs = ufs_send_query(ufs, UFS_UPIU_QUERY_FUNC_STANDARD_WRITE_REQUEST,
+                         UFS_UPIU_QUERY_OPCODE_WRITE_ATTR,
+                         UFS_QUERY_ATTR_IDN_DEFRAG_OP, 0, 0, 0x03, &rsp);
+    g_assert_cmpuint(ocs, ==, UFS_OCS_INVALID_CMD_TABLE_ATTR);
+    g_assert_cmpuint(rsp.header.response, ==, UFS_QUERY_RESULT_INVALID_VALUE);
+
+    /*
+     * 4. dHIDSize is writable and readable
+     */
+    ufs_hid_write_attr(ufs, UFS_QUERY_ATTR_IDN_HID_SIZE, 0x100);
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_SIZE);
+    g_assert_cmpuint(val, ==, 0x100);
+
+    /* Restore default */
+    ufs_hid_write_attr(ufs, UFS_QUERY_ATTR_IDN_HID_SIZE, 0xFFFFFFFF);
+
+    /*
+     * 5. Analysis with no fragments -> Defrag Not Required, then reading
+     *    bHIDState in a terminal state auto-resets HID to Idle.
+     */
+    ufs_hid_write_attr(ufs, UFS_QUERY_ATTR_IDN_DEFRAG_OP, UFS_HID_OP_ANALYSIS);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_STATE);
+    g_assert_cmpuint(val, ==, UFS_HID_STATE_ANALYSIS_IN_PROGRESS);
+
+    /* Idle handler advances analysis; first non-analysis read is decisive */
+    val = ufs_hid_wait_leave_state(ufs, UFS_HID_STATE_ANALYSIS_IN_PROGRESS);
+    g_assert_cmpuint(val, ==, UFS_HID_STATE_DEFRAG_NOT_REQUIRED);
+
+    /* Reading Not Required auto-reset to Idle */
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_STATE);
+    g_assert_cmpuint(val, ==, UFS_HID_STATE_IDLE);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_AVAIL_SIZE);
+    g_assert_cmpuint(val, ==, 0xFFFFFFFF);
+
+    /*
+     * 6. Generate fragmentation via SCSI WRITE, then analyze (analysis
+     *    only): the machine settles at Defrag Required.
+     */
+    memset(write_buf, 0xab, sizeof(write_buf));
+    for (i = 0; i < 4; i++) {
+        ocs = ufs_send_scsi_command(ufs, test_lun, write_cdb, write_buf,
+                                    sizeof(write_buf), NULL, 0, &rsp);
+        g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+    }
+
+    ufs_hid_write_attr(ufs, UFS_QUERY_ATTR_IDN_DEFRAG_OP, UFS_HID_OP_ANALYSIS);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_STATE);
+    g_assert_cmpuint(val, ==, UFS_HID_STATE_ANALYSIS_IN_PROGRESS);
+
+    val = ufs_hid_wait_leave_state(ufs, UFS_HID_STATE_ANALYSIS_IN_PROGRESS);
+    g_assert_cmpuint(val, ==, UFS_HID_STATE_DEFRAG_REQUIRED);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_DEFRAG_OP);
+    g_assert_cmpuint(val, ==, UFS_HID_OP_DISABLE);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_AVAIL_SIZE);
+    g_assert_cmpuint(val, >, 0);
+
+    /*
+     * 7. Disable resets to Idle from any state
+     */
+    ufs_hid_write_attr(ufs, UFS_QUERY_ATTR_IDN_DEFRAG_OP, UFS_HID_OP_DISABLE);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_STATE);
+    g_assert_cmpuint(val, ==, UFS_HID_STATE_IDLE);
+
+    /*
+     * 8. Partial defrag cycle: dHIDSize limits the requested defrag size,
+     *    and reading bHIDProgressRatio at 100% resets the HID attributes.
+     */
+    for (i = 0; i < 4; i++) {
+        ocs = ufs_send_scsi_command(ufs, test_lun, write_cdb, write_buf,
+                                    sizeof(write_buf), NULL, 0, &rsp);
+        g_assert_cmpuint(ocs, ==, UFS_OCS_SUCCESS);
+    }
+
+    ufs_hid_write_attr(ufs, UFS_QUERY_ATTR_IDN_HID_SIZE, 2);
+    ufs_hid_write_attr(ufs, UFS_QUERY_ATTR_IDN_DEFRAG_OP, UFS_HID_OP_DEFRAG);
+
+    /* Should start in Analysis In Progress */
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_STATE);
+    g_assert_cmpuint(val, ==, UFS_HID_STATE_ANALYSIS_IN_PROGRESS);
+
+    ufs_hid_wait_progress_complete(ufs);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_AVAIL_SIZE);
+    g_assert_cmpuint(val, ==, 0xFFFFFFFF);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_DEFRAG_OP);
+    g_assert_cmpuint(val, ==, UFS_HID_OP_DISABLE);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_PROG_RATIO);
+    g_assert_cmpuint(val, ==, 0);
+
+    /*
+     * Re-analyze after the partial defrag. There were 8 fragments before
+     * defrag, and dHIDSize limited the completed operation to 2.
+     */
+    ufs_hid_write_attr(ufs, UFS_QUERY_ATTR_IDN_DEFRAG_OP, UFS_HID_OP_ANALYSIS);
+
+    val = ufs_hid_wait_leave_state(ufs, UFS_HID_STATE_ANALYSIS_IN_PROGRESS);
+    g_assert_cmpuint(val, ==, UFS_HID_STATE_DEFRAG_REQUIRED);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_AVAIL_SIZE);
+    g_assert_cmpuint(val, ==, 6);
+
+    ufs_hid_write_attr(ufs, UFS_QUERY_ATTR_IDN_DEFRAG_OP, UFS_HID_OP_DISABLE);
+    ufs_hid_write_attr(ufs, UFS_QUERY_ATTR_IDN_HID_SIZE, 0xFFFFFFFF);
+
+    /*
+     * 9. Full defrag cycle: reading bHIDState in Completed state returns
+     *    Completed once and resets HID attributes to Idle/default values.
+     */
+    ufs_hid_write_attr(ufs, UFS_QUERY_ATTR_IDN_DEFRAG_OP, UFS_HID_OP_DEFRAG);
+
+    val = ufs_hid_wait_state(ufs, UFS_HID_STATE_DEFRAG_COMPLETED);
+    g_assert_cmpuint(val, ==, UFS_HID_STATE_DEFRAG_COMPLETED);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_STATE);
+    g_assert_cmpuint(val, ==, UFS_HID_STATE_IDLE);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_DEFRAG_OP);
+    g_assert_cmpuint(val, ==, UFS_HID_OP_DISABLE);
+
+    val = ufs_hid_read_attr(ufs, UFS_QUERY_ATTR_IDN_HID_AVAIL_SIZE);
+    g_assert_cmpuint(val, ==, 0xFFFFFFFF);
+
+    ufs_exit(ufs, alloc);
+}
+
 static void ufs_register_nodes(void)
 {
     const char *arch;
@@ -1108,6 +1689,13 @@ static void ufs_register_nodes(void)
     QOSGraphTestOptions mcq_test_opts = { .before = ufs_blk_test_setup,
                                           .edge.extra_device_opts =
                                               "mcq=true,mcq-maxq=1" };
+
+    QOSGraphTestOptions wb_test_opts = { .before = ufs_blk_test_setup,
+                                         .edge.extra_device_opts =
+                                             "mcq=false,nutrs=32,nutmrs=8,"
+                                             "wb-max-size=1024,"
+                                             "wb-min-size=256" };
+    QOSGraphTestOptions acpi_eject_test_opts = { .subprocess = true };
 
     add_qpci_address(&edge_opts, &(QPCIAddress){ .devfn = QPCI_DEVFN(4, 0) });
 
@@ -1126,15 +1714,24 @@ static void ufs_register_nodes(void)
         g_test_message("Skipping ufs io tests for ppc64");
         return;
     }
+    if (!strcmp(arch, "i386") || !strcmp(arch, "x86_64")) {
+        qos_add_test("acpi-eject", "ufs", ufstest_acpi_eject,
+                     &acpi_eject_test_opts);
+    }
     qos_add_test("init", "ufs", ufstest_init, NULL);
     qos_add_test("legacy-read-write", "ufs", ufstest_read_write, &io_test_opts);
     qos_add_test("mcq-read-write", "ufs", ufstest_read_write, &mcq_test_opts);
+    qos_add_test("mcq-cq-wraparound", "ufs", ufstest_mcq_cq_wraparound,
+                 &mcq_test_opts);
     qos_add_test("query-flag", "ufs", ufstest_query_flag_request,
                  &io_test_opts);
     qos_add_test("query-attribute", "ufs", ufstest_query_attr_request,
                  &io_test_opts);
     qos_add_test("query-desciptor", "ufs", ufstest_query_desc_request,
                  &io_test_opts);
+    qos_add_test("wb-init", "ufs", ufstest_wb_init, &wb_test_opts);
+    qos_add_test("wb-read-write", "ufs", ufstest_wb_read_write, &wb_test_opts);
+    qos_add_test("hid", "ufs", ufstest_hid, &io_test_opts);
 }
 
 libqos_init(ufs_register_nodes);

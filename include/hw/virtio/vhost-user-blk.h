@@ -29,11 +29,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(VHostUserBlk, VHOST_USER_BLK)
 
 struct VHostUserBlk {
     VirtIODevice parent_obj;
-    CharBackend chardev;
+    CharFrontend chardev;
     int32_t bootindex;
     struct virtio_blk_config blkcfg;
     uint16_t num_queues;
     uint32_t queue_size;
+    bool seg_max_adjust;
     struct vhost_dev dev;
     struct vhost_inflight *inflight;
     VhostUserState vhost_user;
@@ -52,6 +53,7 @@ struct VHostUserBlk {
     bool started_vu;
 
     bool skip_get_vring_base_on_force_shutdown;
+    bool inflight_migration;
 };
 
 #endif

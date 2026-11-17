@@ -37,7 +37,7 @@ static const gchar *tricore_gdb_arch_name(CPUState *cs)
 
 static void tricore_cpu_set_pc(CPUState *cs, vaddr value)
 {
-    cpu_env(cs)->PC = value & ~(target_ulong)1;
+    cpu_env(cs)->PC = value & ~1;
 }
 
 static vaddr tricore_cpu_get_pc(CPUState *cs)
@@ -176,7 +176,7 @@ static bool tricore_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 
 static const struct SysemuCPUOps tricore_sysemu_ops = {
     .has_work = tricore_cpu_has_work,
-    .get_phys_page_debug = tricore_cpu_get_phys_page_debug,
+    .get_phys_addr_debug = tricore_cpu_get_phys_addr_debug,
 };
 
 static const TCGCPUOps tricore_tcg_ops = {

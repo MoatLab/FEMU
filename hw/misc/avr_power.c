@@ -25,8 +25,8 @@
 #include "qemu/osdep.h"
 #include "hw/misc/avr_power.h"
 #include "qemu/log.h"
-#include "hw/qdev-properties.h"
-#include "hw/irq.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/irq.h"
 #include "trace.h"
 
 static void avr_mask_reset(DeviceState *dev)
@@ -71,6 +71,9 @@ static const MemoryRegionOps avr_mask_ops = {
     .write = avr_mask_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
     .impl = {
+        .max_access_size = 1,
+    },
+    .valid = {
         .max_access_size = 1,
     },
 };

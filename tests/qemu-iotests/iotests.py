@@ -596,6 +596,10 @@ def filter_qemu_io(msg):
     return qemu_io_re.sub("X ops; XX:XX:XX.X "
                           "(XXX YYY/sec and XXX ops/sec)", msg)
 
+qemu_re = re.compile(r"%s" % os.path.basename(qemu_prog))
+def filter_qemu(msg):
+    return qemu_re.sub("QEMU_PROG", msg)
+
 chown_re = re.compile(r"chown [0-9]+:[0-9]+")
 def filter_chown(msg):
     return chown_re.sub("chown UID:GID", msg)
@@ -1602,6 +1606,22 @@ def skip_if_user_is_root(func):
         else:
             return func(*args, **kwargs)
     return func_wrapper
+
+def skip_flaky(bugurl):
+    '''Skip Test Decorator
+       Always skips test due to unreliable design.
+       Requires a bug report URL for historical record.'''
+    def skip_test_decorator(func):
+        def func_wrapper(*args, **kwargs):
+            if os.environ.get("QEMU_TEST_FLAKY_TESTS", None) is None:
+                case_notrun(
+                    ('{}: test is flaky (see {}) and $QEMU_TEST_FLAKY_TESTS ' +
+                     'is not set').format(args[0], bugurl))
+                return None
+            else:
+                return func(*args, **kwargs)
+        return func_wrapper
+    return skip_test_decorator
 
 # We need to filter out the time taken from the output so that
 # qemu-iotest can reliably diff the results against master output,

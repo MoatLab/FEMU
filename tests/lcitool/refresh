@@ -63,7 +63,8 @@ add_user_mapping = [
     "  id ${USER} 2>/dev/null || useradd -u ${UID} -U ${USER}; fi\n"
 ]
 
-def generate_dockerfile(host, target, project="qemu", cross=None, trailer=None):
+def generate_dockerfile(host, target, project="qemu", cross=None, trailer=None,
+                        enable_rust=True):
     filename = Path(src_dir, "tests", "docker", "dockerfiles", host + ".docker")
     cmd = lcitool_cmd + ["dockerfile"]
     if cross is not None:
@@ -71,22 +72,25 @@ def generate_dockerfile(host, target, project="qemu", cross=None, trailer=None):
     cmd.extend([target, project])
 
     if trailer is not None:
+        trailer = trailer.strip() + "\n"
         trailer += "\n".join(add_user_mapping)
     else:
         trailer = "\n".join(add_user_mapping)
 
+    if enable_rust:
+        trailer += "\nENV ENABLE_RUST=1\n"
     generate(filename, cmd, trailer)
 
 
-def generate_cirrus(target, trailer=None):
-    filename = Path(src_dir, ".gitlab-ci.d", "cirrus", target + ".vars")
+def generate_vars(target, trailer=None):
+    filename = Path(src_dir, ".gitlab-ci.d", target + ".vars")
     cmd = lcitool_cmd + ["variables", "--format", "shell", target, "qemu"]
     generate(filename, cmd, trailer)
 
 
-def generate_pkglist(vm, target):
+def generate_pkglist(vm, target, project="qemu"):
     filename = Path(src_dir, "tests", "vm", "generated", vm + ".json")
-    cmd = lcitool_cmd + ["variables", "--format", "json", target, "qemu"]
+    cmd = lcitool_cmd + ["variables", "--format", "json", target, project]
     generate(filename, cmd, None)
 
 
@@ -97,65 +101,121 @@ def generate_yaml(os, target, arch, trailer=None):
     generate(filename, cmd, trailer)
 
 
+alpine_extras = r"""
+# https://gitlab.alpinelinux.org/alpine/aports/-/issues/17463
+RUN apk add clang19-libclang
+"""
+
 # Netmap still needs to be manually built as it is yet to be packaged
 # into a distro. We also add cscope and gtags which are used in the CI
 # test
-debian12_extras = [
-    "# netmap/cscope/global\n",
-    "RUN DEBIAN_FRONTEND=noninteractive eatmydata \\\n",
-    "  apt install -y --no-install-recommends \\\n",
-    "  cscope\\\n",
-    "  global\\\n",
-    "  linux-headers-generic\n",
-    "RUN git clone https://github.com/luigirizzo/netmap.git /usr/src/netmap\n",
-    "RUN cd /usr/src/netmap && git checkout v11.3\n",
-    "RUN cd /usr/src/netmap/LINUX && \\\n",
-    "  ./configure --no-drivers --no-apps \\\n",
-    "  --kernel-dir=$(ls -d /usr/src/linux-headers-*-$(dpkg --print-architecture)) \\\n",
-    "  && make install\n",
-    "ENV QEMU_CONFIGURE_OPTS --enable-netmap\n"
-]
+debian13_extras = r"""
+# netmap/cscope/global
+RUN apt update && \
+  DEBIAN_FRONTEND=noninteractive eatmydata \
+  apt install -y --no-install-recommends \
+  cscope\
+  global\
+  linux-headers-generic
+RUN git clone https://github.com/luigirizzo/netmap.git /usr/src/netmap
+RUN cd /usr/src/netmap && git checkout v11.3
+RUN cd /usr/src/netmap/LINUX && \
+  ./configure --no-drivers --no-apps \
+  --kernel-dir=$(ls -d /usr/src/linux-headers-*-$(dpkg --print-architecture)) \
+  && make install
+ENV QEMU_CONFIGURE_OPTS=--enable-netmap
+"""
 
 # Based on the hub.docker.com/library/rust Dockerfiles
-fedora_rustup_nightly_extras = [
-    "RUN dnf install -y wget\n",
-    "ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo\n",
-    "ENV RUSTC=/usr/local/rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/rustc\n",
-    "ENV RUSTDOC=/usr/local/rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/rustdoc\n",
-    "ENV CARGO=/usr/local/rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo\n",
-    "RUN set -eux && \\\n",
-    "  rustArch='x86_64-unknown-linux-gnu' && \\\n",
-    "  rustupSha256='6aeece6993e902708983b209d04c0d1dbb14ebb405ddb87def578d41f920f56d' && \\\n",
-    '  url="https://static.rust-lang.org/rustup/archive/1.27.1/${rustArch}/rustup-init" && \\\n',
-    '  wget "$url" && \\\n',
-    '  echo "${rustupSha256} *rustup-init" | sha256sum -c - && \\\n',
-    "  chmod +x rustup-init && \\\n",
-    "  ./rustup-init -y --no-modify-path --profile default --default-toolchain nightly --default-host ${rustArch} && \\\n",
-    "  chmod -R a+w $RUSTUP_HOME $CARGO_HOME && \\\n",
-    "  /usr/local/cargo/bin/rustup --version && \\\n",
-    "  /usr/local/cargo/bin/rustup run nightly cargo --version && \\\n",
-    "  /usr/local/cargo/bin/rustup run nightly rustc --version && \\\n",
-    '  test "$CARGO" = "$(/usr/local/cargo/bin/rustup +nightly which cargo)" && \\\n',
-    '  test "$RUSTDOC" = "$(/usr/local/cargo/bin/rustup +nightly which rustdoc)" && \\\n',
-    '  test "$RUSTC" = "$(/usr/local/cargo/bin/rustup +nightly which rustc)"\n',
-    'ENV PATH=$CARGO_HOME/bin:$PATH\n',
-    'RUN /usr/local/cargo/bin/rustup run nightly cargo install bindgen-cli\n',
-    'RUN $CARGO --list\n',
-]
+fedora_rustup_nightly_extras = r"""
+RUN dnf install -y wget
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV RUSTC=/usr/local/rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/rustc
+ENV RUSTDOC=/usr/local/rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/rustdoc
+ENV CARGO=/usr/local/rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo
+RUN set -eux && \
+  rustArch='x86_64-unknown-linux-gnu' && \
+  rustupSha256='6aeece6993e902708983b209d04c0d1dbb14ebb405ddb87def578d41f920f56d' && \
+  url="https://static.rust-lang.org/rustup/archive/1.27.1/${rustArch}/rustup-init" && \
+  wget "$url" && \
+  echo "${rustupSha256} *rustup-init" | sha256sum -c - && \
+  chmod +x rustup-init && \
+  ./rustup-init -y --no-modify-path --profile default --default-toolchain nightly --default-host ${rustArch} && \
+  chmod -R a+w $RUSTUP_HOME $CARGO_HOME && \
+  /usr/local/cargo/bin/rustup --version && \
+  /usr/local/cargo/bin/rustup run nightly cargo --version && \
+  /usr/local/cargo/bin/rustup run nightly rustc --version && \
+  test "$CARGO" = "$(/usr/local/cargo/bin/rustup +nightly which cargo)" && \
+  test "$RUSTDOC" = "$(/usr/local/cargo/bin/rustup +nightly which rustdoc)" && \
+  test "$RUSTC" = "$(/usr/local/cargo/bin/rustup +nightly which rustc)"
+ENV PATH=$CARGO_HOME/bin:$PATH
+RUN /usr/local/cargo/bin/rustup run nightly cargo install --locked bindgen-cli
+RUN $CARGO --list
+"""
 
-ubuntu2204_rust_extras = [
-    "ENV RUSTC=/usr/bin/rustc-1.77\n",
-    "ENV RUSTDOC=/usr/bin/rustdoc-1.77\n",
-    "ENV CARGO_HOME=/usr/local/cargo\n",
-    'ENV PATH=$CARGO_HOME/bin:$PATH\n',
-    "RUN DEBIAN_FRONTEND=noninteractive eatmydata \\\n",
-    "  apt install -y --no-install-recommends cargo\n",
-    'RUN cargo install bindgen-cli\n',
-]
+ubuntu2404_rust_extras = r"""
+ENV RUSTC=/usr/bin/rustc-1.83
+ENV RUSTDOC=/usr/bin/rustdoc-1.83
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=$CARGO_HOME/bin:$PATH
+RUN apt update && \
+  DEBIAN_FRONTEND=noninteractive eatmydata \
+  apt install -y --no-install-recommends cargo
+RUN cargo install --locked bindgen-cli
+"""
+
+debian_all_test_cross_compilers = r"""
+# extras for cross and alternate toolchains
+RUN apt update && \
+  DEBIAN_FRONTEND=noninteractive eatmydata \
+  apt install -y --no-install-recommends \
+  clang\
+  dpkg-dev\
+  gdb-multiarch\
+  libclang-rt-dev
+ENV AVAILABLE_COMPILERS="\
+  gcc-aarch64-linux-gnu \
+  libc6-dev-arm64-cross \
+  gcc-arm-linux-gnueabihf \
+  libc6-dev-armhf-cross \
+  gcc-alpha-linux-gnu \
+  libc6.1-dev-alpha-cross \
+  gcc-mips-linux-gnu \
+  libc6-dev-mips-cross \
+  gcc-mips64-linux-gnuabi64 \
+  libc6-dev-mips64-cross \
+  gcc-mips64el-linux-gnuabi64 \
+  libc6-dev-mips64el-cross \
+  gcc-mipsel-linux-gnu \
+  libc6-dev-mipsel-cross \
+  gcc-powerpc64le-linux-gnu \
+  libc6-dev-ppc64el-cross \
+  gcc-riscv64-linux-gnu \
+  libc6-dev-riscv64-cross \
+  gcc-s390x-linux-gnu \
+  libc6-dev-s390x-cross\
+  gcc-sh4-linux-gnu \
+  libc6-dev-sh4-cross \
+  "
+RUN if dpkg-architecture -e amd64; then \
+  export AVAILABLE_COMPILERS="${AVAILABLE_COMPILERS} gcc-hppa-linux-gnu libc6-dev-hppa-cross"; \
+  export AVAILABLE_COMPILERS="${AVAILABLE_COMPILERS} gcc-m68k-linux-gnu libc6-dev-m68k-cross"; \
+  export AVAILABLE_COMPILERS="${AVAILABLE_COMPILERS} gcc-powerpc-linux-gnu libc6-dev-powerpc-cross"; \
+  export AVAILABLE_COMPILERS="${AVAILABLE_COMPILERS} gcc-powerpc64-linux-gnu libc6-dev-ppc64-cross"; \
+  export AVAILABLE_COMPILERS="${AVAILABLE_COMPILERS} gcc-sparc64-linux-gnu libc6-dev-sparc64-cross"; \
+fi && \
+apt update && \
+DEBIAN_FRONTEND=noninteractive eatmydata \
+apt install -y --no-install-recommends \
+${AVAILABLE_COMPILERS} && \
+dpkg-query --showformat '${Package}_${Version}_${Architecture}' --show > /packages.txt
+ENV QEMU_CONFIGURE_OPTS=--disable-docs
+ENV DEF_TARGET_LIST=aarch64-linux-user,alpha-linux-user,arm-linux-user,hppa-linux-user,i386-linux-user,m68k-linux-user,mips-linux-user,mips64-linux-user,mips64el-linux-user,mipsel-linux-user,ppc-linux-user,ppc64-linux-user,ppc64le-linux-user,riscv64-linux-user,s390x-linux-user,sh4-linux-user,sparc64-linux-user
+"""
 
 def cross_build(prefix, targets):
-    conf = "ENV QEMU_CONFIGURE_OPTS --cross-prefix=%s\n" % (prefix)
-    targets = "ENV DEF_TARGET_LIST %s\n" % (targets)
+    conf = "ENV QEMU_CONFIGURE_OPTS=--cross-prefix=%s\n" % (prefix)
+    targets = "ENV DEF_TARGET_LIST=%s\n" % (targets)
     return "".join([conf, targets])
 
 #
@@ -167,59 +227,48 @@ try:
     #
     # Standard native builds
     #
-    generate_dockerfile("alpine", "alpine-321")
+    generate_dockerfile("alpine", "alpine-323",
+                        trailer=alpine_extras)
     generate_dockerfile("centos9", "centos-stream-9")
-    generate_dockerfile("debian", "debian-12",
-                        trailer="".join(debian12_extras))
-    generate_dockerfile("fedora", "fedora-40")
-    generate_dockerfile("opensuse-leap", "opensuse-leap-15")
-    generate_dockerfile("ubuntu2204", "ubuntu-2204",
-                        trailer="".join(ubuntu2204_rust_extras))
+    generate_dockerfile("debian", "debian-13",
+                        trailer=debian13_extras)
+    generate_dockerfile("fedora", "fedora-43")
+    generate_dockerfile("opensuse-leap", "opensuse-leap-16")
+    generate_dockerfile("ubuntu2404", "ubuntu-2404",
+                        trailer=ubuntu2404_rust_extras)
 
     #
     # Non-fatal Rust-enabled build
     #
-    generate_dockerfile("fedora-rust-nightly", "fedora-40",
-                        trailer="".join(fedora_rustup_nightly_extras))
+    generate_dockerfile("fedora-rust-nightly", "fedora-43",
+                        trailer=fedora_rustup_nightly_extras)
 
     #
     # Cross compiling builds
     #
-    generate_dockerfile("debian-amd64-cross", "debian-12",
+    generate_dockerfile("debian-amd64-cross", "debian-13",
                         cross="x86_64",
                         trailer=cross_build("x86_64-linux-gnu-",
                                             "x86_64-softmmu,"
                                             "x86_64-linux-user,"
                                             "i386-softmmu,i386-linux-user"))
 
-    generate_dockerfile("debian-arm64-cross", "debian-12",
+    generate_dockerfile("debian-arm64-cross", "debian-13",
                         cross="aarch64",
                         trailer=cross_build("aarch64-linux-gnu-",
                                             "aarch64-softmmu,aarch64-linux-user"))
 
-    generate_dockerfile("debian-armhf-cross", "debian-12",
+    generate_dockerfile("debian-armhf-cross", "debian-13",
                         cross="armv7l",
                         trailer=cross_build("arm-linux-gnueabihf-",
                                             "arm-softmmu,arm-linux-user"))
 
-    generate_dockerfile("debian-i686-cross", "debian-12",
+    generate_dockerfile("debian-i686-cross", "debian-13",
                         cross="i686",
                         trailer=cross_build("i686-linux-gnu-",
-                                            "x86_64-softmmu,"
-                                            "x86_64-linux-user,"
                                             "i386-softmmu,i386-linux-user"))
 
-    generate_dockerfile("debian-mips64el-cross", "debian-12",
-                        cross="mips64el",
-                        trailer=cross_build("mips64el-linux-gnuabi64-",
-                                            "mips64el-softmmu,mips64el-linux-user"))
-
-    generate_dockerfile("debian-mipsel-cross", "debian-12",
-                        cross="mipsel",
-                        trailer=cross_build("mipsel-linux-gnu-",
-                                            "mipsel-softmmu,mipsel-linux-user"))
-
-    generate_dockerfile("debian-ppc64el-cross", "debian-12",
+    generate_dockerfile("debian-ppc64el-cross", "debian-13",
                         cross="ppc64le",
                         trailer=cross_build("powerpc64le-linux-gnu-",
                                             "ppc64-softmmu,ppc64-linux-user"))
@@ -227,38 +276,47 @@ try:
     # while not yet a release architecture the packages are still
     # build while part of testing
     generate_dockerfile("debian-riscv64-cross", "debian-13",
-                        project="qemu-minimal",
                         cross="riscv64",
                         trailer=cross_build("riscv64-linux-gnu-",
                                             "riscv64-softmmu,riscv64-linux-user"))
 
-    generate_dockerfile("debian-s390x-cross", "debian-12",
+    generate_dockerfile("debian-s390x-cross", "debian-13",
                         cross="s390x",
                         trailer=cross_build("s390x-linux-gnu-",
                                             "s390x-softmmu,s390x-linux-user"))
 
-    generate_dockerfile("fedora-win64-cross", "fedora-40",
+    generate_dockerfile("fedora-win64-cross", "fedora-43",
                         project='qemu,qemu-win-installer',
                         cross="mingw64",
                         trailer=cross_build("x86_64-w64-mingw32-",
                                             "x86_64-softmmu"))
 
+    # We also generate some docker files with minimal dependencies and
+    # as many cross-compilers as Debian will package for building TCG
+    # tests.
+
+    generate_dockerfile("debian-all-test-cross", "debian-13",
+                        project="qemu-minimal",
+                        enable_rust=False,
+                        trailer=debian_all_test_cross_compilers)
+
     #
-    # Cirrus packages lists for GitLab
+    # GitLab packages lists
     #
-    generate_cirrus("freebsd-14")
-    generate_cirrus("macos-14")
+    generate_vars("macos-14")
 
     #
     # VM packages lists
     #
     generate_pkglist("freebsd", "freebsd-14")
+    generate_pkglist("openbsd", "openbsd-78", project="qemu-minimal")
 
     #
     # Ansible package lists
     #
-    generate_yaml("ubuntu", "ubuntu-2204", "aarch64")
-    generate_yaml("ubuntu", "ubuntu-2204", "s390x")
+    generate_yaml("ubuntu", "ubuntu-2404", "aarch64")
+    generate_yaml("ubuntu", "ubuntu-2404", "s390x")
+    generate_yaml("debian", "debian-13", "ppc64le")
 
 
     sys.exit(0)

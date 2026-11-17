@@ -3,6 +3,7 @@
 
 #ifndef CONFIG_USER_ONLY
 
+#include "exec/page-protection.h"
 #include "system/memory.h"
 
 bool ppc_hash32_xlate(PowerPCCPU *cpu, vaddr eaddr, MMUAccessType access_type,
@@ -69,38 +70,6 @@ static inline hwaddr ppc_hash32_hpt_base(PowerPCCPU *cpu)
 static inline hwaddr ppc_hash32_hpt_mask(PowerPCCPU *cpu)
 {
     return ((cpu->env.spr[SPR_SDR1] & SDR_32_HTABMASK) << 16) | 0xFFFF;
-}
-
-static inline target_ulong ppc_hash32_load_hpte0(PowerPCCPU *cpu,
-                                                 hwaddr pte_offset)
-{
-    target_ulong base = ppc_hash32_hpt_base(cpu);
-
-    return ldl_phys(CPU(cpu)->as, base + pte_offset);
-}
-
-static inline target_ulong ppc_hash32_load_hpte1(PowerPCCPU *cpu,
-                                                 hwaddr pte_offset)
-{
-    target_ulong base = ppc_hash32_hpt_base(cpu);
-
-    return ldl_phys(CPU(cpu)->as, base + pte_offset + HASH_PTE_SIZE_32 / 2);
-}
-
-static inline void ppc_hash32_store_hpte0(PowerPCCPU *cpu,
-                                          hwaddr pte_offset, target_ulong pte0)
-{
-    target_ulong base = ppc_hash32_hpt_base(cpu);
-
-    stl_phys(CPU(cpu)->as, base + pte_offset, pte0);
-}
-
-static inline void ppc_hash32_store_hpte1(PowerPCCPU *cpu,
-                                          hwaddr pte_offset, target_ulong pte1)
-{
-    target_ulong base = ppc_hash32_hpt_base(cpu);
-
-    stl_phys(CPU(cpu)->as, base + pte_offset + HASH_PTE_SIZE_32 / 2, pte1);
 }
 
 static inline hwaddr get_pteg_offset32(PowerPCCPU *cpu, hwaddr hash)

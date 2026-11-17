@@ -2,7 +2,6 @@
 /*
  * Copyright (c) 2025 Loongson Technology Corporation Limited
  */
-#include <stddef.h>
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "csr.h"
@@ -10,19 +9,19 @@
 #define CSR_OFF_FUNCS(NAME, FL, RD, WR)                    \
     [LOONGARCH_CSR_##NAME] = {                             \
         .name   = (stringify(NAME)),                       \
-        .offset = offsetof(CPULoongArchState, CSR_##NAME), \
+        .offset = CSR_OFFSET(CSR_##NAME),                  \
         .flags = FL, .readfn = RD, .writefn = WR           \
     }
 
 #define CSR_OFF_ARRAY(NAME, N)                                \
     [LOONGARCH_CSR_##NAME(N)] = {                             \
         .name   = (stringify(NAME##N)),                       \
-        .offset = offsetof(CPULoongArchState, CSR_##NAME[N]), \
-        .flags = 0, .readfn = NULL, .writefn = NULL           \
+        .offset = CSR_OFFSET(CSR_##NAME[N]),                  \
+        .flags = CSRFL_BASIC, .readfn = NULL, .writefn = NULL           \
     }
 
 #define CSR_OFF_FLAGS(NAME, FL)   CSR_OFF_FUNCS(NAME, FL, NULL, NULL)
-#define CSR_OFF(NAME)             CSR_OFF_FLAGS(NAME, 0)
+#define CSR_OFF(NAME)             CSR_OFF_FLAGS(NAME, CSRFL_BASIC)
 
 static CSRInfo csr_info[] = {
     CSR_OFF_FLAGS(CRMD, CSRFL_EXITTB),
@@ -94,9 +93,46 @@ static CSRInfo csr_info[] = {
     CSR_OFF_ARRAY(DMW, 1),
     CSR_OFF_ARRAY(DMW, 2),
     CSR_OFF_ARRAY(DMW, 3),
+    CSR_OFF_ARRAY(PERFCTRL, 0),
+    CSR_OFF_ARRAY(PERFCNTR, 0),
+    CSR_OFF_ARRAY(PERFCTRL, 1),
+    CSR_OFF_ARRAY(PERFCNTR, 1),
+    CSR_OFF_ARRAY(PERFCTRL, 2),
+    CSR_OFF_ARRAY(PERFCNTR, 2),
+    CSR_OFF_ARRAY(PERFCTRL, 3),
+    CSR_OFF_ARRAY(PERFCNTR, 3),
+    CSR_OFF_ARRAY(PERFCTRL, 4),
+    CSR_OFF_ARRAY(PERFCNTR, 4),
+    CSR_OFF_ARRAY(PERFCTRL, 5),
+    CSR_OFF_ARRAY(PERFCNTR, 5),
+    CSR_OFF_ARRAY(PERFCTRL, 6),
+    CSR_OFF_ARRAY(PERFCNTR, 6),
+    CSR_OFF_ARRAY(PERFCTRL, 7),
+    CSR_OFF_ARRAY(PERFCNTR, 7),
+    CSR_OFF_ARRAY(PERFCTRL, 8),
+    CSR_OFF_ARRAY(PERFCNTR, 8),
+    CSR_OFF_ARRAY(PERFCTRL, 9),
+    CSR_OFF_ARRAY(PERFCNTR, 9),
+    CSR_OFF_ARRAY(PERFCTRL, 10),
+    CSR_OFF_ARRAY(PERFCNTR, 10),
+    CSR_OFF_ARRAY(PERFCTRL, 11),
+    CSR_OFF_ARRAY(PERFCNTR, 11),
+    CSR_OFF_ARRAY(PERFCTRL, 12),
+    CSR_OFF_ARRAY(PERFCNTR, 12),
+    CSR_OFF_ARRAY(PERFCTRL, 13),
+    CSR_OFF_ARRAY(PERFCNTR, 13),
+    CSR_OFF_ARRAY(PERFCTRL, 14),
+    CSR_OFF_ARRAY(PERFCNTR, 14),
+    CSR_OFF_ARRAY(PERFCTRL, 15),
+    CSR_OFF_ARRAY(PERFCNTR, 15),
     CSR_OFF(DBG),
     CSR_OFF(DERA),
     CSR_OFF(DSAVE),
+    CSR_OFF_ARRAY(MSGIS, 0),
+    CSR_OFF_ARRAY(MSGIS, 1),
+    CSR_OFF_ARRAY(MSGIS, 2),
+    CSR_OFF_ARRAY(MSGIS, 3),
+    CSR_OFF(MSGIR),
 };
 
 CSRInfo *get_csr(unsigned int csr_num)
@@ -108,7 +144,7 @@ CSRInfo *get_csr(unsigned int csr_num)
     }
 
     csr = &csr_info[csr_num];
-    if (csr->offset == 0) {
+    if (csr->flags == 0) {
         return NULL;
     }
 

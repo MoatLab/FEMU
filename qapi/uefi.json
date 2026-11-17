@@ -18,7 +18,7 @@
 ##
 # @UefiVariable:
 #
-# UEFI Variable.  Check the UEFI specifification for more detailed
+# UEFI Variable.  Check the UEFI specification for more detailed
 # information on the fields.
 #
 # @guid: variable namespace GUID

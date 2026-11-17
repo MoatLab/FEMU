@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+#
+# Functional test that boots the ASPEED machines
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+import os
+import time
+
+from qemu_test import Asset
+from aspeed import AspeedTest
+from qemu_test import exec_command_and_wait_for_pattern
+
+
+class AST2600Machine(AspeedTest):
+
+    ASSET_SDK_V1101_AST2600 = Asset(
+        'https://github.com/AspeedTech-BMC/openbmc/releases/download/v11.01/ast2600-default-image.tar.gz',
+        '3c5b4d4ccf27b0d208a073f98426db54cd751b96143180cd15df1a83978f832c')
+
+    def do_ast2600_pcie_test(self):
+        exec_command_and_wait_for_pattern(self,
+            'lspci -s 00:08.0',
+            '00:08.0 PCI bridge: '
+            'ASPEED Technology, Inc. AST1150 PCI-to-PCI Bridge')
+        exec_command_and_wait_for_pattern(self,
+            'lspci -s 01:00.0',
+            '01:00.0 Ethernet controller: '
+            'Intel Corporation 82574L Gigabit Network Connection')
+        exec_command_and_wait_for_pattern(self,
+            'ip addr show dev eth4',
+            'inet 10.0.2.15/24')
+
+    def do_ast2600_i3c_test(self):
+        exec_command_and_wait_for_pattern(self,
+            'i3ctransfer -d /dev/bus/i3c/5-1234567890ab'
+            ' -w 0x12,0x34,0x56,0x78,0x90,0xab,0xcd,0xef',
+            'Success on message 0')
+        exec_command_and_wait_for_pattern(self,
+            'i3ctransfer -d /dev/bus/i3c/5-1234567890ab -r 8 | grep 0x | xargs',
+            '0x12 0x34 0x56 0x78 0x90 0xab 0xcd 0xef')
+
+    def do_ast2600_usb_ehci_test(self):
+        exec_command_and_wait_for_pattern(self,
+            'lsusb',
+            'QEMU QEMU USB Keyboard')
+
+    def test_arm_ast2600_evb_sdk(self):
+        self.set_machine('ast2600-evb')
+        self.require_netdev('user')
+
+        self.archive_extract(self.ASSET_SDK_V1101_AST2600)
+
+        self.vm.add_args('-device',
+            'tmp105,bus=aspeed.i2c.bus.5,address=0x4d,id=tmp-test')
+        self.vm.add_args('-device',
+            'ds1338,bus=aspeed.i2c.bus.5,address=0x32')
+        self.vm.add_args('-device', 'e1000e,netdev=net1,bus=pcie.0')
+        self.vm.add_args('-netdev', 'user,id=net1')
+        self.vm.add_args('-device',
+            'mock-i3c-target,bus=dw.i3c.5,pid=0xab9078563412')
+        self.vm.add_args('-device', 'usb-kbd,bus=usb-bus.1')
+        self.do_test_arm_aspeed_sdk_start(
+            self.scratch_file("ast2600-default-image", "image-bmc"))
+
+        self.wait_for_console_pattern('login:')
+
+        exec_command_and_wait_for_pattern(self, 'root', 'Password:')
+        exec_command_and_wait_for_pattern(self, '0penBmc',
+                                          'root@ast2600-default:~#')
+
+        exec_command_and_wait_for_pattern(self,
+            'echo lm75 0x4d > /sys/class/i2c-dev/i2c-5/device/new_device',
+            'i2c i2c-5: new_device: Instantiated device lm75 at 0x4d')
+        exec_command_and_wait_for_pattern(self,
+             'cat /sys/class/hwmon/hwmon19/temp1_input', '0')
+        self.vm.cmd('qom-set', path='/machine/peripheral/tmp-test',
+                    property='temperature', value=18000)
+        exec_command_and_wait_for_pattern(self,
+             'cat /sys/class/hwmon/hwmon19/temp1_input', '18000')
+
+        exec_command_and_wait_for_pattern(self,
+             'echo ds1307 0x32 > /sys/class/i2c-dev/i2c-5/device/new_device',
+             'i2c i2c-5: new_device: Instantiated device ds1307 at 0x32')
+        year = time.strftime("%Y")
+        exec_command_and_wait_for_pattern(self,
+             '/sbin/hwclock -f /dev/rtc1', year)
+        self.do_ast2600_pcie_test()
+        self.do_ast2600_i3c_test()
+        self.do_ast2600_usb_ehci_test()
+
+
+if __name__ == '__main__':
+    AspeedTest.main()

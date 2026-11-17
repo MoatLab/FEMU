@@ -19,13 +19,13 @@
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
 #include "qemu/log.h"
-#include "hw/irq.h"
-#include "hw/registerfields.h"
+#include "hw/core/irq.h"
+#include "hw/core/registerfields.h"
 #include "hw/misc/sifive_e_aon.h"
 #include "qapi/visitor.h"
 #include "qapi/error.h"
 #include "system/watchdog.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 
 REG32(AON_WDT_WDOGCFG, 0x0)
     FIELD(AON_WDT_WDOGCFG, SCALE, 0, 4)
@@ -94,9 +94,9 @@ static void sifive_e_aon_wdt_update_state(SiFiveEAONState *r)
         next += muldiv64((r->wdogcmp0 - wdogs) <<
                          FIELD_EX32(r->wdogcfg, AON_WDT_WDOGCFG, SCALE),
                          NANOSECONDS_PER_SECOND, r->wdogclk_freq);
-        timer_mod(r->wdog_timer, next);
+        timer_mod(&r->wdog_timer, next);
     } else {
-        timer_mod(r->wdog_timer, INT64_MAX);
+        timer_mod(&r->wdog_timer, INT64_MAX);
     }
 }
 
@@ -250,7 +250,7 @@ sifive_e_aon_write(void *opaque, hwaddr addr,
 static const MemoryRegionOps sifive_e_aon_ops = {
     .read = sifive_e_aon_read,
     .write = sifive_e_aon_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_LITTLE_ENDIAN,
     .impl = {
         .min_access_size = 4,
         .max_access_size = 4
@@ -283,10 +283,17 @@ static void sifive_e_aon_init(Object *obj)
     sysbus_init_mmio(sbd, &r->mmio);
 
     /* watchdog timer */
-    r->wdog_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
-                                 sifive_e_aon_wdt_expired_cb, r);
+    timer_init_ns(&r->wdog_timer, QEMU_CLOCK_VIRTUAL,
+                  sifive_e_aon_wdt_expired_cb, r);
     r->wdogclk_freq = SIFIVE_E_LFCLK_DEFAULT_FREQ;
     sysbus_init_irq(sbd, &r->wdog_irq);
+}
+
+static void sifive_e_aon_finalize(Object *obj)
+{
+    SiFiveEAONState *r = SIFIVE_E_AON(obj);
+
+    timer_del(&r->wdog_timer);
 }
 
 static const Property sifive_e_aon_properties[] = {
@@ -307,6 +314,7 @@ static const TypeInfo sifive_e_aon_info = {
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(SiFiveEAONState),
     .instance_init = sifive_e_aon_init,
+    .instance_finalize = sifive_e_aon_finalize,
     .class_init    = sifive_e_aon_class_init,
 };
 

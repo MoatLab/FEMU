@@ -10,12 +10,12 @@
 #include "qobject/qdict.h"
 #include "qapi/error.h"
 #include "monitor/monitor.h"
-#include "monitor/hmp-target.h"
+#include "monitor/hmp.h"
 #include "system/hw_accel.h"
 #include "system/kvm.h"
 #include "system/xen.h"
 #include "system/address-spaces.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/i386/apic_internal.h"
 #include "cpu-internal.h"
 
@@ -32,7 +32,7 @@ APICCommonClass *apic_get_class(Error **errp)
         apic_type = "kvm-apic";
     } else if (xen_enabled()) {
         apic_type = "xen-apic";
-    } else if (whpx_apic_in_platform()) {
+    } else if (whpx_irqchip_in_kernel()) {
         apic_type = "whpx-apic";
     }
 
@@ -41,34 +41,27 @@ APICCommonClass *apic_get_class(Error **errp)
 
 void x86_cpu_apic_create(X86CPU *cpu, Error **errp)
 {
-    APICCommonState *apic;
     APICCommonClass *apic_class = apic_get_class(errp);
 
     if (!apic_class) {
         return;
     }
 
-    cpu->apic_state = DEVICE(object_new_with_class(OBJECT_CLASS(apic_class)));
+    cpu->apic_state = APIC_COMMON(object_new_with_class(OBJECT_CLASS(apic_class)));
     object_property_add_child(OBJECT(cpu), "lapic",
                               OBJECT(cpu->apic_state));
     object_unref(OBJECT(cpu->apic_state));
 
     /* TODO: convert to link<> */
-    apic = APIC_COMMON(cpu->apic_state);
-    apic->cpu = cpu;
-    apic->apicbase = APIC_DEFAULT_ADDRESS | MSR_IA32_APICBASE_ENABLE;
+    cpu->apic_state->cpu = cpu;
+    cpu->apic_state->apicbase = APIC_DEFAULT_ADDRESS | MSR_IA32_APICBASE_ENABLE;
 
-    /*
-     * apic_common_set_id needs to check if the CPU has x2APIC
-     * feature in case APIC ID >= 255, so we need to set apic->cpu
-     * before setting APIC ID
-     */
-    qdev_prop_set_uint32(cpu->apic_state, "id", cpu->apic_id);
+    /* cpu must be set before realize, which validates the APIC ID */
+    qdev_prop_set_uint32(DEVICE(cpu->apic_state), "id", cpu->apic_id);
 }
 
 void x86_cpu_apic_realize(X86CPU *cpu, Error **errp)
 {
-    APICCommonState *apic;
     static bool apic_mmio_map_once;
 
     if (cpu->apic_state == NULL) {
@@ -77,12 +70,11 @@ void x86_cpu_apic_realize(X86CPU *cpu, Error **errp)
     qdev_realize(DEVICE(cpu->apic_state), NULL, errp);
 
     /* Map APIC MMIO area */
-    apic = APIC_COMMON(cpu->apic_state);
     if (!apic_mmio_map_once) {
         memory_region_add_subregion_overlap(get_system_memory(),
-                                            apic->apicbase &
+                                            cpu->apic_state->apicbase &
                                             MSR_IA32_APICBASE_BASE,
-                                            &apic->io_memory,
+                                            &cpu->apic_state->io_memory,
                                             0x1000);
         apic_mmio_map_once = true;
      }

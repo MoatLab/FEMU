@@ -122,7 +122,7 @@ int target_mprotect(abi_ulong start, abi_ulong len, int prot)
         if (ret != 0)
             goto error;
     }
-    page_set_flags(start, start + len - 1, prot | PAGE_VALID);
+    page_set_flags(start, start + len - 1, prot, PAGE_RWX);
     mmap_unlock();
     return 0;
 error:
@@ -258,12 +258,14 @@ abi_ulong mmap_next_start = TASK_UNMAPPED_BASE;
 static abi_ulong mmap_find_vma_reserved(abi_ulong start, abi_ulong size,
                                         abi_ulong alignment)
 {
-    abi_ulong ret;
+    abi_ulong ret = -1;
 
-    ret = page_find_range_empty(start, reserved_va, size, alignment);
+    if (start <= reserved_va) {
+        ret = page_find_range_empty(start, reserved_va, size, alignment);
+    }
     if (ret == -1 && start > TARGET_PAGE_SIZE) {
         /* Restart at the beginning of the address space. */
-        ret = page_find_range_empty(TARGET_PAGE_SIZE, start - 1,
+        ret = page_find_range_empty(TARGET_PAGE_SIZE, MIN(start - 1, reserved_va),
                                     size, alignment);
     }
 
@@ -652,7 +654,7 @@ abi_long target_mmap(abi_ulong start, abi_ulong len, int prot,
         }
     }
  the_end1:
-    page_set_flags(start, start + len - 1, prot | PAGE_VALID);
+    page_set_flags(start, start + len - 1, prot | PAGE_VALID, PAGE_VALID);
  the_end:
 #ifdef DEBUG_MMAP
     printf("ret=0x" TARGET_ABI_FMT_lx "\n", start);
@@ -763,7 +765,7 @@ int target_munmap(abi_ulong start, abi_ulong len)
     }
 
     if (ret == 0) {
-        page_set_flags(start, start + len - 1, 0);
+        page_set_flags(start, start + len - 1, 0, PAGE_VALID);
     }
     mmap_unlock();
     return ret;

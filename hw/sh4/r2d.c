@@ -27,21 +27,21 @@
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
-#include "cpu.h"
-#include "hw/sysbus.h"
+#include "target/sh4/cpu.h"
+#include "hw/core/sysbus.h"
 #include "hw/sh4/sh.h"
 #include "system/reset.h"
 #include "system/runstate.h"
 #include "system/system.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/pci/pci.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "net/net.h"
 #include "sh7750_regs.h"
 #include "hw/ide/mmio.h"
-#include "hw/irq.h"
-#include "hw/loader.h"
-#include "hw/usb.h"
+#include "hw/core/irq.h"
+#include "hw/core/loader.h"
+#include "hw/usb/usb.h"
 #include "hw/block/flash.h"
 #include "exec/tswap.h"
 
@@ -329,8 +329,9 @@ static void r2d_init(MachineState *machine)
         int kernel_size;
 
         kernel_size = load_image_targphys(kernel_filename,
-                                          SDRAM_BASE + LINUX_LOAD_OFFSET,
-                                          INITRD_LOAD_OFFSET - LINUX_LOAD_OFFSET);
+                                        SDRAM_BASE + LINUX_LOAD_OFFSET,
+                                        INITRD_LOAD_OFFSET - LINUX_LOAD_OFFSET,
+                                        NULL);
         if (kernel_size < 0) {
             error_report("qemu: could not load kernel '%s'", kernel_filename);
             exit(1);
@@ -350,7 +351,8 @@ static void r2d_init(MachineState *machine)
 
         initrd_size = load_image_targphys(initrd_filename,
                                           SDRAM_BASE + INITRD_LOAD_OFFSET,
-                                          SDRAM_SIZE - INITRD_LOAD_OFFSET);
+                                          SDRAM_SIZE - INITRD_LOAD_OFFSET,
+                                          NULL);
 
         if (initrd_size < 0) {
             error_report("qemu: could not load initrd '%s'", initrd_filename);

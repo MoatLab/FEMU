@@ -30,12 +30,14 @@
 #include "hw/sd/sdhci.h"
 #include "hw/ssi/imx_spi.h"
 #include "hw/net/imx_fec.h"
+#include "hw/net/flexcan.h"
 #include "hw/usb/chipidea.h"
 #include "hw/usb/imx-usb-phy.h"
 #include "hw/pci-host/designware.h"
-#include "hw/or-irq.h"
+#include "hw/core/or-irq.h"
 #include "system/memory.h"
-#include "cpu.h"
+#include "target/arm/cpu.h"
+#include "net/can_emu.h"
 #include "qom/object.h"
 
 #define TYPE_FSL_IMX6 "fsl-imx6"
@@ -46,11 +48,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(FslIMX6State, FSL_IMX6)
 #define FSL_IMX6_NUM_EPITS 2
 #define FSL_IMX6_NUM_I2CS 3
 #define FSL_IMX6_NUM_GPIOS 7
-#define FSL_IMX6_NUM_ESDHCS 4
+#define FSL_IMX6_NUM_USDHCS 4
 #define FSL_IMX6_NUM_ECSPIS 5
 #define FSL_IMX6_NUM_WDTS 2
 #define FSL_IMX6_NUM_USB_PHYS 2
 #define FSL_IMX6_NUM_USBS 4
+#define FSL_IMX6_NUM_CANS 2
 
 struct FslIMX6State {
     /*< private >*/
@@ -67,12 +70,13 @@ struct FslIMX6State {
     IMXEPITState       epit[FSL_IMX6_NUM_EPITS];
     IMXI2CState        i2c[FSL_IMX6_NUM_I2CS];
     IMXGPIOState       gpio[FSL_IMX6_NUM_GPIOS];
-    SDHCIState         esdhc[FSL_IMX6_NUM_ESDHCS];
+    SDHCIState         usdhc[FSL_IMX6_NUM_USDHCS];
     IMXSPIState        spi[FSL_IMX6_NUM_ECSPIS];
     IMX2WdtState       wdt[FSL_IMX6_NUM_WDTS];
     IMXUSBPHYState     usbphy[FSL_IMX6_NUM_USB_PHYS];
     ChipideaState      usb[FSL_IMX6_NUM_USBS];
     IMXFECState        eth;
+    FlexcanState       flexcan[FSL_IMX6_NUM_CANS];
     DesignwarePCIEHost pcie;
     OrIRQState         pcie4_msi_irq;
     MemoryRegion       rom;
@@ -80,6 +84,8 @@ struct FslIMX6State {
     MemoryRegion       ocram;
     MemoryRegion       ocram_alias;
     uint32_t           phy_num;
+
+    CanBusState       *canbus[FSL_IMX6_NUM_CANS];
 };
 
 

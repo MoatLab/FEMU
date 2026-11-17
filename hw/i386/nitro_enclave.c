@@ -14,7 +14,7 @@
 #include "qom/object_interfaces.h"
 
 #include "chardev/char.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/core/eif.h"
 #include "hw/i386/x86.h"
 #include "hw/i386/microvm.h"
@@ -164,7 +164,7 @@ static void nitro_enclave_machine_initfn(Object *obj)
 }
 
 static void x86_load_eif(X86MachineState *x86ms, FWCfgState *fw_cfg,
-                         int acpi_data_size, bool pvh_enabled)
+                         int acpi_data_size)
 {
     Error *err = NULL;
     char *eif_kernel, *eif_initrd, *eif_cmdline;
@@ -199,7 +199,7 @@ static void x86_load_eif(X86MachineState *x86ms, FWCfgState *fw_cfg,
         machine->kernel_cmdline = eif_cmdline;
     }
 
-    x86_load_linux(x86ms, fw_cfg, 0, true);
+    x86_load_linux(x86ms, fw_cfg, 0);
 
     unlink(machine->kernel_filename);
     unlink(machine->initrd_filename);
@@ -337,11 +337,22 @@ static void nitro_enclave_class_init(ObjectClass *oc, const void *data)
                                           "Set parent instance identifier");
 }
 
+static void nitro_enclave_machine_finalize(Object *obj)
+{
+    NitroEnclaveMachineState *nems = NITRO_ENCLAVE_MACHINE(obj);
+
+    g_free(nems->vsock);
+    g_free(nems->id);
+    g_free(nems->parent_role);
+    g_free(nems->parent_id);
+}
+
 static const TypeInfo nitro_enclave_machine_info = {
     .name          = TYPE_NITRO_ENCLAVE_MACHINE,
     .parent        = TYPE_MICROVM_MACHINE,
     .instance_size = sizeof(NitroEnclaveMachineState),
     .instance_init = nitro_enclave_machine_initfn,
+    .instance_finalize = nitro_enclave_machine_finalize,
     .class_size    = sizeof(NitroEnclaveMachineClass),
     .class_init    = nitro_enclave_class_init,
 };

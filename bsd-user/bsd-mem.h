@@ -1,20 +1,9 @@
 /*
- *  memory management system call shims and definitions
+ * memory management system call shims and definitions
  *
- *  Copyright (c) 2013-15 Stacey D. Son
+ * Copyright (c) 2013-2015 Stacey D. Son
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, see <http://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 /*
@@ -49,11 +38,8 @@
 #ifndef BSD_USER_BSD_MEM_H
 #define BSD_USER_BSD_MEM_H
 
-#include <sys/types.h>
 #include <sys/ipc.h>
-#include <sys/mman.h>
 #include <sys/shm.h>
-#include <fcntl.h>
 
 #include "qemu-bsd.h"
 #include "exec/mmap-lock.h"
@@ -390,8 +376,9 @@ static inline abi_long do_bsd_shmat(int shmid, abi_ulong shmaddr, int shmflg)
         raddr = h2g(host_raddr);
 
         page_set_flags(raddr, raddr + shm_info.shm_segsz - 1,
-                       PAGE_VALID | PAGE_RESET | PAGE_READ |
-                       (shmflg & SHM_RDONLY ? 0 : PAGE_WRITE));
+                       PAGE_VALID | PAGE_READ |
+                       (shmflg & SHM_RDONLY ? 0 : PAGE_WRITE),
+                       PAGE_VALID);
 
         for (int i = 0; i < N_BSD_SHM_REGIONS; i++) {
             if (bsd_shm_regions[i].start == 0) {
@@ -428,7 +415,7 @@ static inline abi_long do_bsd_shmdt(abi_ulong shmaddr)
             abi_ulong size = bsd_shm_regions[i].size;
 
             bsd_shm_regions[i].start = 0;
-            page_set_flags(shmaddr, shmaddr + size - 1, 0);
+            page_set_flags(shmaddr, shmaddr + size - 1, 0, PAGE_VALID);
             mmap_reserve(shmaddr, size);
         }
     }
@@ -441,17 +428,4 @@ static inline abi_long do_bsd_vadvise(void)
     /* See sys_ovadvise() in vm_unix.c */
     return -TARGET_EINVAL;
 }
-
-static inline abi_long do_bsd_sbrk(void)
-{
-    /* see sys_sbrk() in vm_mmap.c */
-    return -TARGET_EOPNOTSUPP;
-}
-
-static inline abi_long do_bsd_sstk(void)
-{
-    /* see sys_sstk() in vm_mmap.c */
-    return -TARGET_EOPNOTSUPP;
-}
-
 #endif /* BSD_USER_BSD_MEM_H */

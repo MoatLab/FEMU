@@ -27,9 +27,9 @@
 #include "ui/console.h"
 #include "hw/i386/vmport.h"
 #include "hw/input/i8042.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
-#include "cpu.h"
+#include "target/i386/cpu.h"
 #include "qom/object.h"
 
 #include "trace.h"
@@ -68,11 +68,14 @@ struct VMMouseState {
     uint16_t nb_queue;
     uint16_t status;
     uint8_t absolute;
-    QEMUPutMouseEntry *entry;
+    QemuInputHandlerState *hs;
+    int axis[INPUT_AXIS__MAX];
+    int dz;
+    bool btns[INPUT_BUTTON__MAX];
     ISAKBDState *i8042;
 };
 
-static void vmmouse_get_data(uint32_t *data)
+static void vmmouse_get_data(uint64_t *data)
 {
     X86CPU *cpu = X86_CPU(current_cpu);
     CPUX86State *env = &cpu->env;
@@ -82,7 +85,7 @@ static void vmmouse_get_data(uint32_t *data)
     data[4] = env->regs[R_ESI]; data[5] = env->regs[R_EDI];
 }
 
-static void vmmouse_set_data(const uint32_t *data)
+static void vmmouse_set_data(const uint64_t *data)
 {
     X86CPU *cpu = X86_CPU(current_cpu);
     CPUX86State *env = &cpu->env;
@@ -99,39 +102,78 @@ static uint32_t vmmouse_get_status(VMMouseState *s)
     return (s->status << 16) | s->nb_queue;
 }
 
-static void vmmouse_mouse_event(void *opaque, int x, int y, int dz, int buttons_state)
+static void vmmouse_input_event(DeviceState *dev, QemuConsole *src,
+                                QemuInputEvent *evt)
 {
-    VMMouseState *s = opaque;
+    VMMouseState *s = VMMOUSE(dev);
+
+    switch (evt->type) {
+    case INPUT_EVENT_KIND_BTN:
+        if (evt->btn.down) {
+            if (evt->btn.button == INPUT_BUTTON_WHEEL_UP) {
+                s->dz--;
+            } else if (evt->btn.button == INPUT_BUTTON_WHEEL_DOWN) {
+                s->dz++;
+            }
+        }
+        s->btns[evt->btn.button] = evt->btn.down;
+        break;
+    case INPUT_EVENT_KIND_ABS:
+        if (evt->abs.axis == INPUT_AXIS_X) {
+            s->axis[INPUT_AXIS_X] =
+                qemu_input_scale_axis(evt->abs.value,
+                                      INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX,
+                                      VMMOUSE_MIN_X, VMMOUSE_MAX_X);
+        } else if (evt->abs.axis == INPUT_AXIS_Y) {
+            s->axis[INPUT_AXIS_Y] =
+                qemu_input_scale_axis(evt->abs.value,
+                                      INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX,
+                                      VMMOUSE_MIN_Y, VMMOUSE_MAX_Y);
+        }
+        break;
+    case INPUT_EVENT_KIND_REL:
+        s->axis[evt->rel.axis] += evt->rel.value;
+        break;
+    default:
+        break;
+    }
+}
+
+static void vmmouse_input_sync(DeviceState *dev)
+{
+    VMMouseState *s = VMMOUSE(dev);
     int buttons = 0;
 
-    if (s->nb_queue > (VMMOUSE_QUEUE_SIZE - 4))
+    if (s->nb_queue > (VMMOUSE_QUEUE_SIZE - 4)) {
         return;
+    }
 
-    trace_vmmouse_mouse_event(x, y, dz, buttons_state);
-
-    if ((buttons_state & MOUSE_EVENT_LBUTTON))
+    if (s->btns[INPUT_BUTTON_LEFT]) {
         buttons |= VMMOUSE_LEFT_BUTTON;
-    if ((buttons_state & MOUSE_EVENT_RBUTTON))
+    }
+    if (s->btns[INPUT_BUTTON_RIGHT]) {
         buttons |= VMMOUSE_RIGHT_BUTTON;
-    if ((buttons_state & MOUSE_EVENT_MBUTTON))
+    }
+    if (s->btns[INPUT_BUTTON_MIDDLE]) {
         buttons |= VMMOUSE_MIDDLE_BUTTON;
-
-    if (s->absolute) {
-        x = qemu_input_scale_axis(x,
-                                  INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX,
-                                  VMMOUSE_MIN_X, VMMOUSE_MAX_X);
-        y = qemu_input_scale_axis(y,
-                                  INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX,
-                                  VMMOUSE_MIN_Y, VMMOUSE_MAX_Y);
-    } else{
-        /* add for guest vmmouse driver to judge this is a relative packet. */
+    }
+    if (!s->absolute) {
         buttons |= VMMOUSE_RELATIVE_PACKET;
     }
 
+    trace_vmmouse_queue_event(s->axis[INPUT_AXIS_X], s->axis[INPUT_AXIS_Y],
+                              s->dz, buttons);
+
     s->queue[s->nb_queue++] = buttons;
-    s->queue[s->nb_queue++] = x;
-    s->queue[s->nb_queue++] = y;
-    s->queue[s->nb_queue++] = dz;
+    s->queue[s->nb_queue++] = s->axis[INPUT_AXIS_X];
+    s->queue[s->nb_queue++] = s->axis[INPUT_AXIS_Y];
+    s->queue[s->nb_queue++] = s->dz;
+    s->dz = 0;
+
+    if (!s->absolute) {
+        s->axis[INPUT_AXIS_X] = 0;
+        s->axis[INPUT_AXIS_Y] = 0;
+    }
 
     /* need to still generate PS2 events to notify driver to
        read from queue */
@@ -140,14 +182,25 @@ static void vmmouse_mouse_event(void *opaque, int x, int y, int dz, int buttons_
 
 static void vmmouse_remove_handler(VMMouseState *s)
 {
-    if (s->entry) {
-        qemu_remove_mouse_event_handler(s->entry);
-        s->entry = NULL;
-    }
+    g_clear_pointer(&s->hs, qemu_input_handler_unregister);
 }
 
 static void vmmouse_update_handler(VMMouseState *s, int absolute)
 {
+    static const QemuInputHandler vmmouse_abs_handler = {
+        .name  = "vmmouse",
+        .mask  = INPUT_EVENT_MASK_BTN | INPUT_EVENT_MASK_ABS,
+        .event = vmmouse_input_event,
+        .sync  = vmmouse_input_sync,
+    };
+
+    static const QemuInputHandler vmmouse_rel_handler = {
+        .name  = "vmmouse",
+        .mask  = INPUT_EVENT_MASK_BTN | INPUT_EVENT_MASK_REL,
+        .event = vmmouse_input_event,
+        .sync  = vmmouse_input_sync,
+    };
+
     if (s->status != 0) {
         return;
     }
@@ -155,11 +208,11 @@ static void vmmouse_update_handler(VMMouseState *s, int absolute)
         s->absolute = absolute;
         vmmouse_remove_handler(s);
     }
-    if (s->entry == NULL) {
-        s->entry = qemu_add_mouse_event_handler(vmmouse_mouse_event,
-                                                s, s->absolute,
-                                                "vmmouse");
-        qemu_activate_mouse_event_handler(s->entry);
+    if (s->hs == NULL) {
+        const QemuInputHandler *h = s->absolute ?
+            &vmmouse_abs_handler : &vmmouse_rel_handler;
+        s->hs = qemu_input_handler_register(DEVICE(s), h);
+        qemu_input_handler_activate(s->hs);
     }
 }
 
@@ -197,7 +250,7 @@ static void vmmouse_disable(VMMouseState *s)
     vmmouse_remove_handler(s);
 }
 
-static void vmmouse_data(VMMouseState *s, uint32_t *data, uint32_t size)
+static void vmmouse_data(VMMouseState *s, uint64_t *data, uint32_t size)
 {
     int i;
 
@@ -221,7 +274,7 @@ static void vmmouse_data(VMMouseState *s, uint32_t *data, uint32_t size)
 static uint32_t vmmouse_ioport_read(void *opaque, uint32_t addr)
 {
     VMMouseState *s = opaque;
-    uint32_t data[6];
+    uint64_t data[6];
     uint16_t command;
 
     vmmouse_get_data(data);
@@ -247,7 +300,7 @@ static uint32_t vmmouse_ioport_read(void *opaque, uint32_t addr)
             vmmouse_request_absolute(s);
             break;
         default:
-            printf("vmmouse: unknown command %x\n", data[1]);
+            printf("vmmouse: unknown command %" PRIx64 "\n", data[1]);
             break;
         }
         break;
@@ -278,7 +331,7 @@ static const VMStateDescription vmstate_vmmouse = {
     .minimum_version_id = 0,
     .post_load = vmmouse_post_load,
     .fields = (const VMStateField[]) {
-        VMSTATE_INT32_EQUAL(queue_size, VMMouseState, NULL),
+        VMSTATE_INT32_EQUAL(queue_size, VMMouseState),
         VMSTATE_UINT32_ARRAY(queue, VMMouseState, VMMOUSE_QUEUE_SIZE),
         VMSTATE_UINT16(nb_queue, VMMouseState),
         VMSTATE_UINT16(status, VMMouseState),

@@ -30,12 +30,30 @@
  * separate backend.
  */
 
+/*
+ * TODO: currently the "load a file" functionality provides no way
+ * for the user to specify which CPU address space to load the data
+ * into without also causing that CPU's PC to be set to the start
+ * address of the file.
+ *
+ * We could fix this by having a new suboption set-pc (default: true)
+ * so the user can say
+ *  -device loader,file=<file>,cpu-num=<cpu-num>
+ * for the current "use this address space and set the PC" behaviour
+ * or
+ *  -device loader,file=<file>,cpu-num=<cpu-num>,set-pc=off
+ * to just pick the address space and not set the PC.
+ *
+ * Using set-pc without file= should be handled as an error; otherwise
+ * it can feed through to what we set s->set_pc to.
+ */
+
 #include "qemu/osdep.h"
 #include "system/dma.h"
 #include "system/reset.h"
-#include "hw/boards.h"
-#include "hw/loader.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/boards.h"
+#include "hw/core/loader.h"
+#include "hw/core/qdev-properties.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "hw/core/generic-loader.h"
@@ -148,13 +166,14 @@ static void generic_loader_realize(DeviceState *dev, Error **errp)
 
         if (size < 0 || s->force_raw) {
             /* Default to the maximum size being the machine's ram size */
-            size = load_image_targphys_as(s->file, s->addr, current_machine->ram_size, as);
+            size = load_image_targphys_as(s->file, s->addr,
+                    current_machine->ram_size, as, errp);
         } else {
             s->addr = entry;
         }
 
         if (size < 0) {
-            error_setg(errp, "Cannot load specified image %s", s->file);
+            error_prepend(errp, "Cannot load specified image %s: ", s->file);
             return;
         }
     }

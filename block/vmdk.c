@@ -1089,7 +1089,7 @@ vmdk_open_vmdk4(BlockDriverState *bs, BdrvChild *file, int flags,
 static int vmdk_parse_description(const char *desc, const char *opt_name,
         char *buf, int buf_size)
 {
-    char *opt_pos, *opt_end;
+    const char *opt_pos, *opt_end;
     const char *end = desc + strlen(desc);
 
     opt_pos = strstr(desc, opt_name);
@@ -1951,10 +1951,10 @@ vmdk_read_extent(VmdkExtent *extent, int64_t cluster_offset,
         marker = (VmdkGrainMarker *)cluster_buf;
         compressed_data = marker->data;
         data_len = le32_to_cpu(marker->size);
-    }
-    if (!data_len || data_len > buf_bytes) {
-        ret = -EINVAL;
-        goto out;
+        if (!data_len || data_len > buf_bytes - sizeof(VmdkGrainMarker)) {
+            ret = -EINVAL;
+            goto out;
+        }
     }
     ret = uncompress(uncomp_buf, &buf_len, compressed_data, data_len);
     if (ret != Z_OK) {
@@ -2334,7 +2334,7 @@ vmdk_create_extent(const char *filename, int64_t filesize, bool flat,
     int ret;
     BlockBackend *blk = NULL;
 
-    ret = bdrv_co_create_file(filename, opts, errp);
+    ret = bdrv_co_create_file(filename, opts, false, errp);
     if (ret < 0) {
         goto exit;
     }

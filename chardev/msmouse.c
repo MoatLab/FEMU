@@ -122,11 +122,9 @@ static void msmouse_queue_event(MouseChardev *mouse)
 }
 
 static void msmouse_input_event(DeviceState *dev, QemuConsole *src,
-                                InputEvent *evt)
+                                QemuInputEvent *evt)
 {
     MouseChardev *mouse = MOUSE_CHARDEV(dev);
-    InputMoveEvent *move;
-    InputBtnEvent *btn;
 
     /* Ignore events if serial mouse powered down. */
     if (!MSMOUSE_PWR(mouse->tiocm)) {
@@ -135,14 +133,12 @@ static void msmouse_input_event(DeviceState *dev, QemuConsole *src,
 
     switch (evt->type) {
     case INPUT_EVENT_KIND_REL:
-        move = evt->u.rel.data;
-        mouse->axis[move->axis] += move->value;
+        mouse->axis[evt->rel.axis] += evt->rel.value;
         break;
 
     case INPUT_EVENT_KIND_BTN:
-        btn = evt->u.btn.data;
-        mouse->btns[btn->button] = btn->down;
-        mouse->btnc[btn->button] = true;
+        mouse->btns[evt->btn.button] = evt->btn.down;
+        mouse->btnc[evt->btn.button] = true;
         break;
 
     default:
@@ -178,7 +174,7 @@ static const QemuInputHandler msmouse_handler = {
     .sync  = msmouse_input_sync,
 };
 
-static int msmouse_ioctl(Chardev *chr, int cmd, void *arg)
+static int msmouse_chr_ioctl(Chardev *chr, int cmd, void *arg)
 {
     MouseChardev *mouse = MOUSE_CHARDEV(chr);
     int c, i, j;
@@ -253,28 +249,29 @@ static void char_msmouse_finalize(Object *obj)
     fifo8_destroy(&mouse->outbuf);
 }
 
-static void msmouse_chr_open(Chardev *chr,
+static bool msmouse_chr_open(Chardev *chr,
                              ChardevBackend *backend,
-                             bool *be_opened,
                              Error **errp)
 {
     MouseChardev *mouse = MOUSE_CHARDEV(chr);
 
-    *be_opened = false;
     mouse->hs = qemu_input_handler_register((DeviceState *)mouse,
                                             &msmouse_handler);
     mouse->tiocm = 0;
     fifo8_create(&mouse->outbuf, MSMOUSE_BUF_SZ);
+
+    /* Never send CHR_EVENT_OPENED */
+    return true;
 }
 
 static void char_msmouse_class_init(ObjectClass *oc, const void *data)
 {
     ChardevClass *cc = CHARDEV_CLASS(oc);
 
-    cc->open = msmouse_chr_open;
+    cc->chr_open = msmouse_chr_open;
     cc->chr_write = msmouse_chr_write;
     cc->chr_accept_input = msmouse_chr_accept_input;
-    cc->chr_ioctl = msmouse_ioctl;
+    cc->chr_ioctl = msmouse_chr_ioctl;
 }
 
 static const TypeInfo char_msmouse_type_info = {

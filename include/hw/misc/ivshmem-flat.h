@@ -16,7 +16,7 @@
 #include "chardev/char-fe.h"
 #include "system/memory.h"
 #include "qom/object.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 
 #define IVSHMEM_MAX_VECTOR_NUM 64
 
@@ -65,7 +65,7 @@ struct IvshmemFTState {
     QTAILQ_HEAD(, IvshmemPeer) peer;
     IvshmemPeer own;
 
-    CharBackend server_chr;
+    CharFrontend server_chr;
 
     /* IRQ */
     qemu_irq irq;

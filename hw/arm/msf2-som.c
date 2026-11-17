@@ -29,10 +29,11 @@
 #include "qemu/units.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
-#include "hw/boards.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/boards.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/arm/boot.h"
-#include "hw/qdev-clock.h"
+#include "hw/arm/machines-qom.h"
+#include "hw/core/qdev-clock.h"
 #include "system/address-spaces.h"
 #include "hw/arm/msf2-soc.h"
 
@@ -83,7 +84,7 @@ static void emcraft_sf2_s2s010_init(MachineState *machine)
     /* Attach SPI flash to SPI0 controller */
     spi_bus = qdev_get_child_bus(dev, "spi0");
     spi_flash = qdev_new("s25sl12801"); /* Spansion S25FL128SDPBHICO */
-    qdev_prop_set_uint8(spi_flash, "spansion-cr2nv", 1);
+    qdev_prop_set_uint8(spi_flash, "spansion-cr2nv", 0x8);
     if (dinfo) {
         qdev_prop_set_drive_err(spi_flash, "drive",
                                 blk_by_legacy_dinfo(dinfo), &error_fatal);
@@ -108,4 +109,4 @@ static void emcraft_sf2_machine_init(MachineClass *mc)
     mc->valid_cpu_types = valid_cpu_types;
 }
 
-DEFINE_MACHINE("emcraft-sf2", emcraft_sf2_machine_init)
+DEFINE_MACHINE_ARM("emcraft-sf2", emcraft_sf2_machine_init)

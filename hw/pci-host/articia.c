@@ -12,7 +12,7 @@
 #include "qapi/error.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pci_host.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/i2c/bitbang_i2c.h"
 #include "hw/intc/i8259.h"
 #include "hw/pci-host/articia.h"
@@ -200,7 +200,6 @@ static void articia_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->realize = articia_realize;
-    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
 }
 
 /* TYPE_ARTICIA_PCI_HOST */

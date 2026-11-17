@@ -9,6 +9,7 @@
 #define MIGRATION_CPR_H
 
 #include "qapi/qapi-types-migration.h"
+#include "io/channel.h"
 #include "qemu/queue.h"
 
 #define MIG_MODE_NONE           -1
@@ -34,12 +35,15 @@ void cpr_resave_fd(const char *name, int id, int fd);
 int cpr_open_fd(const char *path, int flags, const char *name, int id,
                 Error **errp);
 
+typedef bool (*cpr_walk_fd_cb)(int fd);
+bool cpr_walk_fd(cpr_walk_fd_cb cb);
+
 MigMode cpr_get_incoming_mode(void);
 void cpr_set_incoming_mode(MigMode mode);
 bool cpr_is_incoming(void);
 
-int cpr_state_save(MigrationChannel *channel, Error **errp);
-int cpr_state_load(MigrationChannel *channel, Error **errp);
+bool cpr_state_save(MigrationChannel *channel, Error **errp);
+bool cpr_state_load(MigrationChannel *channel, Error **errp);
 void cpr_state_close(void);
 struct QIOChannel *cpr_state_ioc(void);
 
@@ -50,4 +54,16 @@ int cpr_get_fd_param(const char *name, const char *fdname, int index,
 QEMUFile *cpr_transfer_output(MigrationChannel *channel, Error **errp);
 QEMUFile *cpr_transfer_input(MigrationChannel *channel, Error **errp);
 
+void cpr_transfer_add_hup_watch(MigrationState *s, QIOChannelFunc func,
+                                void *opaque);
+void cpr_transfer_source_destroy(MigrationState *s);
+bool cpr_transfer_source_active(MigrationState *s);
+
+void cpr_exec_init(void);
+QEMUFile *cpr_exec_output(Error **errp);
+QEMUFile *cpr_exec_input(Error **errp);
+bool cpr_exec_persist_state(QEMUFile *f, Error **errp);
+bool cpr_exec_has_state(void);
+void cpr_exec_unpersist_state(void);
+void cpr_exec_unpreserve_fds(void);
 #endif

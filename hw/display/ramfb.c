@@ -13,11 +13,13 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "hw/loader.h"
+#include "hw/core/loader.h"
 #include "hw/display/ramfb.h"
 #include "hw/display/bochs-vbe.h" /* for limits */
 #include "ui/console.h"
+#include "system/physmem.h"
 #include "system/reset.h"
+#include "exec/cpu-common.h"
 
 struct QEMU_PACKED RAMFBCfg {
     uint64_t addr;
@@ -41,7 +43,7 @@ static void ramfb_unmap_display_surface(pixman_image_t *image, void *unused)
     void *data = pixman_image_get_data(image);
     uint32_t size = pixman_image_get_stride(image) *
         pixman_image_get_height(image);
-    cpu_physical_memory_unmap(data, size, 0, 0);
+    physical_memory_unmap(data, size, 0, 0);
 }
 
 static DisplaySurface *ramfb_create_display_surface(int width, int height,
@@ -63,9 +65,9 @@ static DisplaySurface *ramfb_create_display_surface(int width, int height,
     }
 
     mapsize = size = stride * (height - 1) + linesize;
-    data = cpu_physical_memory_map(addr, &mapsize, false);
+    data = physical_memory_map(addr, &mapsize, false);
     if (size != mapsize) {
-        cpu_physical_memory_unmap(data, mapsize, 0, 0);
+        physical_memory_unmap(data, mapsize, 0, 0);
         return NULL;
     }
 
@@ -110,12 +112,12 @@ void ramfb_display_update(QemuConsole *con, RAMFBState *s)
     }
 
     if (s->ds) {
-        dpy_gfx_replace_surface(con, s->ds);
+        qemu_console_set_surface(con, s->ds);
         s->ds = NULL;
     }
 
     /* simple full screen update */
-    dpy_gfx_update_full(con);
+    qemu_console_update_full(con);
 }
 
 static int ramfb_post_load(void *opaque, int version_id)

@@ -17,8 +17,8 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "migration/vmstate.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/display/dm163.h"
 #include "ui/console.h"
 #include "trace.h"
@@ -277,15 +277,15 @@ static uint32_t *update_display_of_row(DM163State *s, uint32_t *dest,
         }
     }
 
-    dpy_gfx_update(s->console, 0, LED_SQUARE_SIZE * row,
-                    RGB_MATRIX_NUM_COLS * LED_SQUARE_SIZE, LED_SQUARE_SIZE);
+    qemu_console_update(s->console, 0, LED_SQUARE_SIZE * row,
+                        RGB_MATRIX_NUM_COLS * LED_SQUARE_SIZE, LED_SQUARE_SIZE);
     s->redraw &= ~(1 << row);
     trace_dm163_redraw(s->redraw);
 
     return dest;
 }
 
-static void dm163_update_display(void *opaque)
+static bool dm163_update_display(void *opaque)
 {
     DM163State *s = (DM163State *)opaque;
     DisplaySurface *surface = qemu_console_surface(s->console);
@@ -300,6 +300,8 @@ static void dm163_update_display(void *opaque)
         }
         dest = update_display_of_row(s, dest, row);
     }
+
+    return true;
 }
 
 static const GraphicHwOps dm163_ops = {
@@ -320,7 +322,7 @@ static void dm163_realize(DeviceState *dev, Error **errp)
     qdev_init_gpio_in(dev, dm163_en_b_gpio_handler, 1);
     qdev_init_gpio_out_named(dev, &s->sout, "sout", 1);
 
-    s->console = graphic_console_init(dev, 0, &dm163_ops, s);
+    s->console = qemu_graphic_console_create(dev, 0, &dm163_ops, s);
     qemu_console_resize(s->console, RGB_MATRIX_NUM_COLS * LED_SQUARE_SIZE,
                         RGB_MATRIX_NUM_ROWS * LED_SQUARE_SIZE);
 }

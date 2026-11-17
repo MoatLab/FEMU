@@ -30,7 +30,7 @@
 #include "exec/icount.h"
 #include "system/replay.h"
 #include "qemu/main-loop.h"
-#include "block/aio.h"
+#include "qemu/aio.h"
 #include "block/thread-pool.h"
 #include "qemu/error-report.h"
 #include "qemu/queue.h"
@@ -114,7 +114,10 @@ static int qemu_signal_init(Error **errp)
         return -errno;
     }
 
-    g_unix_set_fd_nonblocking(sigfd, true, NULL);
+    if (!qemu_set_blocking(sigfd, false, errp)) {
+        close(sigfd);
+        return -EINVAL;
+    }
 
     qemu_set_fd_handler(sigfd, sigfd_handler, NULL, (void *)(intptr_t)sigfd);
 
@@ -159,7 +162,7 @@ int qemu_init_main_loop(Error **errp)
     int ret;
     GSource *src;
 
-    init_clocks(qemu_timer_notify_cb);
+    qemu_init_clocks(qemu_timer_notify_cb);
 
     ret = qemu_signal_init(errp);
     if (ret) {
@@ -215,8 +218,10 @@ static void main_loop_init(EventLoopBase *base, Error **errp)
     mloop = m;
 }
 
-static bool main_loop_can_be_deleted(EventLoopBase *base)
+static bool main_loop_prepare_delete(EventLoopBase *base, Error **errp)
 {
+    error_setg(errp, "Deleting main loop '%s' is not supported",
+               object_get_canonical_path_component(OBJECT(base)));
     return false;
 }
 
@@ -226,7 +231,7 @@ static void main_loop_class_init(ObjectClass *oc, const void *class_data)
 
     bc->init = main_loop_init;
     bc->update_params = main_loop_update_params;
-    bc->can_be_deleted = main_loop_can_be_deleted;
+    bc->prepare_delete = main_loop_prepare_delete;
 }
 
 static const TypeInfo main_loop_info = {

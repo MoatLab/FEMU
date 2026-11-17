@@ -9,6 +9,7 @@
 #ifndef QEMU_TARGET_INFO_IMPL_H
 #define QEMU_TARGET_INFO_IMPL_H
 
+#include "qapi/qapi-types-common.h"
 #include "qapi/qapi-types-machine.h"
 
 typedef struct TargetInfo {
@@ -24,6 +25,13 @@ typedef struct TargetInfo {
     const char *machine_typename;
     /* related to TARGET_BIG_ENDIAN definition */
     EndianMode endianness;
+    /*
+     * runtime equivalent of
+     *   TARGET_PAGE_BITS_VARY ? TARGET_PAGE_BITS_LEGACY : TARGET_PAGE_BITS
+     */
+    unsigned page_bits_init;
+    /* runtime equivalent of TARGET_PAGE_BITS_VARY definition */
+    bool page_bits_vary;
 } TargetInfo;
 
 /**

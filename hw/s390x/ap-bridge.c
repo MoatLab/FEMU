@@ -10,11 +10,11 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "qemu/bitops.h"
 #include "qemu/module.h"
 #include "hw/s390x/ap-bridge.h"
-#include "cpu.h"
+#include "target/s390x/cpu.h"
 
 static char *ap_bus_get_dev_path(DeviceState *dev)
 {

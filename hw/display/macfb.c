@@ -12,13 +12,13 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
 #include "hw/nubus/nubus.h"
 #include "hw/display/macfb.h"
 #include "qapi/error.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "trace.h"
 
@@ -82,7 +82,7 @@ typedef struct MacFbSense {
     uint8_t ext_sense;
 } MacFbSense;
 
-static MacFbSense macfb_sense_table[] = {
+static const MacFbSense macfb_sense_table[] = {
     { MACFB_DISPLAY_APPLE_21_COLOR, 0x0, 0 },
     { MACFB_DISPLAY_APPLE_PORTRAIT, 0x1, 0 },
     { MACFB_DISPLAY_APPLE_12_RGB, 0x2, 0 },
@@ -100,7 +100,7 @@ static MacFbSense macfb_sense_table[] = {
     { MACFB_DISPLAY_SVGA, 0x7, 0x5 },
 };
 
-static MacFbMode macfb_mode_table[] = {
+static const MacFbMode macfb_mode_table[] = {
     { MACFB_DISPLAY_VGA, 1, 0x100, 0x71e, 640, 480, 0x400, 0x1000 },
     { MACFB_DISPLAY_VGA, 2, 0x100, 0x70e, 640, 480, 0x400, 0x1000 },
     { MACFB_DISPLAY_VGA, 4, 0x100, 0x706, 640, 480, 0x400, 0x1000 },
@@ -320,14 +320,14 @@ static void macfb_draw_graphic(MacfbState *s)
             }
         } else {
             if (ymin >= 0) {
-                dpy_gfx_update(s->con, 0, ymin, s->width, y - ymin);
+                qemu_console_update(s->con, 0, ymin, s->width, y - ymin);
                 ymin = -1;
             }
         }
     }
 
     if (ymin >= 0) {
-        dpy_gfx_update(s->con, 0, ymin, s->width, y - ymin);
+        qemu_console_update(s->con, 0, ymin, s->width, y - ymin);
     }
 
     g_free(snap);
@@ -342,7 +342,7 @@ static void macfb_invalidate_display(void *opaque)
 
 static uint32_t macfb_sense_read(MacfbState *s)
 {
-    MacFbSense *macfb_sense;
+    const MacFbSense *macfb_sense;
     uint8_t sense;
 
     assert(s->type < ARRAY_SIZE(macfb_sense_table));
@@ -397,7 +397,7 @@ static void macfb_update_mode(MacfbState *s)
 
 static void macfb_mode_write(MacfbState *s)
 {
-    MacFbMode *macfb_mode;
+    const MacFbMode *macfb_mode;
     int i;
 
     for (i = 0; i < ARRAY_SIZE(macfb_mode_table); i++) {
@@ -418,11 +418,11 @@ static void macfb_mode_write(MacfbState *s)
     }
 }
 
-static MacFbMode *macfb_find_mode(MacfbDisplayType display_type,
+static const MacFbMode *macfb_find_mode(MacfbDisplayType display_type,
                                   uint16_t width, uint16_t height,
                                   uint8_t depth)
 {
-    MacFbMode *macfb_mode;
+    const MacFbMode *macfb_mode;
     int i;
 
     for (i = 0; i < ARRAY_SIZE(macfb_mode_table); i++) {
@@ -440,7 +440,7 @@ static MacFbMode *macfb_find_mode(MacfbDisplayType display_type,
 static gchar *macfb_mode_list(void)
 {
     GString *list = g_string_new("");
-    MacFbMode *macfb_mode;
+    const MacFbMode *macfb_mode;
     int i;
 
     for (i = 0; i < ARRAY_SIZE(macfb_mode_table); i++) {
@@ -454,7 +454,7 @@ static gchar *macfb_mode_list(void)
 }
 
 
-static void macfb_update_display(void *opaque)
+static bool macfb_update_display(void *opaque)
 {
     MacfbState *s = opaque;
     DisplaySurface *surface = qemu_console_surface(s->con);
@@ -462,7 +462,7 @@ static void macfb_update_display(void *opaque)
     qemu_flush_coalesced_mmio_buffer();
 
     if (s->width == 0 || s->height == 0) {
-        return;
+        return true;
     }
 
     if (s->width != surface_width(surface) ||
@@ -471,6 +471,8 @@ static void macfb_update_display(void *opaque)
     }
 
     macfb_draw_graphic(s);
+
+    return true;
 }
 
 static void macfb_update_irq(MacfbState *s)
@@ -645,6 +647,10 @@ static bool macfb_common_realize(DeviceState *dev, MacfbState *s, Error **errp)
 {
     DisplaySurface *surface;
 
+    if (s->width == 1152 && s->height == 870) {
+        s->type = MACFB_DISPLAY_APPLE_21_COLOR;
+    }
+
     s->mode = macfb_find_mode(s->type, s->width, s->height, s->depth);
     if (!s->mode) {
         gchar *list;
@@ -665,7 +671,7 @@ static bool macfb_common_realize(DeviceState *dev, MacfbState *s, Error **errp)
     s->regs[DAFB_MODE_CTRL1 >> 2] = s->mode->mode_ctrl1;
     s->regs[DAFB_MODE_CTRL2 >> 2] = s->mode->mode_ctrl2;
 
-    s->con = graphic_console_init(dev, 0, &macfb_ops, s);
+    s->con = qemu_graphic_console_create(dev, 0, &macfb_ops, s);
     surface = qemu_console_surface(s->con);
 
     if (surface_bits_per_pixel(surface) != 32) {

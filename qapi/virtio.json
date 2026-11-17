@@ -85,8 +85,6 @@
 #
 # @acked-features: vhost_dev acked_features
 #
-# @backend-features: vhost_dev backend_features
-#
 # @protocol-features: vhost_dev protocol_features
 #
 # @max-queues: vhost_dev max_queues
@@ -106,7 +104,6 @@
             'vq-index': 'int',
             'features': 'VirtioDeviceFeatures',
             'acked-features': 'VirtioDeviceFeatures',
-            'backend-features': 'VirtioDeviceFeatures',
             'protocol-features': 'VhostDeviceProtocols',
             'max-queues': 'uint64',
             'backend-cap': 'uint64',
@@ -247,6 +244,7 @@
 #              },
 #              "host-features": {
 #                  "unknown-dev-features": 1073741824,
+#                  "unknown-dev-features2": 0,
 #                  "dev-features": [],
 #                  "transports": [
 #                      "VIRTIO_RING_F_EVENT_IDX: Used & avail. event fields enabled",
@@ -490,14 +488,18 @@
 #     unique features)
 #
 # @unknown-dev-features: Virtio device features bitmap that have not
-#     been decoded
+#     been decoded (bits 0-63)
+#
+# @unknown-dev-features2: Virtio device features bitmap that have not
+#     been decoded (bits 64-127) (since 10.2)
 #
 # Since: 7.2
 ##
 { 'struct': 'VirtioDeviceFeatures',
   'data': { 'transports': [ 'str' ],
             '*dev-features': [ 'str' ],
-            '*unknown-dev-features': 'uint64' } }
+            '*unknown-dev-features': 'uint64',
+            '*unknown-dev-features2': 'uint64' } }
 
 ##
 # @VirtQueueStatus:
@@ -648,12 +650,6 @@
 #
 # @call: vhost_virtqueue call
 #
-# @desc: vhost_virtqueue desc
-#
-# @avail: vhost_virtqueue avail
-#
-# @used: vhost_virtqueue used
-#
 # @num: vhost_virtqueue num
 #
 # @desc-phys: vhost_virtqueue desc_phys (descriptor area physical
@@ -676,9 +672,6 @@
   'data': { 'name': 'str',
             'kick': 'int',
             'call': 'int',
-            'desc': 'uint64',
-            'avail': 'uint64',
-            'used': 'uint64',
             'num': 'int',
             'desc-phys': 'uint64',
             'desc-size': 'uint32',
@@ -718,12 +711,9 @@
 #              "avail-size": 2054,
 #              "desc-size": 16384,
 #              "used-size": 8198,
-#              "desc": 140141447430144,
 #              "num": 1024,
 #              "call": 0,
-#              "avail": 140141447446528,
 #              "desc-phys": 5216108544,
-#              "used": 140141447448640,
 #              "kick": 0
 #          }
 #        }
@@ -742,12 +732,9 @@
 #              "avail-size": 262,
 #              "desc-size": 2048,
 #              "used-size": 1030,
-#              "desc": 140141413580800,
 #              "num": 128,
 #              "call": 0,
-#              "avail": 140141413582848,
 #              "desc-phys": 5182259200,
-#              "used": 140141413583168,
 #              "kick": 0
 #          }
 #        }
@@ -959,32 +946,39 @@
 #
 # Since: 9.0
 ##
-
 { 'struct': 'IOThreadVirtQueueMapping',
   'data': { 'iothread': 'str', '*vqs': ['uint16'] } }
 
 ##
 # @VirtIOGPUOutput:
 #
-# Describes configuration of a VirtIO GPU output.
+# Describes configuration of a VirtIO GPU output.  If both @xres and
+# @yres are set, they take precedence over root virtio-gpu resolution
+# configuration and enable the corresponding output.  If none of @xres
+# and @yres are set, root virtio-gpu resolution configuration takes
+# precedence and only the first output is enabled.  Only setting one
+# of @xres or @yres is an error.
 #
 # @name: the name of the output
+#
+# @xres: horizontal resolution of the output in pixels (since 11.0)
+#
+# @yres: vertical resolution of the output in pixels (since 11.0)
 #
 # Since: 10.1
 ##
 
 { 'struct': 'VirtIOGPUOutput',
-  'data': { 'name': 'str' } }
+  'data': { 'name': 'str', '*xres': 'uint16', '*yres': 'uint16' } }
 
 ##
 # @DummyVirtioForceArrays:
 #
-# Not used by QMP; hack to let us use IOThreadVirtQueueMappingList
-# and VirtIOGPUOutputList internally
+# Not used by QMP; hack to let us use IOThreadVirtQueueMappingList and
+# VirtIOGPUOutputList internally
 #
 # Since: 9.0
 ##
-
 { 'struct': 'DummyVirtioForceArrays',
   'data': { 'unused-iothread-vq-mapping': ['IOThreadVirtQueueMapping'],
             'unused-virtio-gpu-output': ['VirtIOGPUOutput'] } }

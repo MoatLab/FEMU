@@ -4,7 +4,7 @@
  * Copyright (c) Red Hat
  *
  * Authors:
- *  Philippe Mathieu-Daudé <philmd@redhat.com>,
+ *  Philippe Mathieu-Daudé,
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
@@ -12,7 +12,7 @@
  * See the COPYING file in the top-level directory.
  */
 #include "qemu/osdep.h"
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 
 HotplugHandler *qdev_get_hotplug_handler(DeviceState *dev)
 {

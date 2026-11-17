@@ -19,7 +19,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/i2c/pm_smbus.h"
 #include "hw/i2c/smbus_master.h"
 #include "migration/vmstate.h"
@@ -442,13 +442,6 @@ static const MemoryRegionOps pm_smbus_ops = {
     .valid.max_access_size = 1,
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
-
-bool pm_smbus_vmstate_needed(void)
-{
-    MachineClass *mc = MACHINE_GET_CLASS(qdev_get_machine());
-
-    return !mc->smbus_no_migration_support;
-}
 
 const VMStateDescription pmsmb_vmstate = {
     .name = "pmsmb",

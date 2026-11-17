@@ -101,8 +101,9 @@ typedef struct BlockAcctCookie {
 } BlockAcctCookie;
 
 void block_acct_init(BlockAcctStats *stats);
-void block_acct_setup(BlockAcctStats *stats, enum OnOffAuto account_invalid,
-                      enum OnOffAuto account_failed);
+bool block_acct_setup(BlockAcctStats *stats, enum OnOffAuto account_invalid,
+                      enum OnOffAuto account_failed, uint32_t *stats_intervals,
+                      uint32_t num_stats_intervals, Error **errp);
 void block_acct_cleanup(BlockAcctStats *stats);
 void block_acct_add_interval(BlockAcctStats *stats, unsigned interval_length);
 BlockAcctTimedStats *block_acct_interval_next(BlockAcctStats *stats,
@@ -115,6 +116,7 @@ void block_acct_invalid(BlockAcctStats *stats, enum BlockAcctType type);
 void block_acct_merge_done(BlockAcctStats *stats, enum BlockAcctType type,
                            int num_requests);
 int64_t block_acct_idle_time_ns(BlockAcctStats *stats);
+/* Caller must hold stats->stats->lock. */
 double block_acct_queue_depth(BlockAcctTimedStats *stats,
                               enum BlockAcctType type);
 int block_latency_histogram_set(BlockAcctStats *stats, enum BlockAcctType type,

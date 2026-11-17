@@ -16,6 +16,7 @@
 #include "qemu/osdep.h"
 #include "chardev/char.h"
 #include "monitor/hmp.h"
+#include "monitor/hmp-completion.h"
 #include "monitor/monitor.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-char.h"

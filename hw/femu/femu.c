@@ -4,7 +4,7 @@
 #include "qemu/error-report.h"
 #include "system/qtest.h"
 #include "system/system.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/pci/pcie_aer.h"
 #include "qom/qom-qobject.h"
 #include "qapi/visitor.h"

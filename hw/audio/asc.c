@@ -13,11 +13,11 @@
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
 #include "qapi/error.h"
-#include "hw/sysbus.h"
-#include "hw/irq.h"
-#include "audio/audio.h"
+#include "hw/core/sysbus.h"
+#include "hw/core/irq.h"
+#include "qemu/audio.h"
 #include "hw/audio/asc.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "trace.h"
 
@@ -355,12 +355,12 @@ static void asc_out_cb(void *opaque, int free_b)
              * loop because the FIFO has run out of data, and the driver
              * reuses the stale content in its circular audio buffer.
              */
-            AUD_write(s->voice, s->silentbuf, samples << s->shift);
+            audio_be_write(s->audio_be, s->voice, s->silentbuf, samples << s->shift);
         }
         return;
     }
 
-    AUD_write(s->voice, s->mixbuf, generated << s->shift);
+    audio_be_write(s->audio_be, s->voice, s->mixbuf, generated << s->shift);
 }
 
 static uint64_t asc_fifo_read(void *opaque, hwaddr addr,
@@ -470,9 +470,9 @@ static void asc_write(void *opaque, hwaddr addr, uint64_t value,
             asc_fifo_reset(&s->fifos[1]);
             asc_lower_irq(s);
             if (value != 0) {
-                AUD_set_active_out(s->voice, 1);
+                audio_be_set_active_out(s->audio_be, s->voice, 1);
             } else {
-                AUD_set_active_out(s->voice, 0);
+                audio_be_set_active_out(s->audio_be, s->voice, 0);
             }
         }
         break;
@@ -489,7 +489,7 @@ static void asc_write(void *opaque, hwaddr addr, uint64_t value,
         {
             int vol = (value & 0xe0);
 
-            AUD_set_volume_out(s->voice, 0, vol, vol);
+            audio_be_set_volume_out_lr(s->audio_be, s->voice, 0, vol, vol);
             break;
         }
     }
@@ -545,7 +545,7 @@ static int asc_post_load(void *opaque, int version)
     ASCState *s = ASC(opaque);
 
     if (s->regs[ASC_MODE] != 0) {
-        AUD_set_active_out(s->voice, 1);
+        audio_be_set_active_out(s->audio_be, s->voice, 1);
     }
 
     return 0;
@@ -614,7 +614,7 @@ static void asc_reset_hold(Object *obj, ResetType type)
 {
     ASCState *s = ASC(obj);
 
-    AUD_set_active_out(s->voice, 0);
+    audio_be_set_active_out(s->audio_be, s->voice, 0);
 
     memset(s->regs, 0, sizeof(s->regs));
     asc_fifo_reset(&s->fifos[0]);
@@ -634,8 +634,6 @@ static void asc_unrealize(DeviceState *dev)
 
     g_free(s->mixbuf);
     g_free(s->silentbuf);
-
-    AUD_remove_card(&s->card);
 }
 
 static void asc_realize(DeviceState *dev, Error **errp)
@@ -643,25 +641,24 @@ static void asc_realize(DeviceState *dev, Error **errp)
     ASCState *s = ASC(dev);
     struct audsettings as;
 
-    if (!AUD_register_card("Apple Sound Chip", &s->card, errp)) {
+    if (!audio_be_check(&s->audio_be, errp)) {
         return;
     }
 
     as.freq = ASC_FREQ;
     as.nchannels = 2;
     as.fmt = AUDIO_FORMAT_U8;
-    as.endianness = AUDIO_HOST_ENDIANNESS;
+    as.big_endian = HOST_BIG_ENDIAN;
 
-    s->voice = AUD_open_out(&s->card, s->voice, "asc.out", s, asc_out_cb,
+    s->voice = audio_be_open_out(s->audio_be, s->voice, "asc.out", s, asc_out_cb,
                             &as);
     if (!s->voice) {
-        AUD_remove_card(&s->card);
         error_setg(errp, "Initializing audio stream failed");
         return;
     }
 
     s->shift = 1;
-    s->samples = AUD_get_buffer_size_out(s->voice) >> s->shift;
+    s->samples = audio_be_get_buffer_size_out(s->audio_be, s->voice) >> s->shift;
     s->mixbuf = g_malloc0(s->samples << s->shift);
 
     s->silentbuf = g_malloc(s->samples << s->shift);
@@ -702,7 +699,7 @@ static void asc_init(Object *obj)
 }
 
 static const Property asc_properties[] = {
-    DEFINE_AUDIO_PROPERTIES(ASCState, card),
+    DEFINE_AUDIO_PROPERTIES(ASCState, audio_be),
     DEFINE_PROP_UINT8("asctype", ASCState, type, ASC_TYPE_ASC),
 };
 

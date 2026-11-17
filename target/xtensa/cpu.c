@@ -30,11 +30,12 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
+#include "exec/cpu-defs.h"
 #include "cpu.h"
 #include "fpu/softfloat.h"
 #include "qemu/module.h"
 #include "migration/vmstate.h"
-#include "hw/qdev-clock.h"
+#include "hw/core/qdev-clock.h"
 #include "accel/tcg/cpu-ops.h"
 #ifndef CONFIG_USER_ONLY
 #include "system/memory.h"
@@ -59,13 +60,13 @@ static TCGTBCPUState xtensa_get_tb_cpu_state(CPUState *cs)
 {
     CPUXtensaState *env = cpu_env(cs);
     uint32_t flags = 0;
-    target_ulong cs_base = 0;
+    uint64_t cs_base = 0;
 
     flags |= xtensa_get_ring(env);
     if (env->sregs[PS] & PS_EXCM) {
         flags |= XTENSA_TBFLAG_EXCM;
     } else if (xtensa_option_enabled(env->config, XTENSA_OPTION_LOOP)) {
-        target_ulong lend_dist =
+        uint64_t lend_dist =
             env->sregs[LEND] - (env->pc & -(1u << TARGET_PAGE_BITS));
 
         /*
@@ -83,7 +84,7 @@ static TCGTBCPUState xtensa_get_tb_cpu_state(CPUState *cs)
          * for the TB that contains this instruction.
          */
         if (lend_dist < (1u << TARGET_PAGE_BITS) + env->config->max_insn_size) {
-            target_ulong lbeg_off = env->sregs[LEND] - env->sregs[LBEG];
+            uint64_t lbeg_off = env->sregs[LEND] - env->sregs[LBEG];
 
             cs_base = lend_dist;
             if (lbeg_off < 256) {
@@ -208,7 +209,8 @@ static void xtensa_cpu_reset_hold(Object *obj, ResetType type)
 #endif
     /* For inf * 0 + NaN, return the input NaN */
     set_float_infzeronan_rule(float_infzeronan_dnan_never, &env->fp_status);
-    set_no_signaling_nans(!dfpu, &env->fp_status);
+    set_snan_rule(dfpu ? float_snan_bit_is_zero : float_snan_never,
+                  &env->fp_status);
     /* Default NaN value: sign bit clear, set frac msb */
     set_float_default_nan_pattern(0b01000000, &env->fp_status);
     xtensa_use_first_nan(env, !dfpu);
@@ -226,7 +228,8 @@ static ObjectClass *xtensa_cpu_class_by_name(const char *cpu_model)
     return oc;
 }
 
-static void xtensa_cpu_disas_set_info(CPUState *cs, disassemble_info *info)
+static void xtensa_cpu_disas_set_info(const CPUState *cs,
+                                      disassemble_info *info)
 {
     XtensaCPU *cpu = XTENSA_CPU(cs);
 
@@ -243,6 +246,14 @@ static void xtensa_cpu_realizefn(DeviceState *dev, Error **errp)
     Error *local_err = NULL;
 
 #ifndef CONFIG_USER_ONLY
+    CPUXtensaState *env = &XTENSA_CPU(dev)->env;
+
+    env->address_space_er = g_malloc(sizeof(*env->address_space_er));
+    env->system_er = g_malloc(sizeof(*env->system_er));
+    memory_region_init_io(env->system_er, OBJECT(dev), NULL, env, "er",
+                          UINT64_C(0x100000000));
+    address_space_init(env->address_space_er, env->system_er, "ER");
+
     xtensa_irq_init(&XTENSA_CPU(dev)->env);
 #endif
 
@@ -268,12 +279,6 @@ static void xtensa_cpu_initfn(Object *obj)
     env->config = xcc->config;
 
 #ifndef CONFIG_USER_ONLY
-    env->address_space_er = g_malloc(sizeof(*env->address_space_er));
-    env->system_er = g_malloc(sizeof(*env->system_er));
-    memory_region_init_io(env->system_er, obj, NULL, env, "er",
-                          UINT64_C(0x100000000));
-    address_space_init(env->address_space_er, env->system_er, "ER");
-
     cpu->clock = qdev_init_clock_in(DEVICE(obj), "clk-in", NULL, cpu, 0);
     clock_set_hz(cpu->clock, env->config->clock_freq_khz * 1000);
 #endif
@@ -300,7 +305,7 @@ static const VMStateDescription vmstate_xtensa_cpu = {
 
 static const struct SysemuCPUOps xtensa_sysemu_ops = {
     .has_work = xtensa_cpu_has_work,
-    .get_phys_page_debug = xtensa_cpu_get_phys_page_debug,
+    .get_phys_addr_debug = xtensa_cpu_get_phys_addr_debug,
 };
 #endif
 

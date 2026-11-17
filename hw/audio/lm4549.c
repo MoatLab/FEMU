@@ -14,8 +14,9 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
-#include "audio/audio.h"
+#include "hw/core/hw-error.h"
+#include "qemu/log.h"
+#include "qemu/audio.h"
 #include "lm4549.h"
 #include "migration/vmstate.h"
 
@@ -100,11 +101,11 @@ static void lm4549_audio_transfer(lm4549_state *s)
     uint32_t i;
 
     /* Activate the voice */
-    AUD_set_active_out(s->voice, 1);
+    audio_be_set_active_out(s->audio_be, s->voice, 1);
     s->voice_is_active = 1;
 
     /* Try to write the buffer content */
-    written_bytes = AUD_write(s->voice, s->buffer,
+    written_bytes = audio_be_write(s->audio_be, s->voice, s->buffer,
                               s->buffer_level * sizeof(uint16_t));
     written_samples = written_bytes >> 1;
 
@@ -128,14 +129,14 @@ static void lm4549_audio_out_callback(void *opaque, int free)
     static uint32_t prev_buffer_level;
 
 #ifdef LM4549_DEBUG
-    int size = AUD_get_buffer_size_out(s->voice);
+    int size = audio_be_get_buffer_size_out(s->audio_be, s->voice);
     DPRINTF("audio_out_callback size = %i free = %i\n", size, free);
 #endif
 
     /* Detect that no data are consumed
        => disable the voice */
     if (s->buffer_level == prev_buffer_level) {
-        AUD_set_active_out(s->voice, 0);
+        audio_be_set_active_out(s->audio_be, s->voice, 0);
         s->voice_is_active = 0;
     }
     prev_buffer_level = s->buffer_level;
@@ -179,18 +180,32 @@ void lm4549_write(lm4549_state *s,
         break;
 
     case LM4549_PCM_Front_DAC_Rate:
-        regfile[LM4549_PCM_Front_DAC_Rate] = value;
         DPRINTF("DAC rate change = %i\n", value);
+
+        /*
+         * Valid sample rates are 4kHz to 48kHz.
+         * The datasheet doesn't say what happens if you try to
+         * set the frequency to zero. AUD_open_out() will print
+         * a bug message if we pass it a zero frequency, so just
+         * ignore attempts to set the DAC frequency to zero.
+         */
+        if (value < 4000 || value > 48000) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: DAC sample rate %d Hz is invalid, ignoring it\n",
+                          __func__, value);
+            break;
+        }
+        regfile[LM4549_PCM_Front_DAC_Rate] = value;
 
         /* Re-open a voice with the new sample rate */
         struct audsettings as;
         as.freq = value;
         as.nchannels = 2;
         as.fmt = AUDIO_FORMAT_S16;
-        as.endianness = 0;
+        as.big_endian = false;
 
-        s->voice = AUD_open_out(
-            &s->card,
+        s->voice = audio_be_open_out(
+            s->audio_be,
             s->voice,
             "lm4549.out",
             s,
@@ -257,10 +272,10 @@ static int lm4549_post_load(void *opaque, int version_id)
     as.freq = freq;
     as.nchannels = 2;
     as.fmt = AUDIO_FORMAT_S16;
-    as.endianness = 0;
+    as.big_endian = false;
 
-    s->voice = AUD_open_out(
-        &s->card,
+    s->voice = audio_be_open_out(
+        s->audio_be,
         s->voice,
         "lm4549.out",
         s,
@@ -270,7 +285,7 @@ static int lm4549_post_load(void *opaque, int version_id)
 
     /* Request data */
     if (s->voice_is_active == 1) {
-        lm4549_audio_out_callback(s, AUD_get_buffer_size_out(s->voice));
+        lm4549_audio_out_callback(s, audio_be_get_buffer_size_out(s->audio_be, s->voice));
     }
 
     return 0;
@@ -282,7 +297,7 @@ void lm4549_init(lm4549_state *s, lm4549_callback data_req_cb, void* opaque,
     struct audsettings as;
 
     /* Register an audio card */
-    if (!AUD_register_card("lm4549", &s->card, errp)) {
+    if (!audio_be_check(&s->audio_be, errp)) {
         return;
     }
 
@@ -297,10 +312,10 @@ void lm4549_init(lm4549_state *s, lm4549_callback data_req_cb, void* opaque,
     as.freq = 48000;
     as.nchannels = 2;
     as.fmt = AUDIO_FORMAT_S16;
-    as.endianness = 0;
+    as.big_endian = false;
 
-    s->voice = AUD_open_out(
-        &s->card,
+    s->voice = audio_be_open_out(
+        s->audio_be,
         s->voice,
         "lm4549.out",
         s,
@@ -308,7 +323,7 @@ void lm4549_init(lm4549_state *s, lm4549_callback data_req_cb, void* opaque,
         &as
     );
 
-    AUD_set_volume_out(s->voice, 0, 255, 255);
+    audio_be_set_volume_out_lr(s->audio_be, s->voice, 0, 255, 255);
 
     s->voice_is_active = 0;
 

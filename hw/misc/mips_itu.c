@@ -24,7 +24,8 @@
 #include "qapi/error.h"
 #include "hw/core/cpu.h"
 #include "hw/misc/mips_itu.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
+#include "accel/tcg/cpu-loop.h"
 #include "target/mips/cpu.h"
 
 #define ITC_TAG_ADDRSPACE_SZ (ITC_ADDRESSMAP_NUM * 8)

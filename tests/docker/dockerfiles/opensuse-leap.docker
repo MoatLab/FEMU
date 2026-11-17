@@ -1,13 +1,12 @@
 # THIS FILE WAS AUTO-GENERATED
 #
-#  $ lcitool dockerfile --layers all opensuse-leap-15 qemu
+#  $ lcitool dockerfile --layers all opensuse-leap-16 qemu
 #
 # https://gitlab.com/libvirt/libvirt-ci
 
-FROM registry.opensuse.org/opensuse/leap:15.6
+FROM registry.opensuse.org/opensuse/leap:16.0
 
 RUN zypper update -y && \
-    zypper addrepo -fc https://download.opensuse.org/update/leap/15.6/backports/openSUSE:Backports:SLE-15-SP6:Update.repo && \
     zypper install -y \
            Mesa-devel \
            alsa-lib-devel \
@@ -19,6 +18,8 @@ RUN zypper update -y && \
            ca-certificates \
            ccache \
            clang \
+           clang-devel \
+           coreutils \
            ctags \
            cyrus-sasl-devel \
            dbus-1 \
@@ -33,7 +34,6 @@ RUN zypper update -y && \
            glib2-devel \
            glibc-locale \
            glibc-static \
-           glusterfs-devel \
            gtk-vnc-devel \
            gtk3-devel \
            hostname \
@@ -78,24 +78,32 @@ RUN zypper update -y && \
            libudev-devel \
            liburing-devel \
            libusb-1_0-devel \
+           libxdp-devel \
            libzstd-devel \
            llvm \
            lttng-ust-devel \
            lzo-devel \
            make \
+           meson \
            mtools \
-           ncat \
            ncurses-devel \
            ninja \
            openssh \
            pam-devel \
-           pcre-devel-static \
+           pcre2-devel-static \
            pipewire-devel \
            pkgconfig \
-           python311 \
-           python311-base \
-           python311-pip \
-           python311-setuptools \
+           python3-Pillow \
+           python3-PyYAML \
+           python3-Sphinx \
+           python3-base \
+           python3-numpy \
+           python3-opencv \
+           python3-pip \
+           python3-setuptools \
+           python3-sphinx_rtd_theme \
+           python3-tomli \
+           python3-wheel \
            rdma-core-devel \
            rust \
            rust-bindgen \
@@ -107,7 +115,7 @@ RUN zypper update -y && \
            spice-protocol-devel \
            swtpm \
            systemd-devel \
-           systemtap-sdt-devel \
+           systemtap-dtrace \
            tar \
            tesseract-ocr \
            tesseract-ocr-traineddata-english \
@@ -130,20 +138,15 @@ RUN zypper update -y && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/clang && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/gcc
 
-RUN /usr/bin/pip3.11 install \
-                     PyYAML \
-                     meson==1.5.0 \
-                     pillow \
-                     sphinx \
-                     sphinx-rtd-theme
-
-ENV CCACHE_WRAPPERSDIR "/usr/libexec/ccache-wrappers"
-ENV LANG "en_US.UTF-8"
-ENV MAKE "/usr/bin/make"
-ENV NINJA "/usr/bin/ninja"
-ENV PYTHON "/usr/bin/python3.11"
+ENV CCACHE_WRAPPERSDIR="/usr/libexec/ccache-wrappers"
+ENV LANG="en_US.UTF-8"
+ENV MAKE="/usr/bin/make"
+ENV NINJA="/usr/bin/ninja"
+ENV PYTHON="/usr/bin/python3"
 # As a final step configure the user (if env is defined)
 ARG USER
 ARG UID
 RUN if [ "${USER}" ]; then \
   id ${USER} 2>/dev/null || useradd -u ${UID} -U ${USER}; fi
+
+ENV ENABLE_RUST=1

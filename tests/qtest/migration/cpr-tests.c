@@ -15,6 +15,9 @@
 #include "migration/framework.h"
 #include "migration/migration-qmp.h"
 #include "migration/migration-util.h"
+#include "qapi/error.h"
+#include "qobject/qjson.h"
+#include "qobject/qlist.h"
 
 
 static char *tmpfs;
@@ -27,27 +30,70 @@ static void *migrate_hook_start_mode_reboot(QTestState *from, QTestState *to)
     return NULL;
 }
 
-static void test_mode_reboot(void)
+static void test_mode_reboot(char *name, MigrateCommon *args)
 {
     g_autofree char *uri = g_strdup_printf("file:%s/%s", tmpfs,
                                            FILE_TEST_FILENAME);
-    MigrateCommon args = {
-        .start.use_shmem = true,
-        .connect_uri = uri,
-        .listen_uri = "defer",
-        .start_hook = migrate_hook_start_mode_reboot,
-        .start = {
-            .caps[MIGRATION_CAPABILITY_X_IGNORE_SHARED] = true,
-        },
-    };
 
-    test_file_common(&args, true);
+    args->uri = uri;
+    args->start_hook = migrate_hook_start_mode_reboot;
+
+    args->start.mem_type = MEM_TYPE_SHMEM;
+    args->start.caps[MIGRATION_CAPABILITY_X_IGNORE_SHARED] = true;
+
+    test_file_common(args, true);
 }
 
-static void *test_mode_transfer_start(QTestState *from, QTestState *to)
+static int test_transfer(MigrateCommon *args, const char *cpr_channel,
+                         bool incoming_defer)
 {
+    QTestState *from, *to;
+    QObject *obj, *out_channels = qobject_from_json(args->connect_channels,
+                                                    &error_abort);
+    QList *channels_list;
+
+    /*
+     * The cpr channel must be included in outgoing channels, but not in
+     * migrate-incoming channels.
+     */
+    channels_list = qobject_to(QList, out_channels);
+    obj = migrate_str_to_channel(cpr_channel);
+    qlist_append(channels_list, obj);
+
+    if (migrate_start(&from, &to, &args->start)) {
+        return -1;
+    }
+
     migrate_set_parameter_str(from, "mode", "cpr-transfer");
-    return NULL;
+
+    wait_for_serial("src_serial");
+
+    qtest_qmp_assert_success(from, "{ 'execute' : 'stop'}");
+    wait_for_stop(from, get_src());
+    migrate_ensure_converge(from);
+
+    migrate_qmp(from, to, NULL, out_channels, "{}");
+
+    qtest_connect(to);
+    qtest_qmp_handshake(to, NULL);
+    if (incoming_defer) {
+        QObject *in_channels = qobject_from_json(args->connect_channels,
+                                                 &error_abort);
+
+        migrate_incoming_qmp(to, NULL, in_channels, "{}");
+    }
+
+    wait_for_migration_complete(from);
+    wait_for_migration_complete(to);
+
+    qtest_qmp_assert_success(to, "{ 'execute' : 'cont'}");
+
+    wait_for_resume(to, get_dst());
+    wait_for_serial("dest_serial");
+
+    migrate_end(from, to, true);
+
+    return 0;
 }
 
 /*
@@ -55,7 +101,7 @@ static void *test_mode_transfer_start(QTestState *from, QTestState *to)
  * migration, and cannot connect synchronously to the monitor, so defer
  * the target connection.
  */
-static void test_mode_transfer_common(bool incoming_defer)
+static void test_mode_transfer_common(MigrateCommon *args, bool incoming_defer)
 {
     g_autofree char *cpr_path = g_strdup_printf("%s/cpr.sock", tmpfs);
     g_autofree char *mig_path = g_strdup_printf("%s/migsocket", tmpfs);
@@ -82,32 +128,166 @@ static void test_mode_transfer_common(bool incoming_defer)
     int cpr_sockfd = qtest_socket_server(cpr_path);
     g_assert(cpr_sockfd >= 0);
 
-    opts_target = g_strdup_printf("-incoming cpr,addr.transport=socket,"
-                                  "addr.type=fd,addr.str=%d %s",
-                                  cpr_sockfd, opts);
-    MigrateCommon args = {
-        .start.opts_source = opts,
-        .start.opts_target = opts_target,
-        .start.defer_target_connect = true,
-        .start.memory_backend = "-object memory-backend-memfd,id=pc.ram,size=%s"
-                                " -machine memory-backend=pc.ram",
-        .listen_uri = incoming_defer ? "defer" : uri,
-        .connect_channels = connect_channels,
-        .cpr_channel = cpr_channel,
-        .start_hook = test_mode_transfer_start,
-    };
+    if (incoming_defer) {
+        opts_target = g_strdup_printf("-incoming cpr,addr.transport=socket,"
+                                      "addr.type=fd,addr.str=%d %s",
+                                      cpr_sockfd, opts);
+    } else {
+        opts_target = g_strdup_printf("-incoming %s "
+                                      "-incoming cpr,addr.transport=socket,"
+                                      "addr.type=fd,addr.str=%d %s",
+                                      uri, cpr_sockfd, opts);
+    }
 
-    test_precopy_common(&args);
+    args->connect_channels = connect_channels;
+
+    args->start.opts_source = opts;
+    args->start.opts_target = opts_target;
+    args->start.defer_target_connect = true;
+    args->start.mem_type = MEM_TYPE_MEMFD;
+
+    if (test_transfer(args, cpr_channel, incoming_defer) < 0) {
+        close(cpr_sockfd);
+        unlink(cpr_path);
+    }
 }
 
-static void test_mode_transfer(void)
+static void test_mode_transfer(char *name, MigrateCommon *args)
 {
-    test_mode_transfer_common(NULL);
+    test_mode_transfer_common(args, false);
 }
 
-static void test_mode_transfer_defer(void)
+static void test_mode_transfer_defer(char *name, MigrateCommon *args)
 {
-    test_mode_transfer_common(true);
+    test_mode_transfer_common(args, true);
+}
+
+static void set_cpr_exec_args(QTestState *who, MigrateCommon *args)
+{
+    g_autofree char *qtest_from_args = NULL;
+    g_autofree char *from_args = NULL;
+    g_autofree char *to_args = NULL;
+    g_autofree char *exec_args = NULL;
+    g_auto(GStrv) argv = NULL;
+    char *from_str, *src, *dst;
+    int ret;
+
+    /*
+     * hide_stderr appends "2>/dev/null" to the command line, but cpr-exec
+     * passes the command-line words to execv, not to the shell, so suppress it
+     * here.  fd 2 was already bound in the source VM, and execv preserves it.
+     */
+    g_assert(args->start.hide_stderr == false);
+
+    ret = migrate_args(&from_args, &to_args, &args->start);
+    g_assert(!ret);
+    qtest_from_args = qtest_qemu_args(from_args);
+
+    /*
+     * The generated args may have been formatted using "%s %s" with empty
+     * strings, which can produce consecutive spaces, which g_strsplit would
+     * convert into empty strings.  Ditto for leading and trailing space.
+     * De-dup spaces to avoid that.
+     */
+
+    from_str = src = dst = g_strstrip(qtest_from_args);
+    do {
+        if (*src != ' ' || src[-1] != ' ') {
+            *dst++ = *src;
+        }
+    } while (*src++);
+
+    exec_args = g_strconcat(qtest_qemu_binary(migration_get_env()->qemu_dst),
+                            " -incoming defer ", from_str, NULL);
+    argv = g_strsplit(exec_args, " ", -1);
+    migrate_set_parameter_strv(who, "cpr-exec-command", argv);
+}
+
+static void wait_for_migration_event(QTestState *who, const char *waitfor)
+{
+    QDict *rsp, *data;
+    bool done = false;
+
+    while (!done) {
+        const char *status;
+
+        rsp = qtest_qmp_eventwait_ref(who, "MIGRATION");
+        g_assert(qdict_haskey(rsp, "data"));
+        data = qdict_get_qdict(rsp, "data");
+        g_assert(qdict_haskey(data, "status"));
+        status = qdict_get_str(data, "status");
+        g_assert(strcmp(status, "failed"));
+        done = !strcmp(status, waitfor);
+        qobject_unref(rsp);
+    }
+}
+
+static void test_cpr_exec(MigrateCommon *args)
+{
+    QTestState *from, *to;
+    void *data_hook = NULL;
+    g_autofree char *connect_uri = g_strdup(args->uri);
+    g_autofree char *filename = g_strdup_printf("%s/%s", tmpfs,
+                                                FILE_TEST_FILENAME);
+
+    if (migrate_start(&from, NULL, &args->start)) {
+        return;
+    }
+
+    /* Source and dest never run concurrently */
+    g_assert_false(args->live);
+
+    if (args->start_hook) {
+        data_hook = args->start_hook(from, NULL);
+    }
+
+    wait_for_serial("src_serial");
+    set_cpr_exec_args(from, args);
+    migrate_set_capability(from, "events", true);
+    migrate_qmp(from, NULL, connect_uri, NULL, "{}");
+    wait_for_migration_event(from, "completed");
+
+    to = qtest_init_after_exec(from);
+
+    qtest_qmp_assert_success(to, "{ 'execute': 'migrate-incoming',"
+                             "  'arguments': { "
+                             "      'channels': [ { 'channel-type': 'main',"
+                             "      'addr': { 'transport': 'file',"
+                             "                'filename': %s,"
+                             "                'offset': 0  } } ] } }",
+                             filename);
+    wait_for_migration_complete(to);
+
+    wait_for_resume(to, get_dst());
+    /* Device on target is still named src_serial because args do not change */
+    wait_for_serial("src_serial");
+
+    if (args->end_hook) {
+        args->end_hook(from, to, data_hook);
+    }
+
+    migrate_end(from, to, args->result == MIG_TEST_SUCCEED);
+}
+
+static void *test_mode_exec_start(QTestState *from, QTestState *to)
+{
+    assert(!to);
+    migrate_set_parameter_str(from, "mode", "cpr-exec");
+    return NULL;
+}
+
+static void test_mode_exec(char *name, MigrateCommon *args)
+{
+    g_autofree char *uri = g_strdup_printf("file:%s/%s", tmpfs,
+                                           FILE_TEST_FILENAME);
+    args->uri = uri;
+    args->start_hook = test_mode_exec_start;
+
+    args->start.only_source = true;
+    args->start.opts_source = "-machine aux-ram-share=on -nodefaults";
+    args->start.mem_type = MEM_TYPE_MEMFD;
+
+    test_cpr_exec(args);
 }
 
 void migration_test_add_cpr(MigrationTestEnv *env)
@@ -132,5 +312,6 @@ void migration_test_add_cpr(MigrationTestEnv *env)
         migration_test_add("/migration/mode/transfer", test_mode_transfer);
         migration_test_add("/migration/mode/transfer/defer",
                            test_mode_transfer_defer);
+        migration_test_add("/migration/mode/exec", test_mode_exec);
     }
 }

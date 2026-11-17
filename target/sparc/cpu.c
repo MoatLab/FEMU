@@ -23,8 +23,9 @@
 #include "qemu/module.h"
 #include "qemu/qemu-print.h"
 #include "accel/tcg/cpu-mmu-index.h"
+#include "accel/tcg/cpu-ops.h"
 #include "exec/translation-block.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "qapi/visitor.h"
 #include "tcg/tcg.h"
 #include "fpu/softfloat.h"
@@ -103,7 +104,8 @@ static bool sparc_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 }
 #endif /* !CONFIG_USER_ONLY */
 
-static void cpu_sparc_disas_set_info(CPUState *cpu, disassemble_info *info)
+static void cpu_sparc_disas_set_info(const CPUState *cpu,
+                                     disassemble_info *info)
 {
     info->print_insn = print_insn_sparc;
     info->endian = BFD_ENDIAN_BIG;
@@ -173,10 +175,10 @@ static void sparc_cpu_parse_features(const char *typename, char *features,
              * TODO: remove minus-override-plus semantics after
              *       warning for a few releases
              */
-            if (!strcasecmp(val, "on") ||
-                !strcasecmp(val, "off") ||
-                !strcasecmp(val, "true") ||
-                !strcasecmp(val, "false")) {
+            if (!g_ascii_strcasecmp(val, "on") ||
+                !g_ascii_strcasecmp(val, "off") ||
+                !g_ascii_strcasecmp(val, "true") ||
+                !g_ascii_strcasecmp(val, "false")) {
                 error_setg(errp, "Boolean properties in format %s=%s"
                                  " are not supported", name, val);
                 return;
@@ -783,7 +785,7 @@ static void sparc_restore_state_to_opc(CPUState *cs,
 #ifndef CONFIG_USER_ONLY
 static bool sparc_cpu_has_work(CPUState *cs)
 {
-    return (cs->interrupt_request & CPU_INTERRUPT_HARD) &&
+    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD) &&
            cpu_interrupts_enabled(cpu_env(cs));
 }
 #endif /* !CONFIG_USER_ONLY */
@@ -896,6 +898,8 @@ static void sparc_cpu_realizefn(DeviceState *dev, Error **errp)
         return;
     }
 
+    sparc_cpu_register_gdb_regs(cs);
+
     qemu_init_vcpu(cs);
 
     scc->parent_realize(dev, errp);
@@ -990,12 +994,31 @@ static const Property sparc_cpu_properties[] = {
 };
 
 #ifndef CONFIG_USER_ONLY
+
+#ifdef TARGET_SPARC64
+#include "monitor/hmp.h"
+
+static const MonitorDef sparc64_monitor_defs[] = {
+    { "asi", offsetof(CPUSPARCState, asi) },
+    { "pstate", offsetof(CPUSPARCState, pstate) },
+    { "cansave", offsetof(CPUSPARCState, cansave) },
+    { "canrestore", offsetof(CPUSPARCState, canrestore) },
+    { "otherwin", offsetof(CPUSPARCState, otherwin) },
+    { "wstate", offsetof(CPUSPARCState, wstate) },
+    { "cleanwin", offsetof(CPUSPARCState, cleanwin) },
+    { NULL },
+};
+#endif
+
 #include "hw/core/sysemu-cpu-ops.h"
 
 static const struct SysemuCPUOps sparc_sysemu_ops = {
     .has_work = sparc_cpu_has_work,
-    .get_phys_page_debug = sparc_cpu_get_phys_page_debug,
+    .get_phys_addr_debug = sparc_cpu_get_phys_addr_debug,
     .legacy_vmsd = &vmstate_sparc_cpu,
+#if defined(TARGET_SPARC64)
+    .monitor_defs = sparc64_monitor_defs,
+#endif
 };
 #endif
 
@@ -1090,10 +1113,9 @@ static void sparc_cpu_class_init(ObjectClass *oc, const void *data)
     cc->disas_set_info = cpu_sparc_disas_set_info;
 
 #if defined(TARGET_SPARC64) && !defined(TARGET_ABI32)
-    cc->gdb_core_xml_file = "sparc64-core.xml";
-    cc->gdb_num_core_regs = 86;
+    cc->gdb_core_xml_file = "sparc64-cpu.xml";
 #else
-    cc->gdb_num_core_regs = 72;
+    cc->gdb_core_xml_file = "sparc32-cpu.xml";
 #endif
     cc->tcg_ops = &sparc_tcg_ops;
 }

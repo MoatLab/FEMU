@@ -12,22 +12,24 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
 #include "hw/arm/boot.h"
+#include "hw/arm/machines-qom.h"
 #include "net/net.h"
 #include "system/system.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/char/serial-mm.h"
 #include "qemu/timer.h"
-#include "hw/ptimer.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/ptimer.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/block/flash.h"
+#include "standard-headers/linux/input-event-codes.h"
 #include "ui/console.h"
 #include "hw/i2c/i2c.h"
 #include "hw/i2c/bitbang_i2c.h"
-#include "hw/irq.h"
-#include "hw/or-irq.h"
+#include "hw/core/irq.h"
+#include "hw/core/or-irq.h"
 #include "hw/audio/wm8750.h"
 #include "system/block-backend.h"
 #include "system/runstate.h"
@@ -36,7 +38,6 @@
 #include "qemu/cutils.h"
 #include "qom/object.h"
 #include "hw/net/mv88w8618_eth.h"
-#include "audio/audio.h"
 #include "qemu/error-report.h"
 #include "target/arm/cpu-qom.h"
 
@@ -152,7 +153,7 @@ static inline void set_lcd_pixel32(musicpal_lcd_state *s,
     }
 }
 
-static void lcd_refresh(void *opaque)
+static bool lcd_refresh(void *opaque)
 {
     musicpal_lcd_state *s = opaque;
     int x, y, col;
@@ -170,7 +171,8 @@ static void lcd_refresh(void *opaque)
         }
     }
 
-    dpy_gfx_update(s->con, 0, 0, 128*3, 64*3);
+    qemu_console_update(s->con, 0, 0, 128*3, 64*3);
+    return true;
 }
 
 static void lcd_invalidate(void *opaque)
@@ -252,7 +254,7 @@ static const GraphicHwOps musicpal_gfx_ops = {
 static void musicpal_lcd_realize(DeviceState *dev, Error **errp)
 {
     musicpal_lcd_state *s = MUSICPAL_LCD(dev);
-    s->con = graphic_console_init(dev, 0, &musicpal_gfx_ops, s);
+    s->con = qemu_graphic_console_create(dev, 0, &musicpal_gfx_ops, s);
     qemu_console_resize(s->con, 128 * 3, 64 * 3);
 }
 
@@ -1060,49 +1062,48 @@ struct musicpal_key_state {
     SysBusDevice parent_obj;
     /*< public >*/
 
+    QemuInputHandlerState *hs;
     uint32_t pressed_keys;
     qemu_irq out[8];
 };
 
 static void musicpal_key_event(DeviceState *dev, QemuConsole *src,
-                               InputEvent *evt)
+                               QemuInputEvent *evt)
 {
     musicpal_key_state *s = MUSICPAL_KEY(dev);
-    InputKeyEvent *key = evt->u.key.data;
-    int qcode = qemu_input_key_value_to_qcode(key->key);
     uint32_t event = 0;
     int i;
 
-    switch (qcode) {
-    case Q_KEY_CODE_UP:
+    switch (evt->key.key) {
+    case KEY_UP:
         event = MP_KEY_WHEEL_NAV | MP_KEY_WHEEL_NAV_INV;
         break;
 
-    case Q_KEY_CODE_DOWN:
+    case KEY_DOWN:
         event = MP_KEY_WHEEL_NAV;
         break;
 
-    case Q_KEY_CODE_LEFT:
+    case KEY_LEFT:
         event = MP_KEY_WHEEL_VOL | MP_KEY_WHEEL_VOL_INV;
         break;
 
-    case Q_KEY_CODE_RIGHT:
+    case KEY_RIGHT:
         event = MP_KEY_WHEEL_VOL;
         break;
 
-    case Q_KEY_CODE_F:
+    case KEY_F:
         event = MP_KEY_BTN_FAVORITS;
         break;
 
-    case Q_KEY_CODE_TAB:
+    case KEY_TAB:
         event = MP_KEY_BTN_VOLUME;
         break;
 
-    case Q_KEY_CODE_RET:
+    case KEY_ENTER:
         event = MP_KEY_BTN_NAVIGATION;
         break;
 
-    case Q_KEY_CODE_M:
+    case KEY_M:
         event = MP_KEY_BTN_MENU;
         break;
     }
@@ -1112,14 +1113,14 @@ static void musicpal_key_event(DeviceState *dev, QemuConsole *src,
      * but do not repeat already-pressed buttons for the other key inputs.
      */
     if (!(event & (MP_KEY_WHEEL_NAV | MP_KEY_WHEEL_VOL))) {
-        if (key->down && (s->pressed_keys & event)) {
+        if (evt->key.down && (s->pressed_keys & event)) {
             event = 0;
         }
     }
 
     if (event) {
         /* Raise GPIO pin first if repeating a key */
-        if (key->down && (s->pressed_keys & event)) {
+        if (evt->key.down && (s->pressed_keys & event)) {
             for (i = 0; i <= 7; i++) {
                 if (event & (1 << i)) {
                     qemu_set_irq(s->out[i], 1);
@@ -1128,10 +1129,10 @@ static void musicpal_key_event(DeviceState *dev, QemuConsole *src,
         }
         for (i = 0; i <= 7; i++) {
             if (event & (1 << i)) {
-                qemu_set_irq(s->out[i], !key->down);
+                qemu_set_irq(s->out[i], !evt->key.down);
             }
         }
-        if (key->down) {
+        if (evt->key.down) {
             s->pressed_keys |= event;
         } else {
             s->pressed_keys &= ~event;
@@ -1158,7 +1159,16 @@ static const QemuInputHandler musicpal_key_handler = {
 
 static void musicpal_key_realize(DeviceState *dev, Error **errp)
 {
-    qemu_input_handler_register(dev, &musicpal_key_handler);
+    musicpal_key_state *s = MUSICPAL_KEY(dev);
+
+    s->hs = qemu_input_handler_register(dev, &musicpal_key_handler);
+}
+
+static void musicpal_key_unrealize(DeviceState *dev)
+{
+    musicpal_key_state *s = MUSICPAL_KEY(dev);
+
+    g_clear_pointer(&s->hs, qemu_input_handler_unregister);
 }
 
 static const VMStateDescription musicpal_key_vmsd = {
@@ -1177,6 +1187,7 @@ static void musicpal_key_class_init(ObjectClass *klass, const void *data)
 
     dc->vmsd = &musicpal_key_vmsd;
     dc->realize = musicpal_key_realize;
+    dc->unrealize = musicpal_key_unrealize;
 }
 
 static const TypeInfo musicpal_key_info = {
@@ -1346,7 +1357,7 @@ static void musicpal_machine_init(MachineClass *mc)
     machine_add_audiodev_property(mc);
 }
 
-DEFINE_MACHINE("musicpal", musicpal_machine_init)
+DEFINE_MACHINE_ARM("musicpal", musicpal_machine_init)
 
 static void mv88w8618_wlan_class_init(ObjectClass *klass, const void *data)
 {

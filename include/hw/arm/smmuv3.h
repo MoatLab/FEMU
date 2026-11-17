@@ -21,6 +21,8 @@
 
 #include "hw/arm/smmu-common.h"
 #include "qom/object.h"
+#include "qapi/qapi-types-misc-arm.h"
+#include "qemu/notify.h"
 
 #define TYPE_SMMUV3_IOMMU_MEMORY_REGION "smmuv3-iommu-memory-region"
 
@@ -63,6 +65,21 @@ struct SMMUv3State {
     qemu_irq     irq[4];
     QemuMutex mutex;
     char *stage;
+    uint8_t identifier;
+
+    /* SMMU has HW accelerator support for nested S1 + s2 */
+    bool accel;
+    struct SMMUv3AccelState *s_accel;
+    uint64_t msi_gpa;
+    Error *migration_blocker;
+    OnOffAuto ril;
+    OnOffAuto ats;
+    OasMode oas;
+    SsidSizeMode ssidsize;
+    /* SMMU CMDQV extension */
+    OnOffAuto cmdqv;
+
+    Notifier machine_done;
 };
 
 typedef enum {
@@ -80,6 +97,8 @@ struct SMMUv3Class {
     DeviceRealize parent_realize;
     ResettablePhases parent_phases;
 };
+
+bool smmuv3_ats_enabled(struct SMMUv3State *s);
 
 #define TYPE_ARM_SMMUV3   "arm-smmuv3"
 OBJECT_DECLARE_TYPE(SMMUv3State, SMMUv3Class, ARM_SMMUV3)

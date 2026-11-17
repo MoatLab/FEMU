@@ -48,6 +48,31 @@ QTestState *qtest_initf(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
 QTestState *qtest_vinitf(const char *fmt, va_list ap) G_GNUC_PRINTF(1, 0);
 
 /**
+ * qtest_qemu_binary:
+ * @var: environment variable name
+ *
+ * Look up @var and return its value as the qemu binary path.
+ * If @var is NULL, look up  the default var name.
+ */
+const char *qtest_qemu_binary(const char *var);
+
+/**
+ * qtest_init_after_exec:
+ * @qts: the previous QEMU state
+ *
+ * Return a test state representing new QEMU after @qts exec's it.
+ */
+QTestState *qtest_init_after_exec(QTestState *qts);
+
+/**
+ * qtest_qemu_args:
+ * @extra_args: Other arguments to pass to QEMU.
+ *
+ * Return the command line used to start QEMU, sans binary.
+ */
+gchar *qtest_qemu_args(const char *extra_args);
+
+/**
  * qtest_init:
  * @extra_args: other arguments to pass to QEMU.  CAUTION: these
  * arguments are subject to word splitting and shell evaluation.
@@ -400,6 +425,14 @@ char *qtest_vhmp(QTestState *s, const char *fmt, va_list ap)
     G_GNUC_PRINTF(2, 0);
 
 void qtest_module_load(QTestState *s, const char *prefix, const char *libname);
+
+/**
+ * qtest_qom_tests:
+ * @s: #QTestState instance to operate on.
+ *
+ * Run QOM property get/set round-trip tests on all non-abstract types.
+ */
+void qtest_qom_tests(QTestState *s);
 
 /**
  * qtest_get_irq:
@@ -977,7 +1010,7 @@ void qtest_qmp_fds_assert_success(QTestState *qts, int *fds, size_t nfds,
  * @cb: Pointer to the callback function
  * @skip_old_versioned: true if versioned old machine types should be skipped
  *
- *  Call a callback function for every name of all available machines.
+ * Call a callback function for every name of all available machines.
  */
 void qtest_cb_for_every_machine(void (*cb)(const char *machine),
                                 bool skip_old_versioned);
@@ -1152,5 +1185,16 @@ bool have_qemu_img(void);
  * Returns: true if the image has been created successfully.
  */
 bool mkimg(const char *file, const char *fmt, unsigned size_mb);
+
+/**
+ * qtest_verbose:
+ * @domain: The logging domain
+ *
+ * Read the QTEST_LOG environment variable and return whether the
+ * specified domain is enabled for verbose logging. Enable specific
+ * logging domains with QTEST_LOG=<domain> or use QTEST_LOG=-<domain> to
+ * enable all domains except for the specific one.
+ */
+bool qtest_verbose(const char *domain);
 
 #endif

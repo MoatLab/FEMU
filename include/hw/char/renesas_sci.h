@@ -10,7 +10,7 @@
 #define HW_CHAR_RENESAS_SCI_H
 
 #include "chardev/char-fe.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "qom/object.h"
 
 #define TYPE_RENESAS_SCI "renesas-sci"
@@ -33,7 +33,7 @@ struct RSCIState {
 
     MemoryRegion memory;
     QEMUTimer timer;
-    CharBackend chr;
+    CharFrontend chr;
     qemu_irq irq[SCI_NR_IRQ];
 
     uint8_t smr;

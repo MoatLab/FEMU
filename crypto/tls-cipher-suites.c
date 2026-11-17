@@ -3,7 +3,7 @@
  *
  * Copyright (c) 2018-2020 Red Hat, Inc.
  *
- * Author: Philippe Mathieu-Daudé <philmd@redhat.com>
+ * Author: Philippe Mathieu-Daudé
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */

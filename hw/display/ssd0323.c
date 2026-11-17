@@ -181,7 +181,7 @@ static uint32_t ssd0323_transfer(SSIPeripheral *dev, uint32_t data)
     return 0;
 }
 
-static void ssd0323_update_display(void *opaque)
+static bool ssd0323_update_display(void *opaque)
 {
     ssd0323_state *s = (ssd0323_state *)opaque;
     DisplaySurface *surface = qemu_console_surface(s->con);
@@ -197,11 +197,11 @@ static void ssd0323_update_display(void *opaque)
     int dest_width;
 
     if (!s->redraw)
-        return;
+        return true;
 
     switch (surface_bits_per_pixel(surface)) {
     case 0:
-        return;
+        return true;
     case 15:
         dest_width = 2;
         break;
@@ -216,7 +216,7 @@ static void ssd0323_update_display(void *opaque)
         break;
     default:
         BADF("Bad color depth\n");
-        return;
+        return true;
     }
     p = colortab;
     for (i = 0; i < 16; i++) {
@@ -240,7 +240,7 @@ static void ssd0323_update_display(void *opaque)
             break;
         default:
             BADF("Bad color depth\n");
-            return;
+            return true;
         }
         p += dest_width;
     }
@@ -270,7 +270,9 @@ static void ssd0323_update_display(void *opaque)
         }
     }
     s->redraw = 0;
-    dpy_gfx_update(s->con, 0, 0, 128 * MAGNIFY, 64 * MAGNIFY);
+    qemu_console_update(s->con, 0, 0, 128 * MAGNIFY, 64 * MAGNIFY);
+
+    return true;
 }
 
 static void ssd0323_invalidate_display(void * opaque)
@@ -355,7 +357,7 @@ static void ssd0323_realize(SSIPeripheral *d, Error **errp)
 
     s->col_end = 63;
     s->row_end = 79;
-    s->con = graphic_console_init(dev, 0, &ssd0323_ops, s);
+    s->con = qemu_graphic_console_create(dev, 0, &ssd0323_ops, s);
     qemu_console_resize(s->con, 128 * MAGNIFY, 64 * MAGNIFY);
 
     qdev_init_gpio_in(dev, ssd0323_cd, 1);

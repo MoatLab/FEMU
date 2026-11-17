@@ -34,8 +34,8 @@ _cleanup()
     if [ -f "$TEST_DIR/qsd.pid" ]; then
         qsd_pid=$(cat "$TEST_DIR/qsd.pid")
         kill -KILL "$qsd_pid"
-        fusermount -u "$TEST_DIR/fuse-export" &>/dev/null
     fi
+    fusermount -u "$TEST_DIR/fuse-export" &>/dev/null
     rm -f "$TEST_DIR/fuse-export"
 }
 trap "_cleanup; exit \$status" 0 1 2 3 15

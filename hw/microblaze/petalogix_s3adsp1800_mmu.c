@@ -24,14 +24,15 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/target-info.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
-#include "cpu.h"
-#include "hw/sysbus.h"
+#include "target/microblaze/cpu.h"
+#include "hw/core/sysbus.h"
 #include "net/net.h"
 #include "hw/block/flash.h"
 #include "system/system.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/misc/unimp.h"
 #include "system/address-spaces.h"
 #include "hw/char/xilinx_uartlite.h"
@@ -177,7 +178,8 @@ static void petalogix_s3adsp1800_machine_class_init(ObjectClass *oc,
                                           &EndianMode_lookup,
                                           machine_get_endianness,
                                           machine_set_endianness);
-    object_property_set_default_str(prop, TARGET_BIG_ENDIAN ? "big" : "little");
+    object_property_set_default_str(prop, target_big_endian() ? "big"
+                                                              : "little");
     object_class_property_set_description(oc, "endianness",
             "Defines whether the machine runs in big or little endian mode");
 }

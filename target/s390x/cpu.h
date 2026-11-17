@@ -28,7 +28,6 @@
 #include "cpu-qom.h"
 #include "cpu_models.h"
 #include "exec/cpu-common.h"
-#include "exec/cpu-defs.h"
 #include "exec/cpu-interrupt.h"
 #include "qemu/cpu-float.h"
 #include "qapi/qapi-types-machine-common.h"
@@ -38,12 +37,6 @@
 #define MMU_USER_IDX 0
 
 #define S390_MAX_CPUS 248
-
-#ifndef CONFIG_KVM
-#define S390_ADAPTER_SUPPRESSIBLE 0x01
-#else
-#define S390_ADAPTER_SUPPRESSIBLE KVM_S390_ADAPTER_SUPPRESSIBLE
-#endif
 
 typedef struct PSW {
     uint64_t mask;
@@ -845,30 +838,8 @@ static inline uint64_t s390_build_validity_mcic(void)
     return mcic;
 }
 
-static inline void s390_do_cpu_full_reset(CPUState *cs, run_on_cpu_data arg)
-{
-    cpu_reset(cs);
-}
-
-static inline void s390_do_cpu_reset(CPUState *cs, run_on_cpu_data arg)
-{
-    resettable_reset(OBJECT(cs), RESET_TYPE_S390_CPU_NORMAL);
-}
-
-static inline void s390_do_cpu_initial_reset(CPUState *cs, run_on_cpu_data arg)
-{
-    resettable_reset(OBJECT(cs), RESET_TYPE_S390_CPU_INITIAL);
-}
-
-static inline void s390_do_cpu_load_normal(CPUState *cs, run_on_cpu_data arg)
-{
-    S390CPUClass *scc = S390_CPU_GET_CLASS(cs);
-
-    scc->load_normal(cs);
-}
-
-
 /* cpu.c */
+void s390_do_cpu_full_reset(CPUState *cs, run_on_cpu_data arg);
 void s390_crypto_reset(void);
 void s390_cmma_reset(void);
 void s390_enable_css_support(S390CPU *cpu);
@@ -924,6 +895,7 @@ void s390_init_sigp(void);
 /* helper.c */
 void s390_cpu_set_psw(CPUS390XState *env, uint64_t mask, uint64_t addr);
 uint64_t s390_cpu_get_psw_mask(CPUS390XState *env);
+void cpu_s390x_load_fpc(CPUS390XState *env, uint32_t fpc);
 
 /* outside of target/s390x/ */
 S390CPU *s390_cpu_addr2state(uint16_t cpu_addr);

@@ -79,7 +79,8 @@ of type ``xen-console`` to connect to it. For the Xen console equivalent of
 the handy ``-serial mon:stdio`` option, for example:
 
 .. parsed-literal::
-   -chardev stdio,mux=on,id=char0,signal=off -mon char0 \\
+   -chardev stdio,mux=on,id=char0,signal=off \\
+   -object monitor-hmp,chardev=char0,id=hmp0 \\
    -device xen-console,chardev=char0
 
 The Xen network device is ``xen-net-device``, which becomes the default NIC

@@ -71,6 +71,22 @@ mixture of host CPU models between machines, if live migration
 compatibility is required, use the newest CPU model that is compatible
 across all desired hosts.
 
+``DiamondRapids``
+    Intel Xeon Processor (DiamondRapids, 2026)
+
+    This does not include SMT but allows the module (dual core module
+    - DCM) and die (core building block - CBB) topology levels. The
+    cache hierarchy is L1 i/d cache per thread, L2 cache per module,
+    and L3 cache per die, which can be emulated using the smp-cache
+    option:
+
+        ::
+
+            -machine smp-cache.0.cache=l1d,smp-cache.0.topology=thread,\
+                     smp-cache.1.cache=l1i,smp-cache.1.topology=thread,\
+                     smp-cache.2.cache=l2,smp-cache.2.topology=module,\
+                     smp-cache.3.cache=l3,smp-cache.3.topology=die
+
 ``ClearwaterForest``
     Intel Xeon Processor (ClearwaterForest, 2025)
 

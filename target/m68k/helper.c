@@ -25,6 +25,7 @@
 #include "exec/target_page.h"
 #include "exec/gdbstub.h"
 #include "exec/helper-proto.h"
+#include "accel/tcg/cpu-loop.h"
 #include "system/memory.h"
 #include "gdbstub/helpers.h"
 #include "fpu/softfloat.h"
@@ -129,10 +130,10 @@ void m68k_cpu_init_gdb(M68kCPU *cpu)
 
     if (m68k_feature(env, M68K_FEATURE_CF_FPU)) {
         gdb_register_coprocessor(cs, cf_fpu_gdb_get_reg, cf_fpu_gdb_set_reg,
-                                 gdb_find_static_feature("cf-fp.xml"), 18);
+                                 gdb_find_static_feature("cf-fp.xml"));
     } else if (m68k_feature(env, M68K_FEATURE_FPU)) {
         gdb_register_coprocessor(cs, m68k_fpu_gdb_get_reg, m68k_fpu_gdb_set_reg,
-                                 gdb_find_static_feature("m68k-fp.xml"), 18);
+                                 gdb_find_static_feature("m68k-fp.xml"));
     }
     /* TODO: Add [E]MAC registers.  */
 }
@@ -907,7 +908,7 @@ txfail:
     return -1;
 }
 
-hwaddr m68k_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
+hwaddr m68k_cpu_get_phys_addr_debug(CPUState *cs, vaddr addr)
 {
     CPUM68KState *env = cpu_env(cs);
     hwaddr phys_addr;

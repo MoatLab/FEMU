@@ -24,9 +24,9 @@
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/log.h"
-#include "hw/loader.h"
+#include "hw/core/loader.h"
 #include "elf.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "system/kvm.h"
 #include "system/device_tree.h"
 #include "kvm_ppc.h"
@@ -507,15 +507,6 @@ static void spapr_vio_busdev_realize(DeviceState *qdev, Error **errp)
 
     dev->irq = spapr_vio_reg_to_irq(dev->reg);
 
-    if (SPAPR_MACHINE_GET_CLASS(spapr)->legacy_irq_allocation) {
-        int irq = spapr_irq_findone(spapr, errp);
-
-        if (irq < 0) {
-            return;
-        }
-        dev->irq = irq;
-    }
-
     if (spapr_irq_claim(spapr, dev->irq, false, errp) < 0) {
         return;
     }
@@ -618,8 +609,8 @@ const VMStateDescription vmstate_spapr_vio = {
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         /* Sanity check */
-        VMSTATE_UINT32_EQUAL(reg, SpaprVioDevice, NULL),
-        VMSTATE_UINT32_EQUAL(irq, SpaprVioDevice, NULL),
+        VMSTATE_UINT32_EQUAL(reg, SpaprVioDevice),
+        VMSTATE_UINT32_EQUAL(irq, SpaprVioDevice),
 
         /* General VIO device state */
         VMSTATE_UINT64(signal_state, SpaprVioDevice),

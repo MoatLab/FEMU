@@ -337,6 +337,7 @@
 #define __NR_io_pgetevents 333
 #define __NR_rseq 334
 #define __NR_uretprobe 335
+#define __NR_uprobe 336
 #define __NR_pidfd_send_signal 424
 #define __NR_io_uring_setup 425
 #define __NR_io_uring_enter 426
@@ -381,6 +382,10 @@
 #define __NR_listxattrat 465
 #define __NR_removexattrat 466
 #define __NR_open_tree_attr 467
+#define __NR_file_getattr 468
+#define __NR_file_setattr 469
+#define __NR_listns 470
+#define __NR_rseq_slice_yield 471
 
 
 #endif /* _ASM_UNISTD_64_H */

@@ -1,6 +1,6 @@
 #include "qemu/osdep.h"
 #include "monitor/monitor.h"
-#include "monitor/hmp-target.h"
+#include "monitor/hmp.h"
 #include "hw/i386/pc.h"
 #include "hw/i386/sgx-epc.h"
 #include "qapi/qapi-commands-misc-i386.h"
@@ -20,11 +20,6 @@ SgxInfo *qmp_query_sgx_capabilities(Error **errp)
 {
     error_setg(errp, "SGX support is not compiled in");
     return NULL;
-}
-
-void hmp_info_sgx(Monitor *mon, const QDict *qdict)
-{
-    monitor_printf(mon, "SGX is not available in this QEMU\n");
 }
 
 void pc_machine_init_sgx_epc(PCMachineState *pcms)

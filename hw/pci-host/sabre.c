@@ -25,13 +25,13 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_host.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/pci/pci_bridge.h"
 #include "hw/pci/pci_bus.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/pci-bridge/simba.h"
 #include "hw/pci-host/sabre.h"
 #include "qapi/error.h"
@@ -505,7 +505,6 @@ static void sabre_class_init(ObjectClass *klass, const void *data)
     dc->realize = sabre_realize;
     device_class_set_legacy_reset(dc, sabre_reset);
     device_class_set_props(dc, sabre_properties);
-    set_bit(DEVICE_CATEGORY_BRIDGE, dc->categories);
     dc->fw_name = "pci";
     sbc->explicit_ofw_unit_address = sabre_ofw_unit_address;
 }

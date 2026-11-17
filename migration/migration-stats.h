@@ -13,8 +13,6 @@
 #ifndef QEMU_MIGRATION_STATS_H
 #define QEMU_MIGRATION_STATS_H
 
-#include "qemu/stats64.h"
-
 /*
  * Amount of time to allocate to each "chunk" of bandwidth-throttled
  * data.
@@ -29,78 +27,82 @@
 
 /*
  * These are the ram migration statistic counters.  It is loosely
- * based on MigrationStats.  We change to Stat64 any counter that
- * needs to be updated using atomic ops (can be accessed by more than
- * one thread).
+ * based on MigrationRAMStats.
  */
 typedef struct {
     /*
-     * Number of bytes that were dirty last time that we synced with
-     * the guest memory.  We use that to calculate the downtime.  As
-     * the remaining dirty amounts to what we know that is still dirty
-     * since last iteration, not counting what the guest has dirtied
-     * since we synchronized bitmaps.
+     * Number of bytes that were reported dirty after the latest
+     * system-wise synchronization of dirty information.  It is used to do
+     * best-effort estimation on expected downtime.
      */
-    Stat64 dirty_bytes_last_sync;
+    uint64_t dirty_bytes_last_sync;
+    /*
+     * Number of bytes that were reported dirty now.  This is an estimate
+     * value and will be updated every time migration thread queries from
+     * modules in an iteration loop.  It is used to provide best-effort
+     * estimation on total remaining data.
+     */
+    uint64_t dirty_bytes_total;
     /*
      * Number of pages dirtied per second.
      */
-    Stat64 dirty_pages_rate;
+    uint64_t dirty_pages_rate;
     /*
-     * Number of times we have synchronized guest bitmaps.
+     * Number of times we have synchronized guest bitmaps.  This always
+     * starts from 1 for the 1st iteration.
      */
-    Stat64 dirty_sync_count;
+    uint64_t dirty_sync_count;
     /*
      * Number of times zero copy failed to send any page using zero
      * copy.
      */
-    Stat64 dirty_sync_missed_zero_copy;
+    uint64_t dirty_sync_missed_zero_copy;
     /*
      * Number of bytes sent at migration completion stage while the
      * guest is stopped.
      */
-    Stat64 downtime_bytes;
+    uint64_t downtime_bytes;
     /*
      * Number of bytes sent through multifd channels.
      */
-    Stat64 multifd_bytes;
+    uint64_t multifd_bytes;
     /*
      * Number of pages transferred that were not full of zeros.
      */
-    Stat64 normal_pages;
+    uint64_t normal_pages;
     /*
      * Number of bytes sent during postcopy.
      */
-    Stat64 postcopy_bytes;
+    uint64_t postcopy_bytes;
     /*
      * Number of postcopy page faults that we have handled during
      * postcopy stage.
      */
-    Stat64 postcopy_requests;
+    uint64_t postcopy_requests;
     /*
      * Number of bytes sent during precopy stage.
      */
-    Stat64 precopy_bytes;
+    uint64_t precopy_bytes;
     /*
      * Number of bytes transferred with QEMUFile.
      */
-    Stat64 qemu_file_transferred;
+    uint64_t qemu_file_transferred;
     /*
      * Amount of transferred data at the start of current cycle.
      */
-    Stat64 rate_limit_start;
+    uint64_t rate_limit_start;
     /*
      * Maximum amount of data we can send in a cycle.
      */
-    Stat64 rate_limit_max;
+    uint64_t rate_limit_max;
     /*
      * Number of bytes sent through RDMA.
      */
-    Stat64 rdma_bytes;
+    uint64_t rdma_bytes;
     /*
      * Number of pages transferred that were full of zeros.
      */
-    Stat64 zero_pages;
+    uint64_t zero_pages;
 } MigrationAtomicStats;
 
 extern MigrationAtomicStats mig_stats;

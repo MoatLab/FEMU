@@ -3,7 +3,7 @@
 
 #include "exec/hwaddr.h"
 #include "standard-headers/linux/qemu_fw_cfg.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "system/dma.h"
 #include "qom/object.h"
 
@@ -305,12 +305,61 @@ bool fw_cfg_add_file_from_generator(FWCfgState *s,
                                     Object *parent, const char *part,
                                     const char *filename, Error **errp);
 
-FWCfgState *fw_cfg_init_io_dma(uint32_t iobase, uint32_t dma_iobase,
-                                AddressSpace *dma_as);
-FWCfgState *fw_cfg_init_mem(hwaddr ctl_addr, hwaddr data_addr);
-FWCfgState *fw_cfg_init_mem_wide(hwaddr ctl_addr,
-                                 hwaddr data_addr, uint32_t data_width,
-                                 hwaddr dma_addr, AddressSpace *dma_as);
+/**
+ * fw_cfg_init_io_dma:
+ * @iobase: x86 port number which is the base of the fw_cfg port range
+ * @dma_as: the device will do DMA to/from this AddressSpace
+ *
+ * Create a fw_cfg device and map it into the specified I/O port range.
+ *
+ * This creates a device with the x86 PC standard port I/O layout:
+ * - Selector Register IOport: @iobase
+ * - Data Register IOport:     @iobase + 1
+ * - DMA Address IOport:       @iobase + 4
+ *
+ * Returns the device object.
+ */
+FWCfgState *fw_cfg_init_io_dma(uint32_t iobase, AddressSpace *dma_as);
+
+/**
+ * fw_cfg_init_mem_nodma:
+ *
+ * @ctl_addr: address of the selector register
+ * @data_addr: address of the data address
+ * @data_width: width of the data register in bytes
+ *
+ * Create a fw_cfg device without DMA support, and map its
+ * registers at the specified addresses.
+ *
+ * Do not use this function in code for a board type that didn't
+ * already support the fw_cfg device. All new board types should
+ * include DMA support and use the standard register layout -- use
+ * fw_cfg_init_mem_dma() instead.
+ *
+ * Returns the device object.
+ */
+FWCfgState *fw_cfg_init_mem_nodma(hwaddr ctl_addr, hwaddr data_addr,
+                                  unsigned data_width);
+/**
+ * fw_cfg_init_mem_dma:
+ * @base_addr: address to map the device at
+ * @as: the device will do DMA to/from this AddressSpace
+ *
+ * Create and map a fw_cfg device at the specified base address.
+ *
+ * This always creates a device with DMA support, and the "standard"
+ * register layout:
+ *  - offset 0 : data, 64 bits
+ *  - offset 8 : selector, 16 bits
+ *  - offset 16 : DMA address, 64 bits
+ *
+ * The device will be created, configured and realized, and its
+ * memory regions for the registers will be mapped at the specified
+ * address.
+ *
+ * Returns the device object.
+ */
+FWCfgState *fw_cfg_init_mem_dma(hwaddr base_addr, AddressSpace *dma_as);
 
 FWCfgState *fw_cfg_find(void);
 bool fw_cfg_dma_enabled(void *opaque);
@@ -349,5 +398,20 @@ const char *fw_cfg_arch_key_name(uint16_t key);
 void load_image_to_fw_cfg(FWCfgState *fw_cfg, uint16_t size_key,
                           uint16_t data_key, const char *image_name,
                           bool try_decompress);
+
+/**
+ * load_image_to_fw_cfg_file() - Load an image file into an fw_cfg entry
+ *                               identified by fw_cfg file name.
+ * @fw_cfg:         The firmware config instance to store the data in.
+ * @fw_cfg_name:    The name of the fw_cfg (pseudo) file.
+ * @image_name:     The name of the image file to load. If it is NULL, the
+ *                  function returns without doing anything.
+ *
+ * In case of failure, the function prints an error message to stderr and the
+ * process exits with status 1.
+ */
+void load_image_to_fw_cfg_file(FWCfgState *fw_cfg,
+                               const char *fw_cfg_name,
+                               const char *image_name);
 
 #endif

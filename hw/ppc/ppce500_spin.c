@@ -30,8 +30,8 @@
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "qemu/units.h"
-#include "hw/hw.h"
-#include "hw/sysbus.h"
+#include "hw/core/hw-error.h"
+#include "hw/core/sysbus.h"
 #include "system/hw_accel.h"
 #include "hw/ppc/ppc.h"
 #include "e500.h"
@@ -99,8 +99,7 @@ static void spin_kick(CPUState *cs, run_on_cpu_data data)
 
     cs->halted = 0;
     cs->exception_index = -1;
-    cs->stopped = false;
-    qemu_cpu_kick(cs);
+    cpu_resume(cs);
 }
 
 static void spin_write(void *opaque, hwaddr addr, uint64_t value,

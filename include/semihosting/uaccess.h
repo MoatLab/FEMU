@@ -28,7 +28,7 @@
     ({ uint64_t val_ = 0;                                               \
        int ret_ = cpu_memory_rw_debug(env_cpu(env), (addr),             \
                                       &val_, sizeof(val_), 0);          \
-       (val) = tswap64(val_); ret_; })
+       (val) = cpu_internal_tswap64(cs, val_); ret_; })
 
 /**
  * get_user_u32:
@@ -39,7 +39,7 @@
     ({ uint32_t val_ = 0;                                               \
        int ret_ = cpu_memory_rw_debug(env_cpu(env), (addr),             \
                                       &val_, sizeof(val_), 0);          \
-       (val) = tswap32(val_); ret_; })
+       (val) = cpu_internal_tswap32(cs, val_); ret_; })
 
 /**
  * get_user_u8:
@@ -65,7 +65,7 @@
  * Returns: 0 on success, -1 on error.
  */
 #define put_user_u64(val, addr)                                         \
-    ({ uint64_t val_ = tswap64(val);                                    \
+    ({ uint64_t val_ = cpu_internal_tswap64(cs, val);                   \
        cpu_memory_rw_debug(env_cpu(env), (addr), &val_, sizeof(val_), 1); })
 
 /**
@@ -74,7 +74,7 @@
  * Returns: 0 on success, -1 on error.
  */
 #define put_user_u32(val, addr)                                         \
-    ({ uint32_t val_ = tswap32(val);                                    \
+    ({ uint32_t val_ = cpu_internal_tswap32(cs, val);                   \
        cpu_memory_rw_debug(env_cpu(env), (addr), &val_, sizeof(val_), 1); })
 
 /**

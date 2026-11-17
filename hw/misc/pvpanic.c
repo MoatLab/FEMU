@@ -18,7 +18,7 @@
 #include "system/runstate.h"
 
 #include "hw/nvram/fw_cfg.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/misc/pvpanic.h"
 #include "qom/object.h"
 #include "standard-headers/misc/pvpanic.h"
@@ -62,6 +62,7 @@ static void pvpanic_write(void *opaque, hwaddr addr, uint64_t val,
 }
 
 static const MemoryRegionOps pvpanic_ops = {
+    .endianness = DEVICE_LITTLE_ENDIAN,
     .read = pvpanic_read,
     .write = pvpanic_write,
     .impl = {

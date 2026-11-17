@@ -54,6 +54,7 @@
 #include "hw/s390x/event-facility.h"
 #include "hw/s390x/ebcdic.h"
 #include "qapi/qapi-visit-machine.h"
+#include "qapi/qapi-events-machine-s390x.h"
 #include "migration/vmstate.h"
 
 typedef struct Data {
@@ -96,6 +97,11 @@ static int write_event_data(SCLPEvent *event, EventBufferHeader *evt_buf_hdr)
                                              ebh);
     SCLPEventCPI *e = SCLP_EVENT_CPI(event);
 
+    /* Caller checks sccb length, buffer header checking is our duty */
+    if (be16_to_cpu(evt_buf_hdr->length) != sizeof(ControlProgramIdMsg)) {
+        return SCLP_RC_INCONSISTENT_LENGTHS;
+    }
+
     ascii_put(e->system_type, (char *)cpim->data.system_type,
               sizeof(cpim->data.system_type));
     ascii_put(e->system_name, (char *)cpim->data.system_name,
@@ -106,6 +112,9 @@ static int write_event_data(SCLPEvent *event, EventBufferHeader *evt_buf_hdr)
     e->timestamp = qemu_clock_get_ns(QEMU_CLOCK_HOST);
 
     cpim->ebh.flags = SCLP_EVENT_BUFFER_ACCEPTED;
+
+    qapi_event_send_sclp_cpi_info_available();
+
     return SCLP_RC_NORMAL_COMPLETION;
 }
 

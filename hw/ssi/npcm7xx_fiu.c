@@ -16,8 +16,8 @@
 
 #include "qemu/osdep.h"
 
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/ssi/npcm7xx_fiu.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
@@ -150,7 +150,7 @@ static uint64_t npcm7xx_fiu_flash_read(void *opaque, hwaddr addr,
     NPCM7xxFIUState *fiu = f->fiu;
     uint64_t value = 0;
     uint32_t drd_cfg;
-    int dummy_cycles;
+    int dummy_bytes;
     int i;
 
     if (fiu->active_cs != -1) {
@@ -180,10 +180,8 @@ static uint64_t npcm7xx_fiu_flash_read(void *opaque, hwaddr addr,
         break;
     }
 
-    /* Flash chip model expects one transfer per dummy bit, not byte */
-    dummy_cycles =
-        (FIU_DRD_CFG_DBW(drd_cfg) * 8) >> FIU_DRD_CFG_ACCTYPE(drd_cfg);
-    for (i = 0; i < dummy_cycles; i++) {
+    dummy_bytes = FIU_DRD_CFG_DBW(drd_cfg);
+    for (i = 0; i < dummy_bytes; i++) {
         ssi_transfer(fiu->spi, 0);
     }
 
@@ -250,6 +248,11 @@ static const MemoryRegionOps npcm7xx_fiu_flash_ops = {
     .read = npcm7xx_fiu_flash_read,
     .write = npcm7xx_fiu_flash_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = {
+        .min_access_size = 1,
+        .max_access_size = 8,
+        .unaligned = true,
+    },
     .valid = {
         .min_access_size = 1,
         .max_access_size = 8,
@@ -300,20 +303,13 @@ static void send_address(SSIBus *spi, unsigned int addsiz, uint32_t addr)
     }
 }
 
-/* Send the number of dummy bits specified in the UMA config register. */
-static void send_dummy_bits(SSIBus *spi, uint32_t uma_cfg, uint32_t uma_cmd)
+/* Send the number of dummy bytes specified in the UMA config register */
+static void send_dummy_bytes(SSIBus *spi, uint32_t uma_cfg)
 {
-    unsigned int bits_per_clock = 1U << FIU_UMA_CFG_DBPCK(uma_cfg);
     unsigned int i;
 
     for (i = 0; i < FIU_UMA_CFG_DBSIZ(uma_cfg); i++) {
-        /* Use bytes 0 and 1 first, then keep repeating byte 2 */
-        unsigned int field = (i < 2) ? ((i + 1) * 8) : 24;
-        unsigned int j;
-
-        for (j = 0; j < 8; j += bits_per_clock) {
-            ssi_transfer(spi, extract32(uma_cmd, field + j, bits_per_clock));
-        }
+        ssi_transfer(spi, 0);
     }
 }
 
@@ -349,8 +345,8 @@ static void npcm7xx_fiu_uma_transaction(NPCM7xxFIUState *s)
         ssi_transfer(s->spi, extract32(s->regs[reg], field, 8));
     }
 
-    /* Send dummy bits, if present. */
-    send_dummy_bits(s->spi, uma_cfg, s->regs[NPCM7XX_FIU_UMA_CMD]);
+    /* Send dummy bytes, if present */
+    send_dummy_bytes(s->spi, uma_cfg);
 
     /* Read data, if present. */
     for (i = 0; i < FIU_UMA_CFG_RDATSIZ(uma_cfg); i++) {

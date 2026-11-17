@@ -29,13 +29,57 @@ bool message_with_timestamp;
 bool error_with_guestname;
 const char *error_guest_name;
 
+/*
+ * Print to the current human monitor if we have one, else to stderr.
+ */
+static int G_GNUC_PRINTF(2, 0)
+error_vprintf_mon(Monitor *cur_mon, const char *fmt, va_list ap)
+{
+    /*
+     * This will return -1 if 'cur_mon' is NULL, or is QMP.
+     * IOW this will only print if in HMP, otherwise we
+     * fallback to stderr for QMP / no-monitor scenarios.
+     */
+    int ret = monitor_vprintf(cur_mon, fmt, ap);
+    if (ret == -1) {
+        ret = vfprintf(stderr, fmt, ap);
+    }
+    return ret;
+}
+
+/*
+ * Print to the current human monitor if we have one, else to stderr.
+ */
+static int G_GNUC_PRINTF(2, 3)
+error_printf_mon(Monitor *cur_mon, const char *fmt, ...)
+{
+    va_list ap;
+    int ret;
+
+    va_start(ap, fmt);
+    ret = error_vprintf_mon(cur_mon, fmt, ap);
+    va_end(ap);
+    return ret;
+}
+
+/*
+ * Print to the current HMP monitor if we have one, else to stderr.
+ */
+int error_vprintf(const char *fmt, va_list ap)
+{
+    return error_vprintf_mon(monitor_cur(), fmt, ap);
+}
+
+/*
+ * Print to the current HMP monitor if we have one, else to stderr.
+ */
 int error_printf(const char *fmt, ...)
 {
     va_list ap;
     int ret;
 
     va_start(ap, fmt);
-    ret = error_vprintf(fmt, ap);
+    ret = error_vprintf_mon(monitor_cur(), fmt, ap);
     va_end(ap);
     return ret;
 }
@@ -136,48 +180,49 @@ void loc_set_file(const char *fname, int lno)
 }
 
 /*
- * Print current location to current monitor if we have one, else to stderr.
+ * Print current location to current HMP monitor if we have one, else
+ * to stderr.
  */
-static void print_loc(void)
+static void print_loc(Monitor *cur)
 {
     const char *sep = "";
     int i;
     const char *const *argp;
 
-    if (!monitor_cur() && g_get_prgname()) {
-        error_printf("%s:", g_get_prgname());
+    if (!cur && g_get_prgname()) {
+        fprintf(stderr, "%s:", g_get_prgname());
         sep = " ";
     }
     switch (cur_loc->kind) {
     case LOC_CMDLINE:
         argp = cur_loc->ptr;
         for (i = 0; i < cur_loc->num; i++) {
-            error_printf("%s%s", sep, argp[i]);
+            error_printf_mon(cur, "%s%s", sep, argp[i]);
             sep = " ";
         }
-        error_printf(": ");
+        error_printf_mon(cur, ": ");
         break;
     case LOC_FILE:
-        error_printf("%s:", (const char *)cur_loc->ptr);
+        error_printf_mon(cur, "%s:", (const char *)cur_loc->ptr);
         if (cur_loc->num) {
-            error_printf("%d:", cur_loc->num);
+            error_printf_mon(cur, "%d:", cur_loc->num);
         }
-        error_printf(" ");
+        error_printf_mon(cur, " ");
         break;
     default:
-        error_printf("%s", sep);
+        error_printf_mon(cur, "%s", sep);
     }
 }
 
-static char *
-real_time_iso8601(void)
+char *real_time_iso8601(void)
 {
     g_autoptr(GDateTime) dt = g_date_time_new_now_utc();
     return g_date_time_format_iso8601(dt);
 }
 
 /*
- * Print a message to current monitor if we have one, else to stderr.
+ * Print a message to current HMP monitor if we have one, else to
+ * stderr.
  * @report_type is the type of message: error, warning or informational.
  * Format arguments like vsprintf().  The resulting message should be
  * a single phrase, with no newline or trailing punctuation.
@@ -186,38 +231,54 @@ real_time_iso8601(void)
 G_GNUC_PRINTF(2, 0)
 static void vreport(report_type type, const char *fmt, va_list ap)
 {
+    /*
+     * When current monitor is QMP, messages must go to stderr
+     * and have prefixes added, so we cast to HMP, leaving 'cur'
+     * as NULL in QMP case
+     */
+    Monitor *cur = MONITOR(
+        object_dynamic_cast(OBJECT(monitor_cur()), TYPE_MONITOR_HMP));
     gchar *timestr;
 
-    if (message_with_timestamp && !monitor_cur()) {
+    if (!cur) {
+        qemu_flockfile(stderr);
+    }
+
+    if (message_with_timestamp && !cur) {
         timestr = real_time_iso8601();
-        error_printf("%s ", timestr);
+        fprintf(stderr, "%s ", timestr);
         g_free(timestr);
     }
 
     /* Only prepend guest name if -msg guest-name and -name guest=... are set */
-    if (error_with_guestname && error_guest_name && !monitor_cur()) {
-        error_printf("%s ", error_guest_name);
+    if (error_with_guestname && error_guest_name && !cur) {
+        fprintf(stderr, "%s ", error_guest_name);
     }
 
-    print_loc();
+    print_loc(cur);
 
     switch (type) {
     case REPORT_TYPE_ERROR:
         break;
     case REPORT_TYPE_WARNING:
-        error_printf("warning: ");
+        error_printf_mon(cur, "warning: ");
         break;
     case REPORT_TYPE_INFO:
-        error_printf("info: ");
+        error_printf_mon(cur, "info: ");
         break;
     }
 
-    error_vprintf(fmt, ap);
-    error_printf("\n");
+    error_vprintf_mon(cur, fmt, ap);
+    error_printf_mon(cur, "\n");
+
+    if (!cur) {
+        qemu_funlockfile(stderr);
+    }
 }
 
 /*
- * Print an error message to current monitor if we have one, else to stderr.
+ * Print an error message to current HMP monitor if we have one, else
+ * to stderr.
  * Format arguments like vsprintf().  The resulting message should be
  * a single phrase, with no newline or trailing punctuation.
  * Prepend the current location and append a newline.
@@ -229,7 +290,8 @@ void error_vreport(const char *fmt, va_list ap)
 }
 
 /*
- * Print a warning message to current monitor if we have one, else to stderr.
+ * Print a warning message to current HMP monitor if we have one, else
+ * to stderr.
  * Format arguments like vsprintf().  The resulting message should be
  * a single phrase, with no newline or trailing punctuation.
  * Prepend the current location and append a newline.
@@ -240,8 +302,8 @@ void warn_vreport(const char *fmt, va_list ap)
 }
 
 /*
- * Print an information message to current monitor if we have one, else to
- * stderr.
+ * Print an information message to current HMP monitor if we have one,
+ * else to stderr.
  * Format arguments like vsprintf().  The resulting message should be
  * a single phrase, with no newline or trailing punctuation.
  * Prepend the current location and append a newline.
@@ -252,7 +314,8 @@ void info_vreport(const char *fmt, va_list ap)
 }
 
 /*
- * Print an error message to current monitor if we have one, else to stderr.
+ * Print an error message to current HMP monitor if we have one, else
+ * to stderr.
  * Format arguments like sprintf().  The resulting message should be
  * a single phrase, with no newline or trailing punctuation.
  * Prepend the current location and append a newline.
@@ -268,7 +331,8 @@ void error_report(const char *fmt, ...)
 }
 
 /*
- * Print a warning message to current monitor if we have one, else to stderr.
+ * Print a warning message to current HMP monitor if we have one, else
+ * to stderr.
  * Format arguments like sprintf(). The resulting message should be a
  * single phrase, with no newline or trailing punctuation.
  * Prepend the current location and append a newline.
@@ -283,8 +347,8 @@ void warn_report(const char *fmt, ...)
 }
 
 /*
- * Print an information message to current monitor if we have one, else to
- * stderr.
+ * Print an information message to current HMP monitor if we have one,
+ * else to stderr.
  * Format arguments like sprintf(). The resulting message should be a
  * single phrase, with no newline or trailing punctuation.
  * Prepend the current location and append a newline.

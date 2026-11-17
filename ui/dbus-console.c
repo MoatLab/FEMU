@@ -27,6 +27,7 @@
 #include "ui/input.h"
 #include "ui/kbd-state.h"
 #include "trace.h"
+#include <stdint.h>
 
 #ifdef G_OS_UNIX
 #include <gio/gunixfdlist.h>
@@ -46,6 +47,7 @@ struct _DBusDisplayConsole {
 
     QemuDBusDisplay1Keyboard *iface_kbd;
     QKbdState *kbd;
+    Notifier led_notifier;
 
     QemuDBusDisplay1Mouse *iface_mouse;
     QemuDBusDisplay1MultiTouch *iface_touch;
@@ -143,7 +145,6 @@ dbus_display_console_init(DBusDisplayConsole *object)
     DBusDisplayConsole *ddc = DBUS_DISPLAY_CONSOLE(object);
 
     ddc->listeners = g_ptr_array_new_with_free_func(g_object_unref);
-    ddc->dcl.ops = &dbus_console_dcl_ops;
 }
 
 static void
@@ -151,7 +152,9 @@ dbus_display_console_dispose(GObject *object)
 {
     DBusDisplayConsole *ddc = DBUS_DISPLAY_CONSOLE(object);
 
-    unregister_displaychangelistener(&ddc->dcl);
+    qemu_input_led_notifier_remove(&ddc->led_notifier);
+    qemu_console_unregister_listener(&ddc->dcl);
+    qemu_remove_mouse_mode_change_notifier(&ddc->mouse_mode_notifier);
     g_clear_object(&ddc->iface_touch);
     g_clear_object(&ddc->iface_mouse);
     g_clear_object(&ddc->iface_kbd);
@@ -201,7 +204,7 @@ dbus_console_set_ui_info(DBusDisplayConsole *ddc,
         .height = arg_height,
     };
 
-    if (!dpy_ui_info_supported(ddc->dcl.con)) {
+    if (!qemu_console_ui_info_supported(ddc->dcl.con)) {
         g_dbus_method_invocation_return_error(invocation,
                                               DBUS_DISPLAY_ERROR,
                                               DBUS_DISPLAY_ERROR_UNSUPPORTED,
@@ -209,7 +212,7 @@ dbus_console_set_ui_info(DBusDisplayConsole *ddc,
         return DBUS_METHOD_INVOCATION_HANDLED;
     }
 
-    dpy_set_ui_info(ddc->dcl.con, &info, false);
+    qemu_console_set_ui_info(ddc->dcl.con, &info, false);
     qemu_dbus_display1_console_complete_set_uiinfo(ddc->iface, invocation);
     return DBUS_METHOD_INVOCATION_HANDLED;
 }
@@ -340,11 +343,11 @@ dbus_kbd_press(DBusDisplayConsole *ddc,
                GDBusMethodInvocation *invocation,
                guint arg_keycode)
 {
-    QKeyCode qcode = qemu_input_key_number_to_qcode(arg_keycode);
+    unsigned int lnx = qemu_input_key_number_to_linux(arg_keycode);
 
     trace_dbus_kbd_press(arg_keycode);
 
-    qkbd_state_key_event(ddc->kbd, qcode, true);
+    qkbd_state_key_event(ddc->kbd, lnx, true);
 
     qemu_dbus_display1_keyboard_complete_press(ddc->iface_kbd, invocation);
 
@@ -356,11 +359,11 @@ dbus_kbd_release(DBusDisplayConsole *ddc,
                  GDBusMethodInvocation *invocation,
                  guint arg_keycode)
 {
-    QKeyCode qcode = qemu_input_key_number_to_qcode(arg_keycode);
+    unsigned int lnx = qemu_input_key_number_to_linux(arg_keycode);
 
     trace_dbus_kbd_release(arg_keycode);
 
-    qkbd_state_key_event(ddc->kbd, qcode, false);
+    qkbd_state_key_event(ddc->kbd, lnx, false);
 
     qemu_dbus_display1_keyboard_complete_release(ddc->iface_kbd, invocation);
 
@@ -368,11 +371,13 @@ dbus_kbd_release(DBusDisplayConsole *ddc,
 }
 
 static void
-dbus_kbd_qemu_leds_updated(void *data, int ledstate)
+dbus_kbd_qemu_leds_updated(Notifier *notifier, void *data)
 {
-    DBusDisplayConsole *ddc = DBUS_DISPLAY_CONSOLE(data);
+    DBusDisplayConsole *ddc = container_of(notifier, DBusDisplayConsole,
+                                           led_notifier);
+    uint32_t leds_mask = qemu_input_get_leds_mask(ddc->dcl.con);
 
-    qemu_dbus_display1_keyboard_set_modifiers(ddc->iface_kbd, ledstate);
+    qemu_dbus_display1_keyboard_set_modifiers(ddc->iface_kbd, leds_mask);
 }
 
 static gboolean
@@ -424,9 +429,9 @@ dbus_touch_send_event(DBusDisplayConsole *ddc,
     width = qemu_console_get_width(ddc->dcl.con, 0);
     height = qemu_console_get_height(ddc->dcl.con, 0);
 
-    console_handle_touch_event(ddc->dcl.con, touch_slots,
-                               num_slot, width, height,
-                               x, y, kind, &error);
+    qemu_input_touch_event(ddc->dcl.con, touch_slots,
+                           num_slot, width, height,
+                           x, y, kind, &error);
     if (error != NULL) {
         g_dbus_method_invocation_return_error(
             invocation, DBUS_DISPLAY_ERROR,
@@ -528,6 +533,11 @@ int dbus_display_console_get_index(DBusDisplayConsole *ddc)
     return qemu_console_get_index(ddc->dcl.con);
 }
 
+QemuConsole *dbus_display_console_get_qemu_console(DBusDisplayConsole *ddc)
+{
+    return ddc->dcl.con;
+}
+
 DBusDisplayConsole *
 dbus_display_console_new(DBusDisplay *display, QemuConsole *con)
 {
@@ -553,7 +563,6 @@ dbus_display_console_new(DBusDisplay *display, QemuConsole *con)
                         "g-object-path", path,
                         NULL);
     ddc->display = display;
-    ddc->dcl.con = con;
     /* handle errors, and skip non graphics? */
     qemu_console_fill_device_address(
         con, device_addr, sizeof(device_addr), NULL);
@@ -579,7 +588,8 @@ dbus_display_console_new(DBusDisplay *display, QemuConsole *con)
 
     ddc->kbd = qkbd_state_init(con);
     ddc->iface_kbd = qemu_dbus_display1_keyboard_skeleton_new();
-    qemu_add_led_event_handler(dbus_kbd_qemu_leds_updated, ddc);
+    ddc->led_notifier.notify = dbus_kbd_qemu_leds_updated;
+    qemu_input_led_notifier_add(&ddc->led_notifier);
     g_object_connect(ddc->iface_kbd,
         "swapped-signal::handle-press", dbus_kbd_press, ddc,
         "swapped-signal::handle-release", dbus_kbd_release, ddc,
@@ -611,7 +621,7 @@ dbus_display_console_new(DBusDisplay *display, QemuConsole *con)
         slot->tracking_id = -1;
     }
 
-    register_displaychangelistener(&ddc->dcl);
+    qemu_console_register_listener(con, &ddc->dcl, &dbus_console_dcl_ops);
     ddc->mouse_mode_notifier.notify = dbus_mouse_mode_change;
     qemu_add_mouse_mode_change_notifier(&ddc->mouse_mode_notifier);
     dbus_mouse_update_is_absolute(ddc);

@@ -22,6 +22,7 @@
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "accel/tcg/cpu-ldst.h"
+#include "accel/tcg/cpu-loop.h"
 #include "tcg/helper-tcg.h"
 #include "tcg/seg_helper.h"
 
@@ -63,7 +64,7 @@ static void do_interrupt_user(CPUX86State *env, int intno, int is_int,
         cpl = env->hflags & HF_CPL_MASK;
         /* check privilege if software int */
         if (dpl < cpl) {
-            raise_exception_err(env, EXCP0D_GPF, (intno << shift) + 2);
+            raise_exception_err(env, EXCP0D_GPF, intno * 8 + 2);
         }
     }
 

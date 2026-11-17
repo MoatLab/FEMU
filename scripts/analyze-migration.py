@@ -19,6 +19,7 @@
 
 import json
 import os
+import math
 import argparse
 import collections
 import struct
@@ -107,7 +108,7 @@ class MigrationFile(object):
         self.file.close()
 
 class RamSection(object):
-    RAM_SAVE_FLAG_COMPRESS = 0x02
+    RAM_SAVE_FLAG_ZERO     = 0x02
     RAM_SAVE_FLAG_MEM_SIZE = 0x04
     RAM_SAVE_FLAG_PAGE     = 0x08
     RAM_SAVE_FLAG_EOS      = 0x10
@@ -127,6 +128,7 @@ class RamSection(object):
         self.dump_memory = ramargs['dump_memory']
         self.write_memory = ramargs['write_memory']
         self.ignore_shared = ramargs['ignore_shared']
+        self.mapped_ram = ramargs['mapped_ram']
         self.sizeinfo = collections.OrderedDict()
         self.data = collections.OrderedDict()
         self.data['section sizes'] = self.sizeinfo
@@ -145,6 +147,57 @@ class RamSection(object):
 
     def getDict(self):
         return self.data
+
+    def parseMappedRamBlob(self, len):
+        version = self.file.read32()
+        if version != 1:
+            raise Exception("Unsupported MappedRamHeader version %s" % version)
+
+        page_size = self.file.read64()
+        if page_size != self.TARGET_PAGE_SIZE:
+            raise Exception("Page size mismatch in MappedRamHeader")
+
+        bitmap_offset = self.file.read64()
+        pages_offset = self.file.read64()
+
+        if self.ignore_shared and bitmap_offset == 0 and pages_offset == 0:
+            # This is a shared ramblock, x-ignore-share must have been
+            # enabled, and mapped-ram didn't allocate bitmap or page blob
+            # for it.
+            return
+
+        if self.dump_memory or self.write_memory:
+            num_pages = len // page_size
+
+            self.file.seek(bitmap_offset, os.SEEK_SET)
+            bitmap_len = int(math.ceil(num_pages / 8))
+            bitmap = self.file.readvar(size=bitmap_len)
+
+            self.file.seek(pages_offset, os.SEEK_SET)
+            for page_num in range(num_pages):
+                page_addr = page_num * page_size
+
+                is_filled = (bitmap[page_num // 8] >> page_num % 8) & 1
+                if is_filled:
+                    data = self.file.readvar(size=self.TARGET_PAGE_SIZE)
+                    if self.write_memory:
+                        self.files[self.name].seek(page_addr, os.SEEK_SET)
+                        self.files[self.name].write(data)
+                    if self.dump_memory:
+                        hexdata = " ".join("{0:02x}".format(c) for c in data)
+                        self.memory['%s (0x%016x)' %
+                                    (self.name, page_addr)] = hexdata
+                else:
+                    self.file.seek(self.TARGET_PAGE_SIZE, os.SEEK_CUR)
+                    if self.write_memory:
+                        self.files[self.name].seek(page_addr, os.SEEK_SET)
+                        self.files[self.name].write(
+                            b'\x00' * self.TARGET_PAGE_SIZE)
+                    if self.dump_memory:
+                        self.memory['%s (0x%016x)' %
+                                    (self.name, page_addr)] = 'Filled with 0x00'
+
+        self.file.seek(pages_offset + len, os.SEEK_SET)
 
     def read(self):
         # Read all RAM sections
@@ -170,21 +223,20 @@ class RamSection(object):
                         self.files[self.name] = f
                     if self.ignore_shared:
                         mr_addr = self.file.read64()
+                    if self.mapped_ram:
+                        self.parseMappedRamBlob(len)
                 flags &= ~self.RAM_SAVE_FLAG_MEM_SIZE
 
-            if flags & self.RAM_SAVE_FLAG_COMPRESS:
+            if flags & self.RAM_SAVE_FLAG_ZERO:
                 if flags & self.RAM_SAVE_FLAG_CONTINUE:
                     flags &= ~self.RAM_SAVE_FLAG_CONTINUE
                 else:
                     self.name = self.file.readstr()
-                fill_char = self.file.read8()
-                # The page in question is filled with fill_char now
-                if self.write_memory and fill_char != 0:
-                    self.files[self.name].seek(addr, os.SEEK_SET)
-                    self.files[self.name].write(chr(fill_char) * self.TARGET_PAGE_SIZE)
+                _fill_char = self.file.read8()
                 if self.dump_memory:
-                    self.memory['%s (0x%016x)' % (self.name, addr)] = 'Filled with 0x%02x' % fill_char
-                flags &= ~self.RAM_SAVE_FLAG_COMPRESS
+                    self.memory['%s (0x%016x)' %
+                                (self.name, addr)] = 'Filled with 0x00'
+                flags &= ~self.RAM_SAVE_FLAG_ZERO
             elif flags & self.RAM_SAVE_FLAG_PAGE:
                 if flags & self.RAM_SAVE_FLAG_CONTINUE:
                     flags &= ~self.RAM_SAVE_FLAG_CONTINUE
@@ -417,26 +469,26 @@ class VMSDFieldIntLE(VMSDFieldInt):
         super(VMSDFieldIntLE, self).__init__(desc, file)
         self.dtype = '<i%d' % self.size
 
-class VMSDFieldNull(VMSDFieldGeneric):
+class VMSDFieldPtrMarker(VMSDFieldGeneric):
     NULL_PTR_MARKER = b'0'
+    VALID_PTR_MARKER = b'1'
 
     def __init__(self, desc, file):
-        super(VMSDFieldNull, self).__init__(desc, file)
+        super(VMSDFieldPtrMarker, self).__init__(desc, file)
 
     def __repr__(self):
-        # A NULL pointer is encoded in the stream as a '0' to
-        # disambiguate from a mere 0x0 value and avoid consumers
-        # trying to follow the NULL pointer. Displaying '0', 0x30 or
-        # 0x0 when analyzing the JSON debug stream could become
+        # A NULL / non-NULL pointer may be encoded in the stream as a
+        # '0'/'1' to represent the status of the pointer.  Displaying '0',
+        # 0x30 or 0x0 when analyzing the JSON debug stream could become
         # confusing, so use an explicit term instead.
-        return "nullptr"
+        return "null-ptr" if self.data == self.NULL_PTR_MARKER else "valid-ptr"
 
     def __str__(self):
         return self.__repr__()
 
     def read(self):
-        super(VMSDFieldNull, self).read()
-        assert(self.data == self.NULL_PTR_MARKER)
+        super(VMSDFieldPtrMarker, self).read()
+        assert(self.data in [self.NULL_PTR_MARKER, self.VALID_PTR_MARKER])
         return self.data
 
 class VMSDFieldBool(VMSDFieldGeneric):
@@ -590,7 +642,9 @@ vmsd_field_readers = {
     "bitmap" : VMSDFieldGeneric,
     "struct" : VMSDFieldStruct,
     "capability": VMSDFieldCap,
-    "nullptr": VMSDFieldNull,
+    # Keep the old nullptr for old binaries
+    "nullptr": VMSDFieldPtrMarker,
+    "ptr-marker": VMSDFieldPtrMarker,
     "unknown" : VMSDFieldGeneric,
 }
 
@@ -663,6 +717,7 @@ class MigrationDump(object):
         ramargs['dump_memory'] = dump_memory
         ramargs['write_memory'] = write_memory
         ramargs['ignore_shared'] = False
+        ramargs['mapped_ram'] = False
         self.section_classes[('ram',0)][1] = ramargs
 
         while True:
@@ -674,6 +729,7 @@ class MigrationDump(object):
                 section = ConfigurationSection(file, config_desc)
                 section.read()
                 ramargs['ignore_shared'] = section.has_capability('x-ignore-shared')
+                ramargs['mapped_ram'] = section.has_capability('mapped-ram')
             elif section_type == self.QEMU_VM_SECTION_START or section_type == self.QEMU_VM_SECTION_FULL:
                 section_id = file.read32()
                 name = file.readstr()

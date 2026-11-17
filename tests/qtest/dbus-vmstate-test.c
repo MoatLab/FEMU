@@ -2,8 +2,8 @@
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 #include "libqtest.h"
+#include "migration/migration-qmp.h"
 #include "dbus-vmstate1.h"
-#include "migration-helpers.h"
 
 static char *workdir;
 
@@ -29,7 +29,7 @@ typedef struct TestServer {
 
 typedef struct Test {
     const char *id_list;
-    bool migrate_fail;
+    int result;
     bool without_dst_b;
     TestServer srcA;
     TestServer dstA;
@@ -190,6 +190,7 @@ test_dbus_vmstate(Test *test)
     g_autofree char *uri = NULL;
     QTestState *src_qemu = NULL, *dst_qemu = NULL;
     guint ownsrcA, ownsrcB, owndstA, owndstB;
+    QTestMigrationState src_state = { };
 
     uri = g_strdup_printf("unix:%s/migsocket", workdir);
 
@@ -219,21 +220,38 @@ test_dbus_vmstate(Test *test)
 
     dstaddr = g_strsplit(g_test_dbus_get_bus_address(dstbus), ",", 2);
     dst_qemu_args =
-        g_strdup_printf("-object dbus-vmstate,id=dv,addr=%s -incoming %s",
-                        dstaddr[0], uri);
+        g_strdup_printf("-object dbus-vmstate,id=dv,addr=%s -incoming defer",
+                        dstaddr[0]);
 
     src_qemu = qtest_init(src_qemu_args);
     dst_qemu = qtest_init(dst_qemu_args);
+
+    migrate_set_capability(src_qemu, "events", true);
+    qtest_qmp_set_event_callback(src_qemu, migrate_watch_for_events,
+                                 &src_state);
+
     set_id_list(test, src_qemu);
     set_id_list(test, dst_qemu);
 
     thread = g_thread_new("dbus-vmstate-thread", dbus_vmstate_thread, loop);
 
-    migrate_qmp(src_qemu, uri, "{}");
+    migrate_incoming_qmp(dst_qemu, uri, NULL, "{}");
+    migrate_ensure_converge(src_qemu);
+    migrate_qmp(src_qemu, NULL, uri, NULL, "{}");
     test->src_qemu = src_qemu;
-    if (test->migrate_fail) {
-        wait_for_migration_fail(src_qemu, true);
-        qtest_set_expected_status(dst_qemu, EXIT_FAILURE);
+
+    if (test->result != MIG_TEST_SUCCEED) {
+        QDict *rsp;
+
+        migration_event_wait(src_qemu, "failing");
+        wait_for_resume(src_qemu, &src_state);
+        migration_event_wait(src_qemu, "failed");
+
+        rsp = qtest_qmp_assert_success_ref(src_qemu,
+                                           "{ 'execute': 'query-status' }");
+        g_assert(qdict_haskey(rsp, "running"));
+        g_assert(qdict_get_bool(rsp, "running"));
+        qobject_unref(rsp);
     } else {
         wait_for_migration_complete(src_qemu);
     }
@@ -242,11 +260,12 @@ test_dbus_vmstate(Test *test)
     qtest_quit(src_qemu);
     g_bus_unown_name(ownsrcA);
     g_bus_unown_name(ownsrcB);
+    g_test_dbus_down(srcbus);
     g_bus_unown_name(owndstA);
     if (!test->without_dst_b) {
         g_bus_unown_name(owndstB);
     }
-
+    g_test_dbus_down(dstbus);
     g_main_loop_quit(test->loop);
 }
 
@@ -269,7 +288,7 @@ check_migrated(TestServer *s, TestServer *d)
 }
 
 static void
-test_dbus_vmstate_without_list(void)
+test_dbus_vmstate_without_list(char *name, MigrateCommon *args)
 {
     Test test = { 0, };
 
@@ -280,7 +299,7 @@ test_dbus_vmstate_without_list(void)
 }
 
 static void
-test_dbus_vmstate_with_list(void)
+test_dbus_vmstate_with_list(char *name, MigrateCommon *args)
 {
     Test test = { .id_list = "idA,idB" };
 
@@ -291,7 +310,7 @@ test_dbus_vmstate_with_list(void)
 }
 
 static void
-test_dbus_vmstate_only_a(void)
+test_dbus_vmstate_only_a(char *name, MigrateCommon *args)
 {
     Test test = { .id_list = "idA" };
 
@@ -302,54 +321,71 @@ test_dbus_vmstate_only_a(void)
 }
 
 static void
-test_dbus_vmstate_missing_src(void)
+test_dbus_vmstate_missing_src(char *name, MigrateCommon *args)
 {
-    Test test = { .id_list = "idA,idC", .migrate_fail = true };
+    Test test = { .id_list = "idA,idC",
+        .result = MIG_TEST_FAIL };
+    bool silent = !getenv("QTEST_LOG");
 
     /* run in subprocess to silence QEMU error reporting */
-    if (g_test_subprocess()) {
-        test_dbus_vmstate(&test);
-        check_not_migrated(&test.srcA, &test.dstA);
-        check_not_migrated(&test.srcB, &test.dstB);
+    if (silent && !g_test_subprocess()) {
+        g_test_trap_subprocess(NULL, 0, 0);
+        g_test_trap_assert_passed();
         return;
     }
 
-    g_test_trap_subprocess(NULL, 0, 0);
-    g_test_trap_assert_passed();
+    test_dbus_vmstate(&test);
+    check_not_migrated(&test.srcA, &test.dstA);
+    check_not_migrated(&test.srcB, &test.dstB);
 }
 
 static void
-test_dbus_vmstate_missing_dst(void)
+test_dbus_vmstate_missing_dst(char *name, MigrateCommon *args)
 {
     Test test = { .id_list = "idA,idB",
                   .without_dst_b = true,
-                  .migrate_fail = true };
+                  .result = MIG_TEST_FAIL };
+    bool silent = !getenv("QTEST_LOG");
 
     /* run in subprocess to silence QEMU error reporting */
-    if (g_test_subprocess()) {
-        test_dbus_vmstate(&test);
-        assert(test.srcA.save_called);
-        assert(test.srcB.save_called);
-        assert(!test.dstB.save_called);
+    if (silent && !g_test_subprocess()) {
+        g_test_trap_subprocess(NULL, 0, 0);
+        g_test_trap_assert_passed();
         return;
     }
 
-    g_test_trap_subprocess(NULL, 0, 0);
-    g_test_trap_assert_passed();
+    test_dbus_vmstate(&test);
+    assert(test.srcA.save_called);
+    assert(test.srcB.save_called);
+    assert(!test.dstB.save_called);
+}
+
+static void log_func(const gchar *log_domain, GLogLevelFlags log_level,
+                     const gchar *message, gpointer user_data)
+{
+    const gchar *domains;
+
+    assert(log_level & G_LOG_LEVEL_DEBUG);
+
+    domains = getenv("G_MESSAGES_DEBUG");
+    if (!domains || (!strstr(domains, "GLib") && !strstr(domains, "all"))) {
+        return;
+    }
+    g_log_default_handler("GLib", G_LOG_LEVEL_DEBUG, message, NULL);
 }
 
 int
 main(int argc, char **argv)
 {
     GError *err = NULL;
-    g_autofree char *dbus_daemon = NULL;
     int ret;
 
-    dbus_daemon = g_build_filename(G_STRINGIFY(SRCDIR),
-                                   "tests",
-                                   "dbus-vmstate-daemon.sh",
-                                   NULL);
-    g_setenv("G_TEST_DBUS_DAEMON", dbus_daemon, true);
+    /*
+     * GLib currently emits debug messages that ignore
+     * G_MESSAGES_DEBUG. Set a custom log handler to work around the
+     * issue.
+     */
+    g_log_set_handler("GLib", G_LOG_LEVEL_DEBUG, log_func, NULL);
 
     g_test_init(&argc, &argv, NULL);
 
@@ -359,18 +395,16 @@ main(int argc, char **argv)
         exit(1);
     }
 
-    g_setenv("DBUS_VMSTATE_TEST_TMPDIR", workdir, true);
-
-    qtest_add_func("/dbus-vmstate/without-list",
-                   test_dbus_vmstate_without_list);
-    qtest_add_func("/dbus-vmstate/with-list",
-                   test_dbus_vmstate_with_list);
-    qtest_add_func("/dbus-vmstate/only-a",
-                   test_dbus_vmstate_only_a);
-    qtest_add_func("/dbus-vmstate/missing-src",
-                   test_dbus_vmstate_missing_src);
-    qtest_add_func("/dbus-vmstate/missing-dst",
-                   test_dbus_vmstate_missing_dst);
+    migration_test_add("/dbus-vmstate/without-list",
+                       test_dbus_vmstate_without_list);
+    migration_test_add("/dbus-vmstate/with-list",
+                       test_dbus_vmstate_with_list);
+    migration_test_add("/dbus-vmstate/only-a",
+                       test_dbus_vmstate_only_a);
+    migration_test_add("/dbus-vmstate/missing-src",
+                       test_dbus_vmstate_missing_src);
+    migration_test_add("/dbus-vmstate/missing-dst",
+                       test_dbus_vmstate_missing_dst);
 
     ret = g_test_run();
 

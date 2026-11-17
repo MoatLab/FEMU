@@ -186,6 +186,7 @@ FEMU_GUEST_KERNEL=~/femu-guest/bzImage \
 FEMU_GUEST_INITRD=~/femu-guest/initramfs.cpio.gz \
 QEMU_TEST_QEMU_BINARY=$PWD/build-femu/qemu-system-x86_64 \
 QEMU_BUILD_ROOT=$PWD/build-femu \
+MESON_BUILD_ROOT=$PWD/build-femu \
 PYTHONPATH=$PWD/python:$PWD/tests/functional \
   build-femu/pyvenv/bin/python3 hw/femu/tests/functional/test_x86_64_femu_guest.py
 ```

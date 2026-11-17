@@ -15,7 +15,7 @@
 
 #include "qemu/osdep.h"
 #include "block/qdict.h"
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-qdev.h"
 #include "qapi/qapi-commands-qom.h"
@@ -215,13 +215,6 @@ ObjectPropertyInfoList *qmp_device_list_properties(const char *typename,
             strcmp(prop->name, "hotpluggable") == 0 ||
             strcmp(prop->name, "hotplugged") == 0 ||
             strcmp(prop->name, "parent_bus") == 0) {
-            continue;
-        }
-
-        /* Skip legacy properties since they are just string versions of
-         * properties that we already list.
-         */
-        if (strstart(prop->name, "legacy-", NULL)) {
             continue;
         }
 

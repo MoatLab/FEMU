@@ -17,10 +17,12 @@
 #include "hw/acpi/aml-build.h"
 #include "hw/acpi/vmgenid.h"
 #include "hw/nvram/fw_cfg.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "migration/vmstate.h"
+#include "system/physmem.h"
 #include "system/reset.h"
+#include "exec/cpu-common.h"
 
 void vmgenid_build_acpi(VmGenIdState *vms, GArray *table_data, GArray *guid,
                         BIOSLinker *linker, const char *oem_id)
@@ -155,7 +157,7 @@ static void vmgenid_update_guest(VmGenIdState *vms)
              * in order to implement the "OVMF SDT Header probe suppressor"
              * see docs/specs/vmgenid.rst for more details.
              */
-            cpu_physical_memory_write(vmgenid_addr, guid_le.data,
+            physical_memory_write(vmgenid_addr, guid_le.data,
                                       sizeof(guid_le.data));
             /* Send _GPE.E05 event */
             acpi_send_event(DEVICE(obj), ACPI_VMGENID_CHANGE_STATUS);

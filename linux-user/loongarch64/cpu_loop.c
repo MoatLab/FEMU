@@ -19,6 +19,7 @@ enum {
 
 void cpu_loop(CPULoongArchState *env)
 {
+    CPUSysState *sys = env_sys(env);
     CPUState *cs = env_cpu(env);
     int trapnr, si_code;
     abi_long ret;
@@ -27,7 +28,7 @@ void cpu_loop(CPULoongArchState *env)
         cpu_exec_start(cs);
         trapnr = cpu_exec(cs);
         cpu_exec_end(cs);
-        process_queued_cpu_work(cs);
+        qemu_process_cpu_events(cs);
 
         switch (trapnr) {
         case EXCP_INTERRUPT:
@@ -44,9 +45,10 @@ void cpu_loop(CPULoongArchState *env)
                 env->pc -= 4;
                 break;
             }
-            if (ret == -QEMU_ESIGRETURN) {
+            if (ret == -QEMU_ESIGRETURN || ret == -QEMU_ESETPC) {
                 /*
-                 * Returning from a successful sigreturn syscall.
+                 * Returning from a successful sigreturn syscall or from
+                 * control flow diversion in a plugin callback.
                  * Avoid clobbering register state.
                  */
                 break;
@@ -102,10 +104,10 @@ void cpu_loop(CPULoongArchState *env)
          * choose the layout of any signal frame.
          */
         case EXCCODE_SXD:
-            env->CSR_EUEN |= R_CSR_EUEN_SXE_MASK;
+            sys->CSR_EUEN |= R_CSR_EUEN_SXE_MASK;
             break;
         case EXCCODE_ASXD:
-            env->CSR_EUEN |= R_CSR_EUEN_ASXE_MASK;
+            sys->CSR_EUEN |= R_CSR_EUEN_ASXE_MASK;
             break;
 
         case EXCP_ATOMIC:
@@ -120,13 +122,10 @@ void cpu_loop(CPULoongArchState *env)
     }
 }
 
-void target_cpu_copy_regs(CPUArchState *env, target_pt_regs *regs)
+void init_main_thread(CPUState *cs, struct image_info *info)
 {
-    int i;
+    CPUArchState *env = cpu_env(cs);
 
-    for (i = 0; i < 32; i++) {
-        env->gpr[i] = regs->regs[i];
-    }
-    env->pc = regs->csr.era;
-
+    env->pc = info->entry;
+    env->gpr[3] = info->start_stack;
 }

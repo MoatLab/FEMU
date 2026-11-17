@@ -13,6 +13,7 @@
 #include "qemu/accel.h"
 #include "exec/vaddr.h"
 #include "qom/object.h"
+#include "gdbstub/enums.h"
 
 #define ACCEL_OPS_SUFFIX "-ops"
 #define TYPE_ACCEL_OPS "accel" ACCEL_OPS_SUFFIX
@@ -34,6 +35,7 @@ struct AccelOpsClass {
     /* initialization function called when accel is chosen */
     void (*ops_init)(AccelClass *ac);
 
+    bool (*cpu_target_realize)(CPUState *cpu, Error **errp);
     bool (*cpus_are_resettable)(void);
     void (*cpu_reset_hold)(CPUState *cpu);
 
@@ -83,11 +85,12 @@ struct AccelOpsClass {
     int64_t (*get_elapsed_ticks)(void);
 
     /* gdbstub hooks */
-    bool (*supports_guest_debug)(void);
     int (*update_guest_debug)(CPUState *cpu);
-    int (*insert_breakpoint)(CPUState *cpu, int type, vaddr addr, vaddr len);
-    int (*remove_breakpoint)(CPUState *cpu, int type, vaddr addr, vaddr len);
-    void (*remove_all_breakpoints)(CPUState *cpu);
+    int (*insert_gdbstub_breakpoint)(CPUState *cpu, GdbBreakpointType type,
+                                     vaddr addr, vaddr len);
+    int (*remove_gdbstub_breakpoint)(CPUState *cpu, GdbBreakpointType type,
+                                     vaddr addr, vaddr len);
+    void (*remove_all_gdbstub_breakpoints)(CPUState *cpu);
 };
 
 void generic_handle_interrupt(CPUState *cpu, int mask);

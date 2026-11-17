@@ -147,6 +147,8 @@ void ppc_update_daw(CPUPPCState *env, int rid)
     vaddr len;
     int flags;
 
+    assert(tcg_enabled());
+
     if (env->dawr_watchpoint[rid]) {
         cpu_watchpoint_remove_by_ref(cs, env->dawr_watchpoint[rid]);
         env->dawr_watchpoint[rid] = NULL;
@@ -248,8 +250,8 @@ void ppc_store_fpscr(CPUPPCState *env, target_ulong val)
         val |= FP_FEX;
     }
     env->fpscr = val;
-    env->fp_status.rebias_overflow  = (FP_OE & env->fpscr) ? true : false;
-    env->fp_status.rebias_underflow = (FP_UE & env->fpscr) ? true : false;
+    set_float_rebias_overflow(FP_OE & env->fpscr, &env->fp_status);
+    set_float_rebias_underflow(FP_UE & env->fpscr, &env->fp_status);
     if (tcg_enabled()) {
         fpscr_set_rounding_mode(env);
     }

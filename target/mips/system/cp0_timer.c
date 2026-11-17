@@ -21,22 +21,23 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "qemu/timer.h"
-#include "system/kvm.h"
 #include "internal.h"
 
 /* MIPS R4K timer */
 static uint32_t cpu_mips_get_count_val(CPUMIPSState *env)
 {
+    MIPSCPU *cpu = env_archcpu(env);
     int64_t now_ns;
     now_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     return env->CP0_Count +
-            (uint32_t)clock_ns_to_ticks(env->count_clock, now_ns);
+            (uint32_t)clock_ns_to_ticks(cpu->count_clock, now_ns);
 }
 
 static void cpu_mips_timer_update(CPUMIPSState *env)
 {
+    MIPSCPU *cpu = env_archcpu(env);
     uint64_t now_ns, next_ns;
     uint32_t wait;
 
@@ -46,7 +47,7 @@ static void cpu_mips_timer_update(CPUMIPSState *env)
     if (!wait) {
         wait = UINT32_MAX;
     }
-    next_ns = now_ns + clock_ticks_to_ns(env->count_clock, wait);
+    next_ns = now_ns + clock_ticks_to_ns(cpu->count_clock, wait);
     timer_mod(env->timer, next_ns);
 }
 
@@ -82,14 +83,14 @@ void cpu_mips_store_count(CPUMIPSState *env, uint32_t count)
 {
     /*
      * This gets called from cpu_state_reset(), potentially before timer init.
-     * So env->timer may be NULL, which is also the case with KVM enabled so
-     * treat timer as disabled in that case.
+     * So env->timer may be NULL, so treat timer as disabled in that case.
      */
+    MIPSCPU *cpu = env_archcpu(env);
     if (env->CP0_Cause & (1 << CP0Ca_DC) || !env->timer) {
         env->CP0_Count = count;
     } else {
         /* Store new count register */
-        env->CP0_Count = count - (uint32_t)clock_ns_to_ticks(env->count_clock,
+        env->CP0_Count = count - (uint32_t)clock_ns_to_ticks(cpu->count_clock,
                         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
         /* Update timer timer */
         cpu_mips_timer_update(env);
@@ -116,7 +117,8 @@ void cpu_mips_start_count(CPUMIPSState *env)
 void cpu_mips_stop_count(CPUMIPSState *env)
 {
     /* Store the current value */
-    env->CP0_Count += (uint32_t)clock_ns_to_ticks(env->count_clock,
+    MIPSCPU *cpu = env_archcpu(env);
+    env->CP0_Count += (uint32_t)clock_ns_to_ticks(cpu->count_clock,
                         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 }
 
@@ -137,11 +139,5 @@ void cpu_mips_clock_init(MIPSCPU *cpu)
 {
     CPUMIPSState *env = &cpu->env;
 
-    /*
-     * If we're in KVM mode, don't create the periodic timer, that is handled in
-     * kernel.
-     */
-    if (!kvm_enabled()) {
-        env->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, &mips_timer_cb, env);
-    }
+    env->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, &mips_timer_cb, env);
 }

@@ -59,7 +59,7 @@
 #ifndef HW_ACPI_GENERIC_EVENT_DEVICE_H
 #define HW_ACPI_GENERIC_EVENT_DEVICE_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/acpi/memory_hotplug.h"
 #include "hw/acpi/ghes.h"
 #include "hw/acpi/cpu.h"
@@ -103,6 +103,7 @@ OBJECT_DECLARE_TYPE(AcpiGedState, AcpiGedClass, ACPI_GED)
 #define ACPI_GED_NVDIMM_HOTPLUG_EVT 0x4
 #define ACPI_GED_CPU_HOTPLUG_EVT    0x8
 #define ACPI_GED_PCI_HOTPLUG_EVT    0x10
+#define ACPI_GED_ERROR_EVT          0x20
 
 typedef struct GEDState {
     MemoryRegion evt;

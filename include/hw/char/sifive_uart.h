@@ -21,8 +21,8 @@
 #define HW_SIFIVE_UART_H
 
 #include "chardev/char-fe.h"
-#include "hw/qdev-properties.h"
-#include "hw/sysbus.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/sysbus.h"
 #include "qom/object.h"
 #include "qemu/fifo8.h"
 
@@ -51,6 +51,8 @@ enum {
 
 #define SIFIVE_UART_TXFIFO_FULL    0x80000000
 
+#define SIFIVE_UART_TXEN(txctrl)        (txctrl & 0x1)
+#define SIFIVE_UART_RXEN(rxctrl)        (rxctrl & 0x1)
 #define SIFIVE_UART_GET_TXCNT(txctrl)   ((txctrl >> 16) & 0x7)
 #define SIFIVE_UART_GET_RXCNT(rxctrl)   ((rxctrl >> 16) & 0x7)
 
@@ -67,11 +69,10 @@ struct SiFiveUARTState {
     /*< public >*/
     qemu_irq irq;
     MemoryRegion mmio;
-    CharBackend chr;
+    CharFrontend chr;
 
     uint32_t txfifo;
     uint32_t ie;
-    uint32_t ip;
     uint32_t txctrl;
     uint32_t rxctrl;
     uint32_t div;

@@ -1,7 +1,7 @@
 /*
  * QTest testcase for SDHCI controllers
  *
- * Written by Philippe Mathieu-Daudé <f4bug@amsat.org>
+ * Written by Philippe Mathieu-Daudé
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  * See the COPYING file in the top-level directory.
@@ -9,7 +9,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/registerfields.h"
+#include "hw/core/registerfields.h"
 #include "libqtest.h"
 #include "qemu/module.h"
 #include "libqos/pci-pc.h"

@@ -39,13 +39,15 @@
 #include "qemu/plugin.h"
 #include "system/cpus.h"
 #include "qemu/guest-random.h"
-#include "hw/nmi.h"
+#include "hw/core/nmi.h"
+#include "system/physmem.h"
 #include "system/replay.h"
 #include "system/runstate.h"
+#include "migration/misc.h"
 #include "system/cpu-timers.h"
 #include "system/whpx.h"
-#include "hw/boards.h"
-#include "hw/hw.h"
+#include "hw/core/boards.h"
+#include "hw/core/hw-error.h"
 #include "trace.h"
 
 #ifdef CONFIG_LINUX
@@ -254,9 +256,15 @@ int64_t cpus_get_elapsed_ticks(void)
     return cpu_get_ticks();
 }
 
+void cpu_set_interrupt(CPUState *cpu, int mask)
+{
+    /* Pairs with cpu_test_interrupt(). */
+    qatomic_or(&cpu->interrupt_request, mask);
+}
+
 void generic_handle_interrupt(CPUState *cpu, int mask)
 {
-    cpu->interrupt_request |= mask;
+    cpu_set_interrupt(cpu, mask);
 
     if (!qemu_cpu_is_self(cpu)) {
         qemu_cpu_kick(cpu);
@@ -336,7 +344,7 @@ bool cpu_can_run(CPUState *cpu)
 void cpu_handle_guest_debug(CPUState *cpu)
 {
     if (replay_running_debug()) {
-        if (!cpu->singlestep_enabled) {
+        if (!cpu_single_stepping(cpu)) {
             /*
              * Report about the breakpoint and
              * make a single step to skip it
@@ -444,7 +452,7 @@ static void qemu_cpu_stop(CPUState *cpu, bool exit)
     qemu_cond_broadcast(&qemu_pause_cond);
 }
 
-void qemu_wait_io_event_common(CPUState *cpu)
+void qemu_process_cpu_events_common(CPUState *cpu)
 {
     qatomic_set_mb(&cpu->thread_kicked, false);
     if (cpu->stop) {
@@ -453,10 +461,11 @@ void qemu_wait_io_event_common(CPUState *cpu)
     process_queued_cpu_work(cpu);
 }
 
-void qemu_wait_io_event(CPUState *cpu)
+void qemu_process_cpu_events(CPUState *cpu)
 {
     bool slept = false;
 
+    qatomic_set(&cpu->exit_request, false);
     while (cpu_thread_is_idle(cpu)) {
         if (!slept) {
             slept = true;
@@ -468,15 +477,15 @@ void qemu_wait_io_event(CPUState *cpu)
         qemu_plugin_vcpu_resume_cb(cpu);
     }
 
-    qemu_wait_io_event_common(cpu);
+    qemu_process_cpu_events_common(cpu);
 }
 
 void cpus_kick_thread(CPUState *cpu)
 {
-    if (cpu->thread_kicked) {
+    if (qatomic_read(&cpu->thread_kicked)) {
         return;
     }
-    cpu->thread_kicked = true;
+    qatomic_set(&cpu->thread_kicked, true);
 
 #ifndef _WIN32
     int err = pthread_kill(cpu->thread->thread, SIG_IPI);
@@ -516,6 +525,18 @@ bool qemu_in_vcpu_thread(void)
 }
 
 QEMU_DEFINE_STATIC_CO_TLS(bool, bql_locked)
+
+bool mutex_is_bql(QemuMutex *mutex)
+{
+    return mutex == &bql;
+}
+
+void bql_update_status(bool locked)
+{
+    /* This function should only be used when an update happened.. */
+    assert(bql_locked() != locked);
+    set_bql_locked(locked);
+}
 
 static uint32_t bql_unlock_blocked;
 
@@ -557,14 +578,12 @@ void bql_lock_impl(const char *file, int line)
 
     g_assert(!bql_locked());
     bql_lock_fn(&bql, file, line);
-    set_bql_locked(true);
 }
 
 void bql_unlock(void)
 {
     g_assert(bql_locked());
     g_assert(!bql_unlock_blocked);
-    set_bql_locked(false);
     qemu_mutex_unlock(&bql);
 }
 
@@ -598,12 +617,13 @@ void cpu_pause(CPUState *cpu)
         qemu_cpu_stop(cpu, true);
     } else {
         cpu->stop = true;
-        qemu_cpu_kick(cpu);
+        cpu_exit(cpu);
     }
 }
 
 void cpu_resume(CPUState *cpu)
 {
+    cpu->exception_index = -1;
     cpu->stop = false;
     cpu->stopped = false;
     qemu_cpu_kick(cpu);
@@ -638,6 +658,7 @@ void pause_all_vcpus(void)
 
     while (!all_vcpus_paused()) {
         qemu_cond_wait(&qemu_pause_cond, &bql);
+        /* FIXME: is this needed? */
         CPU_FOREACH(cpu) {
             qemu_cpu_kick(cpu);
         }
@@ -666,7 +687,7 @@ void cpu_remove_sync(CPUState *cpu)
 {
     cpu->stop = true;
     cpu->unplug = true;
-    qemu_cpu_kick(cpu);
+    cpu_exit(cpu);
     bql_unlock();
     qemu_thread_join(cpu->thread);
     bql_lock();
@@ -700,7 +721,6 @@ void qemu_init_vcpu(CPUState *cpu)
         /* If the target cpu hasn't set up any address spaces itself,
          * give it the default one.
          */
-        cpu->num_ases = 1;
         cpu_address_space_init(cpu, 0, "cpu-memory", cpu->memory);
     }
 
@@ -824,6 +844,11 @@ void qmp_memsave(uint64_t addr, uint64_t size, const char *filename,
     uint8_t buf[1024];
     uint64_t orig_addr = addr, orig_size = size;
 
+    if (migration_guest_ram_loading()) {
+        error_setg(errp, "Guest memory access not allowed during migration");
+        return;
+    }
+
     if (!has_cpu) {
         cpu_index = 0;
     }
@@ -870,6 +895,11 @@ void qmp_pmemsave(uint64_t addr, uint64_t size, const char *filename,
     uint64_t l;
     uint8_t buf[1024];
 
+    if (migration_guest_ram_loading()) {
+        error_setg(errp, "Guest memory access not allowed during migration");
+        return;
+    }
+
     f = fopen(filename, "wb");
     if (!f) {
         error_setg_file_open(errp, errno, filename);
@@ -880,7 +910,7 @@ void qmp_pmemsave(uint64_t addr, uint64_t size, const char *filename,
         l = sizeof(buf);
         if (l > size)
             l = size;
-        cpu_physical_memory_read(addr, buf, l);
+        physical_memory_read(addr, buf, l);
         if (fwrite(buf, 1, l, f) != l) {
             error_setg(errp, "writing memory to '%s' failed",
                        filename);

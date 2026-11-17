@@ -24,7 +24,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/isa/isa.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/acpi/tpm.h"
 #include "tpm_prop.h"
@@ -88,13 +88,12 @@ static void tpm_tis_isa_reset(DeviceState *dev)
     TPMStateISA *isadev = TPM_TIS_ISA(dev);
     TPMState *s = &isadev->state;
 
-    return tpm_tis_reset(s);
+    return tpm_tis_reset(s, true);
 }
 
 static const Property tpm_tis_isa_properties[] = {
     DEFINE_PROP_UINT32("irq", TPMStateISA, state.irq_num, TPM_TIS_IRQ),
     DEFINE_PROP_TPMBE("tpmdev", TPMStateISA, state.be_driver),
-    DEFINE_PROP_BOOL("ppi", TPMStateISA, state.ppi_enabled, true),
 };
 
 static void tpm_tis_isa_initfn(Object *obj)
@@ -132,10 +131,8 @@ static void tpm_tis_isa_realizefn(DeviceState *dev, Error **errp)
     memory_region_add_subregion(isa_address_space(ISA_DEVICE(dev)),
                                 TPM_TIS_ADDR_BASE, &s->mmio);
 
-    if (s->ppi_enabled) {
-        tpm_ppi_init(&s->ppi, isa_address_space(ISA_DEVICE(dev)),
-                     TPM_PPI_ADDR_BASE, OBJECT(dev));
-    }
+    tpm_ppi_init(&s->ppi, isa_address_space(ISA_DEVICE(dev)),
+                 TPM_PPI_ADDR_BASE, OBJECT(dev));
 }
 
 static void build_tpm_tis_isa_aml(AcpiDevAmlIf *adev, Aml *scope)
@@ -162,7 +159,7 @@ static void build_tpm_tis_isa_aml(AcpiDevAmlIf *adev, Aml *scope)
      */
     /* aml_append(crs, aml_irq_no_flags(isadev->state.irq_num)); */
     aml_append(dev, aml_name_decl("_CRS", crs));
-    tpm_build_ppi_acpi(ti, dev);
+    tpm_build_ppi_acpi(ti, dev, TPM_PPI_ADDR_BASE);
     aml_append(scope, dev);
 }
 
@@ -175,6 +172,7 @@ static void tpm_tis_isa_class_init(ObjectClass *klass, const void *data)
     device_class_set_props(dc, tpm_tis_isa_properties);
     dc->vmsd  = &vmstate_tpm_tis_isa;
     tc->model = TPM_MODEL_TPM_TIS;
+    tc->ppi_enabled = true;
     dc->realize = tpm_tis_isa_realizefn;
     device_class_set_legacy_reset(dc, tpm_tis_isa_reset);
     tc->request_completed = tpm_tis_isa_request_completed;

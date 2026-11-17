@@ -353,34 +353,50 @@ static uint32_t vof_nextprop(const void *fdt, uint32_t phandle,
 {
     int offset, nodeoff = fdt_node_offset_by_phandle(fdt, phandle);
     char prev[OF_PROPNAME_LEN_MAX + 1];
-    const char *tmp;
+    const char *tmp = NULL;
+    bool match = false;
 
     if (readstr(prevaddr, prev, sizeof(prev))) {
         return PROM_ERROR;
     }
-
-    fdt_for_each_property_offset(offset, fdt, nodeoff) {
-        if (!fdt_getprop_by_offset(fdt, offset, &tmp, NULL)) {
-            return 0;
+    /*
+     * "name" may or may not be present in fdt but we should still return it.
+     * Do that first and then skip it if seen later.
+     */
+    if (prev[0] == '\0') {
+        tmp = "name";
+    } else {
+        if (strcmp(prev, "name") == 0) {
+            prev[0] = '\0';
         }
-        if (prev[0] == '\0' || strcmp(prev, tmp) == 0) {
-            if (prev[0] != '\0') {
-                offset = fdt_next_property_offset(fdt, offset);
-                if (offset < 0) {
-                    return 0;
-                }
-            }
+        fdt_for_each_property_offset(offset, fdt, nodeoff) {
             if (!fdt_getprop_by_offset(fdt, offset, &tmp, NULL)) {
                 return 0;
             }
-
-            if (VOF_MEM_WRITE(nameaddr, tmp, strlen(tmp) + 1) != MEMTX_OK) {
-                return PROM_ERROR;
+            if (strcmp(tmp, "name") == 0) {
+                continue;
             }
-            return 1;
+            if (match) {
+                break;
+            }
+            if (strcmp(prev, tmp) == 0) {
+                match = true;
+                continue;
+            }
+            if (prev[0] == '\0') {
+                break;
+            }
+        }
+        if (offset < 0) {
+            return 0;
         }
     }
-
+    if (tmp) {
+        if (VOF_MEM_WRITE(nameaddr, tmp, strlen(tmp) + 1) != MEMTX_OK) {
+            return PROM_ERROR;
+        }
+        return 1;
+    }
     return 0;
 }
 
@@ -623,7 +639,7 @@ static gint of_claimed_compare_func(gconstpointer a, gconstpointer b)
 
 static void vof_dt_memory_available(void *fdt, GArray *claimed, uint64_t base)
 {
-    int i, n, offset, proplen = 0, sc, ac;
+    int i, offset, proplen = 0, sc, ac;
     target_ulong mem0_end;
     const uint8_t *mem0_reg;
     g_autofree uint8_t *avail = NULL;
@@ -661,7 +677,7 @@ static void vof_dt_memory_available(void *fdt, GArray *claimed, uint64_t base)
     g_assert(claimed->len && (g_array_index(claimed, OfClaimed, 0).start == 0));
 
     avail = g_malloc0(sizeof(uint32_t) * (ac + sc) * claimed->len);
-    for (i = 0, n = 0, availcur = avail; i < claimed->len; ++i) {
+    for (i = 0, availcur = avail; i < claimed->len; ++i) {
         OfClaimed c = g_array_index(claimed, OfClaimed, i);
         uint64_t start, size;
 
@@ -689,7 +705,6 @@ static void vof_dt_memory_available(void *fdt, GArray *claimed, uint64_t base)
 
         if (size) {
             trace_vof_avail(c.start + c.size, c.start + c.size + size, size);
-            ++n;
         }
     }
     _FDT((fdt_setprop(fdt, offset, "available", avail, availcur - avail)));

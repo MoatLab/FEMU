@@ -18,6 +18,9 @@
 #ifndef HEXAGON_MMVEC_H
 #define HEXAGON_MMVEC_H
 
+#include "exec/target_long.h"
+#include "qemu/bitmap.h"
+
 #define MAX_VEC_SIZE_LOGBYTES 7
 #define MAX_VEC_SIZE_BYTES  (1 << MAX_VEC_SIZE_LOGBYTES)
 

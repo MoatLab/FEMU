@@ -396,5 +396,9 @@
 #define __NR_listxattrat (__NR_Linux + 465)
 #define __NR_removexattrat (__NR_Linux + 466)
 #define __NR_open_tree_attr (__NR_Linux + 467)
+#define __NR_file_getattr (__NR_Linux + 468)
+#define __NR_file_setattr (__NR_Linux + 469)
+#define __NR_listns (__NR_Linux + 470)
+#define __NR_rseq_slice_yield (__NR_Linux + 471)
 
 #endif /* _ASM_UNISTD_N32_H */

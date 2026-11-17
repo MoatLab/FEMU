@@ -80,8 +80,7 @@ dbus_clipboard_update_info(DBusDisplay *dpy, QemuClipboardInfo *info)
     if (req->invocation && info->types[req->type].data) {
         dbus_clipboard_complete_request(dpy, req->invocation, info, req->type);
         g_clear_object(&req->invocation);
-        g_source_remove(req->timeout_id);
-        req->timeout_id = 0;
+        g_clear_handle_id(&req->timeout_id, g_source_remove);
         return;
     }
 
@@ -183,14 +182,14 @@ dbus_clipboard_request_cancelled(DBusClipboardRequest *req)
         "Cancelled clipboard request");
 
     g_clear_object(&req->invocation);
-    g_source_remove(req->timeout_id);
-    req->timeout_id = 0;
+    g_clear_handle_id(&req->timeout_id, g_source_remove);
 }
 
 static void
 dbus_clipboard_unregister_proxy(DBusDisplay *dpy)
 {
     const char *name = NULL;
+    GDBusConnection *connection = NULL;
     int i;
 
     for (i = 0; i < G_N_ELEMENTS(dpy->clipboard_request); ++i) {
@@ -200,6 +199,13 @@ dbus_clipboard_unregister_proxy(DBusDisplay *dpy)
     if (!dpy->clipboard_proxy) {
         return;
     }
+
+    connection = g_dbus_proxy_get_connection(
+        G_DBUS_PROXY(dpy->clipboard_proxy));
+    if (connection) {
+        g_signal_handlers_disconnect_by_data(connection, dpy);
+    }
+    g_signal_handlers_disconnect_by_data(dpy->clipboard_proxy, dpy);
 
     name = g_dbus_proxy_get_name(G_DBUS_PROXY(dpy->clipboard_proxy));
     trace_dbus_clipboard_unregister(name);
@@ -423,6 +429,14 @@ dbus_clipboard_request(
     }
 
     return DBUS_METHOD_INVOCATION_HANDLED;
+}
+
+void
+dbus_clipboard_fini(DBusDisplay *dpy)
+{
+    dbus_clipboard_unregister_proxy(dpy);
+    qemu_clipboard_peer_unregister(&dpy->clipboard_peer);
+    g_clear_object(&dpy->clipboard);
 }
 
 void

@@ -586,12 +586,11 @@ static void do_dup(unsigned vece, TCGv_ptr dbase, uint32_t dofs,
         }
     }
 
-    /* Implement inline with a vector type, if possible.
-     * Prefer integer when 64-bit host and no variable dup.
+    /*
+     * Implement inline with a vector type, if possible;
+     * prefer_i64 with 64-bit variable dup.
      */
-    type = choose_vector_type(NULL, vece, oprsz,
-                              (TCG_TARGET_REG_BITS == 64 && in_32 == NULL
-                               && (in_64 == NULL || vece == MO_64)));
+    type = choose_vector_type(NULL, vece, oprsz, vece == MO_64 && in_64);
     if (type != 0) {
         TCGv_vec t_vec = tcg_temp_new_vec(type);
 
@@ -607,16 +606,16 @@ static void do_dup(unsigned vece, TCGv_ptr dbase, uint32_t dofs,
     }
 
     /* Otherwise, inline with an integer type, unless "large".  */
-    if (check_size_impl(oprsz, TCG_TARGET_REG_BITS / 8)) {
+    if (check_size_impl(oprsz, sizeof(tcg_target_long))) {
         t_64 = NULL;
         t_32 = NULL;
 
         if (in_32) {
-            /* We are given a 32-bit variable input.  For a 64-bit host,
-               use a 64-bit operation unless the 32-bit operation would
-               be simple enough.  */
-            if (TCG_TARGET_REG_BITS == 64
-                && (vece != MO_32 || !check_size_impl(oprsz, 4))) {
+            /*
+             * We are given a 32-bit variable input.  Use a 64-bit operation
+             * unless the 32-bit operation would be simple enough.
+             */
+            if (vece != MO_32 || !check_size_impl(oprsz, 4)) {
                 t_64 = tcg_temp_ebb_new_i64();
                 tcg_gen_extu_i32_i64(t_64, in_32);
                 tcg_gen_dup_i64(vece, t_64, t_64);
@@ -629,14 +628,16 @@ static void do_dup(unsigned vece, TCGv_ptr dbase, uint32_t dofs,
             t_64 = tcg_temp_ebb_new_i64();
             tcg_gen_dup_i64(vece, t_64, in_64);
         } else {
-            /* We are given a constant input.  */
-            /* For 64-bit hosts, use 64-bit constants for "simple" constants
-               or when we'd need too many 32-bit stores, or when a 64-bit
-               constant is really required.  */
+            /*
+             * We are given a constant input.
+             * Use 64-bit constants for "simple" constants or when we'd
+             * need too many 32-bit stores, or when a 64-bit constant
+             * is really required.
+             */
             if (vece == MO_64
-                || (TCG_TARGET_REG_BITS == 64
-                    && (in_c == 0 || in_c == -1
-                        || !check_size_impl(oprsz, 4)))) {
+                || in_c == 0
+                || in_c == -1
+                || !check_size_impl(oprsz, 4)) {
                 t_64 = tcg_constant_i64(in_c);
             } else {
                 t_32 = tcg_constant_i32(in_c);
@@ -1754,7 +1755,7 @@ void tcg_gen_gvec_mov_var(unsigned vece, TCGv_ptr dbase, uint32_t dofs,
         .fni8 = tcg_gen_mov_i64,
         .fniv = vec_mov2,
         .fno = gen_helper_gvec_mov,
-        .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+        .prefer_i64 = true,
     };
 
     if (dofs == aofs && dbase == abase) {
@@ -1917,7 +1918,7 @@ void tcg_gen_gvec_not(unsigned vece, uint32_t dofs, uint32_t aofs,
         .fni8 = tcg_gen_not_i64,
         .fniv = tcg_gen_not_vec,
         .fno = gen_helper_gvec_not,
-        .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+        .prefer_i64 = true,
     };
     tcg_gen_gvec_2(dofs, aofs, oprsz, maxsz, &g);
 }
@@ -2030,7 +2031,7 @@ void tcg_gen_gvec_add_var(unsigned vece, TCGv_ptr dbase, uint32_t dofs,
           .fniv = tcg_gen_add_vec,
           .fno = gen_helper_gvec_add64,
           .opt_opc = vecop_list_add,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -2069,7 +2070,7 @@ void tcg_gen_gvec_adds(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_add_vec,
           .fno = gen_helper_gvec_adds64,
           .opt_opc = vecop_list_add,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -2109,7 +2110,7 @@ void tcg_gen_gvec_subs(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_sub_vec,
           .fno = gen_helper_gvec_subs64,
           .opt_opc = vecop_list_sub,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -2221,7 +2222,7 @@ void tcg_gen_gvec_sub_var(unsigned vece, TCGv_ptr dbase, uint32_t dofs,
           .fniv = tcg_gen_sub_vec,
           .fno = gen_helper_gvec_sub64,
           .opt_opc = vecop_list_sub,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -2260,7 +2261,7 @@ void tcg_gen_gvec_mul(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_mul_vec,
           .fno = gen_helper_gvec_mul64,
           .opt_opc = vecop_list_mul,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -2289,7 +2290,7 @@ void tcg_gen_gvec_muls(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_mul_vec,
           .fno = gen_helper_gvec_muls64,
           .opt_opc = vecop_list_mul,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -2396,20 +2397,6 @@ void tcg_gen_gvec_usadd(unsigned vece, uint32_t dofs, uint32_t aofs,
     };
     tcg_debug_assert(vece <= MO_64);
     tcg_gen_gvec_3(dofs, aofs, bofs, oprsz, maxsz, &g[vece]);
-}
-
-static void tcg_gen_ussub_i32(TCGv_i32 d, TCGv_i32 a, TCGv_i32 b)
-{
-    TCGv_i32 min = tcg_constant_i32(0);
-    tcg_gen_sub_i32(d, a, b);
-    tcg_gen_movcond_i32(TCG_COND_LTU, d, a, b, min, d);
-}
-
-static void tcg_gen_ussub_i64(TCGv_i64 d, TCGv_i64 a, TCGv_i64 b)
-{
-    TCGv_i64 min = tcg_constant_i64(0);
-    tcg_gen_sub_i64(d, a, b);
-    tcg_gen_movcond_i64(TCG_COND_LTU, d, a, b, min, d);
 }
 
 void tcg_gen_gvec_ussub(unsigned vece, uint32_t dofs, uint32_t aofs,
@@ -2618,7 +2605,7 @@ void tcg_gen_gvec_neg(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_neg_vec,
           .fno = gen_helper_gvec_neg64,
           .opt_opc = vecop_list,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -2682,7 +2669,7 @@ void tcg_gen_gvec_abs(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_abs_vec,
           .fno = gen_helper_gvec_abs64,
           .opt_opc = vecop_list,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -2697,7 +2684,7 @@ void tcg_gen_gvec_and(unsigned vece, uint32_t dofs, uint32_t aofs,
         .fni8 = tcg_gen_and_i64,
         .fniv = tcg_gen_and_vec,
         .fno = gen_helper_gvec_and,
-        .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+        .prefer_i64 = true,
     };
 
     if (aofs == bofs) {
@@ -2714,7 +2701,7 @@ void tcg_gen_gvec_or(unsigned vece, uint32_t dofs, uint32_t aofs,
         .fni8 = tcg_gen_or_i64,
         .fniv = tcg_gen_or_vec,
         .fno = gen_helper_gvec_or,
-        .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+        .prefer_i64 = true,
     };
 
     if (aofs == bofs) {
@@ -2731,7 +2718,7 @@ void tcg_gen_gvec_xor(unsigned vece, uint32_t dofs, uint32_t aofs,
         .fni8 = tcg_gen_xor_i64,
         .fniv = tcg_gen_xor_vec,
         .fno = gen_helper_gvec_xor,
-        .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+        .prefer_i64 = true,
     };
 
     if (aofs == bofs) {
@@ -2748,7 +2735,7 @@ void tcg_gen_gvec_andc(unsigned vece, uint32_t dofs, uint32_t aofs,
         .fni8 = tcg_gen_andc_i64,
         .fniv = tcg_gen_andc_vec,
         .fno = gen_helper_gvec_andc,
-        .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+        .prefer_i64 = true,
     };
 
     if (aofs == bofs) {
@@ -2765,7 +2752,7 @@ void tcg_gen_gvec_orc(unsigned vece, uint32_t dofs, uint32_t aofs,
         .fni8 = tcg_gen_orc_i64,
         .fniv = tcg_gen_orc_vec,
         .fno = gen_helper_gvec_orc,
-        .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+        .prefer_i64 = true,
     };
 
     if (aofs == bofs) {
@@ -2782,7 +2769,7 @@ void tcg_gen_gvec_nand(unsigned vece, uint32_t dofs, uint32_t aofs,
         .fni8 = tcg_gen_nand_i64,
         .fniv = tcg_gen_nand_vec,
         .fno = gen_helper_gvec_nand,
-        .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+        .prefer_i64 = true,
     };
 
     if (aofs == bofs) {
@@ -2799,7 +2786,7 @@ void tcg_gen_gvec_nor(unsigned vece, uint32_t dofs, uint32_t aofs,
         .fni8 = tcg_gen_nor_i64,
         .fniv = tcg_gen_nor_vec,
         .fno = gen_helper_gvec_nor,
-        .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+        .prefer_i64 = true,
     };
 
     if (aofs == bofs) {
@@ -2816,7 +2803,7 @@ void tcg_gen_gvec_eqv(unsigned vece, uint32_t dofs, uint32_t aofs,
         .fni8 = tcg_gen_eqv_i64,
         .fniv = tcg_gen_eqv_vec,
         .fno = gen_helper_gvec_eqv,
-        .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+        .prefer_i64 = true,
     };
 
     if (aofs == bofs) {
@@ -2830,7 +2817,7 @@ static const GVecGen2s gop_ands = {
     .fni8 = tcg_gen_and_i64,
     .fniv = tcg_gen_and_vec,
     .fno = gen_helper_gvec_ands,
-    .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+    .prefer_i64 = true,
     .vece = MO_64
 };
 
@@ -2857,7 +2844,7 @@ void tcg_gen_gvec_andcs(unsigned vece, uint32_t dofs, uint32_t aofs,
         .fni8 = tcg_gen_andc_i64,
         .fniv = tcg_gen_andc_vec,
         .fno = gen_helper_gvec_andcs,
-        .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+        .prefer_i64 = true,
         .vece = MO_64
     };
 
@@ -2871,7 +2858,7 @@ static const GVecGen2s gop_xors = {
     .fni8 = tcg_gen_xor_i64,
     .fniv = tcg_gen_xor_vec,
     .fno = gen_helper_gvec_xors,
-    .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+    .prefer_i64 = true,
     .vece = MO_64
 };
 
@@ -2895,7 +2882,7 @@ static const GVecGen2s gop_ors = {
     .fni8 = tcg_gen_or_i64,
     .fniv = tcg_gen_or_vec,
     .fno = gen_helper_gvec_ors,
-    .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+    .prefer_i64 = true,
     .vece = MO_64
 };
 
@@ -2967,7 +2954,7 @@ void tcg_gen_gvec_shli(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_shli_vec,
           .fno = gen_helper_gvec_shl64i,
           .opt_opc = vecop_list,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -3032,7 +3019,7 @@ void tcg_gen_gvec_shri(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_shri_vec,
           .fno = gen_helper_gvec_shr64i,
           .opt_opc = vecop_list,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -3125,7 +3112,7 @@ void tcg_gen_gvec_sari(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_sari_vec,
           .fno = gen_helper_gvec_sar64i,
           .opt_opc = vecop_list,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -3184,7 +3171,7 @@ void tcg_gen_gvec_rotli(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_rotli_vec,
           .fno = gen_helper_gvec_rotl64i,
           .opt_opc = vecop_list,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -3513,7 +3500,7 @@ void tcg_gen_gvec_shlv(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_shlv_mod_vec,
           .fno = gen_helper_gvec_shl64v,
           .opt_opc = vecop_list,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -3576,7 +3563,7 @@ void tcg_gen_gvec_shrv(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_shrv_mod_vec,
           .fno = gen_helper_gvec_shr64v,
           .opt_opc = vecop_list,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -3639,7 +3626,7 @@ void tcg_gen_gvec_sarv(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_sarv_mod_vec,
           .fno = gen_helper_gvec_sar64v,
           .opt_opc = vecop_list,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -3702,7 +3689,7 @@ void tcg_gen_gvec_rotlv(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_rotlv_mod_vec,
           .fno = gen_helper_gvec_rotl64v,
           .opt_opc = vecop_list,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -3761,7 +3748,7 @@ void tcg_gen_gvec_rotrv(unsigned vece, uint32_t dofs, uint32_t aofs,
           .fniv = tcg_gen_rotrv_mod_vec,
           .fno = gen_helper_gvec_rotr64v,
           .opt_opc = vecop_list,
-          .prefer_i64 = TCG_TARGET_REG_BITS == 64,
+          .prefer_i64 = true,
           .vece = MO_64 },
     };
 
@@ -3872,12 +3859,11 @@ void tcg_gen_gvec_cmp(TCGCond cond, unsigned vece, uint32_t dofs,
     }
 
     /*
-     * Implement inline with a vector type, if possible.
-     * Prefer integer when 64-bit host and 64-bit comparison.
+     * Implement inline with a vector type, if possible;
+     * prefer_i64 for a 64-bit comparison.
      */
     hold_list = tcg_swap_vecop_list(cmp_list);
-    type = choose_vector_type(cmp_list, vece, oprsz,
-                              TCG_TARGET_REG_BITS == 64 && vece == MO_64);
+    type = choose_vector_type(cmp_list, vece, oprsz, vece == MO_64);
     switch (type) {
     case TCG_TYPE_V256:
         /* Recall that ARM SVE allows vector sizes that are not a
@@ -3992,11 +3978,10 @@ void tcg_gen_gvec_cmps(TCGCond cond, unsigned vece, uint32_t dofs,
     }
 
     /*
-     * Implement inline with a vector type, if possible.
-     * Prefer integer when 64-bit host and 64-bit comparison.
+     * Implement inline with a vector type, if possible;
+     * prefer_i64 for a 64-bit comparison.
      */
-    type = choose_vector_type(cmp_list, vece, oprsz,
-                              TCG_TARGET_REG_BITS == 64 && vece == MO_64);
+    type = choose_vector_type(cmp_list, vece, oprsz, vece == MO_64);
     if (type != 0) {
         const TCGOpcode *hold_list = tcg_swap_vecop_list(cmp_list);
         TCGv_vec t_vec = tcg_temp_new_vec(type);

@@ -20,8 +20,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/hw.h"
-#include "hw/irq.h"
+#include "hw/core/hw-error.h"
+#include "hw/core/irq.h"
 #include "hw/arm/omap.h"
 
 struct clk {
@@ -707,14 +707,7 @@ void omap_clk_init(struct omap_mpu_state_s *mpu)
 {
     struct clk **i, *j, *k;
     int count;
-    int flag;
-
-    if (cpu_is_omap310(mpu))
-        flag = CLOCK_IN_OMAP310;
-    else if (cpu_is_omap1510(mpu))
-        flag = CLOCK_IN_OMAP1510;
-    else
-        return;
+    int flag = CLOCK_IN_OMAP310;
 
     for (i = onchip_clks, count = 0; *i; i ++)
         if ((*i)->flags & flag)

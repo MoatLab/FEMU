@@ -23,16 +23,16 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/sysbus.h"
-#include "hw/irq.h"
-#include "hw/ptimer.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/sysbus.h"
+#include "hw/core/irq.h"
+#include "hw/core/ptimer.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/bitops.h"
 #include "hw/ssi/xilinx_spips.h"
 #include "qapi/error.h"
-#include "hw/register.h"
+#include "hw/core/register.h"
 #include "system/dma.h"
 #include "migration/blocker.h"
 #include "migration/vmstate.h"
@@ -192,6 +192,10 @@
     FIELD(GQSPI_GF_SNAPSHOT, EXPONENT, 9, 1)
     FIELD(GQSPI_GF_SNAPSHOT, DATA_XFER, 8, 1)
     FIELD(GQSPI_GF_SNAPSHOT, IMMEDIATE_DATA, 0, 8)
+#define GQSPI_GF_MODE_SPI     1
+#define GQSPI_GF_MODE_DSPI    2
+#define GQSPI_GF_MODE_QSPI    3
+
 #define R_GQSPI_MOD_ID        (0x1fc / 4)
 #define R_GQSPI_MOD_ID_RESET  (0x10a0000)
 
@@ -237,7 +241,7 @@ static void xilinx_spips_update_cs(XilinxSPIPS *s, int field)
     }
     if (!(field & ((1 << (s->num_cs * s->num_busses)) - 1))) {
         s->snoop_state = SNOOP_CHECKING;
-        s->cmd_dummies = 0;
+        s->cmd_dummy_bytes = 0;
         s->link_state = 1;
         s->link_state_next = 1;
         s->link_state_next_when = 0;
@@ -369,7 +373,7 @@ static void xilinx_spips_reset(DeviceState *d)
     memset(s->regs, 0, sizeof(s->regs));
 
     fifo8_reset(&s->rx_fifo);
-    fifo8_reset(&s->rx_fifo);
+    fifo8_reset(&s->tx_fifo);
     /* non zero resets */
     s->regs[R_CONFIG] |= MODEFAIL_GEN_EN;
     s->regs[R_SLAVE_IDLE_COUNT] = 0xFF;
@@ -382,7 +386,7 @@ static void xilinx_spips_reset(DeviceState *d)
     s->link_state_next = 1;
     s->link_state_next_when = 0;
     s->snoop_state = SNOOP_CHECKING;
-    s->cmd_dummies = 0;
+    s->cmd_dummy_bytes = 0;
     s->man_start_com = false;
     xilinx_spips_update_ixr(s);
     xilinx_spips_update_cs_lines(s);
@@ -397,7 +401,7 @@ static void xlnx_zynqmp_qspips_reset(DeviceState *d)
     memset(s->regs, 0, sizeof(s->regs));
 
     fifo8_reset(&s->rx_fifo_g);
-    fifo8_reset(&s->rx_fifo_g);
+    fifo8_reset(&s->tx_fifo_g);
     fifo32_reset(&s->fifo_g);
     s->regs[R_INTR_STATUS] = R_INTR_STATUS_RESET;
     s->regs[R_GPIO] = 1;
@@ -457,6 +461,7 @@ static void xlnx_zynqmp_qspips_flush_fifo_g(XlnxZynqMPQSPIPS *s)
         int i;
 
         if (!s->regs[R_GQSPI_DATA_STS]) {
+            uint32_t prev_gf_snapshot = s->regs[R_GQSPI_GF_SNAPSHOT];
             uint8_t imm;
 
             s->regs[R_GQSPI_GF_SNAPSHOT] = fifo32_pop(&s->fifo_g);
@@ -484,7 +489,57 @@ static void xlnx_zynqmp_qspips_flush_fifo_g(XlnxZynqMPQSPIPS *s)
                 }
                 s->regs[R_GQSPI_DATA_STS] = 1ul << imm;
             } else {
-                s->regs[R_GQSPI_DATA_STS] = imm;
+                /*
+                 * When [receive, transmit, data_xfer] = [0,0,1], it represents
+                 * the number of dummy cycle sent on the SPI interface. We need
+                 * to convert the number of dummy cycles to bytes according to
+                 * the SPI mode being used.
+                 *
+                 * Ref: ug1085 v2.2 (December 2020) table 24‐22, an example of
+                 *      Generic FIFO Contents for Quad I/O Read Command (EBh)
+                 */
+                if (!ARRAY_FIELD_EX32(s->regs, GQSPI_GF_SNAPSHOT, TRANSMIT) &&
+                    !ARRAY_FIELD_EX32(s->regs, GQSPI_GF_SNAPSHOT, RECIEVE)) {
+                    uint8_t spi_mode = ARRAY_FIELD_EX32(s->regs,
+                                                        GQSPI_GF_SNAPSHOT,
+                                                        SPI_MODE);
+                    /*
+                     * Some ZynqMP GQSPI drivers, such as Linux, use the data
+                     * bus width in the dummy GENFIFO entry only to configure
+                     * the controller mode. The immediate value is already
+                     * the number of dummy cycles for the dummy phase, which
+                     * follows the address bus width. Reuse the previous TX
+                     * phase mode to convert cycles to SSI bytes.
+                     *
+                     * This does not make the model Linux-only. U-Boot emits
+                     * the dummy entry with op->dummy.buswidth, so the entry
+                     * mode already matches the dummy phase. Its opcode and
+                     * address phases are immediate entries, not DATA_XFER TX
+                     * entries, so the override below is not taken for U-Boot.
+                     */
+                    if (FIELD_EX32(prev_gf_snapshot, GQSPI_GF_SNAPSHOT,
+                                   DATA_XFER) &&
+                        FIELD_EX32(prev_gf_snapshot, GQSPI_GF_SNAPSHOT,
+                                   TRANSMIT) &&
+                        !FIELD_EX32(prev_gf_snapshot, GQSPI_GF_SNAPSHOT,
+                                    RECIEVE)) {
+                        spi_mode = FIELD_EX32(prev_gf_snapshot,
+                                              GQSPI_GF_SNAPSHOT, SPI_MODE);
+                    }
+
+                    if (spi_mode == GQSPI_GF_MODE_QSPI) {
+                        s->regs[R_GQSPI_DATA_STS] = ROUND_UP(imm * 4, 8) / 8;
+                    } else if (spi_mode == GQSPI_GF_MODE_DSPI) {
+                        s->regs[R_GQSPI_DATA_STS] = ROUND_UP(imm * 2, 8) / 8;
+                    } else if (spi_mode == GQSPI_GF_MODE_SPI) {
+                        s->regs[R_GQSPI_DATA_STS] = ROUND_UP(imm * 1, 8) / 8;
+                    } else {
+                        qemu_log_mask(LOG_GUEST_ERROR,
+                                      "Unknown SPI MODE: 0x%x ", spi_mode);
+                    }
+                } else {
+                    s->regs[R_GQSPI_DATA_STS] = imm;
+                }
             }
         }
         /* Zero length transfer check */
@@ -550,7 +605,7 @@ static void xlnx_zynqmp_qspips_flush_fifo_g(XlnxZynqMPQSPIPS *s)
     }
 }
 
-static int xilinx_spips_num_dummies(XilinxQSPIPS *qs, uint8_t command)
+static int xilinx_spips_num_dummy_bytes(XilinxQSPIPS *qs, uint8_t command)
 {
     if (!qs) {
         /* The SPI device is not a QSPI device */
@@ -567,10 +622,11 @@ static int xilinx_spips_num_dummies(XilinxQSPIPS *qs, uint8_t command)
     case QPP_4:
         return 0;
     case FAST_READ:
-    case DOR:
-    case QOR:
     case FAST_READ_4:
+        return 1;
+    case DOR:
     case DOR_4:
+    case QOR:
     case QOR_4:
         return 1;
     case DIOR:
@@ -611,7 +667,6 @@ static void xilinx_spips_flush_txfifo(XilinxSPIPS *s)
         int i;
         uint8_t tx = 0;
         uint8_t tx_rx[MAX_NUM_BUSSES] = { 0 };
-        uint8_t dummy_cycles = 0;
         uint8_t addr_length;
 
         if (fifo8_is_empty(&s->tx_fifo)) {
@@ -631,26 +686,18 @@ static void xilinx_spips_flush_txfifo(XilinxSPIPS *s)
                 tx_rx[i] = tx;
             }
         } else {
-            /*
-             * Extract a dummy byte and generate dummy cycles according to the
-             * link state
-             */
             tx = fifo8_pop(&s->tx_fifo);
-            dummy_cycles = 8 / s->link_state;
+            for (i = 0; i < num_effective_busses(s); ++i) {
+                tx_rx[i] = tx;
+            }
         }
 
         for (i = 0; i < num_effective_busses(s); ++i) {
             int bus = num_effective_busses(s) - 1 - i;
-            if (dummy_cycles) {
-                int d;
-                for (d = 0; d < dummy_cycles; ++d) {
-                    tx_rx[0] = ssi_transfer(s->spi[bus], (uint32_t)tx_rx[0]);
-                }
-            } else {
-                DB_PRINT_L(debug_level, "tx = %02x\n", tx_rx[i]);
-                tx_rx[i] = ssi_transfer(s->spi[bus], (uint32_t)tx_rx[i]);
-                DB_PRINT_L(debug_level, "rx = %02x\n", tx_rx[i]);
-            }
+
+            DB_PRINT_L(debug_level, "tx = %02x\n", tx_rx[i]);
+            tx_rx[i] = ssi_transfer(s->spi[bus], (uint32_t)tx_rx[i]);
+            DB_PRINT_L(debug_level, "rx = %02x\n", tx_rx[i]);
         }
 
         if (s->regs[R_CMND] & R_CMND_RXFIFO_DRAIN) {
@@ -685,9 +732,9 @@ static void xilinx_spips_flush_txfifo(XilinxSPIPS *s)
         switch (s->snoop_state) {
         case (SNOOP_CHECKING):
             /* Store the count of dummy bytes in the txfifo */
-            s->cmd_dummies = xilinx_spips_num_dummies(q, tx);
+            s->cmd_dummy_bytes = xilinx_spips_num_dummy_bytes(q, tx);
             addr_length = get_addr_length(s, tx);
-            if (s->cmd_dummies < 0) {
+            if (s->cmd_dummy_bytes < 0) {
                 s->snoop_state = SNOOP_NONE;
             } else {
                 s->snoop_state = SNOOP_ADDR + addr_length - 1;
@@ -697,14 +744,14 @@ static void xilinx_spips_flush_txfifo(XilinxSPIPS *s)
             case DOR:
             case DOR_4:
                 s->link_state_next = 2;
-                s->link_state_next_when = addr_length + s->cmd_dummies;
+                s->link_state_next_when = addr_length + s->cmd_dummy_bytes;
                 break;
             case QPP:
             case QPP_4:
             case QOR:
             case QOR_4:
                 s->link_state_next = 4;
-                s->link_state_next_when = addr_length + s->cmd_dummies;
+                s->link_state_next_when = addr_length + s->cmd_dummy_bytes;
                 break;
             case DIOR:
             case DIOR_4:
@@ -720,10 +767,10 @@ static void xilinx_spips_flush_txfifo(XilinxSPIPS *s)
             /*
              * Address has been transmitted, transmit dummy cycles now if needed
              */
-            if (s->cmd_dummies < 0) {
+            if (s->cmd_dummy_bytes < 0) {
                 s->snoop_state = SNOOP_NONE;
             } else {
-                s->snoop_state = s->cmd_dummies;
+                s->snoop_state = s->cmd_dummy_bytes;
             }
             break;
         case (SNOOP_STRIPING):
@@ -1152,11 +1199,13 @@ static void lqspi_load_cache(void *opaque, hwaddr addr)
     XilinxQSPIPS *q = opaque;
     XilinxSPIPS *s = opaque;
     int i;
+    int dummy_bytes;
     int flash_addr = ((addr & ~(LQSPI_CACHE_SIZE - 1))
                    / num_effective_busses(s));
     int peripheral = flash_addr >> LQSPI_ADDRESS_BITS;
     int cache_entry = 0;
     uint32_t u_page_save = s->regs[R_LQSPI_STS] & ~LQSPI_CFG_U_PAGE;
+    uint8_t command;
 
     if (addr < q->lqspi_cached_addr ||
             addr > q->lqspi_cached_addr + LQSPI_CACHE_SIZE - 4) {
@@ -1170,10 +1219,10 @@ static void lqspi_load_cache(void *opaque, hwaddr addr)
         fifo8_reset(&s->rx_fifo);
 
         /* instruction */
+        command = s->regs[R_LQSPI_CFG] & LQSPI_CFG_INST_CODE;
         DB_PRINT_L(0, "pushing read instruction: %02x\n",
-                   (unsigned)(uint8_t)(s->regs[R_LQSPI_CFG] &
-                                       LQSPI_CFG_INST_CODE));
-        fifo8_push(&s->tx_fifo, s->regs[R_LQSPI_CFG] & LQSPI_CFG_INST_CODE);
+                   (unsigned)command);
+        fifo8_push(&s->tx_fifo, command);
         /* read address */
         DB_PRINT_L(0, "pushing read address %06x\n", flash_addr);
         if (s->regs[R_LQSPI_CFG] & LQSPI_CFG_ADDR4) {
@@ -1183,14 +1232,22 @@ static void lqspi_load_cache(void *opaque, hwaddr addr)
         fifo8_push(&s->tx_fifo, (uint8_t)(flash_addr >> 8));
         fifo8_push(&s->tx_fifo, (uint8_t)flash_addr);
         /* mode bits */
+        dummy_bytes = xilinx_spips_num_dummy_bytes(q, command);
         if (s->regs[R_LQSPI_CFG] & LQSPI_CFG_MODE_EN) {
             fifo8_push(&s->tx_fifo, extract32(s->regs[R_LQSPI_CFG],
                                               LQSPI_CFG_MODE_SHIFT,
                                               LQSPI_CFG_MODE_WIDTH));
+            if (dummy_bytes > 0) {
+                dummy_bytes--;
+            }
+        }
+        if (dummy_bytes < 0) {
+            dummy_bytes = extract32(s->regs[R_LQSPI_CFG],
+                                    LQSPI_CFG_DUMMY_SHIFT,
+                                    LQSPI_CFG_DUMMY_WIDTH);
         }
         /* dummy bytes */
-        for (i = 0; i < (extract32(s->regs[R_LQSPI_CFG], LQSPI_CFG_DUMMY_SHIFT,
-                                   LQSPI_CFG_DUMMY_WIDTH)); ++i) {
+        for (i = 0; i < dummy_bytes; ++i) {
             DB_PRINT_L(0, "pushing dummy byte\n");
             fifo8_push(&s->tx_fifo, 0);
         }

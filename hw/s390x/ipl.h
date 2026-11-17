@@ -13,11 +13,11 @@
 #ifndef HW_S390_IPL_H
 #define HW_S390_IPL_H
 
-#include "cpu.h"
+#include "target/s390x/cpu.h"
 #include "exec/target_page.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 #include "hw/s390x/ipl/qipl.h"
 #include "qom/object.h"
 #include "target/s390x/kvm/pv.h"
@@ -103,15 +103,11 @@ QEMU_BUILD_BUG_MSG(offsetof(S390IPLState, iplb) & 3, "alignment of iplb wrong");
 #define DIAG308_PV_STORE            9
 #define DIAG308_PV_START            10
 
-#define S390_IPL_TYPE_FCP 0x00
-#define S390_IPL_TYPE_CCW 0x02
-#define S390_IPL_TYPE_PV 0x05
-#define S390_IPL_TYPE_QEMU_SCSI 0xff
-
 #define S390_IPLB_HEADER_LEN 8
 #define S390_IPLB_MIN_PV_LEN 148
 #define S390_IPLB_MIN_CCW_LEN 200
 #define S390_IPLB_MIN_FCP_LEN 384
+#define S390_IPLB_MIN_PCI_LEN (offsetof(IplParameterBlock, pci) + sizeof(IplBlockPci))
 #define S390_IPLB_MIN_QEMU_SCSI_LEN 200
 
 static inline bool iplb_valid_len(IplParameterBlock *iplb)
@@ -125,6 +121,12 @@ static inline bool ipl_valid_pv_components(IplParameterBlock *iplb)
     int i;
 
     if (ipib_pv->num_comp == 0) {
+        return false;
+    }
+
+    if (offsetof(IplParameterBlock, pv.components) +
+        ipib_pv->num_comp * sizeof(IPLBlockPVComp) >
+        be32_to_cpu(iplb->len)) {
         return false;
     }
 
@@ -184,6 +186,8 @@ static inline bool iplb_valid(IplParameterBlock *iplb)
         return len >= S390_IPLB_MIN_FCP_LEN;
     case S390_IPL_TYPE_CCW:
         return len >= S390_IPLB_MIN_CCW_LEN;
+    case S390_IPL_TYPE_PCI:
+        return len >= S390_IPLB_MIN_PCI_LEN;
     case S390_IPL_TYPE_QEMU_SCSI:
     default:
         return false;

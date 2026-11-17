@@ -22,7 +22,7 @@
 
 #define FS_PER_NS 1000000       /* 1000000 femtoseconds == 1 ns */
 #define HPET_MIN_TIMERS         3
-#define HPET_MAX_TIMERS         32
+#define HPET_MAX_TIMERS         24
 
 #define HPET_NUM_IRQ_ROUTES     32
 

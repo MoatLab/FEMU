@@ -7,7 +7,9 @@ bsd_user_ss = ss.source_set()
 common_user_inc += include_directories('include')
 
 bsd_user_ss.add(files(
+  'bsd-ioctl.c',
   'bsd-mem.c',
+  'bsd-misc.c',
   'bsd-proc.c',
   'bsdload.c',
   'elfload.c',
@@ -16,6 +18,7 @@ bsd_user_ss.add(files(
   'plugin-api.c',
   'signal.c',
   'strace.c',
+  'thunk.c',
   'uaccess.c',
 ))
 

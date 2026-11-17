@@ -14,14 +14,15 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "hw/ppc/ppc.h"
-#include "hw/boards.h"
-#include "hw/loader.h"
+#include "hw/core/boards.h"
+#include "hw/core/loader.h"
 #include "hw/pci-host/articia.h"
 #include "hw/isa/vt82c686.h"
 #include "hw/ide/pci.h"
 #include "hw/i2c/smbus_eeprom.h"
-#include "hw/ppc/ppc.h"
+#include "exec/cpu-common.h"
 #include "system/block-backend.h"
+#include "system/physmem.h"
 #include "system/qtest.h"
 #include "system/reset.h"
 #include "kvm_ppc.h"
@@ -221,7 +222,7 @@ struct bd_info {
 
 static void create_bd_info(hwaddr addr, ram_addr_t ram_size)
 {
-    struct bd_info *bd = g_new0(struct bd_info, 1);
+    g_autofree struct bd_info *bd = g_new0(struct bd_info, 1);
 
     bd->bi_memsize =    cpu_to_be32(ram_size);
     bd->bi_flashstart = cpu_to_be32(PROM_ADDR);
@@ -231,7 +232,7 @@ static void create_bd_info(hwaddr addr, ram_addr_t ram_size)
     bd->bi_busfreq =    cpu_to_be32(BUS_FREQ_HZ);
     bd->bi_baudrate =   cpu_to_be32(115200);
 
-    cpu_physical_memory_write(addr, bd, sizeof(*bd));
+    physical_memory_write(addr, bd, sizeof(*bd));
 }
 
 static void amigaone_cpu_reset(void *opaque)
@@ -324,11 +325,7 @@ static void amigaone_init(MachineState *machine)
             error_report("Could not find firmware '%s'", machine->firmware);
             exit(1);
         }
-        sz = load_image_targphys(filename, PROM_ADDR, PROM_SIZE);
-        if (sz <= 0 || sz > PROM_SIZE) {
-            error_report("Could not load firmware '%s'", filename);
-            exit(1);
-        }
+        sz = load_image_targphys(filename, PROM_ADDR, PROM_SIZE, &error_fatal);
     }
 
     /* Articia S */
@@ -390,7 +387,7 @@ static void amigaone_init(MachineState *machine)
         size_t len = strlen(machine->kernel_cmdline);
 
         loadaddr = bi->bd_info + 1 * MiB;
-        cpu_physical_memory_write(loadaddr, machine->kernel_cmdline, len + 1);
+        physical_memory_write(loadaddr, machine->kernel_cmdline, len + 1);
         bi->cmdline_start = loadaddr;
         bi->cmdline_end = loadaddr + len + 1; /* including terminating '\0' */
     }
@@ -413,12 +410,7 @@ static void amigaone_init(MachineState *machine)
         loadaddr = ROUND_UP(loadaddr + 4 * MiB, 4 * KiB);
         loadaddr = MAX(loadaddr, INITRD_MIN_ADDR);
         sz = load_image_targphys(machine->initrd_filename, loadaddr,
-                                 bi->bd_info - loadaddr);
-        if (sz <= 0) {
-            error_report("Could not load initrd '%s'",
-                         machine->initrd_filename);
-            exit(1);
-        }
+                                 bi->bd_info - loadaddr, &error_fatal);
         bi->initrd_start = loadaddr;
         bi->initrd_end = loadaddr + sz;
     }

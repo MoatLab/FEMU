@@ -13,7 +13,7 @@
 #define QEMU_EVENT_LOOP_BASE_H
 
 #include "qom/object.h"
-#include "block/aio.h"
+#include "qemu/aio.h"
 
 #define TYPE_EVENT_LOOP_BASE         "event-loop-base"
 OBJECT_DECLARE_TYPE(EventLoopBase, EventLoopBaseClass,
@@ -24,7 +24,7 @@ struct EventLoopBaseClass {
 
     void (*init)(EventLoopBase *base, Error **errp);
     void (*update_params)(EventLoopBase *base, Error **errp);
-    bool (*can_be_deleted)(EventLoopBase *base);
+    bool (*prepare_delete)(EventLoopBase *base, Error **errp);
 };
 
 struct EventLoopBase {

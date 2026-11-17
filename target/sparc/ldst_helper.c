@@ -707,17 +707,17 @@ uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
                                      MEMTXATTRS_UNSPECIFIED, &result);
             break;
         case 2:
-            ret = address_space_lduw(cs->as, access_addr,
-                                     MEMTXATTRS_UNSPECIFIED, &result);
+            ret = address_space_lduw_be(cs->as, access_addr,
+                                        MEMTXATTRS_UNSPECIFIED, &result);
             break;
         default:
         case 4:
-            ret = address_space_ldl(cs->as, access_addr,
-                                    MEMTXATTRS_UNSPECIFIED, &result);
+            ret = address_space_ldl_be(cs->as, access_addr,
+                                       MEMTXATTRS_UNSPECIFIED, &result);
             break;
         case 8:
-            ret = address_space_ldq(cs->as, access_addr,
-                                    MEMTXATTRS_UNSPECIFIED, &result);
+            ret = address_space_ldq_be(cs->as, access_addr,
+                                       MEMTXATTRS_UNSPECIFIED, &result);
             break;
         }
 
@@ -878,10 +878,10 @@ void helper_st_asi(CPUSPARCState *env, target_ulong addr, uint64_t val,
                 MemTxResult result;
                 hwaddr access_addr = (env->mxccregs[0] & 0xffffffffULL) + 8 * i;
 
-                env->mxccdata[i] = address_space_ldq(cs->as,
-                                                     access_addr,
-                                                     MEMTXATTRS_UNSPECIFIED,
-                                                     &result);
+                env->mxccdata[i] = address_space_ldq_be(cs->as,
+                                                        access_addr,
+                                                        MEMTXATTRS_UNSPECIFIED,
+                                                        &result);
                 if (result != MEMTX_OK) {
                     /* TODO: investigate whether this is the right behaviour */
                     sparc_raise_mmu_fault(cs, access_addr, false, false,
@@ -906,8 +906,8 @@ void helper_st_asi(CPUSPARCState *env, target_ulong addr, uint64_t val,
                 MemTxResult result;
                 hwaddr access_addr = (env->mxccregs[1] & 0xffffffffULL) + 8 * i;
 
-                address_space_stq(cs->as, access_addr, env->mxccdata[i],
-                                  MEMTXATTRS_UNSPECIFIED, &result);
+                address_space_stq_be(cs->as, access_addr, env->mxccdata[i],
+                                     MEMTXATTRS_UNSPECIFIED, &result);
 
                 if (result != MEMTX_OK) {
                     /* TODO: investigate whether this is the right behaviour */
@@ -1072,17 +1072,17 @@ void helper_st_asi(CPUSPARCState *env, target_ulong addr, uint64_t val,
                                   MEMTXATTRS_UNSPECIFIED, &result);
                 break;
             case 2:
-                address_space_stw(cs->as, access_addr, val,
-                                  MEMTXATTRS_UNSPECIFIED, &result);
+                address_space_stw_be(cs->as, access_addr, val,
+                                     MEMTXATTRS_UNSPECIFIED, &result);
                 break;
             case 4:
             default:
-                address_space_stl(cs->as, access_addr, val,
-                                  MEMTXATTRS_UNSPECIFIED, &result);
+                address_space_stl_be(cs->as, access_addr, val,
+                                     MEMTXATTRS_UNSPECIFIED, &result);
                 break;
             case 8:
-                address_space_stq(cs->as, access_addr, val,
-                                  MEMTXATTRS_UNSPECIFIED, &result);
+                address_space_stq_be(cs->as, access_addr, val,
+                                     MEMTXATTRS_UNSPECIFIED, &result);
                 break;
             }
             if (result != MEMTX_OK) {
@@ -1169,27 +1169,18 @@ uint64_t helper_ld_code(CPUSPARCState *env, target_ulong addr, uint32_t oi)
         break;
     case MO_16:
         ret = cpu_ldw_code_mmu(env, addr, oi, ra);
-        if ((mop & MO_BSWAP) != MO_TE) {
-            ret = bswap16(ret);
-        }
         if (mop & MO_SIGN) {
             ret = (int16_t)ret;
         }
         break;
     case MO_32:
         ret = cpu_ldl_code_mmu(env, addr, oi, ra);
-        if ((mop & MO_BSWAP) != MO_TE) {
-            ret = bswap32(ret);
-        }
         if (mop & MO_SIGN) {
             ret = (int32_t)ret;
         }
         break;
     case MO_64:
         ret = cpu_ldq_code_mmu(env, addr, oi, ra);
-        if ((mop & MO_BSWAP) != MO_TE) {
-            ret = bswap64(ret);
-        }
         break;
     default:
         g_assert_not_reached();
@@ -1228,13 +1219,13 @@ uint64_t helper_ld_asi(CPUSPARCState *env, target_ulong addr,
             ret = cpu_ldub_data(env, addr);
             break;
         case 2:
-            ret = cpu_lduw_data(env, addr);
+            ret = cpu_lduw_be_data(env, addr);
             break;
         case 4:
-            ret = cpu_ldl_data(env, addr);
+            ret = cpu_ldl_be_data(env, addr);
             break;
         case 8:
-            ret = cpu_ldq_data(env, addr);
+            ret = cpu_ldq_be_data(env, addr);
             break;
         default:
             g_assert_not_reached();

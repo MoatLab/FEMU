@@ -29,6 +29,7 @@
 #include "fpu/softfloat.h"
 #include "tcg/tcg.h"
 #include "hw/hppa/hppa_hardware.h"
+#include "accel/tcg/cpu-loop.h"
 #include "accel/tcg/cpu-ops.h"
 
 static void hppa_cpu_set_pc(CPUState *cs, vaddr value)
@@ -135,7 +136,7 @@ static void hppa_restore_state_to_opc(CPUState *cs,
 #ifndef CONFIG_USER_ONLY
 static bool hppa_cpu_has_work(CPUState *cs)
 {
-    return cs->interrupt_request & (CPU_INTERRUPT_HARD | CPU_INTERRUPT_NMI);
+    return cpu_test_interrupt(cs, CPU_INTERRUPT_HARD | CPU_INTERRUPT_NMI);
 }
 #endif /* !CONFIG_USER_ONLY */
 
@@ -150,7 +151,7 @@ static int hppa_cpu_mmu_index(CPUState *cs, bool ifetch)
     return env->psw & PSW_W ? MMU_ABS_W_IDX : MMU_ABS_IDX;
 }
 
-static void hppa_cpu_disas_set_info(CPUState *cs, disassemble_info *info)
+static void hppa_cpu_disas_set_info(const CPUState *cs, disassemble_info *info)
 {
     info->mach = bfd_mach_hppa20;
     info->endian = BFD_ENDIAN_BIG;
@@ -203,13 +204,6 @@ static void hppa_cpu_realizefn(DeviceState *dev, Error **errp)
     tcg_cflags_set(cs, CF_PCREL);
 }
 
-static void hppa_cpu_initfn(Object *obj)
-{
-    CPUHPPAState *env = cpu_env(CPU(obj));
-
-    env->is_pa20 = !!object_dynamic_cast(obj, TYPE_HPPA64_CPU);
-}
-
 static void hppa_cpu_reset_hold(Object *obj, ResetType type)
 {
     HPPACPUClass *scc = HPPA_CPU_GET_CLASS(obj);
@@ -236,9 +230,14 @@ static void hppa_cpu_reset_hold(Object *obj, ResetType type)
 
 static ObjectClass *hppa_cpu_class_by_name(const char *cpu_model)
 {
-    g_autofree char *typename = g_strconcat(cpu_model, "-cpu", NULL);
+    ObjectClass *oc;
+    char *typename;
 
-    return object_class_by_name(typename);
+    typename = g_strdup_printf(HPPA_CPU_TYPE_NAME("%s"), cpu_model);
+    oc = object_class_by_name(typename);
+    g_free(typename);
+
+    return oc;
 }
 
 #ifndef CONFIG_USER_ONLY
@@ -246,7 +245,7 @@ static ObjectClass *hppa_cpu_class_by_name(const char *cpu_model)
 
 static const struct SysemuCPUOps hppa_sysemu_ops = {
     .has_work = hppa_cpu_has_work,
-    .get_phys_page_debug = hppa_cpu_get_phys_page_debug,
+    .get_phys_addr_debug = hppa_cpu_get_phys_addr_debug,
 };
 #endif
 
@@ -278,6 +277,19 @@ static const TCGCPUOps hppa_tcg_ops = {
     .do_transaction_failed = hppa_cpu_do_transaction_failed,
 #endif /* !CONFIG_USER_ONLY */
 };
+
+static void hppa_cpu_class_base_init(ObjectClass *oc, const void *data)
+{
+    HPPACPUClass *acc = HPPA_CPU_CLASS(oc);
+    /* Make sure all CPU models define a HPPACPUDef */
+    g_assert(!object_class_is_abstract(oc) && data != NULL);
+    acc->def = data;
+    /*
+     * Verify assumptions made in hppa_abs_to_phys_pa2_w1() on the size
+     * of the physical address space.
+     */
+    g_assert(acc->def->phys_addr_bits <= 54);
+}
 
 static void hppa_cpu_class_init(ObjectClass *oc, const void *data)
 {
@@ -313,14 +325,34 @@ static const TypeInfo hppa_cpu_type_infos[] = {
         .parent = TYPE_CPU,
         .instance_size = sizeof(HPPACPU),
         .instance_align = __alignof(HPPACPU),
-        .instance_init = hppa_cpu_initfn,
-        .abstract = false,
+        .abstract = true,
         .class_size = sizeof(HPPACPUClass),
         .class_init = hppa_cpu_class_init,
+        .class_base_init = hppa_cpu_class_base_init,
     },
     {
-        .name = TYPE_HPPA64_CPU,
+        .name = TYPE_HPPA_CPU_PA_7300LC,
         .parent = TYPE_HPPA_CPU,
+        .class_data = &(const HPPACPUDef) {
+            .phys_addr_bits = 32,
+            .is_pa20 = false,
+        },
+    },
+    {
+        .name = TYPE_HPPA_CPU_PA_8500,
+        .parent = TYPE_HPPA_CPU,
+        .class_data = &(const HPPACPUDef) {
+            .phys_addr_bits = 40,
+            .is_pa20 = true,
+        },
+    },
+    {
+        .name = TYPE_HPPA_CPU_PA_8700,
+        .parent = TYPE_HPPA_CPU,
+        .class_data = &(const HPPACPUDef) {
+            .phys_addr_bits = 44,
+            .is_pa20 = true,
+        },
     },
 };
 

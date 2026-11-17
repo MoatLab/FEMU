@@ -25,6 +25,11 @@ config PCI_TESTDEV
     default y if TEST_DEVICES
     depends on PCI
 
+config IOMMU_TESTDEV
+    bool
+    default y if TEST_DEVICES
+    depends on PCI
+
 config EDU
     bool
     default y if TEST_DEVICES
@@ -121,6 +126,15 @@ config MIPS_ITU
     bool
     depends on TCG
 
+config RISCV_MIPS_CMGCR
+    bool
+
+config RISCV_MIPS_CPC
+    bool
+
+config RISCV_MIPS_CPS
+    bool
+
 config MPS2_FPGAIO
     bool
     select LED
@@ -212,6 +226,11 @@ config VIRT_CTRL
 
 config LASI
     bool
+    select LASI_82596
+    select LASIPS2
+    select NCR710_SCSI
+    select PARALLEL
+    select SERIAL_MM
 
 config ALLWINNER_SRAMC
     bool
@@ -233,6 +252,9 @@ config IOSB
     bool
 
 config XLNX_VERSAL_TRNG
+    bool
+
+config XLNX_ZYNQ_DDRC
     bool
 
 source macio/Kconfig

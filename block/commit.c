@@ -128,8 +128,9 @@ static void commit_clean(Job *job)
     blk_unref(s->top);
 }
 
-static int commit_iteration(CommitBlockJob *s, int64_t offset,
-                            int64_t *requested_bytes, void *buf)
+static int coroutine_fn
+commit_iteration(CommitBlockJob *s, int64_t offset,
+                 int64_t *requested_bytes, void *buf)
 {
     BlockErrorAction action;
     int64_t bytes = *requested_bytes;
@@ -518,6 +519,7 @@ int bdrv_commit(BlockDriverState *bs)
     if (!drv)
         return -ENOMEDIUM;
 
+    bdrv_drain_all_begin();
     bdrv_graph_rdlock_main_loop();
 
     backing_file_bs = bdrv_cow_bs(bs);
@@ -549,6 +551,10 @@ int bdrv_commit(BlockDriverState *bs)
                   BLK_PERM_ALL);
     backing = blk_new(ctx, BLK_PERM_WRITE | BLK_PERM_RESIZE, BLK_PERM_ALL);
 
+    /* We drained all nodes, but still make requests through BlockBackends */
+    blk_set_disable_request_queuing(src, true);
+    blk_set_disable_request_queuing(backing, true);
+
     ret = blk_insert_bs(src, bs, &local_err);
     if (ret < 0) {
         error_report_err(local_err);
@@ -565,7 +571,7 @@ int bdrv_commit(BlockDriverState *bs)
 
     bdrv_graph_rdunlock_main_loop();
 
-    bdrv_graph_wrlock_drained();
+    bdrv_graph_wrlock();
     bdrv_set_backing_hd(commit_top_bs, backing_file_bs, &error_abort);
     bdrv_set_backing_hd(bs, commit_top_bs, &error_abort);
     bdrv_graph_wrunlock();
@@ -647,7 +653,7 @@ ro_cleanup:
     blk_unref(backing);
 
     bdrv_graph_rdunlock_main_loop();
-    bdrv_graph_wrlock_drained();
+    bdrv_graph_wrlock();
     if (bdrv_cow_bs(bs) != backing_file_bs) {
         bdrv_set_backing_hd(bs, backing_file_bs, &error_abort);
     }
@@ -663,6 +669,7 @@ ro_cleanup:
 
 out:
     bdrv_graph_rdunlock_main_loop();
+    bdrv_drain_all_end();
 
     return ret;
 }

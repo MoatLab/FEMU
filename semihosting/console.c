@@ -18,6 +18,7 @@
 #include "qemu/osdep.h"
 #include "semihosting/semihost.h"
 #include "semihosting/console.h"
+#include "accel/tcg/cpu-loop.h"
 #include "exec/cpu-common.h"
 #include "exec/gdbstub.h"
 #include "qemu/log.h"
@@ -30,7 +31,7 @@
 
 /* Access to this structure is protected by the BQL */
 typedef struct SemihostingConsole {
-    CharBackend         backend;
+    CharFrontend        frontend;
     Chardev             *chr;
     GSList              *sleeping_cpus;
     bool                got;
@@ -122,8 +123,8 @@ void qemu_semihosting_console_init(Chardev *chr)
     console.chr = chr;
     if  (chr) {
         fifo8_create(&console.fifo, FIFO_SIZE);
-        qemu_chr_fe_init(&console.backend, chr, &error_abort);
-        qemu_chr_fe_set_handlers(&console.backend,
+        qemu_chr_fe_init(&console.frontend, chr, &error_abort);
+        qemu_chr_fe_set_handlers(&console.frontend,
                                  console_can_read,
                                  console_read,
                                  NULL, NULL, &console,

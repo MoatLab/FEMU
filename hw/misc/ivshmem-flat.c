@@ -13,9 +13,9 @@
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties-system.h"
-#include "hw/sysbus.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties-system.h"
+#include "hw/core/sysbus.h"
 #include "chardev/char-fe.h"
 #include "system/address-spaces.h"
 #include "trace.h"
@@ -138,6 +138,8 @@ static void ivshmem_flat_remove_peer(IvshmemFTState *s, uint16_t peer_id)
 static void ivshmem_flat_add_vector(IvshmemFTState *s, IvshmemPeer *peer,
                                     int vector_fd)
 {
+    Error *err = NULL;
+
     if (peer->vector_counter >= IVSHMEM_MAX_VECTOR_NUM) {
         trace_ivshmem_flat_add_vector_failure(peer->vector_counter,
                                               vector_fd, peer->id);
@@ -154,7 +156,10 @@ static void ivshmem_flat_add_vector(IvshmemFTState *s, IvshmemPeer *peer,
      * peer.
      */
     peer->vector[peer->vector_counter].id = peer->vector_counter;
-    g_unix_set_fd_nonblocking(vector_fd, true, NULL);
+    if (!qemu_set_blocking(vector_fd, false, &err)) {
+        /* FIXME handle the error */
+        warn_report_err(err);
+    }
     event_notifier_init_fd(&peer->vector[peer->vector_counter].event_notifier,
                            vector_fd);
 

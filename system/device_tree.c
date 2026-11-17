@@ -24,8 +24,8 @@
 #include "qemu/cutils.h"
 #include "qemu/guest-random.h"
 #include "system/device_tree.h"
-#include "hw/loader.h"
-#include "hw/boards.h"
+#include "hw/core/loader.h"
+#include "hw/core/boards.h"
 #include "qemu/config-file.h"
 #include "qapi/qapi-commands-machine.h"
 #include "qobject/qdict.h"
@@ -83,7 +83,7 @@ void *load_device_tree(const char *filename_path, int *sizep)
     void *fdt = NULL;
 
     *sizep = 0;
-    dt_size = get_image_size(filename_path);
+    dt_size = get_image_size(filename_path, NULL);
     if (dt_size < 0) {
         error_report("Unable to get size of device tree file '%s'",
                      filename_path);

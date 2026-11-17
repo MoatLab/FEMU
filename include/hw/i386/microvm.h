@@ -21,7 +21,7 @@
 #include "exec/hwaddr.h"
 #include "qemu/notify.h"
 
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/i386/x86.h"
 #include "hw/acpi/acpi_dev_interface.h"
 #include "hw/pci-host/gpex.h"
@@ -79,7 +79,7 @@ struct MicrovmMachineClass {
     HotplugHandler *(*orig_hotplug_handler)(MachineState *machine,
                                            DeviceState *dev);
     void (*x86_load_linux)(X86MachineState *x86ms, FWCfgState *fw_cfg,
-                        int acpi_data_size, bool pvh_enabled);
+                           int acpi_data_size);
 };
 
 struct MicrovmMachineState {
@@ -102,8 +102,6 @@ struct MicrovmMachineState {
     Notifier powerdown_req;
     struct GPEXConfig gpex;
 
-    /* device tree */
-    void *fdt;
     uint32_t ioapic_phandle[2];
 };
 

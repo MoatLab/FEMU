@@ -32,10 +32,12 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/irq.h"
+#include "system/physmem.h"
+#include "hw/core/irq.h"
 #include "hw/net/mii.h"
-#include "hw/qdev-properties.h"
-#include "hw/sysbus.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/sysbus.h"
+#include "exec/cpu-common.h"
 #include "net/net.h"
 #include "qemu/module.h"
 #include "net/eth.h"
@@ -430,7 +432,7 @@ static ssize_t open_eth_receive(NetClientState *nc,
         }
 #endif
 
-        cpu_physical_memory_write(desc->buf_ptr, buf, copy_size);
+        physical_memory_write(desc->buf_ptr, buf, copy_size);
 
         if (GET_REGBIT(s, MODER, PAD) && copy_size < minfl) {
             if (minfl - copy_size > fcsl) {
@@ -442,7 +444,7 @@ static ssize_t open_eth_receive(NetClientState *nc,
                 size_t zero_sz = minfl - copy_size < sizeof(zero) ?
                     minfl - copy_size : sizeof(zero);
 
-                cpu_physical_memory_write(desc->buf_ptr + copy_size,
+                physical_memory_write(desc->buf_ptr + copy_size,
                         zero, zero_sz);
                 copy_size += zero_sz;
             }
@@ -452,7 +454,7 @@ static ssize_t open_eth_receive(NetClientState *nc,
          * Don't do it if the frame is cut at the MAXFL or padded with 4 or
          * more bytes to the MINFL.
          */
-        cpu_physical_memory_write(desc->buf_ptr + copy_size, zero, fcsl);
+        physical_memory_write(desc->buf_ptr + copy_size, zero, fcsl);
         copy_size += fcsl;
 
         SET_FIELD(desc->len_flags, RXD_LEN, copy_size);
@@ -508,7 +510,7 @@ static void open_eth_start_xmit(OpenEthState *s, desc *tx)
     if (len > tx_len) {
         len = tx_len;
     }
-    cpu_physical_memory_read(tx->buf_ptr, buf, len);
+    physical_memory_read(tx->buf_ptr, buf, len);
     if (tx_len > len) {
         memset(buf + len, 0, tx_len - len);
     }
@@ -682,6 +684,15 @@ static void open_eth_reg_write(void *opaque,
     }
 }
 
+static const MemoryRegionOps open_eth_reg_ops = {
+    .read = open_eth_reg_read,
+    .write = open_eth_reg_write,
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+};
+
 static uint64_t open_eth_desc_read(void *opaque,
         hwaddr addr, unsigned int size)
 {
@@ -704,12 +715,6 @@ static void open_eth_desc_write(void *opaque,
     memcpy((uint8_t *)s->desc + addr, &val, size);
     open_eth_check_start_xmit(s);
 }
-
-
-static const MemoryRegionOps open_eth_reg_ops = {
-    .read = open_eth_reg_read,
-    .write = open_eth_reg_write,
-};
 
 static const MemoryRegionOps open_eth_desc_ops = {
     .read = open_eth_desc_read,

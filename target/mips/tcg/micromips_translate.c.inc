@@ -693,34 +693,40 @@ static void gen_ldst_multiple(DisasContext *ctx, uint32_t opc, int reglist,
                               int base, int16_t offset)
 {
     TCGv t0, t1;
-    TCGv_i32 t2;
+    MemOp mop = ctx->default_tcg_memop_mask;
+    MemOpIdx oi;
 
     if (ctx->hflags & MIPS_HFLAG_BMASK) {
         gen_reserved_instruction(ctx);
         return;
     }
 
+    mop |= mo_endian(ctx);
+
     t0 = tcg_temp_new();
 
     gen_base_offset_addr(ctx, t0, base, offset);
 
     t1 = tcg_constant_tl(reglist);
-    t2 = tcg_constant_i32(ctx->mem_idx);
 
     save_cpu_state(ctx, 1);
     switch (opc) {
     case LWM32:
-        gen_helper_lwm(tcg_env, t0, t1, t2);
+        oi = make_memop_idx(mop | MO_UL, ctx->mem_idx);
+        gen_helper_lwm(tcg_env, t0, t1, tcg_constant_i32(oi));
         break;
     case SWM32:
-        gen_helper_swm(tcg_env, t0, t1, t2);
+        oi = make_memop_idx(mop | MO_UL, ctx->mem_idx);
+        gen_helper_swm(tcg_env, t0, t1, tcg_constant_i32(oi));
         break;
 #ifdef TARGET_MIPS64
     case LDM:
-        gen_helper_ldm(tcg_env, t0, t1, t2);
+        oi = make_memop_idx(mop | MO_UQ, ctx->mem_idx);
+        gen_helper_ldm(tcg_env, t0, t1, tcg_constant_i32(oi));
         break;
     case SDM:
-        gen_helper_sdm(tcg_env, t0, t1, t2);
+        oi = make_memop_idx(mop | MO_UQ, ctx->mem_idx);
+        gen_helper_sdm(tcg_env, t0, t1, tcg_constant_i32(oi));
         break;
 #endif
     }
@@ -1623,7 +1629,7 @@ static void decode_micromips32_opc(CPUMIPSState *env, DisasContext *ctx)
     uint32_t op, minor, minor2, mips32_op;
     uint32_t cond, fmt, cc;
 
-    insn = translator_lduw(env, &ctx->base, ctx->base.pc_next + 2);
+    insn = translator_lduw_end(env, &ctx->base, ctx->base.pc_next + 2, mo_endian(ctx));
     ctx->opcode = (ctx->opcode << 16) | insn;
 
     rt = (ctx->opcode >> 21) & 0x1f;

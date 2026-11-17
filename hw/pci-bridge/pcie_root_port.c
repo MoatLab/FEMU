@@ -16,7 +16,7 @@
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "hw/pci/pcie_port.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 
 static void rp_aer_vector_update(PCIDevice *d)
 {
@@ -117,7 +117,7 @@ static void rp_realize(PCIDevice *d, Error **errp)
     pcie_aer_root_init(d);
     rp_aer_vector_update(d);
 
-    if (rpc->acs_offset && !s->disable_acs) {
+    if (rpc->acs_offset) {
         pcie_acs_init(d, rpc->acs_offset);
     }
     return;
@@ -151,7 +151,6 @@ static void rp_exit(PCIDevice *d)
 static const Property rp_props[] = {
     DEFINE_PROP_BIT(COMPAT_PROP_PCP, PCIDevice, cap_present,
                     QEMU_PCIE_SLTCAP_PCP_BITNR, true),
-    DEFINE_PROP_BOOL("disable-acs", PCIESlot, disable_acs, false),
 };
 
 static void rp_instance_post_init(Object *obj)

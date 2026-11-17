@@ -12,7 +12,7 @@
 #ifndef CMSDK_APB_UART_H
 #define CMSDK_APB_UART_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "chardev/char-fe.h"
 #include "qom/object.h"
 
@@ -25,7 +25,7 @@ struct CMSDKAPBUART {
 
     /*< public >*/
     MemoryRegion iomem;
-    CharBackend chr;
+    CharFrontend chr;
     qemu_irq txint;
     qemu_irq rxint;
     qemu_irq txovrint;

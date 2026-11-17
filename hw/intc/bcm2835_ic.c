@@ -14,7 +14,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/intc/bcm2835_ic.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -139,10 +139,19 @@ static void bcm2835_ic_write(void *opaque, hwaddr offset, uint64_t val,
     BCM2835ICState *s = opaque;
 
     switch (offset) {
-    case FIQ_CONTROL:
-        s->fiq_select = extract32(val, 0, 7);
+    case FIQ_CONTROL: {
+        unsigned fiq_select = extract32(val, 0, 7);
+
+        if (fiq_select >= GPU_IRQS + ARM_IRQS) {
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "%s: FIQ select %u out of range\n",
+                          __func__, fiq_select);
+            return;
+        }
+        s->fiq_select = fiq_select;
         s->fiq_enable = extract32(val, 7, 1);
         break;
+    }
     case IRQ_ENABLE_1:
         s->gpu_irq_enable |= val;
         break;

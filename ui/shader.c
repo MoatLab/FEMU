@@ -25,6 +25,7 @@
  * THE SOFTWARE.
  */
 #include "qemu/osdep.h"
+#include <epoxy/gl.h>
 #include "ui/shader.h"
 
 #include "ui/shader/texture-blit-vert.h"

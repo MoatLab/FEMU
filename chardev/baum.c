@@ -1,7 +1,7 @@
 /*
  * QEMU Baum Braille Device
  *
- * Copyright (c) 2008, 2010-2011, 2016-2017 Samuel Thibault
+ * Copyright (c) 2008, 2010-2011, 2016-2017, 2026 Samuel Thibault
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -28,7 +28,7 @@
 #include "qemu/main-loop.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
-#include "hw/usb.h"
+#include "hw/usb/usb.h"
 #include "ui/console.h"
 #include <brlapi.h>
 #include <brlapi_constants.h>
@@ -94,7 +94,7 @@ struct BaumChardev {
     Chardev parent;
 
     brlapi_handle_t *brlapi;
-    int brlapi_fd;
+    brlapi_fileDescriptor brlapi_fd;
     unsigned int x, y;
     bool deferred_init;
 
@@ -561,8 +561,37 @@ static void baum_chr_read(void *opaque)
         case BRLAPI_KEY_TYPE_CMD:
             switch (code & BRLAPI_KEY_CMD_BLK_MASK) {
             case BRLAPI_KEY_CMD_ROUTE:
-                baum_send_key(baum, BAUM_RSP_RoutingKey, (code & BRLAPI_KEY_CMD_ARG_MASK)+1);
+                baum_send_key(baum, BAUM_RSP_RoutingKey,
+                              (code & BRLAPI_KEY_CMD_ARG_MASK) + 1);
                 baum_send_key(baum, BAUM_RSP_RoutingKey, 0);
+                break;
+            case BRLAPI_KEY_CMD_CLIP_NEW:
+                baum_send_key(baum, BAUM_RSP_TopKeys, BAUM_TL1);
+                baum_send_key(baum, BAUM_RSP_RoutingKey,
+                              (code & BRLAPI_KEY_CMD_ARG_MASK) + 1);
+                baum_send_key(baum, BAUM_RSP_RoutingKey, 0);
+                baum_send_key(baum, BAUM_RSP_TopKeys, 0);
+                break;
+            case BRLAPI_KEY_CMD_CLIP_ADD:
+                baum_send_key(baum, BAUM_RSP_TopKeys, BAUM_TL2);
+                baum_send_key(baum, BAUM_RSP_RoutingKey,
+                              (code & BRLAPI_KEY_CMD_ARG_MASK) + 1);
+                baum_send_key(baum, BAUM_RSP_RoutingKey, 0);
+                baum_send_key(baum, BAUM_RSP_TopKeys, 0);
+                break;
+            case BRLAPI_KEY_CMD_COPY_LINE:
+                baum_send_key(baum, BAUM_RSP_TopKeys, BAUM_TR1);
+                baum_send_key(baum, BAUM_RSP_RoutingKey,
+                              (code & BRLAPI_KEY_CMD_ARG_MASK) + 1);
+                baum_send_key(baum, BAUM_RSP_RoutingKey, 0);
+                baum_send_key(baum, BAUM_RSP_TopKeys, 0);
+                break;
+            case BRLAPI_KEY_CMD_COPY_RECT:
+                baum_send_key(baum, BAUM_RSP_TopKeys, BAUM_TR2);
+                baum_send_key(baum, BAUM_RSP_RoutingKey,
+                              (code & BRLAPI_KEY_CMD_ARG_MASK) + 1);
+                baum_send_key(baum, BAUM_RSP_RoutingKey, 0);
+                baum_send_key(baum, BAUM_RSP_TopKeys, 0);
                 break;
             case 0:
                 switch (code & BRLAPI_KEY_CMD_ARG_MASK) {
@@ -606,6 +635,11 @@ static void baum_chr_read(void *opaque)
                     baum_send_key(baum, BAUM_RSP_TopKeys, BAUM_TL1|BAUM_TL3|BAUM_TR1);
                     baum_send_key(baum, BAUM_RSP_TopKeys, 0);
                     break;
+                case BRLAPI_KEY_CMD_PASTE:
+                    baum_send_key(baum, BAUM_RSP_TopKeys,
+                                  BAUM_TL1 | BAUM_TL2 | BAUM_TL3 | BAUM_TR1);
+                    baum_send_key(baum, BAUM_RSP_TopKeys, 0);
+                    break;
                 }
             }
             break;
@@ -642,10 +676,7 @@ static void char_braille_finalize(Object *obj)
     }
 }
 
-static void baum_chr_open(Chardev *chr,
-                          ChardevBackend *backend,
-                          bool *be_opened,
-                          Error **errp)
+static bool baum_chr_open(Chardev *chr, ChardevBackend *backend, Error **errp)
 {
     BaumChardev *baum = BAUM_CHARDEV(chr);
     brlapi_handle_t *handle;
@@ -654,25 +685,32 @@ static void baum_chr_open(Chardev *chr,
     baum->brlapi = handle;
 
     baum->brlapi_fd = brlapi__openConnection(handle, NULL, NULL);
-    if (baum->brlapi_fd == -1) {
+    if (baum->brlapi_fd == BRLAPI_INVALID_FILE_DESCRIPTOR) {
         error_setg(errp, "brlapi__openConnection: %s",
                    brlapi_strerror(brlapi_error_location()));
         g_free(handle);
         baum->brlapi = NULL;
-        return;
+        return false;
     }
     baum->deferred_init = 0;
 
     baum->cellCount_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, baum_cellCount_timer_cb, baum);
 
+    /*
+     * On Windows, brlapi_fd is a pointer, which is being used here
+     * as an integer, but in practice it seems to work
+     */
     qemu_set_fd_handler(baum->brlapi_fd, baum_chr_read, NULL, baum);
+
+    qemu_chr_be_event(chr, CHR_EVENT_OPENED);
+    return true;
 }
 
 static void char_braille_class_init(ObjectClass *oc, const void *data)
 {
     ChardevClass *cc = CHARDEV_CLASS(oc);
 
-    cc->open = baum_chr_open;
+    cc->chr_open = baum_chr_open;
     cc->chr_write = baum_chr_write;
     cc->chr_accept_input = baum_chr_accept_input;
 }

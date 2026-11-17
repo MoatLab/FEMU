@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+ SPDX-License-Identifier: GPL-2.0-or-later
+ -->
+<node>
+  <!--
+      org.qemu.Vnc1.Server:
+
+      This interface is implemented on ``/org/qemu/Vnc1/Server``.
+      It provides management and monitoring of the VNC server.
+  -->
+  <interface name="org.qemu.Vnc1.Server">
+    <!--
+        Name:
+
+        The VM name.
+    -->
+    <property name="Name" type="s" access="read"/>
+
+    <!--
+        Auth:
+
+        Primary authentication method (none, vnc, vencrypt, sasl, etc.).
+    -->
+    <property name="Auth" type="s" access="read"/>
+
+    <!--
+        VencryptSubAuth:
+
+        VEncrypt sub-authentication method, if applicable.
+        Empty string otherwise.
+    -->
+    <property name="VencryptSubAuth" type="s" access="read"/>
+
+    <!--
+        Clients:
+
+        Object paths of connected VNC clients.
+    -->
+    <property name="Clients" type="ao" access="read"/>
+
+    <!--
+        Listeners:
+
+        List of listening sockets. Each entry is a dictionary with keys:
+        ``Host`` (s), ``Service`` (s), ``Family`` (s),
+        ``WebSocket`` (b), ``Auth`` (s), ``VencryptSubAuth`` (s).
+    -->
+    <property name="Listeners" type="aa{sv}" access="read"/>
+
+    <!--
+        SetPassword:
+        @password: The new VNC password.
+
+        Change the VNC password.  Existing clients are unaffected.
+    -->
+    <method name="SetPassword">
+      <arg type="s" name="password" direction="in"/>
+    </method>
+
+    <!--
+        ExpirePassword:
+        @time: Expiry specification.
+
+        Set password expiry.  Values: ``"now"``, ``"never"``,
+        ``"+N"`` (seconds from now), ``"N"`` (absolute epoch seconds).
+    -->
+    <method name="ExpirePassword">
+      <arg type="s" name="time" direction="in"/>
+    </method>
+
+    <!--
+        ReloadCertificates:
+
+        Reload TLS certificates from disk.
+    -->
+    <method name="ReloadCertificates"/>
+
+    <!--
+        AddClient:
+        @socket: file descriptor of a connected socket.
+        @skipauth: whether to skip VNC authentication.
+
+        Add a VNC client from an already-connected socket.
+    -->
+    <method name="AddClient">
+      <arg type="h" name="socket" direction="in"/>
+      <arg type="b" name="skipauth" direction="in"/>
+    </method>
+
+    <!--
+        ClientConnected:
+        @client: Object path of the new client.
+
+        Emitted when a VNC client TCP connection is established
+        (before authentication).
+    -->
+    <signal name="ClientConnected">
+      <arg type="o" name="client"/>
+    </signal>
+
+    <!--
+        ClientInitialized:
+        @client: Object path of the client.
+
+        Emitted when a VNC client has completed authentication
+        and is active.
+    -->
+    <signal name="ClientInitialized">
+      <arg type="o" name="client"/>
+    </signal>
+
+    <!--
+        ClientDisconnected:
+        @client: Object path of the client.
+
+        Emitted when a VNC client disconnects.
+    -->
+    <signal name="ClientDisconnected">
+      <arg type="o" name="client"/>
+    </signal>
+
+    <!--
+        Leaving:
+        @reason: A human-readable reason for shutting down (e.g.
+                 "D-Bus peer org.qemu vanished").
+
+        Emitted when the VNC server is shutting down cleanly.
+        Clients should expect the connection to close shortly after.
+    -->
+    <signal name="Leaving">
+      <arg type="s" name="reason"/>
+    </signal>
+  </interface>
+
+  <!--
+      org.qemu.Vnc1.Client:
+
+      This interface is implemented on ``/org/qemu/Vnc1/Client_$id``.
+      It exposes information about a connected VNC client.
+  -->
+  <interface name="org.qemu.Vnc1.Client">
+    <!--
+        Host:
+
+        Client IP address.
+    -->
+    <property name="Host" type="s" access="read"/>
+
+    <!--
+        Service:
+
+        Client port or service name. This may depend on the host system’s
+        service database so symbolic names should not be relied on.
+    -->
+    <property name="Service" type="s" access="read"/>
+
+    <!--
+        Family:
+
+        Address family (ipv4, ipv6, unix).
+    -->
+    <property name="Family" type="s" access="read"/>
+
+    <!--
+        WebSocket:
+
+        Whether this is a WebSocket connection.
+    -->
+    <property name="WebSocket" type="b" access="read"/>
+
+    <!--
+        X509Dname:
+
+        X.509 distinguished name (empty if not applicable).
+    -->
+    <property name="X509Dname" type="s" access="read"/>
+
+    <!--
+        SaslUsername:
+
+        SASL username (empty if not applicable).
+    -->
+    <property name="SaslUsername" type="s" access="read"/>
+
+    <!--
+        ShutdownRequest:
+
+        Emitted when the VNC client requests a guest shutdown.
+    -->
+    <signal name="ShutdownRequest"/>
+
+    <!--
+        ResetRequest:
+
+        Emitted when the VNC client requests a guest reset.
+    -->
+    <signal name="ResetRequest"/>
+  </interface>
+
+</node>

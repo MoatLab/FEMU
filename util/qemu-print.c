@@ -16,7 +16,7 @@
 
 /*
  * Print like vprintf().
- * Print to current monitor if we have one, else to stdout.
+ * Print to current HMP monitor if we have one, else to stdout.
  */
 int qemu_vprintf(const char *fmt, va_list ap)
 {
@@ -29,7 +29,7 @@ int qemu_vprintf(const char *fmt, va_list ap)
 
 /*
  * Print like printf().
- * Print to current monitor if we have one, else to stdout.
+ * Print to current HMP monitor if we have one, else to stdout.
  */
 int qemu_printf(const char *fmt, ...)
 {
@@ -44,7 +44,10 @@ int qemu_printf(const char *fmt, ...)
 
 /*
  * Print like vfprintf()
- * Print to @stream if non-null, else to current monitor.
+ * Print to @stream if non-null, else to current HMP monitor if we
+ * have one, else fail without printing anything.
+ * Return number of characters printed on success, negative value on
+ * error.
  */
 int qemu_vfprintf(FILE *stream, const char *fmt, va_list ap)
 {
@@ -56,7 +59,10 @@ int qemu_vfprintf(FILE *stream, const char *fmt, va_list ap)
 
 /*
  * Print like fprintf().
- * Print to @stream if non-null, else to current monitor.
+ * Print to @stream if non-null, else to current HMP monitor if we
+ * have one, else fail without printing anything.
+ * Return number of characters printed on success, negative value on
+ * error.
  */
 int qemu_fprintf(FILE *stream, const char *fmt, ...)
 {

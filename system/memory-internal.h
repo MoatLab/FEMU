@@ -14,18 +14,20 @@
 #ifndef MEMORY_INTERNAL_H
 #define MEMORY_INTERNAL_H
 
-#ifndef CONFIG_USER_ONLY
+void machine_memory_init(void);
+
 static inline AddressSpaceDispatch *flatview_to_dispatch(FlatView *fv)
 {
     return fv->dispatch;
 }
 
-static inline AddressSpaceDispatch *address_space_to_dispatch(AddressSpace *as)
+static inline
+AddressSpaceDispatch *address_space_to_dispatch(const AddressSpace *as)
 {
     return flatview_to_dispatch(address_space_to_flatview(as));
 }
 
-FlatView *address_space_get_flatview(AddressSpace *as);
+FlatView *address_space_get_flatview(const AddressSpace *as);
 void flatview_unref(FlatView *view);
 
 extern const MemoryRegionOps unassigned_mem_ops;
@@ -41,9 +43,11 @@ void mtree_print_dispatch(struct AddressSpaceDispatch *d,
 /* returns true if end is big endian. */
 static inline bool devend_big_endian(enum device_endian end)
 {
+#ifndef TARGET_NOT_USING_LEGACY_NATIVE_ENDIAN_API
     if (end == DEVICE_NATIVE_ENDIAN) {
         return target_big_endian();
     }
+#endif
     return end == DEVICE_BIG_ENDIAN;
 }
 
@@ -53,5 +57,4 @@ static inline MemOp devend_memop(enum device_endian end)
     return devend_big_endian(end) ? MO_BE : MO_LE;
 }
 
-#endif
 #endif

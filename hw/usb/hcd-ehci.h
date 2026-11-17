@@ -19,20 +19,10 @@
 #define HW_USB_HCD_EHCI_H
 
 #include "qemu/timer.h"
-#include "hw/usb.h"
+#include "hw/usb/usb.h"
 #include "system/dma.h"
 #include "hw/pci/pci_device.h"
-#include "hw/sysbus.h"
-
-#ifndef EHCI_DEBUG
-#define EHCI_DEBUG   0
-#endif
-
-#if EHCI_DEBUG
-#define DPRINTF printf
-#else
-#define DPRINTF(...)
-#endif
+#include "hw/core/sysbus.h"
 
 #define MMIO_SIZE        0x1000
 #define CAPA_SIZE        0x10
@@ -43,7 +33,8 @@ typedef struct EHCIPacket EHCIPacket;
 typedef struct EHCIQueue EHCIQueue;
 typedef struct EHCIState EHCIState;
 
-/*  EHCI spec version 1.0 Section 3.3
+/*
+ * EHCI spec version 1.0 Section 3.3
  */
 typedef struct EHCIitd {
     uint32_t next;
@@ -74,7 +65,8 @@ typedef struct EHCIitd {
 #define ITD_BUFPTR_MULT_SH       0
 } EHCIitd;
 
-/*  EHCI spec version 1.0 Section 3.4
+/*
+ * EHCI spec version 1.0 Section 3.4
  */
 typedef struct EHCIsitd {
     uint32_t next;                  /* Standard next link pointer */
@@ -118,7 +110,8 @@ typedef struct EHCIsitd {
     uint32_t backptr;                 /* Standard next link pointer */
 } EHCIsitd;
 
-/*  EHCI spec version 1.0 Section 3.5
+/*
+ * EHCI spec version 1.0 Section 3.5
  */
 typedef struct EHCIqtd {
     uint32_t next;                    /* Standard next link pointer */
@@ -148,7 +141,8 @@ typedef struct EHCIqtd {
 #define QTD_BUFPTR_SH                 12
 } EHCIqtd;
 
-/*  EHCI spec version 1.0 Section 3.6
+/*
+ * EHCI spec version 1.0 Section 3.6
  */
 typedef struct EHCIqh {
     uint32_t next;                    /* Standard next link pointer */
@@ -202,13 +196,6 @@ typedef struct EHCIqh {
 #define BUFPTR_SBYTES_SH              5
 } EHCIqh;
 
-/*  EHCI spec version 1.0 Section 3.7
- */
-typedef struct EHCIfstn {
-    uint32_t next;                    /* Standard next link pointer */
-    uint32_t backptr;                 /* Standard next link pointer */
-} EHCIfstn;
-
 enum async_state {
     EHCI_ASYNC_NONE = 0,
     EHCI_ASYNC_INITIALIZED,
@@ -237,7 +224,8 @@ struct EHCIQueue {
     int async;
     int transact_ctr;
 
-    /* cached data from guest - needs to be flushed
+    /*
+     * cached data from guest - needs to be flushed
      * when guest removes an entry (doorbell, handshake sequence)
      */
     EHCIqh qh;             /* copy of current QH (being worked on) */
@@ -275,7 +263,7 @@ struct EHCIState {
      */
     uint8_t caps[CAPA_SIZE];
     union {
-        uint32_t opreg[0x44/sizeof(uint32_t)];
+        uint32_t opreg[0x44 / sizeof(uint32_t)];
         struct {
             uint32_t usbcmd;
             uint32_t usbsts;
@@ -318,6 +306,9 @@ struct EHCIState {
     bool int_req_by_async;
     VMChangeStateEntry *vmstate;
 };
+
+#define DEFINE_EHCI_COMMON_PROPERTIES(_state) \
+    DEFINE_PROP_UINT32("maxframes", _state, ehci.maxframes, 128)
 
 extern const VMStateDescription vmstate_ehci;
 

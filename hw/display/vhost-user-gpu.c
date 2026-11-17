@@ -13,7 +13,7 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qemu/sockets.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/virtio/virtio-gpu.h"
 #include "chardev/char-fe.h"
 #include "qapi/error.h"
@@ -119,6 +119,31 @@ static VhostUserGpuMsg m __attribute__ ((unused));
 
 static void vhost_user_gpu_update_blocked(VhostUserGPU *g, bool blocked);
 
+static size_t
+vhost_user_gpu_min_payload_size(VhostUserGpuRequest request)
+{
+    switch (request) {
+    case VHOST_USER_GPU_CURSOR_POS:
+    case VHOST_USER_GPU_CURSOR_POS_HIDE:
+        return sizeof(VhostUserGpuCursorPos);
+    case VHOST_USER_GPU_CURSOR_UPDATE:
+        return sizeof(VhostUserGpuCursorUpdate);
+    case VHOST_USER_GPU_GET_EDID:
+        return sizeof(VhostUserGpuEdidRequest);
+    case VHOST_USER_GPU_SCANOUT:
+        return sizeof(VhostUserGpuScanout);
+    case VHOST_USER_GPU_DMABUF_SCANOUT:
+        return sizeof(VhostUserGpuDMABUFScanout);
+    case VHOST_USER_GPU_DMABUF_SCANOUT2:
+        return sizeof(VhostUserGpuDMABUFScanout2);
+    case VHOST_USER_GPU_DMABUF_UPDATE:
+    case VHOST_USER_GPU_UPDATE:
+        return sizeof(VhostUserGpuUpdate);
+    default:
+        return 0;
+    }
+}
+
 static void
 vhost_user_gpu_handle_cursor(VhostUserGPU *g, VhostUserGpuMsg *msg)
 {
@@ -142,11 +167,11 @@ vhost_user_gpu_handle_cursor(VhostUserGPU *g, VhostUserGpuMsg *msg)
         memcpy(s->current_cursor->data, up->data,
                64 * 64 * sizeof(uint32_t));
 
-        dpy_cursor_define(s->con, s->current_cursor);
+        qemu_console_set_cursor(s->con, s->current_cursor);
     }
 
-    dpy_mouse_set(s->con, pos->x, pos->y,
-                  msg->request != VHOST_USER_GPU_CURSOR_POS_HIDE);
+    qemu_console_set_mouse(s->con, pos->x, pos->y,
+                           msg->request != VHOST_USER_GPU_CURSOR_POS_HIDE);
 }
 
 static void
@@ -238,7 +263,7 @@ vhost_user_gpu_handle_display(VhostUserGPU *g, VhostUserGpuMsg *msg)
         con = s->con;
 
         if (m->width == 0) {
-            dpy_gfx_replace_surface(con, NULL);
+            qemu_console_set_surface(con, NULL);
         } else {
             s->ds = qemu_create_displaysurface(m->width, m->height);
             /* replace surface on next update */
@@ -269,12 +294,12 @@ vhost_user_gpu_handle_display(VhostUserGPU *g, VhostUserGpuMsg *msg)
 
         if (dmabuf) {
             qemu_dmabuf_close(dmabuf);
-            dpy_gl_release_dmabuf(con, dmabuf);
+            qemu_console_gl_release_dmabuf(con, dmabuf);
             g_clear_pointer(&dmabuf, qemu_dmabuf_free);
         }
 
         if (fd == -1) {
-            dpy_gl_scanout_disable(con);
+            qemu_console_gl_scanout_disable(con);
             g->dmabuf[m->scanout_id] = NULL;
             break;
         }
@@ -291,7 +316,7 @@ vhost_user_gpu_handle_display(VhostUserGPU *g, VhostUserGpuMsg *msg)
                                  &fd, 1, false, m->fd_flags &
                                  VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP);
 
-        dpy_gl_scanout_dmabuf(con, dmabuf);
+        qemu_console_gl_scanout_dmabuf(con, dmabuf);
         g->dmabuf[m->scanout_id] = dmabuf;
         break;
     }
@@ -306,13 +331,13 @@ vhost_user_gpu_handle_display(VhostUserGPU *g, VhostUserGpuMsg *msg)
         }
 
         con = g->parent_obj.scanout[m->scanout_id].con;
-        if (!console_has_gl(con)) {
+        if (!qemu_console_has_gl(con)) {
             error_report("console doesn't support GL!");
             vhost_user_gpu_unblock(g);
             break;
         }
         g->backend_blocked = true;
-        dpy_gl_update(con, m->x, m->y, m->width, m->height);
+        qemu_console_gl_update(con, m->x, m->y, m->width, m->height);
         break;
     }
 #ifdef CONFIG_PIXMAN
@@ -322,6 +347,14 @@ vhost_user_gpu_handle_display(VhostUserGPU *g, VhostUserGpuMsg *msg)
         if (m->scanout_id >= g->parent_obj.conf.max_outputs) {
             break;
         }
+
+        if ((uint64_t)m->width * m->height >
+            (msg->size - sizeof(VhostUserGpuUpdate)) / sizeof(uint32_t)) {
+            error_report("vhost-user-gpu: update payload too small"
+                         " for %ux%u", m->width, m->height);
+            break;
+        }
+
         s = &g->parent_obj.scanout[m->scanout_id];
         con = s->con;
         pixman_image_t *image =
@@ -337,9 +370,9 @@ vhost_user_gpu_handle_display(VhostUserGPU *g, VhostUserGpuMsg *msg)
 
         pixman_image_unref(image);
         if (qemu_console_surface(con) != s->ds) {
-            dpy_gfx_replace_surface(con, s->ds);
+            qemu_console_set_surface(con, s->ds);
         } else {
-            dpy_gfx_update(con, m->x, m->y, m->width, m->height);
+            qemu_console_update(con, m->x, m->y, m->width, m->height);
         }
         break;
     }
@@ -395,6 +428,11 @@ vhost_user_gpu_chr_read(void *opaque)
     msg->request = request;
     msg->flags = flags;
     msg->size = size;
+
+    if (size < vhost_user_gpu_min_payload_size(request)) {
+        error_report("vhost-user-gpu: message %d payload too small", request);
+        goto end;
+    }
 
     if (request == VHOST_USER_GPU_CURSOR_UPDATE ||
         request == VHOST_USER_GPU_CURSOR_POS ||
@@ -631,21 +669,16 @@ vhost_user_gpu_device_realize(DeviceState *qdev, Error **errp)
 
     /* existing backend may send DMABUF, so let's add that requirement */
     g->parent_obj.conf.flags |= 1 << VIRTIO_GPU_FLAG_DMABUF_ENABLED;
-    if (virtio_has_feature(g->vhost->dev.features, VIRTIO_GPU_F_VIRGL)) {
+    if (vhost_dev_has_feature(&g->vhost->dev, VIRTIO_GPU_F_VIRGL)) {
         g->parent_obj.conf.flags |= 1 << VIRTIO_GPU_FLAG_VIRGL_ENABLED;
     }
-    if (virtio_has_feature(g->vhost->dev.features, VIRTIO_GPU_F_EDID)) {
+    if (vhost_dev_has_feature(&g->vhost->dev, VIRTIO_GPU_F_EDID)) {
         g->parent_obj.conf.flags |= 1 << VIRTIO_GPU_FLAG_EDID_ENABLED;
     } else {
         error_report("EDID requested but the backend doesn't support it.");
         g->parent_obj.conf.flags &= ~(1 << VIRTIO_GPU_FLAG_EDID_ENABLED);
     }
-    if (virtio_has_feature(g->vhost->dev.features,
-        VIRTIO_GPU_F_RESOURCE_UUID)) {
-        g->parent_obj.conf.flags |= 1 << VIRTIO_GPU_FLAG_RESOURCE_UUID_ENABLED;
-    }
-    if (virtio_has_feature(g->vhost->dev.features,
-        VIRTIO_GPU_F_RESOURCE_UUID)) {
+    if (vhost_dev_has_feature(&g->vhost->dev, VIRTIO_GPU_F_RESOURCE_UUID)) {
         g->parent_obj.conf.flags |= 1 << VIRTIO_GPU_FLAG_RESOURCE_UUID_ENABLED;
     }
 

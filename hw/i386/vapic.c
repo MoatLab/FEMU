@@ -16,11 +16,14 @@
 #include "system/cpus.h"
 #include "system/hw_accel.h"
 #include "system/kvm.h"
+#include "system/whpx.h"
 #include "system/runstate.h"
 #include "system/address-spaces.h"
+#include "system/physmem.h"
 #include "hw/i386/apic_internal.h"
-#include "hw/sysbus.h"
-#include "hw/boards.h"
+#include "hw/core/sysbus.h"
+#include "hw/core/boards.h"
+#include "exec/cpu-common.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
 
@@ -30,6 +33,10 @@
 
 #define ROM_BLOCK_SIZE          512
 #define ROM_BLOCK_MASK          (~(ROM_BLOCK_SIZE - 1))
+
+/* Option ROM window on PC/Q35 machines; the vapic ROM must live in here. */
+#define OPTION_ROM_START        0xc0000
+#define OPTION_ROM_END          0xe0000
 
 typedef enum VAPICMode {
     VAPIC_INACTIVE = 0,
@@ -136,13 +143,13 @@ static const TPRInstruction tpr_instr[] = {
 
 static void read_guest_rom_state(VAPICROMState *s)
 {
-    cpu_physical_memory_read(s->rom_state_paddr, &s->rom_state,
+    physical_memory_read(s->rom_state_paddr, &s->rom_state,
                              sizeof(GuestROMState));
 }
 
 static void write_guest_rom_state(VAPICROMState *s)
 {
-    cpu_physical_memory_write(s->rom_state_paddr, &s->rom_state,
+    physical_memory_write(s->rom_state_paddr, &s->rom_state,
                               sizeof(GuestROMState));
 }
 
@@ -159,7 +166,6 @@ static void update_guest_rom_state(VAPICROMState *s)
 static int find_real_tpr_addr(VAPICROMState *s, CPUX86State *env)
 {
     CPUState *cs = env_cpu(env);
-    hwaddr paddr;
     target_ulong addr;
 
     if (s->state == VAPIC_ACTIVE) {
@@ -171,8 +177,10 @@ static int find_real_tpr_addr(VAPICROMState *s, CPUX86State *env)
      * virtual address space for the APIC mapping.
      */
     for (addr = 0xfffff000; addr >= 0x80000000; addr -= TARGET_PAGE_SIZE) {
-        paddr = cpu_get_phys_page_debug(cs, addr);
-        if (paddr != APIC_DEFAULT_ADDRESS) {
+        TranslateForDebugResult tres;
+
+        if (!cpu_translate_for_debug(cs, addr, &tres) ||
+            tres.physaddr != APIC_DEFAULT_ADDRESS) {
             continue;
         }
         s->real_tpr_addr = addr + 0x80;
@@ -228,7 +236,8 @@ static int evaluate_tpr_instruction(VAPICROMState *s, X86CPU *cpu,
         return -1;
     }
 
-    if (kvm_enabled() && !kvm_irqchip_in_kernel()) {
+    if ((kvm_enabled() && !kvm_irqchip_in_kernel())
+        || (whpx_enabled() && !whpx_irqchip_in_kernel())) {
         /*
          * KVM without kernel-based TPR access reporting will pass an IP that
          * points after the accessing instruction. So we need to look backward
@@ -289,6 +298,7 @@ static int update_rom_mapping(VAPICROMState *s, CPUX86State *env, target_ulong i
     hwaddr paddr;
     uint32_t rom_state_vaddr;
     uint32_t pos, patch, offset;
+    TranslateForDebugResult tres;
 
     /* nothing to do if already activated */
     if (s->state == VAPIC_ACTIVE) {
@@ -302,11 +312,10 @@ static int update_rom_mapping(VAPICROMState *s, CPUX86State *env, target_ulong i
 
     /* find out virtual address of the ROM */
     rom_state_vaddr = s->rom_state_paddr + (ip & 0xf0000000);
-    paddr = cpu_get_phys_page_debug(cs, rom_state_vaddr);
-    if (paddr == -1) {
+    if (!cpu_translate_for_debug(cs, rom_state_vaddr, &tres)) {
         return -1;
     }
-    paddr += rom_state_vaddr & ~TARGET_PAGE_MASK;
+    paddr = tres.physaddr;
     if (paddr != s->rom_state_paddr) {
         return -1;
     }
@@ -323,14 +332,14 @@ static int update_rom_mapping(VAPICROMState *s, CPUX86State *env, target_ulong i
     for (pos = le32_to_cpu(s->rom_state.fixup_start);
          pos < le32_to_cpu(s->rom_state.fixup_end);
          pos += 4) {
-        cpu_physical_memory_read(paddr + pos - s->rom_state.vaddr,
+        physical_memory_read(paddr + pos - s->rom_state.vaddr,
                                  &offset, sizeof(offset));
         offset = le32_to_cpu(offset);
-        cpu_physical_memory_read(paddr + offset, &patch, sizeof(patch));
+        physical_memory_read(paddr + offset, &patch, sizeof(patch));
         patch = le32_to_cpu(patch);
         patch += rom_state_vaddr - le32_to_cpu(s->rom_state.vaddr);
         patch = cpu_to_le32(patch);
-        cpu_physical_memory_write(paddr + offset, &patch, sizeof(patch));
+        physical_memory_write(paddr + offset, &patch, sizeof(patch));
     }
     read_guest_rom_state(s);
     s->vapic_paddr = paddr + le32_to_cpu(s->rom_state.vapic_vaddr) -
@@ -374,7 +383,7 @@ static int vapic_enable(VAPICROMState *s, X86CPU *cpu)
     }
     vapic_paddr = s->vapic_paddr +
         (((hwaddr)cpu_number) << VAPIC_CPU_SHIFT);
-    cpu_physical_memory_write(vapic_paddr + offsetof(VAPICState, enabled),
+    physical_memory_write(vapic_paddr + offsetof(VAPICState, enabled),
                               &enabled, sizeof(enabled));
     apic_enable_vapic(cpu->apic_state, vapic_paddr);
 
@@ -490,7 +499,7 @@ void vapic_report_tpr_access(DeviceState *dev, CPUState *cs, target_ulong ip,
 }
 
 typedef struct VAPICEnableTPRReporting {
-    DeviceState *apic;
+    APICCommonState *apic;
     bool enable;
 } VAPICEnableTPRReporting;
 
@@ -545,10 +554,10 @@ static int patch_hypercalls(VAPICROMState *s)
     uint8_t *rom;
 
     rom = g_malloc(s->rom_size);
-    cpu_physical_memory_read(rom_paddr, rom, s->rom_size);
+    physical_memory_read(rom_paddr, rom, s->rom_size);
 
     for (pos = 0; pos < s->rom_size - sizeof(vmcall_pattern); pos++) {
-        if (kvm_irqchip_in_kernel()) {
+        if (kvm_enabled() && kvm_irqchip_in_kernel()) {
             pattern = outl_pattern;
             alternates[0] = outl_pattern[7];
             alternates[1] = outl_pattern[7];
@@ -561,7 +570,7 @@ static int patch_hypercalls(VAPICROMState *s)
         }
         if (memcmp(rom + pos, pattern, 7) == 0 &&
             (rom[pos + 7] == alternates[0] || rom[pos + 7] == alternates[1])) {
-            cpu_physical_memory_write(rom_paddr + pos + 5, patch, 3);
+            physical_memory_write(rom_paddr + pos + 5, patch, 3);
             /*
              * Don't flush the tb here. Under ordinary conditions, the patched
              * calls are miles away from the current IP. Under malicious
@@ -587,6 +596,14 @@ static int vapic_map_rom_writable(VAPICROMState *s)
     size_t rom_size;
     uint8_t *ram;
 
+    /*
+     * The VAPIC region should be mapped in place, refuse mapping it
+     * outside of the option ROM window.
+     */
+    if (rom_paddr < OPTION_ROM_START || rom_paddr >= OPTION_ROM_END) {
+        return -1;
+    }
+
     if (s->rom_mapped_writable) {
         memory_region_del_subregion(mr, &s->rom);
         object_unparent(OBJECT(&s->rom));
@@ -597,13 +614,16 @@ static int vapic_map_rom_writable(VAPICROMState *s)
 
     /* read ROM size from RAM region */
     if (rom_paddr + 2 >= memory_region_size(section.mr)) {
+        memory_region_unref(section.mr);
         return -1;
     }
     ram = memory_region_get_ram_ptr(section.mr);
     rom_size = ram[rom_paddr + 2] * ROM_BLOCK_SIZE;
-    if (rom_size == 0) {
+    if (rom_size == 0 || rom_size > OPTION_ROM_END - rom_paddr) {
+        memory_region_unref(section.mr);
         return -1;
     }
+
     s->rom_size = rom_size;
 
     /* We need to round to avoid creating subpages
@@ -611,6 +631,7 @@ static int vapic_map_rom_writable(VAPICROMState *s)
     rom_size += rom_paddr & ~TARGET_PAGE_MASK;
     rom_paddr &= TARGET_PAGE_MASK;
     rom_size = TARGET_PAGE_ALIGN(rom_size);
+    assert(rom_paddr >= OPTION_ROM_START && rom_paddr + rom_size <= OPTION_ROM_END);
 
     memory_region_init_alias(&s->rom, OBJECT(s), "kvmvapic-rom", section.mr,
                              rom_paddr, rom_size);
@@ -678,16 +699,25 @@ static void vapic_write(void *opaque, hwaddr addr, uint64_t data,
         }
         break;
     case 1:
-        if (kvm_enabled()) {
+        if (kvm_enabled() || (whpx_enabled() && !whpx_irqchip_in_kernel())) {
             /*
              * Disable triggering instruction in ROM by writing a NOP.
              *
              * We cannot do this in TCG mode as the reported IP is not
              * accurate.
+             *
+             * Oddly enough, KVM increments EIP _before_ the execution
+             * of the instruction is finished.
              */
             pause_all_vcpus();
-            patch_byte(cpu, env->eip - 2, 0x66);
-            patch_byte(cpu, env->eip - 1, 0x90);
+            if (!kvm_enabled()) {
+                patch_byte(cpu, env->eip, 0x66);
+                patch_byte(cpu, env->eip + 1, 0x90);
+            }
+            else {
+                patch_byte(cpu, env->eip - 2, 0x66);
+                patch_byte(cpu, env->eip - 1, 0x90);
+            }
             resume_all_vcpus();
         }
 
@@ -704,7 +734,7 @@ static void vapic_write(void *opaque, hwaddr addr, uint64_t data,
         break;
     default:
     case 4:
-        if (!kvm_irqchip_in_kernel()) {
+        if (!kvm_irqchip_in_kernel() && !whpx_irqchip_in_kernel()) {
             apic_poll_irq(cpu->apic_state);
         }
         break;
@@ -742,7 +772,7 @@ static void do_vapic_enable(CPUState *cs, run_on_cpu_data data)
     X86CPU *cpu = X86_CPU(cs);
 
     static const uint8_t enabled = 1;
-    cpu_physical_memory_write(s->vapic_paddr + offsetof(VAPICState, enabled),
+    physical_memory_write(s->vapic_paddr + offsetof(VAPICState, enabled),
                               &enabled, sizeof(enabled));
     apic_enable_vapic(cpu->apic_state, s->vapic_paddr);
     s->state = VAPIC_ACTIVE;
@@ -763,7 +793,7 @@ static void vapic_vm_state_change(void *opaque, bool running, RunState state)
             run_on_cpu(first_cpu, do_vapic_enable, RUN_ON_CPU_HOST_PTR(s));
         } else {
             zero = g_malloc0(s->rom_state.vapic_size);
-            cpu_physical_memory_write(s->vapic_paddr, zero,
+            physical_memory_write(s->vapic_paddr, zero,
                                       s->rom_state.vapic_size);
             g_free(zero);
         }

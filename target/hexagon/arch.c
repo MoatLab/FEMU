@@ -208,6 +208,11 @@ void arch_fpop_start(CPUHexagonState *env)
  * model it in qemu user mode.
  */
 #define RAISE_FP_EXCEPTION   do {} while (0)
+#else
+ /*
+  * To be implemented.
+  */
+#define RAISE_FP_EXCEPTION   do { g_assert_not_reached(); } while (0)
 #endif
 
 #define SOFTFLOAT_TEST_FLAG(FLAG, MYF, MYE) \
@@ -222,9 +227,8 @@ void arch_fpop_start(CPUHexagonState *env)
         } \
     } while (0)
 
-void arch_fpop_end(CPUHexagonState *env)
+void arch_fpop_end(CPUHexagonState *env, bool pkt_need_commit)
 {
-    const bool pkt_need_commit = true;
     int flags = get_float_exception_flags(&env->fp_status);
     if (flags != 0) {
         SOFTFLOAT_TEST_FLAG(float_flag_inexact, FPINPF, FPINPE);

@@ -30,7 +30,7 @@
 #include "migration/colo.h"
 #include "util.h"
 
-#include "block/aio-wait.h"
+#include "qemu/aio-wait.h"
 #include "qemu/coroutine.h"
 
 #define TYPE_COLO_COMPARE "colo-compare"
@@ -88,7 +88,7 @@ static uint32_t max_queue_size;
 typedef struct SendCo {
     Coroutine *co;
     struct CompareState *s;
-    CharBackend *chr;
+    CharFrontend *chr;
     GQueue send_list;
     bool notify_remote_frame;
     bool done;
@@ -108,10 +108,10 @@ struct CompareState {
     char *sec_indev;
     char *outdev;
     char *notify_dev;
-    CharBackend chr_pri_in;
-    CharBackend chr_sec_in;
-    CharBackend chr_out;
-    CharBackend chr_notify_dev;
+    CharFrontend chr_pri_in;
+    CharFrontend chr_sec_in;
+    CharFrontend chr_out;
+    CharFrontend chr_notify_dev;
     SocketReadState pri_rs;
     SocketReadState sec_rs;
     SocketReadState notify_rs;
@@ -902,14 +902,13 @@ static void check_old_packet_regular(void *opaque)
 void colo_notify_compares_event(void *opaque, int event, Error **errp)
 {
     CompareState *s;
-    qemu_mutex_lock(&colo_compare_mutex);
+    QEMU_LOCK_GUARD(&colo_compare_mutex);
 
     if (!colo_compare_active) {
-        qemu_mutex_unlock(&colo_compare_mutex);
         return;
     }
 
-    qemu_mutex_lock(&event_mtx);
+    QEMU_LOCK_GUARD(&event_mtx);
     QTAILQ_FOREACH(s, &net_compares, next) {
         s->event = event;
         qemu_bh_schedule(s->event_bh);
@@ -919,9 +918,6 @@ void colo_notify_compares_event(void *opaque, int event, Error **errp)
     while (event_unhandled_count > 0) {
         qemu_cond_wait(&event_complete_cond, &event_mtx);
     }
-
-    qemu_mutex_unlock(&event_mtx);
-    qemu_mutex_unlock(&colo_compare_mutex);
 }
 
 static void colo_compare_timer_init(CompareState *s)
@@ -1396,7 +1392,7 @@ static void colo_compare_init(Object *obj)
 
 void colo_compare_cleanup(void)
 {
-    CompareState *tmp = NULL;
+    CompareState *tmp;
     CompareState *n = NULL;
 
     QTAILQ_FOREACH_SAFE(tmp, &net_compares, next, n) {
@@ -1407,7 +1403,7 @@ void colo_compare_cleanup(void)
 static void colo_compare_finalize(Object *obj)
 {
     CompareState *s = COLO_COMPARE(obj);
-    CompareState *tmp = NULL;
+    CompareState *tmp;
 
     qemu_mutex_lock(&colo_compare_mutex);
     QTAILQ_FOREACH(tmp, &net_compares, next) {
@@ -1416,7 +1412,7 @@ static void colo_compare_finalize(Object *obj)
             break;
         }
     }
-    if (QTAILQ_EMPTY(&net_compares)) {
+    if (colo_compare_active && QTAILQ_EMPTY(&net_compares)) {
         colo_compare_active = false;
         qemu_mutex_destroy(&event_mtx);
         qemu_cond_destroy(&event_complete_cond);
@@ -1431,30 +1427,29 @@ static void colo_compare_finalize(Object *obj)
     }
 
     colo_compare_timer_del(s);
+    g_clear_pointer(&s->event_bh, qemu_bh_delete);
 
-    qemu_bh_delete(s->event_bh);
+    if (s->iothread) {
+        AioContext *ctx = iothread_get_aio_context(s->iothread);
 
-    AioContext *ctx = iothread_get_aio_context(s->iothread);
-    AIO_WAIT_WHILE(ctx, !s->out_sendco.done);
-    if (s->notify_dev) {
-        AIO_WAIT_WHILE(ctx, !s->notify_sendco.done);
+        AIO_WAIT_WHILE(ctx, !s->out_sendco.done);
+        if (s->notify_dev) {
+            AIO_WAIT_WHILE(ctx, !s->notify_sendco.done);
+        }
+
+        /* Release all unhandled packets after compare thread exited */
+        g_queue_foreach(&s->conn_list, colo_flush_packets, s);
+        AIO_WAIT_WHILE(NULL, !s->out_sendco.done);
+
+        object_unref(OBJECT(s->iothread));
     }
-
-    /* Release all unhandled packets after compare thead exited */
-    g_queue_foreach(&s->conn_list, colo_flush_packets, s);
-    AIO_WAIT_WHILE(NULL, !s->out_sendco.done);
 
     g_queue_clear(&s->conn_list);
     g_queue_clear(&s->out_sendco.send_list);
     if (s->notify_dev) {
         g_queue_clear(&s->notify_sendco.send_list);
     }
-
-    if (s->connection_track_table) {
-        g_hash_table_destroy(s->connection_track_table);
-    }
-
-    object_unref(OBJECT(s->iothread));
+    g_clear_pointer(&s->connection_track_table, g_hash_table_destroy);
 
     g_free(s->pri_indev);
     g_free(s->sec_indev);

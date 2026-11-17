@@ -37,8 +37,8 @@
 
 #include "hw/xen/xen-backend.h"
 #include "hw/xen/xen-bus-helper.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 
 #include "hw/xen/interface/io/netif.h"
 #include "hw/xen/interface/io/xs_wire.h"
@@ -61,8 +61,6 @@ struct XenNetDev {
     NICConf               conf;
     NICState              *nic;
 };
-
-typedef struct XenNetDev XenNetDev;
 
 #define TYPE_XEN_NET_DEVICE "xen-net-device"
 OBJECT_DECLARE_SIMPLE_TYPE(XenNetDev, XEN_NET_DEVICE)

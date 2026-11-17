@@ -210,6 +210,7 @@ jobs:
         FEMU_GUEST_REQUIRED=1 FEMU_GUEST_ACCEL=tcg \
         QEMU_TEST_QEMU_BINARY=$PWD/build-femu/qemu-system-x86_64 \
         QEMU_BUILD_ROOT=$PWD/build-femu \
+        MESON_BUILD_ROOT=$PWD/build-femu \
         PYTHONPATH=$PWD/python:$PWD/tests/functional \
           timeout 900 build-femu/pyvenv/bin/python3 \
           hw/femu/tests/functional/test_x86_64_femu_guest.py \

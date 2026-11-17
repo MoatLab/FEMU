@@ -1,8 +1,8 @@
 #ifndef PPCE500_H
 #define PPCE500_H
 
-#include "hw/boards.h"
-#include "hw/platform-bus.h"
+#include "hw/core/boards.h"
+#include "hw/core/platform-bus.h"
 #include "qom/object.h"
 
 #define PLATFORM_CLK_FREQ_HZ (400 * 1000 * 1000)
@@ -40,6 +40,7 @@ struct PPCE500MachineClass {
     hwaddr pci_mmio_bus_base;
     hwaddr spin_base;
     uint32_t clock_freq;
+    uint32_t bus_freq;
     uint32_t tb_freq;
 };
 

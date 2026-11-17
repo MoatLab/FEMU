@@ -42,6 +42,7 @@ struct TPMIfClass {
     enum TpmModel model;
     void (*request_completed)(TPMIf *obj, int ret);
     enum TPMVersion (*get_version)(TPMIf *obj);
+    bool ppi_enabled;
 };
 
 #define TYPE_TPM_TIS_ISA            "tpm-tis"
@@ -76,6 +77,14 @@ static inline TPMVersion tpm_get_version(TPMIf *ti)
     }
 
     return TPM_IF_GET_CLASS(ti)->get_version(ti);
+}
+
+static inline bool tpm_ppi_enabled(TPMIf *ti)
+{
+    if (!ti) {
+        return false;
+    }
+    return TPM_IF_GET_CLASS(ti)->ppi_enabled;
 }
 
 #else /* CONFIG_TPM */

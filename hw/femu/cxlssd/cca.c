@@ -893,9 +893,9 @@ void femu_cxl_cca_finalize(FemuCxlCca *cca)
 /* The one step that can fail, done before the parent realizes. */
 bool femu_cxl_cca_alloc(FemuCxlMedia *s, Object *owner, Error **errp)
 {
-    return memory_region_init_ram_nomigrate(&s->cca.shm, owner,
-                                            "femu-cxl-cca-shm", CCA_SHM_SIZE,
-                                            errp);
+    return memory_region_init_ram_flags_nomigrate(&s->cca.shm, owner,
+                                                  "femu-cxl-cca-shm",
+                                                  CCA_SHM_SIZE, 0, errp);
 }
 
 /* Register BAR5 and start the thread; realize cannot fail after this. */

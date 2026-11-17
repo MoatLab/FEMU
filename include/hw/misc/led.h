@@ -1,7 +1,7 @@
 /*
  * QEMU single LED device
  *
- * Copyright (C) 2020 Philippe Mathieu-Daudé <f4bug@amsat.org>
+ * Copyright (C) 2020 Philippe Mathieu-Daudé
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -9,7 +9,7 @@
 #define HW_MISC_LED_H
 
 #include "qom/object.h"
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 
 #define TYPE_LED "led"
 

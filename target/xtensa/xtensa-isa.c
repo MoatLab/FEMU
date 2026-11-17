@@ -370,7 +370,7 @@ int xtensa_isa_name_compare(const void *v1, const void *v2)
     xtensa_lookup_entry *e1 = (xtensa_lookup_entry *)v1;
     xtensa_lookup_entry *e2 = (xtensa_lookup_entry *)v2;
 
-    return strcasecmp(e1->key, e2->key);
+    return g_ascii_strcasecmp(e1->key, e2->key);
 }
 
 
@@ -513,7 +513,7 @@ xtensa_format xtensa_format_lookup(xtensa_isa isa, const char *fmtname)
     }
 
     for (fmt = 0; fmt < intisa->num_formats; fmt++) {
-        if (strcasecmp(fmtname, intisa->formats[fmt].name) == 0) {
+        if (g_ascii_strcasecmp(fmtname, intisa->formats[fmt].name) == 0) {
             return fmt;
         }
     }

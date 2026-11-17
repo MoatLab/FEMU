@@ -14,21 +14,66 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/base-arch-defs.h"
 #include "system/address-spaces.h"
 #include "system/ioport.h"
 #include "exec/gdbstub.h"
+#include "exec/target_page.h"
 #include "gdbstub/enums.h"
 #include "monitor/hmp.h"
 #include "qemu/help_option.h"
+#include "monitor/hmp.h"
+#include "monitor/hmp-completion.h"
 #include "monitor/monitor-internal.h"
+#include "monitor/qdev.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-control.h"
 #include "qapi/qapi-commands-machine.h"
 #include "qapi/qapi-commands-misc.h"
+#include "block/block-hmp-cmds.h"
 #include "qobject/qdict.h"
 #include "qemu/cutils.h"
 #include "qemu/log.h"
+#include "net/slirp.h"
+#include "system/device_tree.h"
+#include "system/hw_accel.h"
+#include "system/memory.h"
 #include "system/system.h"
+#include "disas/disas.h"
+
+/* Please update hmp-commands.hx when adding or changing commands */
+static HMPCommand hmp_info_cmds[] = {
+#include "hmp-commands-info.h"
+    { NULL, NULL, },
+};
+
+/* hmp_cmds and hmp_info_cmds would be sorted at runtime */
+static HMPCommand hmp_cmds[] = {
+#include "hmp-commands.h"
+    { NULL, NULL, },
+};
+
+HMPCommand *hmp_cmds_for_target(bool info_command)
+{
+    return info_command ? hmp_info_cmds : hmp_cmds;
+}
+
+static int
+compare_mon_cmd(const void *a, const void *b)
+{
+    return strcmp(((const HMPCommand *)a)->name,
+            ((const HMPCommand *)b)->name);
+}
+
+static void __attribute__((__constructor__)) sortcmdlist(void)
+{
+    qsort(hmp_cmds, ARRAY_SIZE(hmp_cmds) - 1,
+          sizeof(*hmp_cmds),
+          compare_mon_cmd);
+    qsort(hmp_info_cmds, ARRAY_SIZE(hmp_info_cmds) - 1,
+          sizeof(*hmp_info_cmds),
+          compare_mon_cmd);
+}
 
 bool hmp_handle_error(Monitor *mon, Error *err)
 {
@@ -84,7 +129,10 @@ void hmp_info_version(Monitor *mon, const QDict *qdict)
 
 void hmp_quit(Monitor *mon, const QDict *qdict)
 {
-    monitor_suspend(mon);
+    MonitorHMP *hmp = MONITOR_HMP(mon);
+    if (hmp->use_readline) {
+        monitor_suspend(mon);
+    }
     qmp_quit(NULL);
 }
 
@@ -200,6 +248,7 @@ void hmp_info_iothreads(Monitor *mon, const QDict *qdict)
         monitor_printf(mon, "  poll-max-ns=%" PRId64 "\n", value->poll_max_ns);
         monitor_printf(mon, "  poll-grow=%" PRId64 "\n", value->poll_grow);
         monitor_printf(mon, "  poll-shrink=%" PRId64 "\n", value->poll_shrink);
+        monitor_printf(mon, "  poll-weight=%" PRId64 "\n", value->poll_weight);
         monitor_printf(mon, "  aio-max-batch=%" PRId64 "\n",
                        value->aio_max_batch);
     }
@@ -210,6 +259,17 @@ void hmp_info_iothreads(Monitor *mon, const QDict *qdict)
 void hmp_help(Monitor *mon, const QDict *qdict)
 {
     hmp_help_cmd(mon, qdict_get_try_str(qdict, "name"));
+}
+
+void hmp_clear(Monitor *mon, const QDict *qdict)
+{
+    /*
+     * Send an ANSI escape sequence:
+     * "\x1b[H" - move cursor to top-left
+     * "\x1b[2J" - clear visible screen
+     * "\x1b[3J" - clear scrollback
+     */
+    monitor_printf(mon, "\x1b[H\x1b[2J\x1b[3J");
 }
 
 void hmp_info_help(Monitor *mon, const QDict *qdict)
@@ -230,7 +290,7 @@ void hmp_info_sync_profile(Monitor *mon, const QDict *qdict)
 
 void hmp_info_history(Monitor *mon, const QDict *qdict)
 {
-    MonitorHMP *hmp_mon = container_of(mon, MonitorHMP, common);
+    MonitorHMP *hmp_mon = container_of(mon, MonitorHMP, parent_obj);
     int i;
     const char *str;
 
@@ -280,14 +340,15 @@ void hmp_log(Monitor *mon, const QDict *qdict)
 
 void hmp_gdbserver(Monitor *mon, const QDict *qdict)
 {
+    Error *err = NULL;
     const char *device = qdict_get_try_str(qdict, "device");
+
     if (!device) {
         device = "tcp::" DEFAULT_GDBSTUB_PORT;
     }
 
-    if (!gdbserver_start(device, &error_warn)) {
-        monitor_printf(mon, "Could not open gdbserver on device '%s'\n",
-                       device);
+    if (!gdbserver_start(device, &err)) {
+        error_report_err(err);
     } else if (strcmp(device, "none") == 0) {
         monitor_printf(mon, "Disabled gdbserver\n");
     } else {
@@ -432,5 +493,352 @@ void hmp_dumpdtb(Monitor *mon, const QDict *qdict)
     }
 
     monitor_printf(mon, "DTB dumped to '%s'\n", filename);
+}
+#endif
+
+/* Set the current CPU defined by the user. Callers must hold BQL. */
+int monitor_set_cpu(Monitor *mon, int cpu_index)
+{
+    CPUState *cpu;
+
+    cpu = qemu_get_cpu(cpu_index);
+    if (cpu == NULL) {
+        return -1;
+    }
+    g_free(mon->mon_cpu_path);
+    mon->mon_cpu_path = object_get_canonical_path(OBJECT(cpu));
+    return 0;
+}
+
+/* Callers must hold BQL. */
+static CPUState *mon_get_cpu_sync(Monitor *mon, bool synchronize)
+{
+    CPUState *cpu = NULL;
+
+    if (mon->mon_cpu_path) {
+        cpu = (CPUState *) object_resolve_path_type(mon->mon_cpu_path,
+                                                    TYPE_CPU, NULL);
+        if (!cpu) {
+            g_free(mon->mon_cpu_path);
+            mon->mon_cpu_path = NULL;
+        }
+    }
+    if (!mon->mon_cpu_path) {
+        if (!first_cpu) {
+            return NULL;
+        }
+        monitor_set_cpu(mon, first_cpu->cpu_index);
+        cpu = first_cpu;
+    }
+    assert(cpu != NULL);
+    if (synchronize) {
+        cpu_synchronize_state(cpu);
+    }
+    return cpu;
+}
+
+CPUState *mon_get_cpu(Monitor *mon)
+{
+    return mon_get_cpu_sync(mon, true);
+}
+
+CPUArchState *mon_get_cpu_env(Monitor *mon)
+{
+    CPUState *cs = mon_get_cpu(mon);
+
+    return cs ? cpu_env(cs) : NULL;
+}
+
+int monitor_get_cpu_index(Monitor *mon)
+{
+    CPUState *cs = mon_get_cpu_sync(mon, false);
+
+    return cs ? cs->cpu_index : UNASSIGNED_CPU_INDEX;
+}
+
+void hmp_info_registers(Monitor *mon, const QDict *qdict)
+{
+    bool all_cpus = qdict_get_try_bool(qdict, "cpustate_all", false);
+    int vcpu = qdict_get_try_int(qdict, "vcpu", -1);
+    CPUState *cs;
+
+    if (all_cpus) {
+        CPU_FOREACH(cs) {
+            monitor_printf(mon, "\nCPU#%d\n", cs->cpu_index);
+            cpu_dump_state(cs, NULL, CPU_DUMP_FPU | CPU_DUMP_VPU);
+        }
+    } else {
+        cs = vcpu >= 0 ? qemu_get_cpu(vcpu) : mon_get_cpu(mon);
+
+        if (!cs) {
+            if (vcpu >= 0) {
+                monitor_printf(mon, "CPU#%d not available\n", vcpu);
+            } else {
+                monitor_printf(mon, "No CPU available\n");
+            }
+            return;
+        }
+
+        monitor_printf(mon, "\nCPU#%d\n", cs->cpu_index);
+        cpu_dump_state(cs, NULL, CPU_DUMP_FPU | CPU_DUMP_VPU);
+    }
+}
+
+static void memory_dump(Monitor *mon, int count, int format, int wsize,
+                        uint64_t addr, bool is_physical)
+{
+    int l, line_size, i, max_digits, len;
+    uint8_t buf[16];
+    uint64_t v;
+    CPUState *cs = mon_get_cpu(mon);
+    const unsigned int addr_width = is_physical ? 8 : (target_long_bits() / 4);
+    const bool big_endian = target_big_endian();
+
+    if (!cs && (format == 'i' || !is_physical)) {
+        monitor_printf(mon, "Can not dump without CPU\n");
+        return;
+    }
+
+    if (format == 'i') {
+        monitor_disas(mon, cs, addr, count, is_physical);
+        return;
+    }
+
+    len = wsize * count;
+    if (wsize == 1) {
+        line_size = 8;
+    } else {
+        line_size = 16;
+    }
+    max_digits = 0;
+
+    switch (format) {
+    case 'o':
+        max_digits = DIV_ROUND_UP(wsize * 8, 3);
+        break;
+    default:
+    case 'x':
+        max_digits = (wsize * 8) / 4;
+        break;
+    case 'u':
+    case 'd':
+        max_digits = DIV_ROUND_UP(wsize * 8 * 10, 33);
+        break;
+    case 'c':
+        wsize = 1;
+        break;
+    }
+
+    while (len > 0) {
+        monitor_printf(mon, "%0*" PRIx64 ":", addr_width, addr);
+        l = len;
+        if (l > line_size) {
+            l = line_size;
+        }
+        if (is_physical) {
+            AddressSpace *as = cs ? cs->as : &address_space_memory;
+            MemTxResult r = address_space_read(as, addr,
+                                               MEMTXATTRS_UNSPECIFIED, buf, l);
+            if (r != MEMTX_OK) {
+                monitor_printf(mon, " Cannot access memory\n");
+                break;
+            }
+        } else {
+            if (cpu_memory_rw_debug(cs, addr, buf, l, 0) < 0) {
+                monitor_printf(mon, " Cannot access memory\n");
+                break;
+            }
+        }
+        i = 0;
+        while (i < l) {
+            switch (wsize) {
+            default:
+            case 1:
+                v = ldub_p(buf + i);
+                break;
+            case 2:
+                v = (big_endian ? lduw_be_p : lduw_le_p)(buf + i);
+                break;
+            case 4:
+                v = (uint32_t)(big_endian ? ldl_be_p : ldl_le_p)(buf + i);
+                break;
+            case 8:
+                v = (big_endian ? ldq_be_p : ldq_le_p)(buf + i);
+                break;
+            }
+            monitor_printf(mon, " ");
+            switch (format) {
+            case 'o':
+                monitor_printf(mon, "0%*" PRIo64, max_digits, v);
+                break;
+            case 'x':
+                monitor_printf(mon, "0x%0*" PRIx64, max_digits, v);
+                break;
+            case 'u':
+                monitor_printf(mon, "%*" PRIu64, max_digits, v);
+                break;
+            case 'd':
+                monitor_printf(mon, "%*" PRId64, max_digits, v);
+                break;
+            case 'c':
+                monitor_printc(mon, v);
+                break;
+            }
+            i += wsize;
+        }
+        monitor_printf(mon, "\n");
+        addr += l;
+        len -= l;
+    }
+}
+
+void hmp_memory_dump(Monitor *mon, const QDict *qdict)
+{
+    int count = qdict_get_int(qdict, "count");
+    int format = qdict_get_int(qdict, "format");
+    int size = qdict_get_int(qdict, "size");
+    vaddr addr = qdict_get_int(qdict, "addr");
+
+    memory_dump(mon, count, format, size, addr, false);
+}
+
+void hmp_physical_memory_dump(Monitor *mon, const QDict *qdict)
+{
+    int count = qdict_get_int(qdict, "count");
+    int format = qdict_get_int(qdict, "format");
+    int size = qdict_get_int(qdict, "size");
+    hwaddr addr = qdict_get_int(qdict, "addr");
+
+    memory_dump(mon, count, format, size, addr, true);
+}
+
+void *gpa2hva(MemoryRegion **p_mr, hwaddr addr, uint64_t size, Error **errp)
+{
+    Int128 gpa_region_size;
+    MemoryRegionSection mrs = memory_region_find(get_system_memory(),
+                                                 addr, size);
+
+    if (!mrs.mr) {
+        error_setg(errp,
+                   "No memory is mapped at address 0x%" HWADDR_PRIx, addr);
+        return NULL;
+    }
+
+    if (!memory_region_is_ram(mrs.mr) && !memory_region_is_romd(mrs.mr)) {
+        error_setg(errp,
+                   "Memory at address 0x%" HWADDR_PRIx " is not RAM", addr);
+        memory_region_unref(mrs.mr);
+        return NULL;
+    }
+
+    gpa_region_size = int128_make64(size);
+    if (int128_lt(mrs.size, gpa_region_size)) {
+        error_setg(errp, "Size of memory region at 0x%" HWADDR_PRIx
+                   " exceeded.", addr);
+        memory_region_unref(mrs.mr);
+        return NULL;
+    }
+
+    *p_mr = mrs.mr;
+    return qemu_map_ram_ptr(mrs.mr->ram_block, mrs.offset_within_region);
+}
+
+void hmp_gpa2hva(Monitor *mon, const QDict *qdict)
+{
+    hwaddr addr = qdict_get_int(qdict, "addr");
+    Error *local_err = NULL;
+    MemoryRegion *mr = NULL;
+    void *ptr;
+
+    ptr = gpa2hva(&mr, addr, 1, &local_err);
+    if (local_err) {
+        error_report_err(local_err);
+        return;
+    }
+
+    monitor_printf(mon, "Host virtual address for 0x%" HWADDR_PRIx
+                   " (%s) is %p\n",
+                   addr, mr->name, ptr);
+
+    memory_region_unref(mr);
+}
+
+void hmp_gva2gpa(Monitor *mon, const QDict *qdict)
+{
+    vaddr addr = qdict_get_int(qdict, "addr");
+    CPUState *cs = mon_get_cpu(mon);
+    TranslateForDebugResult tres;
+
+    if (!cs) {
+        monitor_printf(mon, "No cpu\n");
+        return;
+    }
+
+    if (!cpu_translate_for_debug(cs, addr, &tres)) {
+        monitor_printf(mon, "Unmapped\n");
+    } else {
+        monitor_printf(mon, "gpa: 0x%" HWADDR_PRIx "\n", tres.physaddr);
+    }
+}
+
+#ifdef CONFIG_LINUX
+static uint64_t vtop(void *ptr, Error **errp)
+{
+    uint64_t pinfo;
+    uint64_t ret = -1;
+    uintptr_t addr = (uintptr_t) ptr;
+    uintptr_t pagesize = qemu_real_host_page_size();
+    off_t offset = addr / pagesize * sizeof(pinfo);
+    int fd;
+
+    fd = open("/proc/self/pagemap", O_RDONLY);
+    if (fd == -1) {
+        error_setg_file_open(errp, errno, "/proc/self/pagemap");
+        return -1;
+    }
+
+    /* Force copy-on-write if necessary.  */
+    qatomic_add((uint8_t *)ptr, 0);
+
+    if (pread(fd, &pinfo, sizeof(pinfo), offset) != sizeof(pinfo)) {
+        error_setg_errno(errp, errno, "Cannot read pagemap");
+        goto out;
+    }
+    if ((pinfo & (1ull << 63)) == 0) {
+        error_setg(errp, "Page not present");
+        goto out;
+    }
+    ret = (pinfo & 0x007fffffffffffffull) * pagesize;
+    ret |= addr & (pagesize - 1);
+
+out:
+    close(fd);
+    return ret;
+}
+
+void hmp_gpa2hpa(Monitor *mon, const QDict *qdict)
+{
+    hwaddr addr = qdict_get_int(qdict, "addr");
+    Error *local_err = NULL;
+    MemoryRegion *mr = NULL;
+    void *ptr;
+    uint64_t physaddr;
+
+    ptr = gpa2hva(&mr, addr, 1, &local_err);
+    if (local_err) {
+        error_report_err(local_err);
+        return;
+    }
+
+    physaddr = vtop(ptr, &local_err);
+    if (local_err) {
+        error_report_err(local_err);
+    } else {
+        monitor_printf(mon, "Host physical address for 0x%" HWADDR_PRIx
+                       " (%s) is 0x%" PRIx64 "\n",
+                       addr, mr->name, (uint64_t) physaddr);
+    }
+
+    memory_region_unref(mr);
 }
 #endif

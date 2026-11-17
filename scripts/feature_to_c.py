@@ -85,18 +85,25 @@ for input in sys.argv[1:]:
     num_regs = max(regnums) - base_reg + 1 if len(regnums) else 0
 
     sys.stdout.write('    {\n')
-    writeliteral(8, bytes(os.path.basename(input), 'utf-8'))
+    sys.stdout.write('        .xmlname = ')
+    writeliteral(0, bytes(os.path.basename(input), 'utf-8'))
     sys.stdout.write(',\n')
-    writeliteral(8, read)
+    sys.stdout.write('        .xml = \n')
+    writeliteral(12, read)
     sys.stdout.write(',\n')
-    writeliteral(8, bytes(feature_name, 'utf-8'))
-    sys.stdout.write(',\n        (const char * const []) {\n')
+    sys.stdout.write('        .name = ')
+    writeliteral(0, bytes(feature_name, 'utf-8'))
+    sys.stdout.write(',\n')
+    sys.stdout.write(f'        .regs = (const char * const [{num_regs}]) {{\n')
 
     for index, regname in enumerate(regnames):
         sys.stdout.write(f'            [{regnums[index] - base_reg}] =\n')
         writeliteral(16, bytes(regname, 'utf-8'))
         sys.stdout.write(',\n')
 
-    sys.stdout.write(f'        }},\n        {num_regs},\n    }},\n')
+    sys.stdout.write( '        },\n')
+    sys.stdout.write(f'        .base_reg = {base_reg},\n')
+    sys.stdout.write(f'        .num_regs = {num_regs},\n')
+    sys.stdout.write( '    },\n')
 
 sys.stdout.write('    { NULL }\n};\n')

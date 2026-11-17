@@ -19,14 +19,15 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "cpu.h"
+#include "target/mips/cpu.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "hw/sysbus.h"
+#include "hw/core/cpu.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
 
 #include "hw/misc/mips_cpc.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 
 static inline uint64_t cpc_vp_run_mask(MIPSCPCState *cpc)
 {
@@ -44,7 +45,7 @@ static void mips_cpu_reset_async_work(CPUState *cs, run_on_cpu_data data)
 
 static void cpc_run_vp(MIPSCPCState *cpc, uint64_t vp_run)
 {
-    CPUState *cs = first_cpu;
+    CPUState *cs;
 
     CPU_FOREACH(cs) {
         uint64_t i = 1ULL << cs->cpu_index;
@@ -62,7 +63,7 @@ static void cpc_run_vp(MIPSCPCState *cpc, uint64_t vp_run)
 
 static void cpc_stop_vp(MIPSCPCState *cpc, uint64_t vp_stop)
 {
-    CPUState *cs = first_cpu;
+    CPUState *cs;
 
     CPU_FOREACH(cs) {
         uint64_t i = 1ULL << cs->cpu_index;

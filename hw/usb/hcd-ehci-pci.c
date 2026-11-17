@@ -16,7 +16,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/usb/hcd-ehci.h"
 #include "migration/vmstate.h"
 #include "qemu/module.h"
@@ -136,7 +136,7 @@ static void usb_ehci_pci_write_config(PCIDevice *dev, uint32_t addr,
 }
 
 static const Property ehci_pci_properties[] = {
-    DEFINE_PROP_UINT32("maxframes", EHCIPCIState, ehci.maxframes, 128),
+    DEFINE_EHCI_COMMON_PROPERTIES(EHCIPCIState),
 };
 
 static const VMStateDescription vmstate_ehci_pci = {

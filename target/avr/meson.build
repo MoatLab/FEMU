@@ -11,10 +11,12 @@ avr_ss.add(files(
   'translate.c',
   'helper.c',
   'cpu.c',
-  'gdbstub.c',
   'disas.c'))
 
-avr_system_ss.add(files('machine.c'))
+avr_common_system_ss = ss.source_set()
+avr_common_system_ss.add(files('gdbstub.c'))
+avr_common_system_ss.add(files('machine.c'))
 
 target_arch += {'avr': avr_ss}
 target_system_arch += {'avr': avr_system_ss}
+target_common_system_arch += {'avr': avr_common_system_ss}

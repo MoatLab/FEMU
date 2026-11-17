@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 import os
 import sys
@@ -42,7 +41,7 @@ def main(args):
     for obj in args:
         entry = compile_commands.get(obj, None)
         if not entry:
-            sys.stderr.print('modinfo: Could not find object file', obj)
+            sys.stderr.write(f'modinfo: Could not find object file {obj}')
             sys.exit(1)
         src = entry['file']
         if not src.endswith('.c'):

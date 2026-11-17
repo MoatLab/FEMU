@@ -14,7 +14,7 @@
 #include "qemu/timer.h"
 #include "qemu/cutils.h"
 #include "qemu/module.h"
-#include "cpu.h"
+#include "target/s390x/cpu.h"
 #include "tcg/tcg_s390x.h"
 #include "system/rtc.h"
 

@@ -7,7 +7,7 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
-#include "migration/cpu.h"
+#include "migration/vmstate.h"
 #include "system/tcg.h"
 #include "vec.h"
 
@@ -41,6 +41,26 @@ static const VMStateDescription vmstate_fpu = {
         VMSTATE_FPU_REGS(env.fpr, LoongArchCPU, 0),
         VMSTATE_UINT32(env.fcsr0, LoongArchCPU),
         VMSTATE_BOOL_ARRAY(env.cf, LoongArchCPU, 8),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static bool msgint_needed(void *opaque)
+{
+    LoongArchCPU *cpu = opaque;
+
+    return FIELD_EX64(cpu->env.cpucfg[1], CPUCFG1, MSG_INT);
+}
+
+static const VMStateDescription vmstate_msgint = {
+    .name = "cpu/msgint",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = msgint_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT64_ARRAY(env.sys_states[0].CSR_MSGIS, LoongArchCPU, N_MSGIS),
+        VMSTATE_UINT64(env.sys_states[0].CSR_MSGIR, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_MSGIE, LoongArchCPU),
         VMSTATE_END_OF_LIST()
     },
 };
@@ -133,6 +153,28 @@ static const VMStateDescription vmstate_lbt = {
     },
 };
 
+static bool pmu_needed(void *opaque)
+{
+    LoongArchCPU *cpu = opaque;
+
+    return cpu->pmu == ON_OFF_AUTO_ON;
+}
+
+static const VMStateDescription vmstate_pmu = {
+    .name = "cpu/pmu",
+    .version_id = 0,
+    .minimum_version_id = 0,
+    .needed = pmu_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(env.perf_event_num, LoongArchCPU),
+        VMSTATE_UINT64_ARRAY(env.sys_states[0].CSR_PERFCTRL, LoongArchCPU,\
+                             MAX_PERF_EVENTS),
+        VMSTATE_UINT64_ARRAY(env.sys_states[0].CSR_PERFCNTR, LoongArchCPU, \
+                             MAX_PERF_EVENTS),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 #if defined(CONFIG_TCG) && !defined(CONFIG_USER_ONLY)
 static bool tlb_needed(void *opaque)
 {
@@ -168,68 +210,68 @@ static const VMStateDescription vmstate_tlb = {
 /* LoongArch CPU state */
 const VMStateDescription vmstate_loongarch_cpu = {
     .name = "cpu",
-    .version_id = 3,
-    .minimum_version_id = 3,
+    .version_id = 4,
+    .minimum_version_id = 4,
     .fields = (const VMStateField[]) {
-        VMSTATE_UINTTL_ARRAY(env.gpr, LoongArchCPU, 32),
-        VMSTATE_UINTTL(env.pc, LoongArchCPU),
+        VMSTATE_UINT64_ARRAY(env.gpr, LoongArchCPU, 32),
+        VMSTATE_UINT64(env.pc, LoongArchCPU),
 
         /* Remaining CSRs */
-        VMSTATE_UINT64(env.CSR_CRMD, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_PRMD, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_EUEN, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_MISC, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_ECFG, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_ESTAT, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_ERA, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_BADV, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_BADI, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_EENTRY, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBIDX, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBEHI, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBELO0, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBELO1, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_ASID, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_PGDL, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_PGDH, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_PGD, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_PWCL, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_PWCH, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_STLBPS, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_RVACFG, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_PRCFG1, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_PRCFG2, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_PRCFG3, LoongArchCPU),
-        VMSTATE_UINT64_ARRAY(env.CSR_SAVE, LoongArchCPU, 16),
-        VMSTATE_UINT64(env.CSR_TID, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TCFG, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TVAL, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_CNTC, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TICLR, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_LLBCTL, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_IMPCTL1, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_IMPCTL2, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBRENTRY, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBRBADV, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBRERA, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBRSAVE, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBRELO0, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBRELO1, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBREHI, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_TLBRPRMD, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_MERRCTL, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_MERRINFO1, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_MERRINFO2, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_MERRENTRY, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_MERRERA, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_MERRSAVE, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_CTAG, LoongArchCPU),
-        VMSTATE_UINT64_ARRAY(env.CSR_DMW, LoongArchCPU, 4),
+        VMSTATE_UINT64(env.sys_states[0].CSR_CRMD, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_PRMD, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_EUEN, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_MISC, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_ECFG, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_ESTAT, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_ERA, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_BADV, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_BADI, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_EENTRY, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBIDX, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBEHI, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBELO0, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBELO1, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_ASID, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_PGDL, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_PGDH, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_PGD, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_PWCL, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_PWCH, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_STLBPS, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_RVACFG, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_PRCFG1, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_PRCFG2, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_PRCFG3, LoongArchCPU),
+        VMSTATE_UINT64_ARRAY(env.sys_states[0].CSR_SAVE, LoongArchCPU, 16),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TID, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TCFG, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TVAL, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_CNTC, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TICLR, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_LLBCTL, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_IMPCTL1, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_IMPCTL2, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBRENTRY, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBRBADV, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBRERA, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBRSAVE, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBRELO0, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBRELO1, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBREHI, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_TLBRPRMD, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_MERRCTL, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_MERRINFO1, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_MERRINFO2, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_MERRENTRY, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_MERRERA, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_MERRSAVE, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_CTAG, LoongArchCPU),
+        VMSTATE_UINT64_ARRAY(env.sys_states[0].CSR_DMW, LoongArchCPU, 4),
 
         /* Debug CSRs */
-        VMSTATE_UINT64(env.CSR_DBG, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_DERA, LoongArchCPU),
-        VMSTATE_UINT64(env.CSR_DSAVE, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_DBG, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_DERA, LoongArchCPU),
+        VMSTATE_UINT64(env.sys_states[0].CSR_DSAVE, LoongArchCPU),
 
         VMSTATE_UINT64(kvm_state_counter, LoongArchCPU),
         /* PV steal time */
@@ -245,6 +287,8 @@ const VMStateDescription vmstate_loongarch_cpu = {
         &vmstate_tlb,
 #endif
         &vmstate_lbt,
+        &vmstate_msgint,
+        &vmstate_pmu,
         NULL
     }
 };

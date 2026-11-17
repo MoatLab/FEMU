@@ -18,8 +18,8 @@
 #include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "crypto/hash.h"
-#include "hw/qdev-properties.h"
-#include "hw/irq.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/irq.h"
 #include "trace.h"
 
 #define R_CRYPT_CMD     (0x10 / 4)
@@ -154,6 +154,14 @@ static bool has_padding(AspeedHACEState *s, struct iovec *iov,
                         hwaddr req_len, uint32_t *total_msg_len,
                         uint32_t *pad_offset)
 {
+    /* Need at least 8 bytes to read the total message length field */
+    if (req_len < 8) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: invalid request length=0x%" HWADDR_PRIx "\n",
+                      __func__, req_len);
+        return false;
+    }
+
     *total_msg_len = (uint32_t)(ldq_be_p(iov->iov_base + req_len - 8) / 8);
     /*
      * SG_LIST_LEN_LAST asserted in the request length doesn't mean it is the
@@ -197,8 +205,32 @@ static uint64_t hash_get_source_addr(AspeedHACEState *s)
     return src_addr;
 }
 
+static bool hash_accumulate_len(AspeedHACEState *s, hwaddr plen)
+{
+    if (plen > UINT32_MAX - s->total_req_len) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "%s: total_req_len overflow, current=0x%x, adding=0x%"
+                      HWADDR_PRIx "\n", __func__, s->total_req_len, plen);
+        return false;
+    }
+
+    s->total_req_len += plen;
+    return true;
+}
+
+static void hash_iov_unmap(AspeedHACEState *s, struct iovec *iov,
+                           hwaddr *mapped_lens, int iov_count)
+{
+    for (; iov_count > 0; iov_count--) {
+        address_space_unmap(&s->dram_as, iov[iov_count - 1].iov_base,
+                            mapped_lens[iov_count - 1], false,
+                            mapped_lens[iov_count - 1]);
+    }
+}
+
 static int hash_prepare_direct_iov(AspeedHACEState *s, struct iovec *iov,
-                                   bool acc_mode, bool *acc_final_request)
+                                   bool acc_mode, bool *acc_final_request,
+                                   hwaddr *mapped_lens)
 {
     uint32_t total_msg_len;
     uint32_t pad_offset;
@@ -222,9 +254,13 @@ static int hash_prepare_direct_iov(AspeedHACEState *s, struct iovec *iov,
 
     iov[0].iov_base = haddr;
     iov_idx = 1;
+    mapped_lens[0] = plen;
 
     if (acc_mode) {
-        s->total_req_len += plen;
+        if (!hash_accumulate_len(s, plen)) {
+            hash_iov_unmap(s, iov, mapped_lens, 1);
+            return -1;
+        }
 
         if (has_padding(s, &iov[0], plen, &total_msg_len,
                         &pad_offset)) {
@@ -242,7 +278,8 @@ static int hash_prepare_direct_iov(AspeedHACEState *s, struct iovec *iov,
 }
 
 static int hash_prepare_sg_iov(AspeedHACEState *s, struct iovec *iov,
-                               bool acc_mode, bool *acc_final_request)
+                               bool acc_mode, bool *acc_final_request,
+                               hwaddr *mapped_lens)
 {
     uint32_t total_msg_len;
     uint32_t pad_offset;
@@ -252,6 +289,7 @@ static int hash_prepare_sg_iov(AspeedHACEState *s, struct iovec *iov,
     int iov_idx;
     hwaddr plen;
     void *haddr;
+    int iov_mapped = 0;
 
     src = hash_get_source_addr(s);
     for (iov_idx = 0; !(len & SG_LIST_LEN_LAST); iov_idx++) {
@@ -259,7 +297,7 @@ static int hash_prepare_sg_iov(AspeedHACEState *s, struct iovec *iov,
             qemu_log_mask(LOG_GUEST_ERROR,
                           "%s: Failed to set end of sg list marker\n",
                           __func__);
-            return -1;
+            goto fail;
         }
 
         len = address_space_ldl_le(&s->dram_as, src,
@@ -284,14 +322,18 @@ static int hash_prepare_sg_iov(AspeedHACEState *s, struct iovec *iov,
                           "%s: Unable to map address, sg_addr=0x%x, "
                           "plen=0x%" HWADDR_PRIx "\n",
                           __func__, sg_addr, plen);
-            return -1;
+            goto fail;
         }
 
         src += SG_LIST_ENTRY_SIZE;
 
         iov[iov_idx].iov_base = haddr;
+        iov_mapped = iov_idx + 1;
+        mapped_lens[iov_idx] = plen;
         if (acc_mode) {
-            s->total_req_len += plen;
+            if (!hash_accumulate_len(s, plen)) {
+                goto fail;
+            }
 
             if (has_padding(s, &iov[iov_idx], plen, &total_msg_len,
                             &pad_offset)) {
@@ -307,6 +349,10 @@ static int hash_prepare_sg_iov(AspeedHACEState *s, struct iovec *iov,
     }
 
     return iov_idx;
+
+fail:
+    hash_iov_unmap(s, iov, mapped_lens, iov_mapped);
+    return -1;
 }
 
 static uint64_t hash_get_digest_addr(AspeedHACEState *s)
@@ -325,6 +371,7 @@ static uint64_t hash_get_digest_addr(AspeedHACEState *s)
 static void hash_write_digest_and_unmap_iov(AspeedHACEState *s,
                                             struct iovec *iov,
                                             int iov_idx,
+                                            hwaddr *mapped_lens,
                                             uint8_t *digest_buf,
                                             size_t digest_len)
 {
@@ -344,15 +391,12 @@ static void hash_write_digest_and_unmap_iov(AspeedHACEState *s,
         hace_hexdump("digest", (char *)digest_buf, digest_len);
     }
 
-    for (; iov_idx > 0; iov_idx--) {
-        address_space_unmap(&s->dram_as, iov[iov_idx - 1].iov_base,
-                            iov[iov_idx - 1].iov_len, false,
-                            iov[iov_idx - 1].iov_len);
-    }
+    hash_iov_unmap(s, iov, mapped_lens, iov_idx);
 }
 
 static void hash_execute_non_acc_mode(AspeedHACEState *s, int algo,
-                                      struct iovec *iov, int iov_idx)
+                                      struct iovec *iov, int iov_idx,
+                                      hwaddr *mapped_lens)
 {
     g_autofree uint8_t *digest_buf = NULL;
     Error *local_err = NULL;
@@ -364,15 +408,17 @@ static void hash_execute_non_acc_mode(AspeedHACEState *s, int algo,
                       "%s: qcrypto hash bytesv failed : %s",
                       __func__, error_get_pretty(local_err));
         error_free(local_err);
+        hash_iov_unmap(s, iov, mapped_lens, iov_idx);
         return;
     }
 
-    hash_write_digest_and_unmap_iov(s, iov, iov_idx, digest_buf, digest_len);
+    hash_write_digest_and_unmap_iov(s, iov, iov_idx, mapped_lens,
+                                    digest_buf, digest_len);
 }
 
 static void hash_execute_acc_mode(AspeedHACEState *s, int algo,
                                   struct iovec *iov, int iov_idx,
-                                  bool final_request)
+                                  bool final_request, hwaddr *mapped_lens)
 {
     g_autofree uint8_t *digest_buf = NULL;
     Error *local_err = NULL;
@@ -386,6 +432,7 @@ static void hash_execute_acc_mode(AspeedHACEState *s, int algo,
             qemu_log_mask(LOG_GUEST_ERROR, "%s: qcrypto hash new failed : %s",
                           __func__, error_get_pretty(local_err));
             error_free(local_err);
+            hash_iov_unmap(s, iov, mapped_lens, iov_idx);
             return;
         }
     }
@@ -394,6 +441,7 @@ static void hash_execute_acc_mode(AspeedHACEState *s, int algo,
         qemu_log_mask(LOG_GUEST_ERROR, "%s: qcrypto hash updatev failed : %s",
                       __func__, error_get_pretty(local_err));
         error_free(local_err);
+        hash_iov_unmap(s, iov, mapped_lens, iov_idx);
         return;
     }
 
@@ -413,22 +461,25 @@ static void hash_execute_acc_mode(AspeedHACEState *s, int algo,
         s->total_req_len = 0;
     }
 
-    hash_write_digest_and_unmap_iov(s, iov, iov_idx, digest_buf, digest_len);
+    hash_write_digest_and_unmap_iov(s, iov, iov_idx, mapped_lens,
+                                    digest_buf, digest_len);
 }
 
 static void do_hash_operation(AspeedHACEState *s, int algo, bool sg_mode,
                               bool acc_mode)
 {
     QEMU_UNINITIALIZED struct iovec iov[ASPEED_HACE_MAX_SG];
+    hwaddr mapped_lens[ASPEED_HACE_MAX_SG] = { 0 };
     bool acc_final_request = false;
     int iov_idx = -1;
 
     /* Prepares the iov for hashing operations based on the selected mode */
     if (sg_mode) {
-        iov_idx = hash_prepare_sg_iov(s, iov, acc_mode, &acc_final_request);
+        iov_idx = hash_prepare_sg_iov(s, iov, acc_mode, &acc_final_request,
+                                      mapped_lens);
     } else {
         iov_idx = hash_prepare_direct_iov(s, iov, acc_mode,
-                                          &acc_final_request);
+                                          &acc_final_request, mapped_lens);
     }
 
     if (iov_idx <= 0) {
@@ -443,9 +494,10 @@ static void do_hash_operation(AspeedHACEState *s, int algo, bool sg_mode,
 
     /* Executes the hash operation */
     if (acc_mode) {
-        hash_execute_acc_mode(s, algo, iov, iov_idx, acc_final_request);
+        hash_execute_acc_mode(s, algo, iov, iov_idx, acc_final_request,
+                              mapped_lens);
     } else {
-        hash_execute_non_acc_mode(s, algo, iov, iov_idx);
+        hash_execute_non_acc_mode(s, algo, iov, iov_idx, mapped_lens);
     }
 }
 
@@ -572,9 +624,9 @@ static const MemoryRegionOps aspeed_hace_ops = {
     },
 };
 
-static void aspeed_hace_reset(DeviceState *dev)
+static void aspeed_hace_reset_hold(Object *obj, ResetType type)
 {
-    struct AspeedHACEState *s = ASPEED_HACE(dev);
+    AspeedHACEState *s = ASPEED_HACE(obj);
     AspeedHACEClass *ahc = ASPEED_HACE_GET_CLASS(s);
 
     if (s->hash_ctx != NULL) {
@@ -635,21 +687,14 @@ static void aspeed_hace_unrealize(DeviceState *dev)
 static void aspeed_hace_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->realize = aspeed_hace_realize;
     dc->unrealize = aspeed_hace_unrealize;
-    device_class_set_legacy_reset(dc, aspeed_hace_reset);
+    rc->phases.hold = aspeed_hace_reset_hold;
     device_class_set_props(dc, aspeed_hace_properties);
     dc->vmsd = &vmstate_aspeed_hace;
 }
-
-static const TypeInfo aspeed_hace_info = {
-    .name = TYPE_ASPEED_HACE,
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(AspeedHACEState),
-    .class_init = aspeed_hace_class_init,
-    .class_size = sizeof(AspeedHACEClass)
-};
 
 static void aspeed_ast2400_hace_class_init(ObjectClass *klass, const void *data)
 {
@@ -665,12 +710,6 @@ static void aspeed_ast2400_hace_class_init(ObjectClass *klass, const void *data)
     ahc->hash_mask = 0x000003ff; /* No SG or SHA512 modes */
 }
 
-static const TypeInfo aspeed_ast2400_hace_info = {
-    .name = TYPE_ASPEED_AST2400_HACE,
-    .parent = TYPE_ASPEED_HACE,
-    .class_init = aspeed_ast2400_hace_class_init,
-};
-
 static void aspeed_ast2500_hace_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -684,12 +723,6 @@ static void aspeed_ast2500_hace_class_init(ObjectClass *klass, const void *data)
     ahc->key_mask = 0x3FFFFFC0;
     ahc->hash_mask = 0x000003ff; /* No SG or SHA512 modes */
 }
-
-static const TypeInfo aspeed_ast2500_hace_info = {
-    .name = TYPE_ASPEED_AST2500_HACE,
-    .parent = TYPE_ASPEED_HACE,
-    .class_init = aspeed_ast2500_hace_class_init,
-};
 
 static void aspeed_ast2600_hace_class_init(ObjectClass *klass, const void *data)
 {
@@ -705,12 +738,6 @@ static void aspeed_ast2600_hace_class_init(ObjectClass *klass, const void *data)
     ahc->hash_mask = 0x00147FFF;
 }
 
-static const TypeInfo aspeed_ast2600_hace_info = {
-    .name = TYPE_ASPEED_AST2600_HACE,
-    .parent = TYPE_ASPEED_HACE,
-    .class_init = aspeed_ast2600_hace_class_init,
-};
-
 static void aspeed_ast1030_hace_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
@@ -724,12 +751,6 @@ static void aspeed_ast1030_hace_class_init(ObjectClass *klass, const void *data)
     ahc->key_mask = 0x7FFFFFF8;
     ahc->hash_mask = 0x00147FFF;
 }
-
-static const TypeInfo aspeed_ast1030_hace_info = {
-    .name = TYPE_ASPEED_AST1030_HACE,
-    .parent = TYPE_ASPEED_HACE,
-    .class_init = aspeed_ast1030_hace_class_init,
-};
 
 static void aspeed_ast2700_hace_class_init(ObjectClass *klass, const void *data)
 {
@@ -770,20 +791,39 @@ static void aspeed_ast2700_hace_class_init(ObjectClass *klass, const void *data)
     ahc->has_dma64 = true;
 }
 
-static const TypeInfo aspeed_ast2700_hace_info = {
-    .name = TYPE_ASPEED_AST2700_HACE,
-    .parent = TYPE_ASPEED_HACE,
-    .class_init = aspeed_ast2700_hace_class_init,
+static const TypeInfo aspeed_hace_types[] = {
+    {
+        .name = TYPE_ASPEED_HACE,
+        .parent = TYPE_SYS_BUS_DEVICE,
+        .instance_size = sizeof(AspeedHACEState),
+        .class_init = aspeed_hace_class_init,
+        .class_size = sizeof(AspeedHACEClass),
+    },
+    {
+        .name = TYPE_ASPEED_AST1030_HACE,
+        .parent = TYPE_ASPEED_HACE,
+        .class_init = aspeed_ast1030_hace_class_init,
+    },
+    {
+        .name = TYPE_ASPEED_AST2400_HACE,
+        .parent = TYPE_ASPEED_HACE,
+        .class_init = aspeed_ast2400_hace_class_init,
+    },
+    {
+        .name = TYPE_ASPEED_AST2500_HACE,
+        .parent = TYPE_ASPEED_HACE,
+        .class_init = aspeed_ast2500_hace_class_init,
+    },
+    {
+        .name = TYPE_ASPEED_AST2600_HACE,
+        .parent = TYPE_ASPEED_HACE,
+        .class_init = aspeed_ast2600_hace_class_init,
+    },
+    {
+        .name = TYPE_ASPEED_AST2700_HACE,
+        .parent = TYPE_ASPEED_HACE,
+        .class_init = aspeed_ast2700_hace_class_init,
+    }
 };
 
-static void aspeed_hace_register_types(void)
-{
-    type_register_static(&aspeed_ast2400_hace_info);
-    type_register_static(&aspeed_ast2500_hace_info);
-    type_register_static(&aspeed_ast2600_hace_info);
-    type_register_static(&aspeed_ast1030_hace_info);
-    type_register_static(&aspeed_ast2700_hace_info);
-    type_register_static(&aspeed_hace_info);
-}
-
-type_init(aspeed_hace_register_types);
+DEFINE_TYPES(aspeed_hace_types)

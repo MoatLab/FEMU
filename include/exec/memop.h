@@ -36,10 +36,12 @@ typedef enum MemOp {
     MO_BE    = MO_BSWAP,
 #endif
 #ifdef COMPILING_PER_TARGET
+#ifndef TARGET_NOT_USING_LEGACY_NATIVE_ENDIAN_API
 #if TARGET_BIG_ENDIAN
     MO_TE    = MO_BE,
 #else
     MO_TE    = MO_LE,
+#endif
 #endif
 #endif
 
@@ -73,6 +75,16 @@ typedef enum MemOp {
     MO_ALIGN    = MO_AMASK,
 
     /*
+     * MO_ALIGN_TLB_ONLY:
+     * Apply MO_AMASK only along the TCG slow path if TLB_CHECK_ALIGNED
+     * is set; otherwise unaligned access is permitted.
+     * This is used by target/arm, where unaligned accesses are
+     * permitted for pages marked Normal but aligned accesses are
+     * required for pages marked Device.
+     */
+    MO_ALIGN_TLB_ONLY = 1 << 8,
+
+    /*
      * MO_ATOM_* describes the atomicity requirements of the operation:
      * MO_ATOM_IFALIGN: the operation must be single-copy atomic if it
      *    is aligned; if unaligned there is no atomicity.
@@ -104,7 +116,7 @@ typedef enum MemOp {
      * size of the operation, if aligned.  This retains the behaviour
      * from before this field was introduced.
      */
-    MO_ATOM_SHIFT         = 8,
+    MO_ATOM_SHIFT         = 9,
     MO_ATOM_IFALIGN       = 0 << MO_ATOM_SHIFT,
     MO_ATOM_IFALIGN_PAIR  = 1 << MO_ATOM_SHIFT,
     MO_ATOM_WITHIN16      = 2 << MO_ATOM_SHIFT,
@@ -140,6 +152,7 @@ typedef enum MemOp {
     MO_BESQ  = MO_BE | MO_SQ,
 
 #ifdef COMPILING_PER_TARGET
+#ifndef TARGET_NOT_USING_LEGACY_NATIVE_ENDIAN_API
     MO_TEUW  = MO_TE | MO_UW,
     MO_TEUL  = MO_TE | MO_UL,
     MO_TEUQ  = MO_TE | MO_UQ,
@@ -147,6 +160,7 @@ typedef enum MemOp {
     MO_TESW  = MO_TE | MO_SW,
     MO_TESL  = MO_TE | MO_SL,
     MO_TESQ  = MO_TE | MO_SQ,
+#endif
 #endif
 
     MO_SSIZE = MO_SIZE | MO_SIGN,
@@ -169,16 +183,16 @@ static inline MemOp size_memop(unsigned size)
 }
 
 /**
- * memop_alignment_bits:
+ * memop_tlb_alignment_bits:
  * @memop: MemOp value
  *
- * Extract the alignment size from the memop.
+ * Extract the alignment size for use with TLB_CHECK_ALIGNED.
  */
-static inline unsigned memop_alignment_bits(MemOp memop)
+static inline unsigned memop_tlb_alignment_bits(MemOp memop, bool tlb_check)
 {
     unsigned a = memop & MO_AMASK;
 
-    if (a == MO_UNALN) {
+    if (a == MO_UNALN || (!tlb_check && (memop & MO_ALIGN_TLB_ONLY))) {
         /* No alignment required.  */
         a = 0;
     } else if (a == MO_ALIGN) {
@@ -191,28 +205,15 @@ static inline unsigned memop_alignment_bits(MemOp memop)
     return a;
 }
 
-/*
- * memop_atomicity_bits:
+/**
+ * memop_alignment_bits:
  * @memop: MemOp value
  *
- * Extract the atomicity size from the memop.
+ * Extract the alignment size from the memop.
  */
-static inline unsigned memop_atomicity_bits(MemOp memop)
+static inline unsigned memop_alignment_bits(MemOp memop)
 {
-    unsigned size = memop & MO_SIZE;
-
-    switch (memop & MO_ATOM_MASK) {
-    case MO_ATOM_NONE:
-        size = MO_8;
-        break;
-    case MO_ATOM_IFALIGN_PAIR:
-    case MO_ATOM_WITHIN16_PAIR:
-        size = size ? size - 1 : 0;
-        break;
-    default:
-        break;
-    }
-    return size;
+    return memop_tlb_alignment_bits(memop, false);
 }
 
 #endif

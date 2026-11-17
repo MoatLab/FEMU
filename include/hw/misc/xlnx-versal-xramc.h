@@ -9,8 +9,8 @@
 #ifndef XLNX_VERSAL_XRAMC_H
 #define XLNX_VERSAL_XRAMC_H
 
-#include "hw/sysbus.h"
-#include "hw/register.h"
+#include "hw/core/sysbus.h"
+#include "hw/core/register.h"
 
 #define TYPE_XLNX_XRAM_CTRL "xlnx.versal-xramc"
 
@@ -90,7 +90,6 @@ typedef struct XlnxXramCtrl {
         unsigned int encoded_size;
     } cfg;
 
-    RegisterInfoArray *reg_array;
     uint32_t regs[XRAM_CTRL_R_MAX];
     RegisterInfo regs_info[XRAM_CTRL_R_MAX];
 } XlnxXramCtrl;

@@ -197,11 +197,15 @@
 # @logappend: true to append instead of truncate (default to false to
 #     truncate)
 #
+# @logtimestamp: true to insert timestamps into logfile
+#     (default false) (since 11.0)
+#
 # Since: 2.6
 ##
 { 'struct': 'ChardevCommon',
   'data': { '*logfile': 'str',
-            '*logappend': 'bool' } }
+            '*logappend': 'bool',
+            '*logtimestamp': 'bool' } }
 
 ##
 # @ChardevFile:
@@ -269,21 +273,10 @@
 # @websocket: enable websocket protocol on server sockets
 #     (default: false) (Since: 3.1)
 #
-# @reconnect: For a client socket, if a socket is disconnected, then
-#     attempt a reconnect after the given number of seconds.  Setting
-#     this to zero disables this function.  The use of this member is
-#     deprecated, use @reconnect-ms instead.  (default: 0) (Since: 2.2)
-#
 # @reconnect-ms: For a client socket, if a socket is disconnected,
 #     then attempt a reconnect after the given number of milliseconds.
-#     Setting this to zero disables this function.  This member is
-#     mutually exclusive with @reconnect.
+#     Setting this to zero disables this function.
 #     (default: 0) (Since: 9.2)
-#
-# Features:
-#
-# @deprecated: Member @reconnect is deprecated.  Use @reconnect-ms
-#     instead.
 #
 # Since: 1.4
 ##
@@ -297,7 +290,6 @@
             '*telnet': 'bool',
             '*tn3270': 'bool',
             '*websocket': 'bool',
-            '*reconnect': { 'type': 'int', 'features': [ 'deprecated' ] },
             '*reconnect-ms': 'int' },
   'base': 'ChardevCommon' }
 
@@ -386,16 +378,38 @@
   'if': 'CONFIG_SPICE' }
 
 ##
+# @ChardevVCEncoding:
+#
+# Character encoding expected from the guest on a virtual console.
+#
+# @cp437: CP437 (8-bit Extended ASCII / VGA).  Every byte maps
+#     directly to a glyph; suitable for DOS or other guests that
+#     output raw CP437.
+#
+# @utf8: UTF-8.  Multi-byte sequences are decoded and then mapped
+#     back to CP437 glyphs for display; unmappable codepoints are
+#     shown as '?'.  Suitable for modern Linux guests.
+#
+# Since: 11.1
+##
+{ 'enum': 'ChardevVCEncoding',
+  'data': [ 'cp437', 'utf8' ] }
+
+##
 # @ChardevDBus:
 #
 # Configuration info for DBus chardevs.
 #
 # @name: name of the channel (following docs/spice-port-fqdn.txt)
 #
+# @encoding: character encoding the guest is expected to use
+#     (since 11.1)
+#
 # Since: 7.0
 ##
 { 'struct': 'ChardevDBus',
-  'data': { 'name': 'str' },
+  'data': { 'name': 'str',
+            '*encoding': 'ChardevVCEncoding' },
   'base': 'ChardevCommon',
   'if': 'CONFIG_DBUS_DISPLAY' }
 
@@ -412,6 +426,9 @@
 #
 # @rows: console height, in chars
 #
+# @encoding: character encoding the guest is expected to use
+#     (since 11.1)
+#
 # .. note:: The options are only effective when the VNC or SDL
 #    graphical display backend is active.  They are ignored with the
 #    GTK, Spice, VNC and D-Bus display backends.
@@ -422,7 +439,8 @@
   'data': { '*width': 'int',
             '*height': 'int',
             '*cols': 'int',
-            '*rows': 'int' },
+            '*rows': 'int',
+            '*encoding': 'ChardevVCEncoding' },
   'base': 'ChardevCommon' }
 
 ##
@@ -693,7 +711,6 @@
 { 'struct': 'ChardevRingbufWrapper',
   'data': { 'data': 'ChardevRingbuf' } }
 
-
 ##
 # @ChardevPtyWrapper:
 #
@@ -804,7 +821,7 @@
 #
 # Change a character device backend
 #
-# @id: the chardev's ID, must exist
+# @id: the chardev's ID
 #
 # @backend: new backend type and parameters
 #
@@ -845,7 +862,7 @@
 #
 # Remove a character device backend
 #
-# @id: the chardev's ID, must exist and not be in use
+# @id: the chardev's ID, must not be in use
 #
 # Since: 1.4
 #
@@ -862,7 +879,7 @@
 #
 # Send a break to a character device
 #
-# @id: the chardev's ID, must exist
+# @id: the chardev's ID
 #
 # Since: 2.10
 #

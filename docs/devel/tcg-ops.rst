@@ -563,9 +563,9 @@ Load/Store
 
        ld16u_i32/i64 *t0*, *t1*, *offset*
 
-       ld32s_i64 t0, *t1*, *offset*
+       ld32s_i64 *t0*, *t1*, *offset*
 
-       ld32u_i64 t0, *t1*, *offset*
+       ld32u_i64 *t0*, *t1*, *offset*
 
      - | *t0* = read(*t1* + *offset*)
        |
@@ -598,19 +598,19 @@ Multiword arithmetic support
      - | Compute *t0* = *t1* + *t2* and in addition output to the
          carry bit provided by the host architecture.
 
-   * - addci *t0, *t1*, *t2*
+   * - addci *t0*, *t1*, *t2*
 
      - | Compute *t0* = *t1* + *t2* + *C*, where *C* is the
          input carry bit provided by the host architecture.
          The output carry bit need not be computed.
 
-   * - addcio *t0, *t1*, *t2*
+   * - addcio *t0*, *t1*, *t2*
 
      - | Compute *t0* = *t1* + *t2* + *C*, where *C* is the
          input carry bit provided by the host architecture,
          and also compute the output carry bit.
 
-   * - addc1o *t0, *t1*, *t2*
+   * - addc1o *t0*, *t1*, *t2*
 
      - | Compute *t0* = *t1* + *t2* + 1, and in addition output to the
          carry bit provided by the host architecture.  This is akin to
@@ -630,19 +630,19 @@ Multiword arithmetic support
          identical to the borrow bit.  Thus the addc\* and subb\*
          opcodes must not be mixed.
 
-   * - subbi *t0, *t1*, *t2*
+   * - subbi *t0*, *t1*, *t2*
 
      - | Compute *t0* = *t1* - *t2* - *B*, where *B* is the
          input borrow bit provided by the host architecture.
          The output borrow bit need not be computed.
 
-   * - subbio *t0, *t1*, *t2*
+   * - subbio *t0*, *t1*, *t2*
 
      - | Compute *t0* = *t1* - *t2* - *B*, where *B* is the
          input borrow bit provided by the host architecture,
          and also compute the output borrow bit.
 
-   * - subb1o *t0, *t1*, *t2*
+   * - subb1o *t0*, *t1*, *t2*
 
      - | Compute *t0* = *t1* - *t2* - 1, and in addition output to the
          borrow bit provided by the host architecture.  This is akin to
@@ -694,26 +694,6 @@ Memory Barrier support
          which have ordering side effects.
        |
        | Please see :ref:`atomics-ref` for more information on memory barriers.
-
-
-64-bit guest on 32-bit host support
------------------------------------
-
-The following opcodes are internal to TCG.  Thus they are to be implemented by
-32-bit host code generators, but are not to be emitted by guest translators.
-They are emitted as needed by inline functions within ``tcg-op.h``.
-
-.. list-table::
-
-   * - brcond2_i32 *t0_low*, *t0_high*, *t1_low*, *t1_high*, *cond*, *label*
-
-     - | Similar to brcond, except that the 64-bit values *t0* and *t1*
-         are formed from two 32-bit arguments.
-
-   * - setcond2_i32 *dest*, *t1_low*, *t1_high*, *t2_low*, *t2_high*, *cond*
-
-     - | Similar to setcond, except that the 64-bit values *t1* and *t2* are
-         formed from two 32-bit arguments. The result is a 32-bit value.
 
 
 QEMU specific operations
@@ -789,11 +769,6 @@ specifies the length of the element (if applicable) in log2 8-bit units.
      - | Similarly, for a constant.
        | Smaller values will be replicated to host register size by the expanders.
 
-   * - dup2_vec *v0*, *r1*, *r2*
-
-     - | Duplicate *r2*:*r1* into TYPE/64 copies across *v0*. This opcode is
-         only present for 32-bit hosts.
-
    * - add_vec *v0*, *v1*, *v2*
 
      - | *v0* = *v1* + *v2*, in elements across the vector.
@@ -841,9 +816,15 @@ specifies the length of the element (if applicable) in log2 8-bit units.
 
    * - and_vec *v0*, *v1*, *v2*
 
+       nand_vec *v0*, *v1*, *v2*
+
        or_vec *v0*, *v1*, *v2*
 
+       nor_vec *v0*, *v1*, *v2*
+
        xor_vec *v0*, *v1*, *v2*
+
+       eqv_vec *v0*, *v1*, *v2*
 
        andc_vec *v0*, *v1*, *v2*
 
@@ -876,6 +857,8 @@ specifies the length of the element (if applicable) in log2 8-bit units.
        shrs_vec *v0*, *v1*, *s2*
 
        sars_vec *v0*, *v1*, *s2*
+
+       rotls_vec *v0*, *v1*, *s2*
 
      - | Similarly for logical and arithmetic right shift, and left rotate.
 
@@ -935,15 +918,11 @@ than being a standalone C file.
 Assumptions
 -----------
 
-The target word size (``TCG_TARGET_REG_BITS``) is expected to be 32 bit or
-64 bit. It is expected that the pointer has the same size as the word.
+The target word size (``TCG_TARGET_REG_BITS``) is expected to be 64 bit.
+It is expected that the pointer has the same size as the word.
 
-On a 32 bit target, all 64 bit operations are converted to 32 bits.
-A few specific operations must be implemented to allow it
-(see brcond2_i32, setcond2_i32).
-
-On a 64 bit target, the values are transferred between 32 and 64-bit
-registers using the following ops:
+Values are transferred between 32 and 64-bit registers using the
+following ops:
 
 - extrl_i64_i32
 - extrh_i64_i32

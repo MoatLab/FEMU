@@ -12,7 +12,7 @@
 #ifndef HW_S390_HYPERCALL_H
 #define HW_S390_HYPERCALL_H
 
-#include "cpu.h"
+#include "target/s390x/cpu.h"
 
 #define DIAG500_VIRTIO_NOTIFY           0 /* legacy, implemented as a NOP */
 #define DIAG500_VIRTIO_RESET            1 /* legacy */

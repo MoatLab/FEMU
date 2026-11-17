@@ -29,7 +29,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/intc/aspeed_vic.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/bitops.h"
 #include "qemu/log.h"
@@ -291,9 +291,9 @@ static const MemoryRegionOps aspeed_vic_ops = {
     .valid.unaligned = false,
 };
 
-static void aspeed_vic_reset(DeviceState *dev)
+static void aspeed_vic_reset_hold(Object *obj, ResetType type)
 {
-    AspeedVICState *s = ASPEED_VIC(dev);
+    AspeedVICState *s = ASPEED_VIC(obj);
 
     s->level = 0;
     s->raw = 0;
@@ -342,22 +342,20 @@ static const VMStateDescription vmstate_aspeed_vic = {
 static void aspeed_vic_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
     dc->realize = aspeed_vic_realize;
-    device_class_set_legacy_reset(dc, aspeed_vic_reset);
+    rc->phases.hold = aspeed_vic_reset_hold;
     dc->desc = "ASPEED Interrupt Controller (New)";
     dc->vmsd = &vmstate_aspeed_vic;
 }
 
-static const TypeInfo aspeed_vic_info = {
-    .name = TYPE_ASPEED_VIC,
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(AspeedVICState),
-    .class_init = aspeed_vic_class_init,
+static const TypeInfo aspeed_vic_types[] = {
+    {
+        .name = TYPE_ASPEED_VIC,
+        .parent = TYPE_SYS_BUS_DEVICE,
+        .instance_size = sizeof(AspeedVICState),
+        .class_init = aspeed_vic_class_init,
+    }
 };
 
-static void aspeed_vic_register_types(void)
-{
-    type_register_static(&aspeed_vic_info);
-}
-
-type_init(aspeed_vic_register_types);
+DEFINE_TYPES(aspeed_vic_types)

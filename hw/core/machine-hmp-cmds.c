@@ -24,7 +24,7 @@
 #include "qapi/string-output-visitor.h"
 #include "qemu/error-report.h"
 #include "system/numa.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 
 void hmp_info_cpus(Monitor *mon, const QDict *qdict)
 {
@@ -163,6 +163,24 @@ void hmp_info_kvm(Monitor *mon, const QDict *qdict)
     qapi_free_KvmInfo(info);
 }
 
+void hmp_info_accelerators(Monitor *mon, const QDict *qdict)
+{
+    AcceleratorInfo *info;
+    AcceleratorList *accel;
+
+    info = qmp_query_accelerators(NULL);
+    for (accel = info->present; accel; accel = accel->next) {
+        char trail = accel->next ? ' ' : '\n';
+        if (info->enabled == accel->value) {
+            monitor_printf(mon, "[%s]%c", Accelerator_str(accel->value), trail);
+        } else {
+            monitor_printf(mon, "%s%c", Accelerator_str(accel->value), trail);
+        }
+    }
+
+    qapi_free_AcceleratorInfo(info);
+}
+
 void hmp_info_uuid(Monitor *mon, const QDict *qdict)
 {
     UuidInfo *info;
@@ -261,6 +279,7 @@ void hmp_info_memory_devices(Monitor *mon, const QDict *qdict)
     PCDIMMDeviceInfo *di;
     SgxEPCDeviceInfo *se;
     HvBalloonDeviceInfo *hi;
+    SpMemDeviceInfo *spmi;
 
     for (info = info_list; info; info = info->next) {
         value = info->value;
@@ -331,6 +350,16 @@ void hmp_info_memory_devices(Monitor *mon, const QDict *qdict)
                 if (hi->memdev) {
                     monitor_printf(mon, "  memdev: %s\n", hi->memdev);
                 }
+                break;
+            case MEMORY_DEVICE_INFO_KIND_SP_MEM:
+                spmi = value->u.sp_mem.data;
+                monitor_printf(mon, "Memory device [%s]: \"%s\"\n",
+                               MemoryDeviceInfoKind_str(value->type),
+                               spmi->id ? spmi->id : "");
+                monitor_printf(mon, "  addr: 0x%" PRIx64 "\n", spmi->addr);
+                monitor_printf(mon, "  node: %" PRId64 "\n", spmi->node);
+                monitor_printf(mon, "  size: %" PRIu64 "\n", spmi->size);
+                monitor_printf(mon, "  memdev: %s\n", spmi->memdev);
                 break;
             default:
                 g_assert_not_reached();

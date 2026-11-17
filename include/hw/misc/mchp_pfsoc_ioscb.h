@@ -23,7 +23,7 @@
 #ifndef MCHP_PFSOC_IOSCB_H
 #define MCHP_PFSOC_IOSCB_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 
 typedef struct MchpPfSoCIoscbState {
     SysBusDevice parent;
@@ -35,6 +35,8 @@ typedef struct MchpPfSoCIoscbState {
     MemoryRegion mailbox;
     MemoryRegion cfg;
     MemoryRegion ccc;
+    MemoryRegion pll_nw_0;
+    MemoryRegion pll_nw_1;
     MemoryRegion pll_mss;
     MemoryRegion cfm_mss;
     MemoryRegion pll_ddr;

@@ -29,15 +29,14 @@
 #include "qemu/error-report.h"
 #include "qemu/option.h"
 #include "qemu/units.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/i386/x86.h"
 #include "hw/i386/pc.h"
-#include "hw/loader.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/loader.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/block/flash.h"
 #include "system/kvm.h"
 #include "target/i386/sev.h"
-#include "kvm/tdx.h"
 
 #define FLASH_SECTOR_SIZE 4096
 
@@ -280,37 +279,6 @@ void pc_system_firmware_init(PCMachineState *pcms,
                              "using IGVM");
                 exit(1);
             }
-        }
-    }
-}
-
-void x86_firmware_configure(hwaddr gpa, void *ptr, int size)
-{
-    int ret;
-
-    /*
-     * OVMF places a GUIDed structures in the flash, so
-     * search for them
-     */
-    pc_system_parse_ovmf_flash(ptr, size);
-
-    if (sev_enabled()) {
-
-        /* Copy the SEV metadata table (if it exists) */
-        pc_system_parse_sev_metadata(ptr, size);
-
-        ret = sev_es_save_reset_vector(ptr, size);
-        if (ret) {
-            error_report("failed to locate and/or save reset vector");
-            exit(1);
-        }
-
-        sev_encrypt_flash(gpa, ptr, size, &error_fatal);
-    } else if (is_tdx_vm()) {
-        ret = tdx_parse_tdvf(ptr, size);
-        if (ret) {
-            error_report("failed to parse TDVF for TDX VM");
-            exit(1);
         }
     }
 }

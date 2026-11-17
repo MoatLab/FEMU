@@ -9,7 +9,7 @@
 #ifndef FSL_IMX8MP_H
 #define FSL_IMX8MP_H
 
-#include "cpu.h"
+#include "target/arm/cpu.h"
 #include "hw/char/imx_serial.h"
 #include "hw/gpio/imx_gpio.h"
 #include "hw/i2c/imx_i2c.h"
@@ -17,8 +17,9 @@
 #include "hw/misc/imx7_snvs.h"
 #include "hw/misc/imx8mp_analog.h"
 #include "hw/misc/imx8mp_ccm.h"
+#include "hw/net/flexcan.h"
 #include "hw/net/imx_fec.h"
-#include "hw/or-irq.h"
+#include "hw/core/or-irq.h"
 #include "hw/pci-host/designware.h"
 #include "hw/pci-host/fsl_imx8m_phy.h"
 #include "hw/sd/sdhci.h"
@@ -26,7 +27,7 @@
 #include "hw/timer/imx_gpt.h"
 #include "hw/usb/hcd-dwc3.h"
 #include "hw/watchdog/wdt_imx2.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "qom/object.h"
 #include "qemu/units.h"
 
@@ -37,6 +38,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(FslImx8mpState, FSL_IMX8MP)
 #define FSL_IMX8MP_RAM_SIZE_MAX     (8 * GiB)
 
 enum FslImx8mpConfiguration {
+    FSL_IMX8MP_NUM_CANS         = 2,
     FSL_IMX8MP_NUM_CPUS         = 4,
     FSL_IMX8MP_NUM_ECSPIS       = 3,
     FSL_IMX8MP_NUM_GPIOS        = 5,
@@ -68,11 +70,14 @@ struct FslImx8mpState {
     USBDWC3            usb[FSL_IMX8MP_NUM_USBS];
     DesignwarePCIEHost pcie;
     FslImx8mPciePhyState   pcie_phy;
+    FlexcanState       flexcan[FSL_IMX8MP_NUM_CANS];
     OrIRQState         gpt5_gpt6_irq;
     MemoryRegion       ocram;
 
     uint32_t           phy_num;
     bool               phy_connected;
+
+    CanBusState       *canbus[FSL_IMX8MP_NUM_CANS];
 };
 
 enum FslImx8mpMemoryRegions {
@@ -279,6 +284,9 @@ enum FslImx8mpIrqs {
     FSL_IMX8MP_PCI_INTC_IRQ = 124,
     FSL_IMX8MP_PCI_INTD_IRQ = 123,
     FSL_IMX8MP_PCI_MSI_IRQ  = 140,
+
+    FSL_IMX8MP_FLEXCAN1_IRQ  = 142,
+    FSL_IMX8MP_FLEXCAN2_IRQ  = 144,
 };
 
 #endif /* FSL_IMX8MP_H */

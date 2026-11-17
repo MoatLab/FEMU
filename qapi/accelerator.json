@@ -29,6 +29,11 @@
 #
 # Return information about KVM acceleration
 #
+# Features:
+#
+# @deprecated: This command is deprecated.  Use `query-accelerators`
+#     instead.
+#
 # Since: 0.14
 #
 # .. qmp-example::
@@ -36,7 +41,8 @@
 #     -> { "execute": "query-kvm" }
 #     <- { "return": { "enabled": true, "present": true } }
 ##
-{ 'command': 'query-kvm', 'returns': 'KvmInfo' }
+{ 'command': 'query-kvm', 'returns': 'KvmInfo',
+  'features': [ 'deprecated' ] }
 
 ##
 # @x-accel-stats:
@@ -54,3 +60,58 @@
 { 'command': 'x-accel-stats',
   'returns': 'HumanReadableText',
   'features': [ 'unstable' ] }
+
+##
+# @Accelerator:
+#
+# Information about support for MSHV acceleration
+#
+# @hvf: Apple Hypervisor.framework
+#
+# @kvm: KVM
+#
+# @mshv: Hyper-V
+#
+# @nvmm: NetBSD NVMM
+#
+# @qtest: QTest (dummy accelerator)
+#
+# @tcg: TCG (dynamic translation)
+#
+# @whpx: Windows Hypervisor Platform
+#
+# @xen: Xen
+#
+# Since: 10.2.0
+##
+{ 'enum': 'Accelerator', 'data': ['hvf', 'kvm', 'mshv', 'nvmm', 'qtest', 'tcg', 'whpx', 'xen'] }
+
+##
+# @AcceleratorInfo:
+#
+# Information about support for various accelerators
+#
+# @enabled: the accelerator that is in use
+#
+# @present: the list of accelerators that are built into this
+#     executable
+#
+# Since: 10.2.0
+##
+{ 'struct': 'AcceleratorInfo', 'data': {'enabled': 'Accelerator', 'present': ['Accelerator']} }
+
+##
+# @query-accelerators:
+#
+# Return information about accelerators
+#
+# Returns: @AcceleratorInfo
+#
+# Since: 10.2.0
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-accelerators" }
+#     <- { "return": { "enabled": "mshv", "present": ["kvm", "mshv", "qtest", "tcg"] } }
+##
+{ 'command': 'query-accelerators', 'returns': 'AcceleratorInfo' }

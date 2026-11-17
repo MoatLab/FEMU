@@ -41,9 +41,16 @@
 #define IDE_PCI_FUNC    1
 
 #define IDE_BASE 0x1f0
+#define IDE_BASE2 0x3f6
 #define IDE_PRIMARY_IRQ 14
 
+#define IDE_CTRL_RESET 0x04
+
 #define ATAPI_BLOCK_SIZE 2048
+
+/* Raw READ CD sector: 12 sync + 4 header + 2048 data + 288 EDC/ECC. */
+#define ATAPI_RAW_SIZE   2352
+#define ATAPI_RAW_DATA   16
 
 /* How many bytes to receive via ATAPI PIO at one time.
  * Must be less than 0xFFFF. */
@@ -88,6 +95,7 @@ enum {
 
 enum {
     CMD_DSM         = 0x06,
+    CMD_READ        = 0x20,  /* READ SECTOR(S) */
     CMD_DIAGNOSE    = 0x90,
     CMD_INIT_DP     = 0x91,  /* INITIALIZE DEVICE PARAMETERS */
     CMD_READ_DMA    = 0xc8,
@@ -99,6 +107,7 @@ enum {
 
     CMDF_ABORT      = 0x100,
     CMDF_NO_BM      = 0x200,
+    CMDF_NO_WAIT    = 0x400,
 };
 
 enum {
@@ -200,20 +209,48 @@ static uint64_t trim_range_le(uint64_t sector, uint16_t count)
     return cpu_to_le64(((uint64_t)count << 48) + sector);
 }
 
-static int send_dma_request(QTestState *qts, int cmd, uint64_t sector,
-                            int nb_sectors, PrdtEntry *prdt, int prdt_entries,
-                            void(*post_exec)(QPCIDevice *dev, QPCIBar ide_bar,
-                                             uint64_t sector, int nb_sectors))
+static uint8_t wait_dma_completion(QTestState *qts, QPCIDevice *dev,
+                                   QPCIBar bmdma_bar, QPCIBar ide_bar)
 {
-    QPCIDevice *dev;
-    QPCIBar bmdma_bar, ide_bar;
+    uint8_t status;
+
+    /* Wait for the DMA transfer to complete */
+    do {
+        status = qpci_io_readb(dev, bmdma_bar, bmreg_status);
+    } while ((status & (BM_STS_ACTIVE | BM_STS_INTR)) == BM_STS_ACTIVE);
+
+    g_assert_cmpint(qtest_get_irq(qts, IDE_PRIMARY_IRQ), ==,
+                    !!(status & BM_STS_INTR));
+
+    /* Check IDE status code */
+    assert_bit_set(qpci_io_readb(dev, ide_bar, reg_status), DRDY);
+    assert_bit_clear(qpci_io_readb(dev, ide_bar, reg_status), BSY | DRQ);
+
+    /* Reading the status register clears the IRQ */
+    g_assert(!qtest_get_irq(qts, IDE_PRIMARY_IRQ));
+
+    /* Stop DMA transfer if still active */
+    if (status & BM_STS_ACTIVE) {
+        qpci_io_writeb(dev, bmdma_bar, bmreg_cmd, 0);
+    }
+
+    return status;
+}
+
+static int send_dma_request_dev(QTestState *qts, QPCIDevice *dev,
+                                QPCIBar bmdma_bar, QPCIBar ide_bar, int cmd,
+                                uint64_t sector, int nb_sectors,
+                                PrdtEntry *prdt, int prdt_entries,
+                                void(*post_exec)(QPCIDevice *dev,
+                                                 QPCIBar ide_bar,
+                                                 uint64_t sector,
+                                                 int nb_sectors))
+{
     uintptr_t guest_prdt;
     size_t len;
     bool from_dev;
     uint8_t status;
     int flags;
-
-    dev = get_pci_device(qts, &bmdma_bar, &ide_bar);
 
     flags = cmd & ~0xff;
     cmd &= 0xff;
@@ -280,26 +317,28 @@ static int send_dma_request(QTestState *qts, int cmd, uint64_t sector,
         qpci_io_writeb(dev, bmdma_bar, bmreg_cmd, 0);
     }
 
-    /* Wait for the DMA transfer to complete */
-    do {
-        status = qpci_io_readb(dev, bmdma_bar, bmreg_status);
-    } while ((status & (BM_STS_ACTIVE | BM_STS_INTR)) == BM_STS_ACTIVE);
-
-    g_assert_cmpint(qtest_get_irq(qts, IDE_PRIMARY_IRQ), ==,
-                    !!(status & BM_STS_INTR));
-
-    /* Check IDE status code */
-    assert_bit_set(qpci_io_readb(dev, ide_bar, reg_status), DRDY);
-    assert_bit_clear(qpci_io_readb(dev, ide_bar, reg_status), BSY | DRQ);
-
-    /* Reading the status register clears the IRQ */
-    g_assert(!qtest_get_irq(qts, IDE_PRIMARY_IRQ));
-
-    /* Stop DMA transfer if still active */
-    if (status & BM_STS_ACTIVE) {
-        qpci_io_writeb(dev, bmdma_bar, bmreg_cmd, 0);
+    if (flags & CMDF_NO_WAIT) {
+        return 0;
     }
 
+    status = wait_dma_completion(qts, dev, bmdma_bar, ide_bar);
+
+    return status;
+}
+
+static int send_dma_request(QTestState *qts, int cmd, uint64_t sector,
+                            int nb_sectors, PrdtEntry *prdt, int prdt_entries,
+                            void(*post_exec)(QPCIDevice *dev, QPCIBar ide_bar,
+                                             uint64_t sector, int nb_sectors))
+{
+    QPCIDevice *dev;
+    QPCIBar bmdma_bar, ide_bar;
+    uint8_t status;
+
+    dev = get_pci_device(qts, &bmdma_bar, &ide_bar);
+    status = send_dma_request_dev(qts, dev, bmdma_bar, ide_bar,
+                                  cmd, sector, nb_sectors, prdt, prdt_entries,
+                                  post_exec);
     free_pci_device(dev);
 
     return status;
@@ -441,6 +480,60 @@ static void test_bmdma_trim(void)
     g_assert_cmphex(status, ==, BM_STS_INTR);
     assert_bit_set(qpci_io_readb(dev, ide_bar, reg_status), ERR);
     assert_bit_set(qpci_io_readb(dev, ide_bar, reg_error), ABRT);
+
+    free_pci_device(dev);
+    g_free(buf);
+    test_bmdma_teardown(qts);
+}
+
+static void test_bmdma_trim_reset(void)
+{
+    QTestState *qts;
+    QPCIDevice *dev;
+    QPCIBar bmdma_bar, ide_bar, ide_bar2;
+    uint8_t status;
+    const uint64_t trim_range[] = {
+        trim_range_le(0, 2),
+        trim_range_le(6, 8),
+    };
+    size_t len = 512;
+    uint8_t *buf;
+    uintptr_t guest_buf;
+    PrdtEntry prdt[1];
+
+    qts = ide_test_start(
+        "-blockdev file,filename=%s,node-name=img "
+        "-blockdev blkdebug,image=img,node-name=dbg,discard=unmap,"
+        "inject-error.0.event=none,inject-error.0.iotype=discard,"
+        "inject-error.0.errno=0,inject-error.0.delay-ns=1000000 "
+        "-device ide-hd,drive=dbg,bus=ide.0",
+        tmp_path[0]);
+    qtest_irq_intercept_in(qts, "ioapic");
+
+    guest_buf = guest_alloc(&guest_malloc, len);
+    prdt[0].addr = cpu_to_le32(guest_buf),
+    prdt[0].size = cpu_to_le32(len | PRDT_EOT),
+
+    dev = get_pci_device(qts, &bmdma_bar, &ide_bar);
+    ide_bar2 = qpci_legacy_iomap(dev, IDE_BASE2);
+
+    buf = g_malloc(len);
+
+    /* TRIM request with two segments */
+    *((uint64_t *)buf) = trim_range[0];
+    *((uint64_t *)buf + 1) = trim_range[1];
+
+    qtest_memwrite(qts, guest_buf, buf, 2 * sizeof(uint64_t));
+
+    send_dma_request_dev(qts, dev, bmdma_bar, ide_bar, CMD_DSM | CMDF_NO_WAIT, 0, 1, prdt,
+                     ARRAY_SIZE(prdt), NULL);
+
+    /* Reset the device while the first segment is in flight */
+    qpci_io_writeb(dev, ide_bar2, 0, IDE_CTRL_RESET);
+
+    status = wait_dma_completion(qts, dev, bmdma_bar, ide_bar);
+    g_assert_cmphex(status, ==, BM_STS_INTR);
+    assert_bit_clear(qpci_io_readb(dev, ide_bar, reg_status), DF | ERR);
 
     free_pci_device(dev);
     g_free(buf);
@@ -894,6 +987,41 @@ static void send_scsi_cdb_read10(QPCIDevice *dev, QPCIBar ide_bar,
     }
 }
 
+typedef struct ReadCDCDB {
+    uint8_t opcode;
+    uint8_t sector_type;
+    uint32_t lba;
+    uint8_t length[3];
+    uint8_t main_channel;
+    uint8_t sub_channel;
+    uint8_t control;
+} __attribute__((__packed__)) ReadCDCDB;
+
+static void send_scsi_cdb_read_cd(QPCIDevice *dev, QPCIBar ide_bar,
+                                  uint64_t lba, int nblocks)
+{
+    ReadCDCDB pkt = { };
+    int i;
+
+    g_assert_cmpint(lba, <=, UINT32_MAX);
+    g_assert_cmpint(nblocks, >=, 0);
+    g_assert_cmpint(nblocks, <=, 0xffffff);
+
+    /* Construct SCSI CDB packet */
+    pkt.opcode = 0xbe;
+    pkt.lba = cpu_to_be32(lba);
+    pkt.length[0] = (nblocks >> 16) & 0xff;
+    pkt.length[1] = (nblocks >> 8) & 0xff;
+    pkt.length[2] = nblocks & 0xff;
+    pkt.main_channel = 0xf8; /* sync + headers + user data + EDC/ECC: 2352 */
+
+    /* Send Packet */
+    for (i = 0; i < sizeof(ReadCDCDB) / 2; i++) {
+        qpci_io_writew(dev, ide_bar, reg_data,
+                       le16_to_cpu(((uint16_t *)&pkt)[i]));
+    }
+}
+
 static void nsleep(QTestState *qts, int64_t nsecs)
 {
     const struct timespec val = { .tv_nsec = nsecs };
@@ -946,8 +1074,14 @@ static void ide_wait_intr(QTestState *qts, int irq)
     g_assert_not_reached();
 }
 
-static void cdrom_pio_impl(int nblocks)
+#define CDROM_PIO 0
+#define CDROM_DMA (1 << 0)
+#define CDROM_RAW (1 << 1)
+
+static void cdrom_read_impl(int nblocks, unsigned flags)
 {
+    bool dma = flags & CDROM_DMA;
+    bool raw = flags & CDROM_RAW;
     QTestState *qts;
     QPCIDevice *dev;
     QPCIBar bmdma_bar, ide_bar;
@@ -955,8 +1089,11 @@ static void cdrom_pio_impl(int nblocks)
     int patt_blocks = MAX(16, nblocks);
     size_t patt_len = ATAPI_BLOCK_SIZE * patt_blocks;
     char *pattern = g_malloc(patt_len);
-    size_t rxsize = ATAPI_BLOCK_SIZE * nblocks;
+    unsigned xfer = raw ? ATAPI_RAW_SIZE : ATAPI_BLOCK_SIZE;
+    size_t rxsize = xfer * nblocks;
     uint16_t *rx = g_malloc0(rxsize);
+    void (*send_cdb)(QPCIDevice *, QPCIBar, uint64_t, int) =
+        raw ? send_scsi_cdb_read_cd : send_scsi_cdb_read10;
     int i, j;
     uint8_t data;
     uint16_t limit;
@@ -975,110 +1112,178 @@ static void cdrom_pio_impl(int nblocks)
     dev = get_pci_device(qts, &bmdma_bar, &ide_bar);
     qtest_irq_intercept_in(qts, "ioapic");
 
-    /* PACKET command on device 0 */
-    qpci_io_writeb(dev, ide_bar, reg_device, 0);
-    qpci_io_writeb(dev, ide_bar, reg_lba_middle, BYTE_COUNT_LIMIT & 0xFF);
-    qpci_io_writeb(dev, ide_bar, reg_lba_high, (BYTE_COUNT_LIMIT >> 8 & 0xFF));
-    qpci_io_writeb(dev, ide_bar, reg_command, CMD_PACKET);
-    /* HP0: Check_Status_A State */
-    nsleep(qts, 400);
-    data = ide_wait_clear(qts, BSY);
-    /* HP1: Send_Packet State */
-    assert_bit_set(data, DRQ | DRDY);
-    assert_bit_clear(data, ERR | DF | BSY);
+    if (dma) {
+        uintptr_t guest_buf = guest_alloc(&guest_malloc, rxsize);
+        PrdtEntry prdt[1];
 
-    /* SCSI CDB (READ10) -- read n*2048 bytes from block 0 */
-    send_scsi_cdb_read10(dev, ide_bar, 0, nblocks);
+        prdt[0].addr = cpu_to_le32(guest_buf);
+        prdt[0].size = cpu_to_le32(rxsize | PRDT_EOT);
 
-    /* Read data back: occurs in bursts of 'BYTE_COUNT_LIMIT' bytes.
-     * If BYTE_COUNT_LIMIT is odd, we transfer BYTE_COUNT_LIMIT - 1 bytes.
-     * We allow an odd limit only when the remaining transfer size is
-     * less than BYTE_COUNT_LIMIT. However, SCSI's read10 command can only
-     * request n blocks, so our request size is always even.
-     * For this reason, we assume there is never a hanging byte to fetch. */
-    g_assert(!(rxsize & 1));
-    limit = BYTE_COUNT_LIMIT & ~1;
-    for (i = 0; i < DIV_ROUND_UP(rxsize, limit); i++) {
-        size_t offset = i * (limit / 2);
-        size_t rem = (rxsize / 2) - offset;
+        send_dma_request_dev(qts, dev, bmdma_bar, ide_bar, CMD_PACKET, 0,
+                             nblocks, prdt, ARRAY_SIZE(prdt), send_cdb);
 
-        /* HP3: INTRQ_Wait */
-        ide_wait_intr(qts, IDE_PRIMARY_IRQ);
-
-        /* HP2: Check_Status_B (and clear IRQ) */
+        qtest_memread(qts, guest_buf, rx, rxsize);
+    } else {
+        /* PACKET command on device 0 */
+        qpci_io_writeb(dev, ide_bar, reg_device, 0);
+        qpci_io_writeb(dev, ide_bar, reg_lba_middle, BYTE_COUNT_LIMIT & 0xFF);
+        qpci_io_writeb(dev, ide_bar, reg_lba_high,
+                       (BYTE_COUNT_LIMIT >> 8 & 0xFF));
+        qpci_io_writeb(dev, ide_bar, reg_command, CMD_PACKET);
+        /* HP0: Check_Status_A State */
+        nsleep(qts, 400);
         data = ide_wait_clear(qts, BSY);
+        /* HP1: Send_Packet State */
         assert_bit_set(data, DRQ | DRDY);
         assert_bit_clear(data, ERR | DF | BSY);
 
-        /* HP4: Transfer_Data */
-        for (j = 0; j < MIN((limit / 2), rem); j++) {
-            rx[offset + j] = cpu_to_le16(qpci_io_readw(dev, ide_bar,
-                                                       reg_data));
+        send_cdb(dev, ide_bar, 0, nblocks);
+
+        /*
+         * Read data back: occurs in bursts of 'BYTE_COUNT_LIMIT' bytes.
+         * If BYTE_COUNT_LIMIT is odd, we transfer BYTE_COUNT_LIMIT - 1 bytes.
+         * We allow an odd limit only when the remaining transfer size is
+         * less than BYTE_COUNT_LIMIT. However, SCSI's read10 command can only
+         * request n blocks, so our request size is always even.
+         * For this reason, we assume there is never a hanging byte to fetch.
+         */
+        g_assert(!(rxsize & 1));
+        limit = BYTE_COUNT_LIMIT & ~1;
+        for (i = 0; i < DIV_ROUND_UP(rxsize, limit); i++) {
+            size_t offset = i * (limit / 2);
+            size_t rem = (rxsize / 2) - offset;
+
+            /* HP3: INTRQ_Wait */
+            ide_wait_intr(qts, IDE_PRIMARY_IRQ);
+
+            /* HP2: Check_Status_B (and clear IRQ) */
+            data = ide_wait_clear(qts, BSY);
+            assert_bit_set(data, DRQ | DRDY);
+            assert_bit_clear(data, ERR | DF | BSY);
+
+            /* HP4: Transfer_Data */
+            for (j = 0; j < MIN((limit / 2), rem); j++) {
+                rx[offset + j] = cpu_to_le16(qpci_io_readw(dev, ide_bar,
+                                                           reg_data));
+            }
         }
+
+        /* Check for final completion IRQ */
+        ide_wait_intr(qts, IDE_PRIMARY_IRQ);
+
+        /* Sanity check final state */
+        data = ide_wait_clear(qts, DRQ);
+        assert_bit_set(data, DRDY);
+        assert_bit_clear(data, DRQ | ERR | DF | BSY);
     }
 
-    /* Check for final completion IRQ */
-    ide_wait_intr(qts, IDE_PRIMARY_IRQ);
+    if (raw) {
+        /* The 2048-byte payload of each raw sector sits past its header. */
+        for (i = 0; i < nblocks; i++) {
+            uint8_t *sec = (uint8_t *)rx + i * ATAPI_RAW_SIZE + ATAPI_RAW_DATA;
 
-    /* Sanity check final state */
-    data = ide_wait_clear(qts, DRQ);
-    assert_bit_set(data, DRDY);
-    assert_bit_clear(data, DRQ | ERR | DF | BSY);
+            g_assert_cmpint(memcmp(sec, pattern + i * ATAPI_BLOCK_SIZE,
+                                   ATAPI_BLOCK_SIZE), ==, 0);
+        }
+    } else {
+        g_assert_cmpint(memcmp(pattern, rx, rxsize), ==, 0);
+    }
 
-    g_assert_cmpint(memcmp(pattern, rx, rxsize), ==, 0);
     g_free(pattern);
     g_free(rx);
     test_bmdma_teardown(qts);
     free_pci_device(dev);
 }
 
+/* Zero sectors per track has to abort (ATA-5 8.16.6), not divide by zero */
+static void test_specify_zero_sectors(void)
+{
+    QTestState *qts;
+    QPCIDevice *dev;
+    QPCIBar bmdma_bar, ide_bar;
+    uint16_t buf[256];
+    uint8_t data;
+    int i;
+
+    qts = ide_test_start(
+        "-blockdev driver=file,node-name=hda,filename=%s "
+        "-device ide-hd,drive=hda,bus=ide.0,unit=0 ",
+        tmp_path[0]);
+
+    dev = get_pci_device(qts, &bmdma_bar, &ide_bar);
+
+    qpci_io_writeb(dev, ide_bar, reg_nsectors, 0);
+    qpci_io_writeb(dev, ide_bar, reg_device, 0);
+    qpci_io_writeb(dev, ide_bar, reg_command, CMD_INIT_DP);
+
+    assert_bit_set(qpci_io_readb(dev, ide_bar, reg_status), ERR);
+    assert_bit_set(qpci_io_readb(dev, ide_bar, reg_error), ABRT);
+
+    /* The refused request has to leave the default translation in effect */
+    qpci_io_writeb(dev, ide_bar, reg_device, 0);
+    qpci_io_writeb(dev, ide_bar, reg_command, CMD_IDENTIFY);
+    for (i = 0; i < 256; i++) {
+        buf[i] = qpci_io_readw(dev, ide_bar, reg_data);
+    }
+    g_assert_cmpint(buf[55], ==, 16);
+    g_assert_cmpint(buf[56], ==, 63);
+
+    /* READ SECTOR(S) of CHS 0/0/1, which used to crash QEMU */
+    qpci_io_writeb(dev, ide_bar, reg_nsectors, 1);
+    qpci_io_writeb(dev, ide_bar, reg_lba_low, 1);
+    qpci_io_writeb(dev, ide_bar, reg_lba_middle, 0);
+    qpci_io_writeb(dev, ide_bar, reg_lba_high, 0);
+    qpci_io_writeb(dev, ide_bar, reg_device, 0);
+    qpci_io_writeb(dev, ide_bar, reg_command, CMD_READ);
+
+    data = ide_wait_clear(qts, BSY);
+    assert_bit_set(data, DRQ);
+    assert_bit_clear(data, ERR | DF);
+    for (i = 0; i < 256; i++) {
+        buf[i] = qpci_io_readw(dev, ide_bar, reg_data);
+    }
+    assert_bit_clear(qpci_io_readb(dev, ide_bar, reg_status), ERR | DF | DRQ);
+
+    /* A supported translation is still accepted */
+    qpci_io_writeb(dev, ide_bar, reg_nsectors, 32);
+    qpci_io_writeb(dev, ide_bar, reg_device, 7);
+    qpci_io_writeb(dev, ide_bar, reg_command, CMD_INIT_DP);
+
+    assert_bit_clear(qpci_io_readb(dev, ide_bar, reg_status), ERR);
+
+    ide_test_quit(qts);
+    free_pci_device(dev);
+}
+
 static void test_cdrom_pio(void)
 {
-    cdrom_pio_impl(1);
+    cdrom_read_impl(1, CDROM_PIO);
 }
 
 static void test_cdrom_pio_large(void)
 {
     /* Test a few loops of the PIO DRQ mechanism. */
-    cdrom_pio_impl(BYTE_COUNT_LIMIT * 4 / ATAPI_BLOCK_SIZE);
+    cdrom_read_impl(BYTE_COUNT_LIMIT * 4 / ATAPI_BLOCK_SIZE, CDROM_PIO);
 }
-
 
 static void test_cdrom_dma(void)
 {
-    QTestState *qts;
-    static const size_t len = ATAPI_BLOCK_SIZE;
-    size_t ret;
-    char *pattern = g_malloc(ATAPI_BLOCK_SIZE * 16);
-    char *rx = g_malloc0(len);
-    uintptr_t guest_buf;
-    PrdtEntry prdt[1];
-    FILE *fh;
+    cdrom_read_impl(1, CDROM_DMA);
+}
 
-    qts = ide_test_start(
-            "-drive if=none,file=%s,media=cdrom,format=raw,id=sr0,index=0 "
-            "-device ide-cd,drive=sr0,bus=ide.0", tmp_path[0]);
-    qtest_irq_intercept_in(qts, "ioapic");
+static void test_cdrom_dma_large(void)
+{
+    cdrom_read_impl(BYTE_COUNT_LIMIT * 4 / ATAPI_BLOCK_SIZE, CDROM_DMA);
+}
 
-    guest_buf = guest_alloc(&guest_malloc, len);
-    prdt[0].addr = cpu_to_le32(guest_buf);
-    prdt[0].size = cpu_to_le32(len | PRDT_EOT);
+static void test_cdrom_pio_raw(void)
+{
+    cdrom_read_impl(4, CDROM_RAW);
+}
 
-    generate_pattern(pattern, ATAPI_BLOCK_SIZE * 16, ATAPI_BLOCK_SIZE);
-    fh = fopen(tmp_path[0], "wb+");
-    ret = fwrite(pattern, ATAPI_BLOCK_SIZE, 16, fh);
-    g_assert_cmpint(ret, ==, 16);
-    fclose(fh);
-
-    send_dma_request(qts, CMD_PACKET, 0, 1, prdt, 1, send_scsi_cdb_read10);
-
-    /* Read back data from guest memory into local qtest memory */
-    qtest_memread(qts, guest_buf, rx, len);
-    g_assert_cmpint(memcmp(pattern, rx, len), ==, 0);
-
-    g_free(pattern);
-    g_free(rx);
-    test_bmdma_teardown(qts);
+static void test_cdrom_dma_raw(void)
+{
+    cdrom_read_impl(4, CDROM_DMA | CDROM_RAW);
 }
 
 int main(int argc, char **argv)
@@ -1121,6 +1326,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
 
     qtest_add_func("/ide/read_native", test_specify);
+    qtest_add_func("/ide/specify/zero_sectors", test_specify_zero_sectors);
 
     qtest_add_func("/ide/identify", test_identify);
 
@@ -1128,6 +1334,7 @@ int main(int argc, char **argv)
 
     qtest_add_func("/ide/bmdma/simple_rw", test_bmdma_simple_rw);
     qtest_add_func("/ide/bmdma/trim", test_bmdma_trim);
+    qtest_add_func("/ide/bmdma/trim_reset", test_bmdma_trim_reset);
     qtest_add_func("/ide/bmdma/various_prdts", test_bmdma_various_prdts);
     qtest_add_func("/ide/bmdma/no_busmaster", test_bmdma_no_busmaster);
 
@@ -1139,6 +1346,9 @@ int main(int argc, char **argv)
     qtest_add_func("/ide/cdrom/pio", test_cdrom_pio);
     qtest_add_func("/ide/cdrom/pio_large", test_cdrom_pio_large);
     qtest_add_func("/ide/cdrom/dma", test_cdrom_dma);
+    qtest_add_func("/ide/cdrom/dma_large", test_cdrom_dma_large);
+    qtest_add_func("/ide/cdrom/pio_raw", test_cdrom_pio_raw);
+    qtest_add_func("/ide/cdrom/dma_raw", test_cdrom_dma_raw);
 
     ret = g_test_run();
 

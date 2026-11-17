@@ -1,3 +1,0 @@
-config OPENRISC
-    bool
-    select DEVICE_TREE # needed by boot.c

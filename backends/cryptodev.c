@@ -454,9 +454,15 @@ bool cryptodev_backend_is_ready(CryptoDevBackend *backend)
 }
 
 static bool
-cryptodev_backend_can_be_deleted(UserCreatable *uc)
+cryptodev_backend_prepare_delete(UserCreatable *uc, Error **errp)
 {
-    return !cryptodev_backend_is_used(CRYPTODEV_BACKEND(uc));
+    if (cryptodev_backend_is_used(CRYPTODEV_BACKEND(uc))) {
+        error_setg(errp,
+                   "Cannot delete cryptodev backend '%s' that is in use",
+                   object_get_canonical_path_component(OBJECT(uc)));
+        return false;
+    }
+    return true;
 }
 
 static void cryptodev_backend_instance_init(Object *obj)
@@ -613,7 +619,7 @@ cryptodev_backend_class_init(ObjectClass *oc, const void *data)
     UserCreatableClass *ucc = USER_CREATABLE_CLASS(oc);
 
     ucc->complete = cryptodev_backend_complete;
-    ucc->can_be_deleted = cryptodev_backend_can_be_deleted;
+    ucc->prepare_delete = cryptodev_backend_prepare_delete;
 
     QTAILQ_INIT(&crypto_clients);
     object_class_property_add(oc, "queues", "uint32",

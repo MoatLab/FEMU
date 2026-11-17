@@ -174,7 +174,6 @@ retry:
         if (gen_id != cpu_list_generation_id_get()) {
             g_free(records);
             g_free(stat->rates);
-            cpu_list_unlock();
             goto retry;
         }
         vcpu_dirty_stat_collect(records, false);
@@ -486,7 +485,7 @@ static bool record_ramblock_hash_info(struct RamblockDirtyInfo **block_dinfo,
 {
     struct RamblockDirtyInfo *info = NULL;
     struct RamblockDirtyInfo *dinfo = NULL;
-    RAMBlock *block = NULL;
+    RAMBlock *block;
     int total_count = 0;
     int index = 0;
     bool ret = false;
@@ -569,7 +568,7 @@ static bool compare_page_hash_info(struct RamblockDirtyInfo *info,
                                   int block_count)
 {
     struct RamblockDirtyInfo *block_dinfo = NULL;
-    RAMBlock *block = NULL;
+    RAMBlock *block;
 
     RAMBLOCK_FOREACH_MIGRATABLE(block) {
         if (skip_sample_ramblock(block)) {

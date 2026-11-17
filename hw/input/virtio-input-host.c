@@ -10,7 +10,7 @@
 #include "qemu/sockets.h"
 
 #include "hw/virtio/virtio.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/virtio/virtio-input.h"
 
 #include <sys/ioctl.h>
@@ -114,8 +114,7 @@ static void virtio_input_host_realize(DeviceState *dev, Error **errp)
         error_setg_file_open(errp, errno, vih->evdev);
         return;
     }
-    if (!g_unix_set_fd_nonblocking(vih->fd, true, NULL)) {
-        error_setg_errno(errp, errno, "Failed to set FD nonblocking");
+    if (!qemu_set_blocking(vih->fd, false, errp)) {
         goto err_close;
     }
 

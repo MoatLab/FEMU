@@ -26,6 +26,7 @@
 
 #include "qemu/osdep.h"
 #include "vnc.h"
+#include "trace.h"
 
 #define ZALLOC_ALIGNMENT 16
 
@@ -71,8 +72,7 @@ static int vnc_zlib_stop(VncState *vs, VncWorker *worker)
     if (zstream->opaque != vs) {
         int err;
 
-        VNC_DEBUG("VNC: initializing zlib stream\n");
-        VNC_DEBUG("VNC: opaque = %p | vs = %p\n", zstream->opaque, vs);
+        trace_vnc_zlib_init(vs, zstream->opaque);
         zstream->zalloc = vnc_zlib_zalloc;
         zstream->zfree = vnc_zlib_zfree;
 

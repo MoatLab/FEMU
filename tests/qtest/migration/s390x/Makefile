@@ -3,7 +3,7 @@
 
 .PHONY: all clean
 all: a-b-bios.h
-fwdir=../../../pc-bios/s390-ccw
+fwdir=$(SRC_PATH)/pc-bios/s390-ccw
 
 CFLAGS+=-ffreestanding -fno-delete-null-pointer-checks -fPIE -Os \
 	-msoft-float -march=z900 -fno-asynchronous-unwind-tables \
@@ -11,14 +11,14 @@ CFLAGS+=-ffreestanding -fno-delete-null-pointer-checks -fPIE -Os \
 
 a-b-bios.h: s390x.elf
 	echo "$$__note" > header.tmp
-	xxd -i $< | sed -e 's/.*int.*//' >> header.tmp
+	xxd -i $< | sed -e '/.*int.*/d' >> header.tmp
 	mv header.tmp $@
 
 # We use common-page-size=16 to avoid big padding in the ELF file
 s390x.elf: a-b-bios.c
 	$(CROSS_PREFIX)gcc $(CFLAGS) -I$(fwdir) $(fwdir)/start.S \
-		$(fwdir)/sclp.c -Wl,-zcommon-page-size=16 -o $@ $<
+	 -Wl,-zcommon-page-size=16 -o $@ $<
 	$(CROSS_PREFIX)strip $@
 
 clean:
-	@rm -rf *.elf *.o
+	@rm -rf *.elf *.o *.h

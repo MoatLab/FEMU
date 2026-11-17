@@ -253,7 +253,7 @@ static int plugin_load(struct qemu_plugin_desc *desc, const qemu_info_t *info, E
          * call a full uninstall if the plugin did not yet call it.
          */
         if (!ctx->uninstalling) {
-            plugin_reset_uninstall(ctx->id, NULL, false);
+            plugin_reset_uninstall(ctx->id, NULL, NULL, false);
         }
     }
 
@@ -314,10 +314,12 @@ int qemu_plugin_load_list(QemuPluginList *head, Error **errp)
 
 struct qemu_plugin_reset_data {
     struct qemu_plugin_ctx *ctx;
-    qemu_plugin_simple_cb_t cb;
+    qemu_plugin_udata_cb_t cb;
+    void *userdata;
     bool reset;
 };
 
+QEMU_DISABLE_CFI
 static void plugin_reset_destroy__locked(struct qemu_plugin_reset_data *data)
 {
     struct qemu_plugin_ctx *ctx = data->ctx;
@@ -337,7 +339,7 @@ static void plugin_reset_destroy__locked(struct qemu_plugin_reset_data *data)
     if (data->reset) {
         g_assert(ctx->resetting);
         if (data->cb) {
-            data->cb(ctx->id);
+            data->cb(data->userdata);
         }
         ctx->resetting = false;
         g_free(data);
@@ -356,7 +358,7 @@ static void plugin_reset_destroy__locked(struct qemu_plugin_reset_data *data)
     g_assert(success);
     QTAILQ_REMOVE(&plugin.ctxs, ctx, entry);
     if (data->cb) {
-        data->cb(ctx->id);
+        data->cb(data->userdata);
     }
     if (!g_module_close(ctx->handle)) {
         warn_report("%s: %s", __func__, g_module_error());
@@ -377,13 +379,13 @@ static void plugin_flush_destroy(CPUState *cpu, run_on_cpu_data arg)
 {
     struct qemu_plugin_reset_data *data = arg.host_ptr;
 
-    g_assert(cpu_in_exclusive_context(cpu));
-    tb_flush(cpu);
+    tb_flush__exclusive_or_serial();
     plugin_reset_destroy(data);
 }
 
 void plugin_reset_uninstall(qemu_plugin_id_t id,
-                            qemu_plugin_simple_cb_t cb,
+                            qemu_plugin_udata_cb_t cb,
+                            void *userdata,
                             bool reset)
 {
     struct qemu_plugin_reset_data *data;
@@ -401,6 +403,7 @@ void plugin_reset_uninstall(qemu_plugin_id_t id,
     data = g_new(struct qemu_plugin_reset_data, 1);
     data->ctx = ctx;
     data->cb = cb;
+    data->userdata = userdata;
     data->reset = reset;
     /*
      * Only flush the code cache if the vCPUs have been created. If so,

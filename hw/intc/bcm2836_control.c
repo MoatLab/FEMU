@@ -19,7 +19,7 @@
 
 #include "qemu/osdep.h"
 #include "hw/intc/bcm2836_control.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "migration/vmstate.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -197,12 +197,21 @@ static void bcm2836_control_local_timer_set_next(void *opaque)
 {
     BCM2836ControlState *s = opaque;
     uint64_t next_event;
+    uint64_t reload_value = LOCALTIMER_VALUE(s->local_timer_control);
 
-    assert(LOCALTIMER_VALUE(s->local_timer_control) > 0);
+    if (reload_value == 0) {
+        /*
+         * Spec doesn't say what happens in this case; treat as a
+         * guest error and stop the timer running.
+         */
+        qemu_log_mask(LOG_GUEST_ERROR, "%s: local timer reload value is 0\n",
+                      __func__);
+        timer_del(&s->timer);
+        return;
+    }
 
     next_event = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-        muldiv64(LOCALTIMER_VALUE(s->local_timer_control),
-            NANOSECONDS_PER_SECOND, LOCALTIMER_FREQ);
+        muldiv64(reload_value, NANOSECONDS_PER_SECOND, LOCALTIMER_FREQ);
     timer_mod(&s->timer, next_event);
 }
 

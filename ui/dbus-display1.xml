@@ -1141,4 +1141,22 @@
     -->
     <property name="Interfaces" type="as" access="read"/>
   </interface>
+
+  <!--
+      org.qemu.Display1.Chardev.VCEncoding:
+
+      Provides encoding information for virtual console chardevs.
+
+      This interface is present on chardev objects that are virtual
+      consoles, and exposes the character encoding used by the guest.
+  -->
+  <interface name="org.qemu.Display1.Chardev.VCEncoding">
+    <!--
+        Encoding:
+
+        The character encoding used by the virtual console
+        (matching ``ChardevVCEncoding``): ``cp437`` or ``utf8``.
+    -->
+    <property name="Encoding" type="s" access="read"/>
+  </interface>
 </node>

@@ -13,8 +13,8 @@
 #ifndef HW_AUDIO_ASC_H
 #define HW_AUDIO_ASC_H
 
-#include "hw/sysbus.h"
-#include "audio/audio.h"
+#include "hw/core/sysbus.h"
+#include "qemu/audio.h"
 
 #define ASC_FREQ 22257
 
@@ -61,7 +61,7 @@ struct ASCState {
     MemoryRegion mem_regs;
     MemoryRegion mem_extregs;
 
-    QEMUSoundCard card;
+    AudioBackend *audio_be;
     SWVoiceOut *voice;
     uint8_t *mixbuf;
     int samples;

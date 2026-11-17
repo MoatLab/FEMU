@@ -23,12 +23,12 @@
 #include "chardev/char-serial.h"
 #include "migration/vmstate.h"
 #include "hw/char/stm32l4x5_usart.h"
-#include "hw/clock.h"
-#include "hw/irq.h"
-#include "hw/qdev-clock.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
-#include "hw/registerfields.h"
+#include "hw/core/clock.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-clock.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
+#include "hw/core/registerfields.h"
 #include "trace.h"
 
 
@@ -280,10 +280,7 @@ buffer_drained:
 
 static void usart_cancel_transmit(Stm32l4x5UsartBaseState *s)
 {
-    if (s->watch_tag) {
-        g_source_remove(s->watch_tag);
-        s->watch_tag = 0;
-    }
+    g_clear_handle_id(&s->watch_tag, g_source_remove);
 }
 
 static void stm32l4x5_update_params(Stm32l4x5UsartBaseState *s)

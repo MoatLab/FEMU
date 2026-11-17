@@ -58,11 +58,11 @@
 
 /*
  * Sanity check that the size of an atomic operation isn't "overly large".
- * Despite the fact that e.g. i686 has 64-bit atomic operations, we do not
+ * Despite the fact that e.g. x86-64 has 128-bit atomic operations, we do not
  * want to use them because we ought not need them, and this lets us do a
- * bit of sanity checking that other 32-bit hosts might build.
+ * bit of sanity checking that other 32- and 64-bit hosts might build.
  */
-#define ATOMIC_REG_SIZE  sizeof(void *)
+#define ATOMIC_REG_SIZE  sizeof(uint64_t)
 
 /* Weak atomic operations prevent the compiler moving other
  * loads/stores past the atomic operation load/store. However there is
@@ -204,7 +204,7 @@
  * the same semantics.
  */
 #if !defined(QEMU_SANITIZE_THREAD) && \
-    (defined(__i386__) || defined(__x86_64__) || defined(__s390x__))
+    (defined(__x86_64__) || defined(__s390x__))
 # define smp_mb__before_rmw() signal_barrier()
 # define smp_mb__after_rmw() signal_barrier()
 #else
@@ -218,7 +218,7 @@
  */
 
 #if !defined(QEMU_SANITIZE_THREAD) && \
-    (defined(__i386__) || defined(__x86_64__) || defined(__s390x__))
+    (defined(__x86_64__) || defined(__s390x__))
 # define qatomic_set_mb(ptr, i) \
     ({ (void)qatomic_xchg(ptr, i); smp_mb__after_rmw(); })
 #else
@@ -233,40 +233,5 @@
     }                                                                   \
     _oldn;                                                              \
 })
-
-/*
- * Abstractions to access atomically (i.e. "once") i64/u64 variables.
- *
- * The i386 abi is odd in that by default members are only aligned to
- * 4 bytes, which means that 8-byte types can wind up mis-aligned.
- * Clang will then warn about this, and emit a call into libatomic.
- *
- * Use of these types in structures when they will be used with atomic
- * operations can avoid this.
- */
-typedef int64_t aligned_int64_t __attribute__((aligned(8)));
-typedef uint64_t aligned_uint64_t __attribute__((aligned(8)));
-
-#ifdef CONFIG_ATOMIC64
-/* Use __nocheck because sizeof(void *) might be < sizeof(u64) */
-#define qatomic_read_i64(P) \
-    _Generic(*(P), int64_t: qatomic_read__nocheck(P))
-#define qatomic_read_u64(P) \
-    _Generic(*(P), uint64_t: qatomic_read__nocheck(P))
-#define qatomic_set_i64(P, V) \
-    _Generic(*(P), int64_t: qatomic_set__nocheck(P, V))
-#define qatomic_set_u64(P, V) \
-    _Generic(*(P), uint64_t: qatomic_set__nocheck(P, V))
-
-static inline void qatomic64_init(void)
-{
-}
-#else /* !CONFIG_ATOMIC64 */
-int64_t  qatomic_read_i64(const int64_t *ptr);
-uint64_t qatomic_read_u64(const uint64_t *ptr);
-void qatomic_set_i64(int64_t *ptr, int64_t val);
-void qatomic_set_u64(uint64_t *ptr, uint64_t val);
-void qatomic64_init(void);
-#endif /* !CONFIG_ATOMIC64 */
 
 #endif /* QEMU_ATOMIC_H */

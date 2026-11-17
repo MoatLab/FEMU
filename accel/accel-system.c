@@ -25,9 +25,10 @@
 
 #include "qemu/osdep.h"
 #include "qemu/accel.h"
+#include "qom/compat-properties.h"
 #include "qapi/qapi-commands-accelerator.h"
 #include "monitor/monitor.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/core/cpu.h"
 #include "accel/accel-ops.h"
 #include "accel/accel-cpu-ops.h"

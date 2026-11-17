@@ -14,7 +14,7 @@
 #include <sys/ioctl.h>
 #include <linux/vfio.h>
 #include "qapi/error.h"
-#include "exec/ramlist.h"
+#include "system/ramlist.h"
 #include "exec/cpu-common.h"
 #include "system/memory.h"
 #include "trace.h"
@@ -233,31 +233,36 @@ int qemu_vfio_pci_init_irq(QEMUVFIOState *s, EventNotifier *e,
     return 0;
 }
 
-static int qemu_vfio_pci_read_config(QEMUVFIOState *s, void *buf,
+static int qemu_vfio_pci_read_config(QEMUVFIOState *s, uint32_t *buf,
                                      int size, int ofs)
 {
     int ret;
+    uint32_t val_le;
 
     trace_qemu_vfio_pci_read_config(buf, ofs, size,
                                     s->config_region_info.offset,
                                     s->config_region_info.size);
     assert(QEMU_IS_ALIGNED(s->config_region_info.offset + ofs, size));
     ret = RETRY_ON_EINTR(
-        pread(s->device, buf, size, s->config_region_info.offset + ofs)
+        pread(s->device, &val_le, size, s->config_region_info.offset + ofs)
     );
+
+    *buf = le32_to_cpu(val_le);
     return ret == size ? 0 : -errno;
 }
 
-static int qemu_vfio_pci_write_config(QEMUVFIOState *s, void *buf, int size, int ofs)
+static int qemu_vfio_pci_write_config(QEMUVFIOState *s, uint32_t *buf, int size, int ofs)
 {
     int ret;
+    uint32_t val_le;
 
+    val_le = cpu_to_le32(*buf);
     trace_qemu_vfio_pci_write_config(buf, ofs, size,
                                      s->config_region_info.offset,
                                      s->config_region_info.size);
     assert(QEMU_IS_ALIGNED(s->config_region_info.offset + ofs, size));
     ret = RETRY_ON_EINTR(
-        pwrite(s->device, buf, size, s->config_region_info.offset + ofs)
+        pwrite(s->device, &val_le, size, s->config_region_info.offset + ofs)
     );
     return ret == size ? 0 : -errno;
 }
@@ -296,7 +301,7 @@ static int qemu_vfio_init_pci(QEMUVFIOState *s, const char *device,
 {
     int ret;
     int i;
-    uint16_t pci_cmd;
+    uint32_t pci_cmd;
     struct vfio_group_status group_status = { .argsz = sizeof(group_status) };
     struct vfio_iommu_type1_info *iommu_info = NULL;
     size_t iommu_info_size = sizeof(*iommu_info);
@@ -309,7 +314,7 @@ static int qemu_vfio_init_pci(QEMUVFIOState *s, const char *device,
     s->container = open("/dev/vfio/vfio", O_RDWR);
 
     if (s->container == -1) {
-        error_setg_errno(errp, errno, "Failed to open /dev/vfio/vfio");
+        error_setg_file_open(errp, errno, "/dev/vfio/vfio");
         return -errno;
     }
     if (ioctl(s->container, VFIO_GET_API_VERSION) != VFIO_API_VERSION) {
@@ -333,8 +338,7 @@ static int qemu_vfio_init_pci(QEMUVFIOState *s, const char *device,
 
     s->group = open(group_file, O_RDWR);
     if (s->group == -1) {
-        error_setg_errno(errp, errno, "Failed to open VFIO group file: %s",
-                         group_file);
+        error_setg_file_open(errp, errno, group_file);
         g_free(group_file);
         ret = -errno;
         goto fail_container;

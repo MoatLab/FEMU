@@ -35,7 +35,12 @@ typedef enum json_token_type {
     JSON_MAX = JSON_END_OF_INPUT
 } JSONTokenType;
 
-typedef struct JSONToken JSONToken;
+typedef struct JSONToken {
+    JSONTokenType type;
+    int x;
+    int y;
+    char *str;
+} JSONToken;
 
 /* json-lexer.c */
 void json_lexer_init(JSONLexer *lexer, bool enable_interpolation);
@@ -48,7 +53,9 @@ void json_message_process_token(JSONLexer *lexer, GString *input,
                                 JSONTokenType type, int x, int y);
 
 /* json-parser.c */
-JSONToken *json_token(JSONTokenType type, int x, int y, GString *tokstr);
-QObject *json_parser_parse(GQueue *tokens, va_list *ap, Error **errp);
+void json_parser_init(JSONParserContext *ctxt, va_list *ap);
+void json_parser_reset(JSONParserContext *ctxt);
+QObject *json_parser_feed(JSONParserContext *ctxt, const JSONToken *token, Error **errp);
+void json_parser_destroy(JSONParserContext *ctxt);
 
 #endif

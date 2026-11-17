@@ -37,12 +37,15 @@ The virt board supports:
 - An RTC
 - The fw_cfg device that allows a guest to obtain data from QEMU
 - A PL061 GPIO controller
-- An optional SMMUv3 IOMMU
+- An optional machine-wide SMMUv3 IOMMU
+- User-creatable SMMUv3 devices (see below for example)
+- An optional SBSA Generic Watchdog Timer (see below)
 - hotpluggable DIMMs
 - hotpluggable NVDIMMs
-- An MSI controller (GICv2M or ITS). GICv2M is selected by default along
-  with GICv2. ITS is selected by default with GICv3 (>= virt-2.7). Note
-  that ITS is not modeled in TCG mode.
+- An MSI controller (GICv2m or ITS).
+  - When using GICv3, ITS is selected by default when available on the platform.
+  - If using GICv2, a GICv2m is provided by default instead.
+  - When ITS is not available on a GICv3 platform, a GICv2m is provided by default.
 - 32 virtio-mmio transport devices
 - running guests using the KVM accelerator on aarch64 hardware
 - large amounts of RAM (at least 255GB, and more if using highmem)
@@ -159,6 +162,25 @@ gic-version
     GICv3. This allows up to 512 CPUs.
   ``4``
     GICv4. Requires ``virtualization`` to be ``on``; allows up to 317 CPUs.
+  ``x-5``
+    GICv5 (experimental). This is an experimental emulation of the GICv5,
+    based on the EAC release of the GICv5 architecture specification.
+    Experimental means:
+
+    - guest-visible behaviour may change when the final version of
+      the specification is released and QEMU implements it
+    - migration support is not yet implemented
+    - the GICv5 is not exposed to the guest via ACPI tables, only via DTB
+    - the way the interrupt controller is exposed to the guest and the
+      command line syntax for enabling it may change
+
+    The current implementation supports only an EL1 guest (no EL2 or
+    EL3 and no Realm support), and does not implement the ITS (no
+    MSI support).
+
+    Note that as the GICv5 is an Armv9 feature, enabling it will
+    automatically disable support for AArch32 at all exception levels
+    except for EL0 (userspace).
   ``host``
     Use the same GIC version the host provides, when using KVM
   ``max``
@@ -166,9 +188,22 @@ gic-version
     with TCG this is currently ``3`` if ``virtualization`` is ``off`` and
     ``4`` if ``virtualization`` is ``on``, but this may change in future)
 
+msi
+  Specify the MSI and MSI-X controller (GIC) to provide.
+  Valid values are:
+
+  ``auto``
+    Use the best available MSI-X controller option. ITS when supported, GICv2m otherwise.
+  ``gicv2m``
+    GICv2m. Typically used with a GICv2. Also available with a newer GIC.
+  ``its``
+    GICv3 ITS. This is the default option when using a GICv3 or GICv4 with a supported
+    accelerator.
+  ``off``
+    Disable support for MSI/MSI-X interrupts.
+
 its
-  Set ``on``/``off`` to enable/disable ITS instantiation. The default is ``on``
-  for machine types later than ``virt-2.7``.
+  Set ``on``/``off`` to control ITS instantiation. This is a deprecated option, use ``msi`` instead.
 
 iommu
   Set the IOMMU type to create for the guest. Valid values are:
@@ -176,7 +211,7 @@ iommu
   ``none``
     Don't create an IOMMU (the default)
   ``smmuv3``
-    Create an SMMUv3
+    Create a machine-wide SMMUv3.
 
 default-bus-bypass-iommu
   Set ``on``/``off`` to enable/disable `bypass_iommu
@@ -211,6 +246,11 @@ dtb-randomness
 dtb-kaslr-seed
   A deprecated synonym for dtb-randomness.
 
+virtio-mmio-transports
+  Set the number of virtio-mmio transports to create (between 0 and 32;
+  the default is 32).  Unused transports are harmless, but you can
+  use this property to avoid exposing them to the guest if you wish.
+
 x-oem-id
   Set string (up to 6 bytes) to override the default value of field OEMID in ACPI
   table header.
@@ -218,6 +258,85 @@ x-oem-id
 x-oem-table-id
   Set string (up to 8 bytes) to override the default value of field OEM Table ID
   in ACPI table header.
+
+SMMU configuration
+""""""""""""""""""
+
+Machine-wide SMMUv3 IOMMU
+  Setting the machine-specific option ``iommu=smmuv3`` causes QEMU to
+  create a single, machine-wide SMMUv3 instance that applies to all
+  devices in the PCIe topology.
+
+  For information about selectively bypassing devices, refer to
+  ``docs/bypass-iommu.txt``.
+
+User-creatable SMMUv3 devices
+  You can use the ``-device arm-smmuv3`` option to create multiple
+  user-defined SMMUv3 devices, each associated with a separate PCIe
+  root complex. This is only permitted if the machine-wide SMMUv3
+  (``iommu=smmuv3``) option is not used. Each ``arm-smmuv3`` device
+  uses the ``primary-bus`` sub-option to specify which PCIe root
+  complex it is associated with.
+
+  This model is useful when you want to mirror a host configuration where
+  each NUMA node typically has its own SMMU, allowing the VM topology to
+  align more closely with the host’s hardware layout.
+
+  Example::
+
+      -device arm-smmuv3,primary-bus=pcie.0,id=smmuv3.0
+      ...
+      -device pxb-pcie,id=pcie.1,numa_node=1
+      -device arm-smmuv3,primary-bus=pcie.1,id=smmuv3.1
+
+  *Accelerated SMMUv3 (nested translation)*
+
+  The ``accel=on`` option enables hardware-accelerated nested translation
+  for vfio-pci passthrough devices. In this mode the guest SMMU driver
+  programs its own Stage-1 page tables, with the host SMMUv3 handling both
+  Stage-1 (guest) and Stage-2 (host) translations in hardware. The host
+  SMMUv3 must support nested translation. This mode requires the iommufd
+  backend and is only supported when booting with ACPI (not device tree).
+
+  When ``accel=on``, QEMU automatically derives the values for the
+  ``ril``, ``ats``, ``oas``, ``ssidsize`` and ``cmdqv`` sub-options
+  from the host SMMUv3 capabilities unless they are set explicitly.
+
+  Example::
+
+      -device arm-smmuv3,primary-bus=pcie.0,id=smmuv3.0,accel=on
+
+  *Accelerated SMMUv3 command queues (Tegra241 CMDQV)*
+
+  The ``cmdqv`` sub-option enables NVIDIA Tegra241 Command Queue
+  Virtualization (CMDQV) on supported hosts. With CMDQV, each accelerated
+  ``arm-smmuv3`` device gets dedicated hardware command queues and the
+  guest issues SMMU invalidation commands directly to real hardware,
+  bypassing QEMU and improving throughput for workloads that issue many
+  invalidations. Without it, every invalidation command traps into QEMU.
+
+SBSA Generic Watchdog
+"""""""""""""""""""""
+
+The SBSA Generic Watchdog Timer (GWDT) can be added to the virt machine
+using ``-device sbsa-gwdt``. It is only supported on the virt machine,
+which wires up statically assigned MMIO regions and IRQs via
+machine-specific plug handlers.
+
+Two modes are available:
+
+Native mode (default)
+  The watchdog is described via the ACPI GTDT table and FDT, using
+  the system counter frequency. Example::
+
+    -device sbsa-gwdt
+
+WDAT mode
+  The watchdog is described via the ACPI WDAT table (no FDT node),
+  using a 1 kHz timer frequency. WDAT and GTDT watchdog entries are
+  mutually exclusive. Example::
+
+    -device sbsa-gwdt,wdat=on
 
 Linux guest kernel configuration
 """"""""""""""""""""""""""""""""

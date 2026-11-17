@@ -53,15 +53,29 @@ the following line will only run the tests for the x86_64 target:
   make check-functional-x86_64
 
 To run a single test file without the meson test runner, you can also
-execute the file directly by specifying two environment variables first,
-the PYTHONPATH that has to include the python folder and the tests/functional
-folder of the source tree, and QEMU_TEST_QEMU_BINARY that has to point
-to the QEMU binary that should be used for the test. The current working
-directory should be your build folder. For example::
+execute the file directly by specifying the name of the emulator target
+binary as an env variable.
 
-  $ export PYTHONPATH=../python:../tests/functional
-  $ export QEMU_TEST_QEMU_BINARY=$PWD/qemu-system-x86_64
-  $ pyvenv/bin/python3 ../tests/functional/test_file.py
+Assuming the current working directory is the top level source checkout
+and the build directory is './build'::
+
+  $ export QEMU_TEST_QEMU_BINARY=qemu-system-x86_64
+
+Run all tests from a test file::
+
+  $ ./build/run tests/functional/x86_64/test_virtio_version.py
+
+Run all tests from a test class::
+
+  $ ./build/run tests/functional/x86_64/test_virtio_version.py VirtioVersionCheck
+
+Or a single test::
+
+  $ ./build/run tests/functional/x86_64/test_virtio_version.py VirtioVersionCheck.test_modern_only_devs
+
+Filtering test names also works::
+
+  $ ./build/run tests/functional/x86_64/test_virtio_version.py -k modern
 
 The test framework will automatically purge any scratch files created during
 the tests. If needing to debug a failed test, it is possible to keep these
@@ -311,6 +325,9 @@ the assets without running the tests, you can do so by running::
 The cache is populated in the ``~/.cache/qemu/download`` directory by
 default, but the location can be changed by setting the
 ``QEMU_TEST_CACHE_DIR`` environment variable.
+
+To force the test suite to re-download the cache, even if still valid,
+set the ``QEMU_TEST_REFRESH_CACHE`` environment variable.
 
 Skipping tests
 --------------

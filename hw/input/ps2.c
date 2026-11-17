@@ -24,10 +24,11 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
-#include "hw/irq.h"
-#include "hw/sysbus.h"
+#include "hw/core/irq.h"
+#include "hw/core/sysbus.h"
 #include "hw/input/ps2.h"
 #include "migration/vmstate.h"
+#include "standard-headers/linux/input-event-codes.h"
 #include "ui/console.h"
 #include "ui/input.h"
 #include "system/reset.h"
@@ -72,6 +73,7 @@
 #define AUX_SET_DEFAULT     0xF6
 #define AUX_RESET           0xFF    /* Reset aux device */
 #define AUX_ACK             0xFA    /* Command byte ACK. */
+#define AUX_RESEND          0xFE    /* Command NACK, send the cmd again */
 
 #define MOUSE_STATUS_REMOTE     0x40
 #define MOUSE_STATUS_ENABLED    0x20
@@ -123,20 +125,20 @@ static uint8_t translate_table[256] = {
     0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
 };
 
-static unsigned int ps2_modifier_bit(QKeyCode key)
+static unsigned int ps2_modifier_bit(unsigned int key)
 {
     switch (key) {
-    case Q_KEY_CODE_CTRL:
+    case KEY_LEFTCTRL:
         return MOD_CTRL_L;
-    case Q_KEY_CODE_CTRL_R:
+    case KEY_RIGHTCTRL:
         return MOD_CTRL_R;
-    case Q_KEY_CODE_SHIFT:
+    case KEY_LEFTSHIFT:
         return MOD_SHIFT_L;
-    case Q_KEY_CODE_SHIFT_R:
+    case KEY_RIGHTSHIFT:
         return MOD_SHIFT_R;
-    case Q_KEY_CODE_ALT:
+    case KEY_LEFTALT:
         return MOD_ALT_L;
-    case Q_KEY_CODE_ALT_R:
+    case KEY_RIGHTALT:
         return MOD_ALT_R;
     default:
         return 0;
@@ -310,11 +312,9 @@ static void ps2_put_keycode(void *opaque, int keycode)
 }
 
 static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
-                               InputEvent *evt)
+                               QemuInputEvent *evt)
 {
     PS2KbdState *s = (PS2KbdState *)dev;
-    InputKeyEvent *key = evt->u.key.data;
-    int qcode;
     uint16_t keycode = 0;
     int mod;
 
@@ -325,28 +325,27 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
 
     qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
     assert(evt->type == INPUT_EVENT_KIND_KEY);
-    qcode = qemu_input_key_value_to_qcode(key->key);
 
-    mod = ps2_modifier_bit(qcode);
-    trace_ps2_keyboard_event(s, qcode, key->down, mod,
+    mod = ps2_modifier_bit(evt->key.key);
+    trace_ps2_keyboard_event(s, evt->key.key, evt->key.down, mod,
                              s->modifiers, s->scancode_set, s->translate);
-    if (key->down) {
+    if (evt->key.down) {
         s->modifiers |= mod;
     } else {
         s->modifiers &= ~mod;
     }
 
     if (s->scancode_set == 1) {
-        if (qcode == Q_KEY_CODE_PAUSE) {
+        if (evt->key.key == KEY_PAUSE) {
             if (s->modifiers & (MOD_CTRL_L | MOD_CTRL_R)) {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xe0);
                     ps2_put_keycode(s, 0x46);
                     ps2_put_keycode(s, 0xe0);
                     ps2_put_keycode(s, 0xc6);
                 }
             } else {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xe1);
                     ps2_put_keycode(s, 0x1d);
                     ps2_put_keycode(s, 0x45);
@@ -355,9 +354,9 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
                     ps2_put_keycode(s, 0xc5);
                 }
             }
-        } else if (qcode == Q_KEY_CODE_PRINT) {
+        } else if (evt->key.key == KEY_SYSRQ) {
             if (s->modifiers & MOD_ALT_L) {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xb8);
                     ps2_put_keycode(s, 0x38);
                     ps2_put_keycode(s, 0x54);
@@ -367,7 +366,7 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
                     ps2_put_keycode(s, 0x38);
                 }
             } else if (s->modifiers & MOD_ALT_R) {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xe0);
                     ps2_put_keycode(s, 0xb8);
                     ps2_put_keycode(s, 0xe0);
@@ -382,7 +381,7 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
                 }
             } else if (s->modifiers & (MOD_SHIFT_L | MOD_CTRL_L |
                                        MOD_SHIFT_R | MOD_CTRL_R)) {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xe0);
                     ps2_put_keycode(s, 0x37);
                 } else {
@@ -390,7 +389,7 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
                     ps2_put_keycode(s, 0xb7);
                 }
             } else {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xe0);
                     ps2_put_keycode(s, 0x2a);
                     ps2_put_keycode(s, 0xe0);
@@ -402,30 +401,30 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
                     ps2_put_keycode(s, 0xaa);
                 }
             }
-        } else if ((qcode == Q_KEY_CODE_LANG1 || qcode == Q_KEY_CODE_LANG2)
-                   && !key->down) {
+        } else if ((evt->key.key == KEY_HANGEUL || evt->key.key == KEY_HANJA)
+                   && !evt->key.down) {
             /* Ignore release for these keys */
         } else {
-            if (qcode < qemu_input_map_qcode_to_atset1_len) {
-                keycode = qemu_input_map_qcode_to_atset1[qcode];
+            if (evt->key.key < qemu_input_map_linux_to_atset1_len) {
+                keycode = qemu_input_map_linux_to_atset1[evt->key.key];
             }
             if (keycode) {
                 if (keycode & 0xff00) {
                     ps2_put_keycode(s, keycode >> 8);
                 }
-                if (!key->down) {
+                if (!evt->key.down) {
                     keycode |= 0x80;
                 }
                 ps2_put_keycode(s, keycode & 0xff);
             } else {
                 qemu_log_mask(LOG_UNIMP,
-                              "ps2: ignoring key with qcode %d\n", qcode);
+                              "ps2: ignoring key %u\n", evt->key.key);
             }
         }
     } else if (s->scancode_set == 2) {
-        if (qcode == Q_KEY_CODE_PAUSE) {
+        if (evt->key.key == KEY_PAUSE) {
             if (s->modifiers & (MOD_CTRL_L | MOD_CTRL_R)) {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xe0);
                     ps2_put_keycode(s, 0x7e);
                     ps2_put_keycode(s, 0xe0);
@@ -433,7 +432,7 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
                     ps2_put_keycode(s, 0x7e);
                 }
             } else {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xe1);
                     ps2_put_keycode(s, 0x14);
                     ps2_put_keycode(s, 0x77);
@@ -444,9 +443,9 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
                     ps2_put_keycode(s, 0x77);
                 }
             }
-        } else if (qcode == Q_KEY_CODE_PRINT) {
+        } else if (evt->key.key == KEY_SYSRQ) {
             if (s->modifiers & MOD_ALT_L) {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xf0);
                     ps2_put_keycode(s, 0x11);
                     ps2_put_keycode(s, 0x11);
@@ -459,7 +458,7 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
                     ps2_put_keycode(s, 0x11);
                 }
             } else if (s->modifiers & MOD_ALT_R) {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xe0);
                     ps2_put_keycode(s, 0xf0);
                     ps2_put_keycode(s, 0x11);
@@ -477,7 +476,7 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
                 }
             } else if (s->modifiers & (MOD_SHIFT_L | MOD_CTRL_L |
                                        MOD_SHIFT_R | MOD_CTRL_R)) {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xe0);
                     ps2_put_keycode(s, 0x7c);
                 } else {
@@ -486,7 +485,7 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
                     ps2_put_keycode(s, 0x7c);
                 }
             } else {
-                if (key->down) {
+                if (evt->key.down) {
                     ps2_put_keycode(s, 0xe0);
                     ps2_put_keycode(s, 0x12);
                     ps2_put_keycode(s, 0xe0);
@@ -500,39 +499,39 @@ static void ps2_keyboard_event(DeviceState *dev, QemuConsole *src,
                     ps2_put_keycode(s, 0x12);
                 }
             }
-        } else if ((qcode == Q_KEY_CODE_LANG1 || qcode == Q_KEY_CODE_LANG2) &&
-                   !key->down) {
+        } else if ((evt->key.key == KEY_HANGEUL || evt->key.key == KEY_HANJA) &&
+                   !evt->key.down) {
             /* Ignore release for these keys */
         } else {
-            if (qcode < qemu_input_map_qcode_to_atset2_len) {
-                keycode = qemu_input_map_qcode_to_atset2[qcode];
+            if (evt->key.key < qemu_input_map_linux_to_atset2_len) {
+                keycode = qemu_input_map_linux_to_atset2[evt->key.key];
             }
             if (keycode) {
                 if (keycode & 0xff00) {
                     ps2_put_keycode(s, keycode >> 8);
                 }
-                if (!key->down) {
+                if (!evt->key.down) {
                     ps2_put_keycode(s, 0xf0);
                 }
                 ps2_put_keycode(s, keycode & 0xff);
             } else {
                 qemu_log_mask(LOG_UNIMP,
-                              "ps2: ignoring key with qcode %d\n", qcode);
+                              "ps2: ignoring key %u\n", evt->key.key);
             }
         }
     } else if (s->scancode_set == 3) {
-        if (qcode < qemu_input_map_qcode_to_atset3_len) {
-            keycode = qemu_input_map_qcode_to_atset3[qcode];
+        if (evt->key.key < qemu_input_map_linux_to_atset3_len) {
+            keycode = qemu_input_map_linux_to_atset3[evt->key.key];
         }
         if (keycode) {
             /* FIXME: break code should be configured on a key by key basis */
-            if (!key->down) {
+            if (!evt->key.down) {
                 ps2_put_keycode(s, 0xf0);
             }
             ps2_put_keycode(s, keycode);
         } else {
             qemu_log_mask(LOG_UNIMP,
-                          "ps2: ignoring key with qcode %d\n", qcode);
+                          "ps2: ignoring key %u\n", evt->key.key);
         }
     }
 }
@@ -579,7 +578,7 @@ static void ps2_set_ledstate(PS2KbdState *s, int ledstate)
 {
     trace_ps2_set_ledstate(s, ledstate);
     s->ledstate = ledstate;
-    kbd_put_ledstate(ledstate);
+    qemu_input_handler_set_leds_mask(PS2_DEVICE(s)->hs, ledstate);
 }
 
 static void ps2_reset_keyboard(PS2KbdState *s)
@@ -787,7 +786,7 @@ static int ps2_mouse_send_packet(PS2MouseState *s)
 }
 
 static void ps2_mouse_event(DeviceState *dev, QemuConsole *src,
-                            InputEvent *evt)
+                            QemuInputEvent *evt)
 {
     static const int bmap[INPUT_BUTTON__MAX] = {
         [INPUT_BUTTON_LEFT]   = PS2_MOUSE_BUTTON_LEFT,
@@ -797,8 +796,6 @@ static void ps2_mouse_event(DeviceState *dev, QemuConsole *src,
         [INPUT_BUTTON_EXTRA]  = PS2_MOUSE_BUTTON_EXTRA,
     };
     PS2MouseState *s = (PS2MouseState *)dev;
-    InputMoveEvent *move;
-    InputBtnEvent *btn;
 
     /* check if deltas are recorded when disabled */
     if (!(s->mouse_status & MOUSE_STATUS_ENABLED)) {
@@ -807,31 +804,29 @@ static void ps2_mouse_event(DeviceState *dev, QemuConsole *src,
 
     switch (evt->type) {
     case INPUT_EVENT_KIND_REL:
-        move = evt->u.rel.data;
-        if (move->axis == INPUT_AXIS_X) {
-            s->mouse_dx += move->value;
-        } else if (move->axis == INPUT_AXIS_Y) {
-            s->mouse_dy -= move->value;
+        if (evt->rel.axis == INPUT_AXIS_X) {
+            s->mouse_dx += evt->rel.value;
+        } else if (evt->rel.axis == INPUT_AXIS_Y) {
+            s->mouse_dy -= evt->rel.value;
         }
         break;
 
     case INPUT_EVENT_KIND_BTN:
-        btn = evt->u.btn.data;
-        if (btn->down) {
-            s->mouse_buttons |= bmap[btn->button];
-            if (btn->button == INPUT_BUTTON_WHEEL_UP) {
+        if (evt->btn.down) {
+            s->mouse_buttons |= bmap[evt->btn.button];
+            if (evt->btn.button == INPUT_BUTTON_WHEEL_UP) {
                 s->mouse_dz--;
-            } else if (btn->button == INPUT_BUTTON_WHEEL_DOWN) {
+            } else if (evt->btn.button == INPUT_BUTTON_WHEEL_DOWN) {
                 s->mouse_dz++;
             }
 
-            if (btn->button == INPUT_BUTTON_WHEEL_RIGHT) {
+            if (evt->btn.button == INPUT_BUTTON_WHEEL_RIGHT) {
                 s->mouse_dw--;
-            } else if (btn->button == INPUT_BUTTON_WHEEL_LEFT) {
+            } else if (evt->btn.button == INPUT_BUTTON_WHEEL_LEFT) {
                 s->mouse_dw++;
             }
         } else {
-            s->mouse_buttons &= ~bmap[btn->button];
+            s->mouse_buttons &= ~bmap[evt->btn.button];
         }
         break;
 
@@ -961,6 +956,11 @@ void ps2_write_mouse(PS2MouseState *s, int val)
                 s->mouse_type);
             break;
         default:
+            /*
+             * A PS/2 device answers every command it is given; an unknown
+             * one draws a resend.
+             */
+            ps2_queue(ps2, AUX_RESEND);
             break;
         }
         break;
@@ -1114,7 +1114,7 @@ static int ps2_kbd_ledstate_post_load(void *opaque, int version_id)
 {
     PS2KbdState *s = opaque;
 
-    kbd_put_ledstate(s->ledstate);
+    qemu_input_handler_set_leds_mask(PS2_DEVICE(s)->hs, s->ledstate);
     return 0;
 }
 
@@ -1239,7 +1239,16 @@ static const QemuInputHandler ps2_keyboard_handler = {
 
 static void ps2_kbd_realize(DeviceState *dev, Error **errp)
 {
-    qemu_input_handler_register(dev, &ps2_keyboard_handler);
+    PS2State *s = PS2_DEVICE(dev);
+
+    s->hs = qemu_input_handler_register(dev, &ps2_keyboard_handler);
+}
+
+static void ps2_kbd_unrealize(DeviceState *dev)
+{
+    PS2State *s = PS2_DEVICE(dev);
+
+    g_clear_pointer(&s->hs, qemu_input_handler_unregister);
 }
 
 static const QemuInputHandler ps2_mouse_handler = {
@@ -1251,7 +1260,16 @@ static const QemuInputHandler ps2_mouse_handler = {
 
 static void ps2_mouse_realize(DeviceState *dev, Error **errp)
 {
-    qemu_input_handler_register(dev, &ps2_mouse_handler);
+    PS2State *s = PS2_DEVICE(dev);
+
+    s->hs = qemu_input_handler_register(dev, &ps2_mouse_handler);
+}
+
+static void ps2_mouse_unrealize(DeviceState *dev)
+{
+    PS2State *s = PS2_DEVICE(dev);
+
+    g_clear_pointer(&s->hs, qemu_input_handler_unregister);
 }
 
 static void ps2_kbd_class_init(ObjectClass *klass, const void *data)
@@ -1261,6 +1279,7 @@ static void ps2_kbd_class_init(ObjectClass *klass, const void *data)
     PS2DeviceClass *ps2dc = PS2_DEVICE_CLASS(klass);
 
     dc->realize = ps2_kbd_realize;
+    dc->unrealize = ps2_kbd_unrealize;
     resettable_class_set_parent_phases(rc, NULL, ps2_kbd_reset_hold, NULL,
                                        &ps2dc->parent_phases);
     dc->vmsd = &vmstate_ps2_keyboard;
@@ -1280,6 +1299,7 @@ static void ps2_mouse_class_init(ObjectClass *klass, const void *data)
     PS2DeviceClass *ps2dc = PS2_DEVICE_CLASS(klass);
 
     dc->realize = ps2_mouse_realize;
+    dc->unrealize = ps2_mouse_unrealize;
     resettable_class_set_parent_phases(rc, NULL, ps2_mouse_reset_hold, NULL,
                                        &ps2dc->parent_phases);
     dc->vmsd = &vmstate_ps2_mouse;

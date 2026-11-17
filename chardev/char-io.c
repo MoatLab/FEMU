@@ -88,6 +88,9 @@ static gboolean io_watch_poll_dispatch(GSource *source, GSourceFunc callback,
 static void io_watch_poll_finalize(GSource *source)
 {
     IOWatchPoll *iwp = io_watch_poll_from_source(source);
+
+    object_unref(OBJECT(iwp->ioc));
+
     if (iwp->src) {
         g_source_destroy(iwp->src);
         g_source_unref(iwp->src);
@@ -117,6 +120,8 @@ GSource *io_add_watch_poll(Chardev *chr,
     iwp->fd_can_read = fd_can_read;
     iwp->opaque = user_data;
     iwp->ioc = ioc;
+    object_ref(OBJECT(iwp->ioc));
+
     iwp->fd_read = (GSourceFunc) fd_read;
     iwp->src = NULL;
     iwp->context = context;
@@ -181,4 +186,12 @@ int io_channel_send_full(QIOChannel *ioc,
 int io_channel_send(QIOChannel *ioc, const void *buf, size_t len)
 {
     return io_channel_send_full(ioc, buf, len, NULL, 0);
+}
+
+void remove_listener_fd_in_watch(Chardev *chr)
+{
+    ChardevClass *cc = CHARDEV_GET_CLASS(chr);
+    if (cc->chr_listener_cleanup) {
+        cc->chr_listener_cleanup(chr);
+    }
 }

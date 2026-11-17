@@ -48,11 +48,13 @@
 static void compare_string(QI2CDevice *i2cdev, uint8_t reg,
                            const char *test_str)
 {
-    uint8_t len = i2c_get8(i2cdev, reg);
-    char i2c_str[SMBUS_DATA_MAX_LEN] = {0};
+    uint8_t expected_len = strlen(test_str);
+    uint8_t resp[SMBUS_DATA_MAX_LEN] = {0};
 
-    i2c_read_block(i2cdev, reg, (uint8_t *)i2c_str, len);
-    g_assert_cmpstr(i2c_str, ==, test_str);
+    g_assert(expected_len + 1 < SMBUS_DATA_MAX_LEN);
+    i2c_read_block(i2cdev, reg, resp, expected_len + 1);
+    g_assert_cmpint(resp[0], ==, expected_len);
+    g_assert_cmpstr((char *)resp + 1, ==, test_str);
 }
 
 static void write_and_compare_string(QI2CDevice *i2cdev, uint8_t reg,

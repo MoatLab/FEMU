@@ -101,11 +101,7 @@ static int protocol_client_vencrypt_auth(VncState *vs, uint8_t *data, size_t len
         QIOChannelTLS *tls;
         vnc_write_u8(vs, 1); /* Accept auth */
         vnc_flush(vs);
-
-        if (vs->ioc_tag) {
-            g_source_remove(vs->ioc_tag);
-            vs->ioc_tag = 0;
-        }
+        g_clear_handle_id(&vs->ioc_tag, g_source_remove);
 
         tls = qio_channel_tls_new_server(
             vs->ioc,

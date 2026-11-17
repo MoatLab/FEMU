@@ -26,6 +26,7 @@
 #ifndef HW_SERIAL_H
 #define HW_SERIAL_H
 
+#include "hw/core/qdev.h"
 #include "chardev/char-fe.h"
 #include "system/memory.h"
 #include "qemu/fifo8.h"
@@ -54,7 +55,7 @@ struct SerialState {
        it can be reset while reading iir */
     int thr_ipending;
     qemu_irq irq;
-    CharBackend chr;
+    CharFrontend chr;
     int last_break_enable;
     uint32_t baudbase;
     uint32_t tsr_retry;
@@ -77,7 +78,6 @@ struct SerialState {
     QEMUTimer *modem_status_poll;
     MemoryRegion io;
 };
-typedef struct SerialState SerialState;
 
 extern const VMStateDescription vmstate_serial;
 extern const MemoryRegionOps serial_io_ops;

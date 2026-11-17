@@ -15,7 +15,7 @@
 #include "qemu/module.h"
 #include "qapi/error.h"
 
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 
 #define T true
 #define F false
@@ -875,10 +875,7 @@ static void check_parse(MachineState *ms, const SMPConfiguration *config,
                config_str, expect_err, output_topo_str);
 
 end:
-    if (err != NULL) {
-        error_free(err);
-    }
-
+    error_free(err);
     abort();
 }
 

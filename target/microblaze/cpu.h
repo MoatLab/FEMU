@@ -22,7 +22,6 @@
 
 #include "cpu-qom.h"
 #include "exec/cpu-common.h"
-#include "exec/cpu-defs.h"
 #include "qemu/cpu-float.h"
 #include "exec/cpu-interrupt.h"
 
@@ -87,6 +86,7 @@ typedef struct CPUArchState CPUMBState;
 #define          ESR_ESS_FSL_OFFSET     5
 
 #define          ESR_ESS_MASK  (0x7f << 5)
+#define          ESR_ESS_DEC_OF  (1 << 11) /* DEC: 0=DBZ, 1=OF */
 
 #define          ESR_EC_FSL             0
 #define          ESR_EC_UNALIGNED_DATA  1
@@ -121,9 +121,9 @@ typedef struct CPUArchState CPUMBState;
 #define PVR0_USE_ICACHE_MASK            0x02000000
 #define PVR0_USE_DCACHE_MASK            0x01000000
 #define PVR0_USE_MMU_MASK               0x00800000
-#define PVR0_USE_BTC			0x00400000
+#define PVR0_USE_BTC                    0x00400000
 #define PVR0_ENDI_MASK                  0x00200000
-#define PVR0_FAULT			0x00100000
+#define PVR0_FAULT                      0x00100000
 #define PVR0_VERSION_MASK               0x0000FF00
 #define PVR0_USER1_MASK                 0x000000FF
 #define PVR0_SPROT_MASK                 0x00000001
@@ -259,7 +259,7 @@ struct CPUArchState {
 
     /* lwx/swx reserved address */
 #define RES_ADDR_NONE 0xffffffff /* Use 0xffffffff to indicate no reservation */
-    target_ulong res_addr;
+    uint32_t res_addr;
     uint32_t res_val;
 
     /* Internal flags.  */
@@ -270,10 +270,10 @@ struct CPUArchState {
 /* MSR_UM               (1 << 11) */
 /* MSR_VM               (1 << 13) */
 /* ESR_ESS_MASK         [11:5]    -- unwind into iflags for unaligned excp */
-#define D_FLAG		(1 << 12)  /* Bit in ESR.  */
-#define DRTI_FLAG	(1 << 16)
-#define DRTE_FLAG	(1 << 17)
-#define DRTB_FLAG	(1 << 18)
+#define D_FLAG          (1 << 12)  /* Bit in ESR.  */
+#define DRTI_FLAG       (1 << 16)
+#define DRTE_FLAG       (1 << 17)
+#define DRTB_FLAG       (1 << 18)
 
 /* TB dependent CPUMBState.  */
 #define IFLAGS_TB_MASK  (D_FLAG | BIMM_FLAG | IMM_FLAG | \
@@ -369,8 +369,8 @@ struct MicroBlazeCPUClass {
 #ifndef CONFIG_USER_ONLY
 void mb_cpu_do_interrupt(CPUState *cs);
 bool mb_cpu_exec_interrupt(CPUState *cs, int int_req);
-hwaddr mb_cpu_get_phys_page_attrs_debug(CPUState *cpu, vaddr addr,
-                                        MemTxAttrs *attrs);
+bool mb_cpu_translate_for_debug(CPUState *cs, vaddr addr,
+                                TranslateForDebugResult *result);
 #endif /* !CONFIG_USER_ONLY */
 G_NORETURN void mb_cpu_do_unaligned_access(CPUState *cs, vaddr vaddr,
                                            MMUAccessType access_type,
@@ -411,13 +411,6 @@ void mb_translate_code(CPUState *cs, TranslationBlock *tb,
 
 /* Ensure there is no overlap between the two masks. */
 QEMU_BUILD_BUG_ON(MSR_TB_MASK & IFLAGS_TB_MASK);
-
-static inline bool mb_cpu_is_big_endian(CPUState *cs)
-{
-    MicroBlazeCPU *cpu = MICROBLAZE_CPU(cs);
-
-    return !cpu->cfg.endi;
-}
 
 #if !defined(CONFIG_USER_ONLY)
 bool mb_cpu_tlb_fill(CPUState *cs, vaddr address, int size,

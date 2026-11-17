@@ -1,0 +1,45 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+echo "Checking authentication token status"
+glab auth status
+
+if test $? != 0
+then
+  echo "ERROR: not authenticated with gitlab.com"
+  exit 1
+fi
+
+if ! test -f .gitlab-map-auto
+then
+  echo "ERROR: cannot find existing '.gitlab-map-auto file'"
+  echo "ERROR: this must be executed from the root of the"
+  echo "ERROR: git repository checkout"
+  exit 1
+fi
+
+fail=0
+echo "Updating member list from qemu-project"
+glab api --paginate /groups/qemu-project/members | \
+    jq -r -c '.[] | [.username, .name] | @tsv' | \
+    grep -v '^group_3038080_bot' > \
+    .gitlab-map-auto.tmp
+test $? != 0 && fail=1
+
+echo "Updating member list from qemu-project/qemu"
+glab api --paginate /projects/qemu-project%2fqemu/members | \
+    jq -r -c '.[] | [.username, .name] | @tsv' | \
+    grep -v 'Duo Developer' >> \
+    .gitlab-map-auto.tmp
+test $? != 0 && fail=1
+
+if test $fail == 0
+then
+  grep '^#' .gitlab-map-auto > .gitlab-map-auto.new
+  LC_ALL=C sort .gitlab-map-auto.tmp | uniq >> .gitlab-map-auto.new
+  mv .gitlab-map-auto.new .gitlab-map-auto
+  echo "OK: GitLab member list updated"
+else
+  echo "ERROR: Updating member list failed"
+fi
+rm -f .gitlab-map-auto.tmp

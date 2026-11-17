@@ -13,6 +13,7 @@ are useful for making QEMU interoperate with other software.
    dbus
    dbus-vmstate
    dbus-display
+   dbus-vnc
    live-block-operations
    nbd
    parallels

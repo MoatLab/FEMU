@@ -21,17 +21,20 @@
  */
 static gnutls_datum_t *build_signed_data(mm_variable_access *va, void *data)
 {
-    variable_auth_2 *auth = data;
-    uint64_t data_offset = sizeof(efi_time) + auth->hdr_length;
+    variable_auth_2 auth;
+    uint64_t data_offset;
     uint16_t *name = (void *)va + sizeof(mm_variable_access);
     gnutls_datum_t *sdata;
     uint64_t pos = 0;
+
+    memcpy(&auth, data, sizeof(auth));
+    data_offset = sizeof(efi_time) + auth.hdr_length;
 
     sdata = g_new(gnutls_datum_t, 1);
     sdata->size = (va->name_size - 2
                    + sizeof(QemuUUID)
                    + sizeof(va->attributes)
-                   + sizeof(auth->timestamp)
+                   + sizeof(auth.timestamp)
                    + va->data_size - data_offset);
     sdata->data = g_malloc(sdata->size);
 
@@ -48,8 +51,8 @@ static gnutls_datum_t *build_signed_data(mm_variable_access *va, void *data)
     pos += sizeof(va->attributes);
 
     /* TimeStamp */
-    memcpy(sdata->data + pos, &auth->timestamp, sizeof(auth->timestamp));
-    pos += sizeof(auth->timestamp);
+    memcpy(sdata->data + pos, &auth.timestamp, sizeof(auth.timestamp));
+    pos += sizeof(auth.timestamp);
 
     /* Variable Content */
     memcpy(sdata->data + pos, data + data_offset, va->data_size - data_offset);
@@ -73,10 +76,11 @@ static void wrap_pkcs7(gnutls_datum_t *pkcs7)
     };
     gnutls_datum_t wrap;
 
-    if (pkcs7->data[4] == 0x06 &&
+    if (pkcs7->size > 16 &&
+        pkcs7->data[4] == 0x06 &&
         pkcs7->data[5] == 0x09 &&
         memcmp(pkcs7->data + 6, signed_data_oid, sizeof(signed_data_oid)) == 0 &&
-        pkcs7->data[15] == 0x0a &&
+        pkcs7->data[15] == 0xa0 &&
         pkcs7->data[16] == 0x82) {
         return;
     }
@@ -104,13 +108,14 @@ static void wrap_pkcs7(gnutls_datum_t *pkcs7)
 
 static gnutls_datum_t *build_pkcs7(void *data)
 {
-    variable_auth_2 *auth = data;
+    variable_auth_2 auth;
     gnutls_datum_t *pkcs7;
 
+    memcpy(&auth, data, sizeof(auth));
     pkcs7 = g_new(gnutls_datum_t, 1);
-    pkcs7->size = auth->hdr_length - 24;
+    pkcs7->size = auth.hdr_length - (sizeof(auth) - sizeof(auth.timestamp));
     pkcs7->data = g_malloc(pkcs7->size);
-    memcpy(pkcs7->data, data + 16 + 24, pkcs7->size);
+    memcpy(pkcs7->data, data + sizeof(auth), pkcs7->size);
 
     wrap_pkcs7(pkcs7);
 

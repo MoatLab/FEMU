@@ -21,12 +21,13 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
+#include "qemu/iov.h"
 #include "io/channel-tls.h"
 #include "trace.h"
 #include "qemu/atomic.h"
 
 
-static ssize_t qio_channel_tls_write_handler(const char *buf,
+static ssize_t qio_channel_tls_write_handler(const void *buf,
                                              size_t len,
                                              void *opaque,
                                              Error **errp)
@@ -43,7 +44,7 @@ static ssize_t qio_channel_tls_write_handler(const char *buf,
     return ret;
 }
 
-static ssize_t qio_channel_tls_read_handler(char *buf,
+static ssize_t qio_channel_tls_read_handler(void *buf,
                                             size_t len,
                                             void *opaque,
                                             Error **errp)
@@ -153,13 +154,32 @@ struct QIOChannelTLSData {
 };
 typedef struct QIOChannelTLSData QIOChannelTLSData;
 
+static void qio_channel_tls_io_data_free(gpointer user_data)
+{
+    QIOChannelTLSData *data = user_data;
+    /*
+     * Usually 'task' will be NULL since the GSource
+     * callback will either complete the task or pass
+     * it on to a new GSource. We'll see a non-NULL
+     * task here only if the GSource was released before
+     * its callback triggers
+     */
+    if (data->task) {
+        qio_task_free(data->task);
+    }
+    if (data->context) {
+        g_main_context_unref(data->context);
+    }
+    g_free(data);
+}
+
 static gboolean qio_channel_tls_handshake_io(QIOChannel *ioc,
                                              GIOCondition condition,
                                              gpointer user_data);
 
-static void qio_channel_tls_handshake_task(QIOChannelTLS *ioc,
-                                           QIOTask *task,
-                                           GMainContext *context)
+static gboolean qio_channel_tls_handshake_task(QIOChannelTLS *ioc,
+                                               QIOTask *task,
+                                               GMainContext *context)
 {
     Error *err = NULL;
     int status;
@@ -170,7 +190,7 @@ static void qio_channel_tls_handshake_task(QIOChannelTLS *ioc,
         trace_qio_channel_tls_handshake_fail(ioc);
         qio_task_set_error(task, err);
         qio_task_complete(task);
-        return;
+        return TRUE;
     }
 
     if (status == QCRYPTO_TLS_HANDSHAKE_COMPLETE) {
@@ -183,6 +203,7 @@ static void qio_channel_tls_handshake_task(QIOChannelTLS *ioc,
             trace_qio_channel_tls_credentials_allow(ioc);
         }
         qio_task_complete(task);
+        return TRUE;
     } else {
         GIOCondition condition;
         QIOChannelTLSData *data = g_new0(typeof(*data), 1);
@@ -206,8 +227,9 @@ static void qio_channel_tls_handshake_task(QIOChannelTLS *ioc,
                                        condition,
                                        qio_channel_tls_handshake_io,
                                        data,
-                                       NULL,
+                                       qio_channel_tls_io_data_free,
                                        context);
+        return FALSE;
     }
 }
 
@@ -223,11 +245,9 @@ static gboolean qio_channel_tls_handshake_io(QIOChannel *ioc,
         qio_task_get_source(task));
 
     tioc->hs_ioc_tag = 0;
-    g_free(data);
-    qio_channel_tls_handshake_task(tioc, task, context);
-
-    if (context) {
-        g_main_context_unref(context);
+    if (!qio_channel_tls_handshake_task(tioc, task, context)) {
+        /* task is kept by new GSource so must not be released yet */
+        data->task = NULL;
     }
 
     return FALSE;
@@ -250,14 +270,16 @@ void qio_channel_tls_handshake(QIOChannelTLS *ioc,
                         func, opaque, destroy);
 
     trace_qio_channel_tls_handshake_start(ioc);
-    qio_channel_tls_handshake_task(ioc, task, context);
+    if (qio_channel_tls_handshake_task(ioc, task, context)) {
+        qio_task_free(task);
+    }
 }
 
 static gboolean qio_channel_tls_bye_io(QIOChannel *ioc, GIOCondition condition,
                                        gpointer user_data);
 
-static void qio_channel_tls_bye_task(QIOChannelTLS *ioc, QIOTask *task,
-                                     GMainContext *context)
+static gboolean qio_channel_tls_bye_task(QIOChannelTLS *ioc, QIOTask *task,
+                                         GMainContext *context)
 {
     GIOCondition condition;
     QIOChannelTLSData *data;
@@ -270,12 +292,12 @@ static void qio_channel_tls_bye_task(QIOChannelTLS *ioc, QIOTask *task,
         trace_qio_channel_tls_bye_fail(ioc);
         qio_task_set_error(task, err);
         qio_task_complete(task);
-        return;
+        return TRUE;
     }
 
     if (status == QCRYPTO_TLS_BYE_COMPLETE) {
         qio_task_complete(task);
-        return;
+        return TRUE;
     }
 
     data = g_new0(typeof(*data), 1);
@@ -295,7 +317,10 @@ static void qio_channel_tls_bye_task(QIOChannelTLS *ioc, QIOTask *task,
     trace_qio_channel_tls_bye_pending(ioc, status);
     ioc->bye_ioc_tag = qio_channel_add_watch_full(ioc->master, condition,
                                                   qio_channel_tls_bye_io,
-                                                  data, NULL, context);
+                                                  data,
+                                                  qio_channel_tls_io_data_free,
+                                                  context);
+    return FALSE;
 }
 
 
@@ -308,11 +333,9 @@ static gboolean qio_channel_tls_bye_io(QIOChannel *ioc, GIOCondition condition,
     QIOChannelTLS *tioc = QIO_CHANNEL_TLS(qio_task_get_source(task));
 
     tioc->bye_ioc_tag = 0;
-    g_free(data);
-    qio_channel_tls_bye_task(tioc, task, context);
-
-    if (context) {
-        g_main_context_unref(context);
+    if (!qio_channel_tls_bye_task(tioc, task, context)) {
+        /* task is kept by new GSource so must not be released yet */
+        data->task = NULL;
     }
 
     return FALSE;
@@ -330,7 +353,9 @@ void qio_channel_tls_bye(QIOChannelTLS *ioc, Error **errp)
     task = qio_task_new(OBJECT(ioc), propagate_error, errp, NULL);
 
     trace_qio_channel_tls_bye_start(ioc);
-    qio_channel_tls_bye_task(ioc, task, NULL);
+    if (qio_channel_tls_bye_task(ioc, task, NULL)) {
+        qio_task_free(task);
+    }
 }
 
 static void qio_channel_tls_init(Object *obj G_GNUC_UNUSED)
@@ -342,10 +367,33 @@ static void qio_channel_tls_finalize(Object *obj)
 {
     QIOChannelTLS *ioc = QIO_CHANNEL_TLS(obj);
 
+    if (ioc->hs_ioc_tag) {
+        trace_qio_channel_tls_handshake_cancel(ioc);
+        g_clear_handle_id(&ioc->hs_ioc_tag, g_source_remove);
+    }
+
+    if (ioc->bye_ioc_tag) {
+        trace_qio_channel_tls_bye_cancel(ioc);
+        g_clear_handle_id(&ioc->bye_ioc_tag, g_source_remove);
+    }
+
     object_unref(OBJECT(ioc->master));
     qcrypto_tls_session_free(ioc->session);
 }
 
+static bool
+qio_channel_tls_allow_premature_termination(QIOChannelTLS *tioc, int flags)
+{
+    if (flags & QIO_CHANNEL_READ_FLAG_RELAXED_EOF) {
+        return true;
+    }
+
+    if (qatomic_read(&tioc->shutdown) & QIO_CHANNEL_SHUTDOWN_READ) {
+        return true;
+    }
+
+    return false;
+}
 
 static ssize_t qio_channel_tls_readv(QIOChannel *ioc,
                                      const struct iovec *iov,
@@ -355,6 +403,7 @@ static ssize_t qio_channel_tls_readv(QIOChannel *ioc,
                                      int flags,
                                      Error **errp)
 {
+    ERRP_GUARD();
     QIOChannelTLS *tioc = QIO_CHANNEL_TLS(ioc);
     size_t i;
     ssize_t got = 0;
@@ -364,8 +413,6 @@ static ssize_t qio_channel_tls_readv(QIOChannel *ioc,
             tioc->session,
             iov[i].iov_base,
             iov[i].iov_len,
-            flags & QIO_CHANNEL_READ_FLAG_RELAXED_EOF ||
-            qatomic_load_acquire(&tioc->shutdown) & QIO_CHANNEL_SHUTDOWN_READ,
             errp);
         if (ret == QCRYPTO_TLS_SESSION_ERR_BLOCK) {
             if (got) {
@@ -374,6 +421,12 @@ static ssize_t qio_channel_tls_readv(QIOChannel *ioc,
                 return QIO_CHANNEL_ERR_BLOCK;
             }
         } else if (ret < 0) {
+            if (ret == QCRYPTO_TLS_SESSION_PREMATURE_TERMINATION &&
+                qio_channel_tls_allow_premature_termination(tioc, flags)) {
+                error_free(*errp);
+                *errp = NULL;
+                return got;
+            }
             return -1;
         }
         got += ret;
@@ -396,12 +449,24 @@ static ssize_t qio_channel_tls_writev(QIOChannel *ioc,
     QIOChannelTLS *tioc = QIO_CHANNEL_TLS(ioc);
     size_t i;
     ssize_t done = 0;
+    ssize_t remain;
+    g_autofree struct iovec *tmpiov = NULL;
+    size_t ntmpiov = 0;
 
-    for (i = 0 ; i < niov ; i++) {
-        ssize_t ret = qcrypto_tls_session_write(tioc->session,
-                                                iov[i].iov_base,
-                                                iov[i].iov_len,
-                                                errp);
+    /*
+     * The previous write encrypted all the data, but some
+     * was not able to be sent on the wire when uncorked,
+     * so we returned a short write. The encrypted data
+     * will still be cached by GNUTLS and the session will
+     * be in a corked state.
+     *
+     * This write call will be trying to write the remaining
+     * plain text data again, but we must avoid sending that
+     * into GNUTLS. Instead flush the previously encrypted
+     * pending data.
+     */
+    while (tioc->corked) {
+        ssize_t ret = qcrypto_tls_session_write_uncork(tioc->session, errp);
         if (ret == QCRYPTO_TLS_SESSION_ERR_BLOCK) {
             if (done) {
                 return done;
@@ -411,12 +476,74 @@ static ssize_t qio_channel_tls_writev(QIOChannel *ioc,
         } else if (ret < 0) {
             return -1;
         }
+        done += (tioc->corked - ret);
+        tioc->corked = ret;
+    }
+
+    /*
+     * If we flushed pending data, we must discard an
+     * equivalent amount of plain text data from this
+     * write call, and then process what's left over,
+     * if any.
+     */
+    if (done) {
+        ssize_t total = iov_size(iov, niov);
+        if (done == total) {
+            return done;
+        }
+
+        tmpiov = g_new0(struct iovec, niov);
+        ntmpiov = iov_copy(tmpiov, niov, iov, niov,
+                           done, total - done);
+
+        iov = tmpiov;
+        niov = ntmpiov;
+    }
+
+    /*
+     * At this point we should ony be processing "new"
+     * data, not seen by a previous write call so we
+     * send to GNUTLS as normal.
+     */
+    qcrypto_tls_session_write_cork(tioc->session);
+    for (i = 0 ; i < niov ; i++) {
+        ssize_t ret = qcrypto_tls_session_write(tioc->session,
+                                                iov[i].iov_base,
+                                                iov[i].iov_len,
+                                                errp);
+        if (ret == QCRYPTO_TLS_SESSION_ERR_BLOCK) {
+            error_setg(errp, "Unexpected TLS blocking I/O while corked");
+            return -1;
+        } else if (ret < 0) {
+            return -1;
+        }
         done += ret;
         if (ret < iov[i].iov_len) {
             break;
         }
     }
-    return done;
+
+    /*
+     * On non-blocking sockets, uncorking may not succeed
+     * in sending all encrypted data, so we have to check
+     * what was actually sent to see if GNUTLS remains in
+     * the corked state with pending data.
+     */
+    remain = qcrypto_tls_session_write_uncork(tioc->session, errp);
+    if (remain < 0) {
+        return -1;
+    } else if (remain) {
+        tioc->corked = remain;
+    }
+    /*
+     * done == what we sent to GNUTLS for encryption & sending
+     * remain == subset of 'done' that was encrypted but not sent
+     */
+    if (done && (remain == done)) {
+        return QIO_CHANNEL_ERR_BLOCK;
+    } else {
+        return done - remain;
+    }
 }
 
 static int qio_channel_tls_set_blocking(QIOChannel *ioc,
@@ -425,7 +552,7 @@ static int qio_channel_tls_set_blocking(QIOChannel *ioc,
 {
     QIOChannelTLS *tioc = QIO_CHANNEL_TLS(ioc);
 
-    return qio_channel_set_blocking(tioc->master, enabled, errp);
+    return qio_channel_set_blocking(tioc->master, enabled, errp) ? 0 : -1;
 }
 
 static void qio_channel_tls_set_delay(QIOChannel *ioc,

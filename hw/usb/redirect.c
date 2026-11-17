@@ -41,9 +41,9 @@
 #include <usbredirparser.h>
 #include <usbredirfilter.h>
 
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
-#include "hw/usb.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
+#include "hw/usb/usb.h"
 #include "migration/qemu-file-types.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
@@ -113,7 +113,7 @@ struct PacketIdQueue {
 struct USBRedirDevice {
     USBDevice dev;
     /* Properties */
-    CharBackend cs;
+    CharFrontend cs;
     bool enable_streams;
     bool suppress_remote_wake;
     bool in_write;
@@ -690,6 +690,7 @@ static void usbredir_buffered_bulk_in_complete_ftdi(USBRedirDevice *dev,
     struct buf_packet *bulkp;
     int count;
 
+    assert(maxp != 0);
     while ((bulkp = QTAILQ_FIRST(&dev->endpoint[EP2I(ep)].bufpq)) &&
            p->actual_length < p->iov.size && p->status == USB_RET_SUCCESS) {
         if (bulkp->len < 2) {
@@ -739,6 +740,7 @@ static void usbredir_handle_buffered_bulk_in_data(USBRedirDevice *dev,
             .stream_id = 0,
             .no_transfers = 5,
         };
+        assert(dev->endpoint[EP2I(ep)].max_packet_size != 0);
         /* Round bytes_per_transfer up to a multiple of max_packet_size */
         bpt = 512 + dev->endpoint[EP2I(ep)].max_packet_size - 1;
         bpt /= dev->endpoint[EP2I(ep)].max_packet_size;
@@ -793,6 +795,7 @@ static void usbredir_handle_bulk_data(USBRedirDevice *dev, USBPacket *p,
     }
 
     if (dev->endpoint[EP2I(ep)].bulk_receiving_enabled) {
+        assert(maxp != 0);
         if (size != 0 && (size % maxp) == 0) {
             usbredir_handle_buffered_bulk_in_data(dev, p, ep);
             return;
@@ -1226,10 +1229,7 @@ static void usbredir_chardev_close_bh(void *opaque)
         usbredirparser_destroy(dev->parser);
         dev->parser = NULL;
     }
-    if (dev->watch) {
-        g_source_remove(dev->watch);
-        dev->watch = 0;
-    }
+    g_clear_handle_id(&dev->watch, g_source_remove);
 }
 
 static void usbredir_create_parser(USBRedirDevice *dev)
@@ -1494,9 +1494,7 @@ static void usbredir_unrealize(USBDevice *udev)
     if (dev->parser) {
         usbredirparser_destroy(dev->parser);
     }
-    if (dev->watch) {
-        g_source_remove(dev->watch);
-    }
+    g_clear_handle_id(&dev->watch, g_source_remove);
 
     free(dev->filter_rules);
     qemu_del_vm_change_state_handler(dev->vmstate);
@@ -1801,6 +1799,17 @@ static void usbredir_ep_info(void *priv,
         if (usbredirparser_peer_has_cap(dev->parser,
                                      usb_redir_cap_ep_info_max_packet_size)) {
             dev->endpoint[i].max_packet_size = ep_info->max_packet_size[i];
+            if (ep_info->max_packet_size[i] == 0 &&
+                dev->endpoint[i].bulk_receiving_enabled) {
+                USBPacket *p = dev->endpoint[i].pending_async_packet;
+                usbredir_stop_bulk_receiving(dev, I2EP(i));
+                dev->endpoint[i].bulk_receiving_enabled = 0;
+                if (p != NULL) {
+                    dev->endpoint[i].pending_async_packet = NULL;
+                    p->status = USB_RET_IOERROR;
+                    usb_packet_complete(&dev->dev, p);
+                }
+            }
         }
 #if USBREDIR_VERSION >= 0x000700
         if (usbredirparser_peer_has_cap(dev->parser,
@@ -2143,7 +2152,7 @@ static void usbredir_buffered_bulk_packet(void *priv, uint64_t id,
     USBRedirDevice *dev = priv;
     uint8_t status, ep = buffered_bulk_packet->endpoint;
     void *free_on_destroy;
-    int i, len;
+    int i, len, queued = 0;
 
     DPRINTF("buffered-bulk-in status %d ep %02X len %d id %"PRIu64"\n",
             buffered_bulk_packet->status, ep, data_len, id);
@@ -2161,6 +2170,7 @@ static void usbredir_buffered_bulk_packet(void *priv, uint64_t id,
     }
 
     /* Data must be in maxp chunks for buffered_bulk_add_*_data_to_packet */
+    assert(dev->endpoint[EP2I(ep)].max_packet_size != 0);
     len = dev->endpoint[EP2I(ep)].max_packet_size;
     status = usb_redir_success;
     free_on_destroy = NULL;
@@ -2174,8 +2184,24 @@ static void usbredir_buffered_bulk_packet(void *priv, uint64_t id,
         /* bufp_alloc also adds the packet to the ep queue */
         r = bufp_alloc(dev, data + i, len, status, ep, free_on_destroy);
         if (r) {
+            /*
+             * Earlier fragments from this packet are in the queue
+             * with interior pointers into data. If the dropped
+             * fragment was the final one, bufp_alloc already freed
+             * data so those pointers are dangling. Remove them.
+             */
+            while (queued > 0) {
+                struct buf_packet *bufp;
+                bufp = QTAILQ_LAST(&dev->endpoint[EP2I(ep)].bufpq);
+                bufp_free(dev, bufp, ep);
+                queued--;
+            }
+            if (!free_on_destroy) {
+                free(data);
+            }
             break;
         }
+        queued++;
     }
 
     if (dev->endpoint[EP2I(ep)].pending_async_packet) {
@@ -2227,6 +2253,15 @@ static int usbredir_post_load(void *priv, int version_id)
 
     usbredir_setup_usb_eps(dev);
     usbredir_check_bulk_receiving(dev);
+
+    for (int i = 0; i < MAX_ENDPOINTS; i++) {
+        if (dev->endpoint[i].bulk_receiving_started &&
+            dev->endpoint[i].max_packet_size == 0) {
+            error_report("usbredir: endpoint %d has bulk receiving started "
+                         "with zero max_packet_size", i);
+            return -EINVAL;
+        }
+    }
 
     return 0;
 }

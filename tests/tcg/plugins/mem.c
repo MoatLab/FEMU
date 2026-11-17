@@ -12,16 +12,7 @@
 #include <stdio.h>
 #include <glib.h>
 
-/*
- * plugins should not include anything from QEMU aside from the
- * API header. However as this is a test plugin to exercise the
- * internals of QEMU and we want to avoid needless code duplication we
- * do so here. bswap.h is pretty self-contained although it needs a
- * few things provided by compiler.h.
- */
-#include <compiler.h>
 #include <stdbool.h>
-#include <bswap.h>
 #include <qemu-plugin.h>
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
@@ -77,7 +68,7 @@ static gint addr_order(gconstpointer a, gconstpointer b, gpointer d)
 }
 
 
-static void plugin_exit(qemu_plugin_id_t id, void *p)
+static void plugin_exit(void *p)
 {
     g_autoptr(GString) out = g_string_new("");
 
@@ -93,24 +84,22 @@ static void plugin_exit(qemu_plugin_id_t id, void *p)
 
 
     if (do_region_summary) {
-        GList *counts = g_hash_table_get_values(regions);
+        g_autoptr(GList) regionlist = g_hash_table_get_values(regions);
 
-        counts = g_list_sort_with_data(counts, addr_order, NULL);
+        regionlist = g_list_sort_with_data(regionlist, addr_order, NULL);
 
         g_string_printf(out, "Region Base, Reads, Writes, Seen all\n");
 
-        if (counts && g_list_next(counts)) {
-            for (/* counts */; counts; counts = counts->next) {
-                RegionInfo *ri = (RegionInfo *) counts->data;
+        for (GList *l = regionlist; l; l = g_list_next(l)) {
+            RegionInfo *ri = (RegionInfo *) l->data;
 
-                g_string_append_printf(out,
-                                       "0x%016"PRIx64", "
-                                       "%"PRId64", %"PRId64", %s\n",
-                                       ri->region_address,
-                                       ri->reads,
-                                       ri->writes,
-                                       ri->seen_all ? "true" : "false");
-            }
+            g_string_append_printf(out,
+                                   "0x%016"PRIx64", "
+                                   "%"PRId64", %"PRId64", %s\n",
+                                   ri->region_address,
+                                   ri->reads,
+                                   ri->writes,
+                                   ri->seen_all ? "true" : "false");
         }
         qemu_plugin_outs(out->str);
     }
@@ -132,6 +121,9 @@ static void update_region_info(uint64_t region, uint64_t offset,
     bool is_store = qemu_plugin_mem_is_store(meminfo);
     RegionInfo *ri;
     bool unseen_data = false;
+    void *val_ptr;
+    unsigned int val_size;
+    qemu_plugin_mem_value swapped_value;
 
     g_assert(offset + size <= region_size);
 
@@ -152,64 +144,45 @@ static void update_region_info(uint64_t region, uint64_t offset,
         ri->reads++;
     }
 
+    void *ri_data = &ri->data[offset];
+
+    swapped_value.type = value.type;
     switch (value.type) {
     case QEMU_PLUGIN_MEM_VALUE_U8:
-        if (is_store) {
-            ri->data[offset] = value.data.u8;
-        } else if (ri->data[offset] != value.data.u8) {
-            unseen_data = true;
-        }
+        swapped_value.data.u8 = value.data.u8;
+        val_ptr = &swapped_value.data.u8;
+        val_size = 1;
         break;
     case QEMU_PLUGIN_MEM_VALUE_U16:
-    {
-        uint16_t *p = (uint16_t *) &ri->data[offset];
-        if (is_store) {
-            if (be) {
-                stw_be_p(p, value.data.u16);
-            } else {
-                stw_le_p(p, value.data.u16);
-            }
-        } else {
-            uint16_t val = be ? lduw_be_p(p) : lduw_le_p(p);
-            unseen_data = val != value.data.u16;
-        }
+        swapped_value.data.u16 = be ? GUINT16_TO_BE(value.data.u16) :
+            GUINT16_TO_LE(value.data.u16);
+        val_ptr = &swapped_value.data.u16;
+        val_size = 2;
         break;
-    }
     case QEMU_PLUGIN_MEM_VALUE_U32:
-    {
-        uint32_t *p = (uint32_t *) &ri->data[offset];
-        if (is_store) {
-            if (be) {
-                stl_be_p(p, value.data.u32);
-            } else {
-                stl_le_p(p, value.data.u32);
-            }
-        } else {
-            uint32_t val = be ? ldl_be_p(p) : ldl_le_p(p);
-            unseen_data = val != value.data.u32;
-        }
+        swapped_value.data.u32 = be ? GUINT32_TO_BE(value.data.u32) :
+            GUINT32_TO_LE(value.data.u32);
+        val_ptr = &swapped_value.data.u32;
+        val_size = 4;
         break;
-    }
     case QEMU_PLUGIN_MEM_VALUE_U64:
-    {
-        uint64_t *p = (uint64_t *) &ri->data[offset];
-        if (is_store) {
-            if (be) {
-                stq_be_p(p, value.data.u64);
-            } else {
-                stq_le_p(p, value.data.u64);
-            }
-        } else {
-            uint64_t val = be ? ldq_be_p(p) : ldq_le_p(p);
-            unseen_data = val != value.data.u64;
-        }
+        swapped_value.data.u64 = be ? GUINT64_TO_BE(value.data.u64) :
+            GUINT64_TO_LE(value.data.u64);
+        val_ptr = &swapped_value.data.u64;
+        val_size = 8;
         break;
-    }
     case QEMU_PLUGIN_MEM_VALUE_U128:
-        /* non in test so skip */
-        break;
+        /* none in test so skip */
+        goto done;
     default:
         g_assert_not_reached();
+    }
+
+    /* ri_data may not be aligned, so we use memcpy/memcmp */
+    if (is_store) {
+        memcpy(ri_data, val_ptr, val_size);
+    } else {
+        unseen_data = memcmp(ri_data, val_ptr, val_size) != 0;
     }
 
     /*
@@ -226,6 +199,7 @@ static void update_region_info(uint64_t region, uint64_t offset,
         ri->seen_all = false;
     }
 
+done:
     g_mutex_unlock(&lock);
 }
 
@@ -292,7 +266,7 @@ static void print_access(unsigned int cpu_index, qemu_plugin_meminfo_t meminfo,
     qemu_plugin_outs(out->str);
 }
 
-static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
+static void vcpu_tb_trans(struct qemu_plugin_tb *tb, void *userdata)
 {
     size_t n = qemu_plugin_tb_n_insns(tb);
     size_t i;
@@ -400,7 +374,7 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
     mem_count = qemu_plugin_scoreboard_u64_in_struct(
         counts, CPUCount, mem_count);
     io_count = qemu_plugin_scoreboard_u64_in_struct(counts, CPUCount, io_count);
-    qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
+    qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans, NULL);
     qemu_plugin_register_atexit_cb(id, plugin_exit, NULL);
     return 0;
 }

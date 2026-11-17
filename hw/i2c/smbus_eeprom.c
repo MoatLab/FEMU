@@ -25,10 +25,10 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "qapi/error.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/i2c/i2c.h"
 #include "hw/i2c/smbus_slave.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/i2c/smbus_eeprom.h"
 #include "qom/object.h"
@@ -88,11 +88,9 @@ static int eeprom_write_data(SMBusDevice *dev, uint8_t *buf, uint8_t len)
 
 static bool smbus_eeprom_vmstate_needed(void *opaque)
 {
-    MachineClass *mc = MACHINE_GET_CLASS(qdev_get_machine());
     SMBusEEPROMDevice *eeprom = opaque;
 
-    return (eeprom->accessed || smbus_vmstate_needed(&eeprom->smbusdev)) &&
-        !mc->smbus_no_migration_support;
+    return eeprom->accessed || smbus_vmstate_needed(&eeprom->smbusdev);
 }
 
 static const VMStateDescription vmstate_smbus_eeprom = {
@@ -288,6 +286,7 @@ uint8_t *spd_data_generate(enum sdram_type type, ram_addr_t ram_size)
     spd[33] = 8;    /* addr/cmd hold time */
     spd[34] = 20;   /* data input setup time */
     spd[35] = 8;    /* data input hold time */
+    spd[36] = (type == DDR2 ? 13 << 2 : 0); /* min. write recovery time */
 
     /* checksum */
     for (i = 0; i < 63; i++) {

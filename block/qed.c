@@ -351,15 +351,21 @@ static void bdrv_qed_detach_aio_context(BlockDriverState *bs)
 {
     BDRVQEDState *s = bs->opaque;
 
-    qed_cancel_need_check_timer(s);
-    timer_free(s->need_check_timer);
-    s->need_check_timer = NULL;
+    if (s->need_check_timer) {
+        qed_cancel_need_check_timer(s);
+        timer_free(s->need_check_timer);
+        s->need_check_timer = NULL;
+    }
 }
 
-static void bdrv_qed_attach_aio_context(BlockDriverState *bs,
-                                        AioContext *new_context)
+static void GRAPH_RDLOCK bdrv_qed_attach_aio_context(BlockDriverState *bs,
+                                                     AioContext *new_context)
 {
     BDRVQEDState *s = bs->opaque;
+
+    if (bdrv_is_inactive(bs)) {
+        return;
+    }
 
     s->need_check_timer = aio_timer_new(new_context,
                                         QEMU_CLOCK_VIRTUAL, SCALE_NS,
@@ -788,7 +794,7 @@ bdrv_qed_co_create_opts(BlockDriver *drv, const char *filename,
     }
 
     /* Create and open the file (protocol layer) */
-    ret = bdrv_co_create_file(filename, opts, errp);
+    ret = bdrv_co_create_file(filename, opts, true, errp);
     if (ret < 0) {
         goto fail;
     }

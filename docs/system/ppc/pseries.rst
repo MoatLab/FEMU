@@ -16,7 +16,7 @@ Supported devices
 
  * Multi processor support for many Power processors generations:
    - POWER7, POWER7+
-   - POWER8, POWER8NVL
+   - POWER8
    - POWER9
    - Power10
    - Power11
@@ -43,7 +43,7 @@ Firmware
 
 The pSeries platform in QEMU comes with 2 firmwares:
 
-`SLOF <https://github.com/aik/SLOF>`_ (Slimline Open Firmware) is an
+`SLOF <https://gitlab.com/slof/slof>`_ (Slimline Open Firmware) is an
 implementation of the `IEEE 1275-1994, Standard for Boot (Initialization
 Configuration) Firmware: Core Requirements and Practices
 <https://standards.ieee.org/standard/1275-1994.html>`_.

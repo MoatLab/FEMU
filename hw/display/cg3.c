@@ -28,11 +28,11 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "ui/console.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
-#include "hw/irq.h"
-#include "hw/loader.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/irq.h"
+#include "hw/core/loader.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "trace.h"
@@ -85,7 +85,7 @@ struct CG3State {
     uint8_t dac_index, dac_state;
 };
 
-static void cg3_update_display(void *opaque)
+static bool cg3_update_display(void *opaque)
 {
     CG3State *s = opaque;
     DisplaySurface *surface = qemu_console_surface(s->con);
@@ -98,7 +98,7 @@ static void cg3_update_display(void *opaque)
     DirtyBitmapSnapshot *snap = NULL;
 
     if (surface_bits_per_pixel(surface) != 32) {
-        return;
+        return true;
     }
     width = s->width;
     height = s->height;
@@ -137,7 +137,7 @@ static void cg3_update_display(void *opaque)
             }
         } else {
             if (y_start >= 0) {
-                dpy_gfx_update(s->con, 0, y_start, width, y - y_start);
+                qemu_console_update(s->con, 0, y_start, width, y - y_start);
                 y_start = -1;
             }
             pix += width;
@@ -146,7 +146,7 @@ static void cg3_update_display(void *opaque)
     }
     s->full_update = 0;
     if (y_start >= 0) {
-        dpy_gfx_update(s->con, 0, y_start, width, y - y_start);
+        qemu_console_update(s->con, 0, y_start, width, y - y_start);
     }
     /* vsync interrupt? */
     if (s->regs[0] & CG3_CR_ENABLE_INTS) {
@@ -154,6 +154,7 @@ static void cg3_update_display(void *opaque)
         qemu_irq_raise(s->irq);
     }
     g_free(snap);
+    return true;
 }
 
 static void cg3_invalidate_display(void *opaque)
@@ -265,7 +266,7 @@ static void cg3_reg_write(void *opaque, hwaddr addr, uint64_t val,
 static const MemoryRegionOps cg3_reg_ops = {
     .read = cg3_reg_read,
     .write = cg3_reg_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
+    .endianness = DEVICE_BIG_ENDIAN,
     .valid = {
         .min_access_size = 1,
         .max_access_size = 4,
@@ -277,29 +278,23 @@ static const GraphicHwOps cg3_ops = {
     .gfx_update = cg3_update_display,
 };
 
-static void cg3_initfn(Object *obj)
+static void cg3_realizefn(DeviceState *dev, Error **errp)
 {
-    SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
-    CG3State *s = CG3(obj);
+    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
+    Object *obj = OBJECT(dev);
+    CG3State *s = CG3(dev);
+    int ret;
+    char *fcode_filename;
 
-    memory_region_init_rom_nomigrate(&s->rom, obj, "cg3.prom",
-                                     FCODE_MAX_ROM_SIZE, &error_fatal);
+    memory_region_init_rom(&s->rom, obj, "cg3.prom", FCODE_MAX_ROM_SIZE,
+                           &error_fatal);
     sysbus_init_mmio(sbd, &s->rom);
 
     memory_region_init_io(&s->reg, obj, &cg3_reg_ops, s, "cg3.reg",
                           CG3_REG_SIZE);
     sysbus_init_mmio(sbd, &s->reg);
-}
-
-static void cg3_realizefn(DeviceState *dev, Error **errp)
-{
-    SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
-    CG3State *s = CG3(dev);
-    int ret;
-    char *fcode_filename;
 
     /* FCode ROM */
-    vmstate_register_ram_global(&s->rom);
     fcode_filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, CG3_ROM_FILE);
     if (fcode_filename) {
         ret = load_image_mr(fcode_filename, &s->rom);
@@ -316,7 +311,7 @@ static void cg3_realizefn(DeviceState *dev, Error **errp)
 
     sysbus_init_irq(sbd, &s->irq);
 
-    s->con = graphic_console_init(dev, 0, &cg3_ops, s);
+    s->con = qemu_graphic_console_create(dev, 0, &cg3_ops, s);
     qemu_console_resize(s->con, s->width, s->height);
 }
 
@@ -382,7 +377,6 @@ static const TypeInfo cg3_info = {
     .name          = TYPE_CG3,
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(CG3State),
-    .instance_init = cg3_initfn,
     .class_init    = cg3_class_init,
 };
 

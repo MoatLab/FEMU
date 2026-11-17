@@ -905,7 +905,7 @@ static int vhost_vdpa_reset_device(struct vhost_dev *dev)
 
     memory_listener_unregister(&v->shared->listener);
     v->shared->listener_registered = false;
-    v->suspended = false;
+    v->shared->suspended = false;
     return 0;
 }
 
@@ -1075,13 +1075,13 @@ static int vhost_vdpa_svq_set_fds(struct vhost_dev *dev,
     int r;
 
     r = event_notifier_init(&svq->hdev_kick, 0);
-    if (r != 0) {
+    if (r < 0) {
         error_setg_errno(errp, -r, "Couldn't create kick event notifier");
         goto err_init_hdev_kick;
     }
 
     r = event_notifier_init(&svq->hdev_call, 0);
-    if (r != 0) {
+    if (r < 0) {
         error_setg_errno(errp, -r, "Couldn't create call event notifier");
         goto err_init_hdev_call;
     }
@@ -1354,7 +1354,7 @@ static void vhost_vdpa_suspend(struct vhost_dev *dev)
         if (unlikely(r)) {
             error_report("Cannot suspend: %s(%d)", g_strerror(errno), errno);
         } else {
-            v->suspended = true;
+            v->shared->suspended = true;
             return;
         }
     }
@@ -1481,7 +1481,7 @@ static int vhost_vdpa_get_vring_base(struct vhost_dev *dev,
         return 0;
     }
 
-    if (!v->suspended) {
+    if (!v->shared->suspended) {
         /*
          * Cannot trust in value returned by device, let vhost recover used
          * idx from guest.
@@ -1571,16 +1571,9 @@ static int vhost_vdpa_set_owner(struct vhost_dev *dev)
     return 0;
 }
 
-static int vhost_vdpa_vq_get_addr(struct vhost_dev *dev,
-                    struct vhost_vring_addr *addr, struct vhost_virtqueue *vq)
+static bool vhost_vdpa_phys_vring_addr(struct vhost_dev *dev)
 {
-    assert(dev->vhost_ops->backend_type == VHOST_BACKEND_TYPE_VDPA);
-    addr->desc_user_addr = (uint64_t)(unsigned long)vq->desc_phys;
-    addr->avail_user_addr = (uint64_t)(unsigned long)vq->avail_phys;
-    addr->used_user_addr = (uint64_t)(unsigned long)vq->used_phys;
-    trace_vhost_vdpa_vq_get_addr(dev, vq, addr->desc_user_addr,
-                                 addr->avail_user_addr, addr->used_user_addr);
-    return 0;
+    return true;
 }
 
 static bool  vhost_vdpa_force_iommu(struct vhost_dev *dev)
@@ -1590,8 +1583,8 @@ static bool  vhost_vdpa_force_iommu(struct vhost_dev *dev)
 
 const VhostOps vdpa_ops = {
         .backend_type = VHOST_BACKEND_TYPE_VDPA,
-        .vhost_backend_init = vhost_vdpa_init,
-        .vhost_backend_cleanup = vhost_vdpa_cleanup,
+        .vhost_init = vhost_vdpa_init,
+        .vhost_cleanup = vhost_vdpa_cleanup,
         .vhost_set_log_base = vhost_vdpa_set_log_base,
         .vhost_set_vring_addr = vhost_vdpa_set_vring_addr,
         .vhost_set_vring_num = vhost_vdpa_set_vring_num,
@@ -1602,7 +1595,7 @@ const VhostOps vdpa_ops = {
         .vhost_get_features = vhost_vdpa_get_features,
         .vhost_set_owner = vhost_vdpa_set_owner,
         .vhost_set_vring_endian = NULL,
-        .vhost_backend_memslots_limit = vhost_vdpa_memslots_limit,
+        .vhost_memslots_limit = vhost_vdpa_memslots_limit,
         .vhost_set_mem_table = vhost_vdpa_set_mem_table,
         .vhost_set_features = vhost_vdpa_set_features,
         .vhost_reset_device = vhost_vdpa_reset_device,
@@ -1617,7 +1610,7 @@ const VhostOps vdpa_ops = {
         .vhost_send_device_iotlb_msg = NULL,
         .vhost_dev_start = vhost_vdpa_dev_start,
         .vhost_get_device_id = vhost_vdpa_get_device_id,
-        .vhost_vq_get_addr = vhost_vdpa_vq_get_addr,
+        .vhost_phys_vring_addr = vhost_vdpa_phys_vring_addr,
         .vhost_force_iommu = vhost_vdpa_force_iommu,
         .vhost_set_config_call = vhost_vdpa_set_config_call,
         .vhost_reset_status = vhost_vdpa_reset_status,

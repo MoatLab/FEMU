@@ -57,7 +57,7 @@ struct target_sigframe
 
 struct target_ucontext {
     target_ulong tuc_flags;
-    struct target_ucontext *tuc_link;
+    abi_ulong tuc_link;
     target_stack_t tuc_stack;
     struct target_sigcontext tuc_mcontext;
     target_sigset_t tuc_sigmask;        /* mask last for extensibility */
@@ -109,7 +109,7 @@ static void unwind_gusa(CPUSH4State *regs)
            the SP, otherwise we would be pushing the signal context to
            invalid memory.  */
         regs->gregs[15] = regs->gregs[1];
-    } else if (regs->flags & TB_FLAG_DELAY_SLOT) {
+    } else if (regs->flags & (TB_FLAG_DELAY_SLOT | TB_FLAG_DELAY_SLOT_COND)) {
         /* If we are in a delay slot, push the previous instruction.  */
         regs->pc -= 2;
     }
@@ -131,8 +131,10 @@ static void setup_sigcontext(struct target_sigcontext *sc,
     COPY(gregs[14]); COPY(gregs[15]);
     COPY(gbr); COPY(mach);
     COPY(macl); COPY(pr);
-    COPY(sr); COPY(pc);
+    COPY(pc);
 #undef COPY
+    /* The T, M and Q bits live outside env->sr; fold them back in. */
+    __put_user(cpu_read_sr(regs), &sc->sc_sr);
 
     for (i=0; i<16; i++) {
         __put_user(regs->fregs[i], &sc->sc_fpregs[i]);
@@ -159,13 +161,24 @@ static void restore_sigcontext(CPUSH4State *regs, struct target_sigcontext *sc)
     COPY(gregs[14]); COPY(gregs[15]);
     COPY(gbr); COPY(mach);
     COPY(macl); COPY(pr);
-    COPY(sr); COPY(pc);
+    COPY(pc);
 #undef COPY
+    /* The T, M and Q bits live outside env->sr; unfold them. */
+    {
+        uint32_t sr;
+        __get_user(sr, &sc->sc_sr);
+        cpu_write_sr(regs, sr);
+    }
 
     for (i=0; i<16; i++) {
         __get_user(regs->fregs[i], &sc->sc_fpregs[i]);
     }
-    __get_user(regs->fpscr, &sc->sc_fpscr);
+    /* Resync the derived float_status state, not just env->fpscr. */
+    {
+        uint32_t fpscr;
+        __get_user(fpscr, &sc->sc_fpscr);
+        cpu_load_fpscr(regs, fpscr);
+    }
     __get_user(regs->fpul, &sc->sc_fpul);
 
     regs->tra = -1;         /* disable syscall checks */
@@ -192,6 +205,8 @@ void setup_frame(int sig, struct target_sigaction *ka,
     for (i = 0; i < TARGET_NSIG_WORDS - 1; i++) {
         __put_user(set->sig[i + 1], &frame->extramask[i]);
     }
+
+    regs->fpscr = FPSCR_PR;
 
     /* Set up to return from userspace.  If provided, use a stub
        already in userspace.  */
@@ -237,13 +252,15 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
 
     /* Create the ucontext.  */
     __put_user(0, &frame->uc.tuc_flags);
-    __put_user(0, (unsigned long *)&frame->uc.tuc_link);
+    __put_user(0, &frame->uc.tuc_link);
     target_save_altstack(&frame->uc.tuc_stack, regs);
     setup_sigcontext(&frame->uc.tuc_mcontext,
                      regs, set->sig[0]);
     for(i = 0; i < TARGET_NSIG_WORDS; i++) {
         __put_user(set->sig[i], &frame->uc.tuc_sigmask.sig[i]);
     }
+
+    regs->fpscr = FPSCR_PR;
 
     /* Set up to return from userspace.  If provided, use a stub
        already in userspace.  */
@@ -329,20 +346,42 @@ badframe:
     return -QEMU_ESIGRETURN;
 }
 
+/*
+ * "or r0,r0" nop used by the Linux kernel inline sigreturn trampolines to
+ * avoid a hardware bug (OR_R0_R0 in arch/sh/kernel/signal_32.c).  Five of
+ * these nops follow TRAP_NOARG, placing the syscall number word 14 bytes
+ * past the MOVW(7) instruction (at MOVW(7)'s load offset).  This yields the
+ * fixed 16-byte layout that libunwind's unw_is_signal_frame detects:
+ *   [MOVW(7), TRAP_NOARG, 5x NOP_OR, .word syscall_nr]
+ */
+#define NOP_OR 0x200b
+
 void setup_sigtramp(abi_ulong sigtramp_page)
 {
-    uint16_t *tramp = lock_user(VERIFY_WRITE, sigtramp_page, 2 * 6, 0);
+    uint16_t *tramp = lock_user(VERIFY_WRITE, sigtramp_page, 2 * 16, 0);
     assert(tramp != NULL);
 
+    /* sigreturn trampoline (non-RT) at offset 0 */
     default_sigreturn = sigtramp_page;
-    __put_user(MOVW(2), &tramp[0]);
+    __put_user(MOVW(7), &tramp[0]);
     __put_user(TRAP_NOARG, &tramp[1]);
-    __put_user(TARGET_NR_sigreturn, &tramp[2]);
+    __put_user(NOP_OR, &tramp[2]);
+    __put_user(NOP_OR, &tramp[3]);
+    __put_user(NOP_OR, &tramp[4]);
+    __put_user(NOP_OR, &tramp[5]);
+    __put_user(NOP_OR, &tramp[6]);
+    __put_user(TARGET_NR_sigreturn, &tramp[7]);
 
-    default_rt_sigreturn = sigtramp_page + 6;
-    __put_user(MOVW(2), &tramp[3]);
-    __put_user(TRAP_NOARG, &tramp[4]);
-    __put_user(TARGET_NR_rt_sigreturn, &tramp[5]);
+    /* rt_sigreturn trampoline at offset 16 */
+    default_rt_sigreturn = sigtramp_page + 16;
+    __put_user(MOVW(7), &tramp[8]);
+    __put_user(TRAP_NOARG, &tramp[9]);
+    __put_user(NOP_OR, &tramp[10]);
+    __put_user(NOP_OR, &tramp[11]);
+    __put_user(NOP_OR, &tramp[12]);
+    __put_user(NOP_OR, &tramp[13]);
+    __put_user(NOP_OR, &tramp[14]);
+    __put_user(TARGET_NR_rt_sigreturn, &tramp[15]);
 
-    unlock_user(tramp, sigtramp_page, 2 * 6);
+    unlock_user(tramp, sigtramp_page, 2 * 16);
 }

@@ -18,6 +18,7 @@
 #include "hw/xen/xen_native.h"
 #include "qemu/bitmap.h"
 
+#include "system/ramlist.h"
 #include "system/runstate.h"
 #include "system/xen-mapcache.h"
 #include "trace.h"
@@ -78,6 +79,12 @@ static MapCache *mapcache;
 static MapCache *mapcache_grants_ro;
 static MapCache *mapcache_grants_rw;
 static xengnttab_handle *xen_region_gnttabdev;
+
+bool xen_map_cache_enabled(void)
+{
+    /* Map cache enabled implies xen_enabled().  */
+    return xen_enabled() && mapcache;
+}
 
 static inline void mapcache_lock(MapCache *mc)
 {
@@ -453,7 +460,7 @@ tryagain:
     return mc->last_entry->vaddr_base + address_offset;
 }
 
-uint8_t *xen_map_cache(MemoryRegion *mr,
+uint8_t *xen_map_cache(const MemoryRegion *mr,
                        hwaddr phys_addr, hwaddr size,
                        ram_addr_t ram_addr_offset,
                        uint8_t lock, bool dma,
@@ -462,6 +469,8 @@ uint8_t *xen_map_cache(MemoryRegion *mr,
     bool grant = xen_mr_is_grants(mr);
     MapCache *mc = mapcache;
     uint8_t *p;
+
+    assert(mapcache);
 
     if (grant) {
         mc = is_write ? mapcache_grants_rw : mapcache_grants_ro;
@@ -528,6 +537,8 @@ static ram_addr_t xen_ram_addr_from_mapcache_single(MapCache *mc, void *ptr)
 ram_addr_t xen_ram_addr_from_mapcache(void *ptr)
 {
     ram_addr_t addr;
+
+    assert(mapcache);
 
     addr = xen_ram_addr_from_mapcache_single(mapcache, ptr);
     if (addr == RAM_ADDR_INVALID) {
@@ -651,6 +662,8 @@ static void xen_invalidate_map_cache_entry_bh(void *opaque)
 
 void coroutine_mixed_fn xen_invalidate_map_cache_entry(uint8_t *buffer)
 {
+    assert(mapcache);
+
     if (qemu_in_coroutine()) {
         XenMapCacheData data = {
             .co = qemu_coroutine_self(),
@@ -708,6 +721,8 @@ static void xen_invalidate_map_cache_single(MapCache *mc)
 
 void xen_invalidate_map_cache(void)
 {
+    assert(mapcache);
+
     /* Flush pending AIO before destroying the mapcache */
     bdrv_drain_all();
 
@@ -774,6 +789,8 @@ uint8_t *xen_replace_cache_entry(hwaddr old_phys_addr,
                                  hwaddr size)
 {
     uint8_t *p;
+
+    assert(mapcache);
 
     mapcache_lock(mapcache);
     p = xen_replace_cache_entry_unlocked(mapcache, old_phys_addr,

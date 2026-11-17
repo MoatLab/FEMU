@@ -26,8 +26,8 @@
 #include "qemu/osdep.h"
 #include "qemu/module.h"
 #include "qemu/log.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/timer/mss-timer.h"
 #include "migration/vmstate.h"
 
@@ -189,14 +189,11 @@ timer_write(void *opaque, hwaddr offset,
         break;
 
     default:
-        if (addr < R_TIM1_MAX) {
-            st->regs[addr] = value;
-        } else {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                        TYPE_MSS_TIMER": 64-bit mode not supported\n");
-            return;
-        }
-        break;
+        /* All non-64-bit regs covered by the switch cases */
+        assert(addr >= R_TIM1_MAX);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      TYPE_MSS_TIMER": 64-bit mode not supported\n");
+        return;
     }
     timer_update_irq(st);
 }

@@ -26,8 +26,8 @@
 #include "system/block-backend.h"
 #include "hw/block/block.h"
 #include "hw/block/flash.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/ssi/ssi.h"
 #include "migration/vmstate.h"
 #include "qemu/bitops.h"
@@ -217,7 +217,8 @@ static const FlashPartInfo known_devices[] = {
     /* ISSI */
     { INFO("is25lq040b",  0x9d4013,      0,  64 << 10,   8, ER_4K) },
     { INFO("is25lp080d",  0x9d6014,      0,  64 << 10,  16, ER_4K) },
-    { INFO("is25lp016d",  0x9d6015,      0,  64 << 10,  32, ER_4K) },
+    { INFO("is25lp016d",  0x9d6015,      0,  64 << 10,  32,
+           ER_4K | HAS_SR_TB) },
     { INFO("is25lp032",   0x9d6016,      0,  64 << 10,  64, ER_4K) },
     { INFO("is25lp064",   0x9d6017,      0,  64 << 10, 128, ER_4K) },
     { INFO("is25lp128",   0x9d6018,      0,  64 << 10, 256, ER_4K) },
@@ -364,6 +365,8 @@ static const FlashPartInfo known_devices[] = {
       .sfdp_read = m25p80_sfdp_w25q512jv },
     { INFO("w25q01jvq",   0xef4021,      0,  64 << 10, 2048, ER_4K),
       .sfdp_read = m25p80_sfdp_w25q01jvq },
+    { INFO("w25q02jvm",   0xef7022,      0,  64 << 10, 4096, ER_4K),
+      .sfdp_read = m25p80_sfdp_w25q02jvm },
 
     /* Microchip */
     { INFO("25csm04",      0x29cc00,      0x100,  64 << 10,  8, 0) },
@@ -968,28 +971,107 @@ static uint8_t numonyx_mode(Flash *s)
     }
 }
 
-static uint8_t numonyx_extract_cfg_num_dummies(Flash *s)
+static uint8_t numonyx_extract_cfg_dummy_bytes(Flash *s)
 {
-    uint8_t num_dummies;
+    uint8_t dummy_bits;
     uint8_t mode;
-    assert(get_man(s) == MAN_NUMONYX);
 
     mode = numonyx_mode(s);
-    num_dummies = extract32(s->volatile_cfg, 4, 4);
+    dummy_bits = extract32(s->volatile_cfg, 4, 4);
 
-    if (num_dummies == 0x0 || num_dummies == 0xf) {
+    /*
+     * The default nubmer of dummy cycles is only related to the SPI
+     * protocol mode. For QSPI it is 10, otherwise it is 8.
+     */
+    if (dummy_bits == 0x0 || dummy_bits == 0xf) {
+        dummy_bits = (mode == MODE_QIO) ? 10 : 8;
+    }
+
+    /*
+     * Convert the number of dummy cycles to bytes.
+     *
+     * In the Dual I/O and Quad I/O protocols, all command phases use 2 or 4
+     * lines. In standard/extended SPI mode the phase width depends on the
+     * command sequence: output-only fast reads keep the dummy clocks on the
+     * single address line, while input/output fast reads use the same 2-line
+     * or 4-line phase as the address.
+     */
+
+    if (mode == MODE_QIO) {
+        dummy_bits *= 4;
+    } else if (mode == MODE_DIO) {
+        dummy_bits *= 2;
+    } else {
         switch (s->cmd_in_progress) {
         case QIOR:
         case QIOR4:
-            num_dummies = 10;
+            dummy_bits *= 4;
             break;
-        default:
-            num_dummies = (mode == MODE_QIO) ? 10 : 8;
+        case DIOR:
+        case DIOR4:
+            dummy_bits *= 2;
             break;
-        }
+         }
     }
 
-    return num_dummies;
+    /*
+     * Assert that the dummy bit count is byte-aligned
+     * as SSI core can only consume whole dummy bytes.
+     */
+    assert(dummy_bits % 8 == 0);
+
+    /* return the number of dummy bytes */
+    return dummy_bits / 8;
+}
+
+static uint8_t macronix_extract_cfg_dummy_bytes(Flash *s, uint8_t bus_width)
+{
+    static const uint8_t dummy_cycles_fast[4] = { 8, 6, 8, 10 };
+    static const uint8_t dummy_cycles_dio[4] = { 4, 6, 8, 10 };
+    static const uint8_t dummy_cycles_qio[4] = { 6, 4, 8, 10 };
+    const uint8_t *dummy_cycles = dummy_cycles_fast;
+    uint8_t dummy_bits;
+
+    switch (s->cmd_in_progress) {
+    case DIOR:
+    case DIOR4:
+        dummy_cycles = dummy_cycles_dio;
+        break;
+    case QIOR:
+    case QIOR4:
+        dummy_cycles = dummy_cycles_qio;
+        break;
+    default:
+        break;
+    }
+
+    dummy_bits = dummy_cycles[extract32(s->volatile_cfg, 6, 2)];
+    dummy_bits *= bus_width;
+
+    /*
+     * Assert that the dummy bit count is byte-aligned
+     * as SSI core can only consume whole dummy bytes.
+     */
+    assert(dummy_bits % 8 == 0);
+
+    return dummy_bits / 8;
+}
+
+static uint8_t spansion_extract_cfg_dummy_bytes(Flash *s, uint8_t bus_width)
+{
+    uint8_t dummy_bits;
+
+    dummy_bits = extract32(s->spansion_cr2v, SPANSION_DUMMY_CLK_POS,
+                            SPANSION_DUMMY_CLK_LEN);
+    dummy_bits *= bus_width;
+
+    /*
+     * Assert that the dummy bit count is byte-aligned
+     * as SSI core can only consume whole dummy bytes.
+     */
+    assert(dummy_bits % 8 == 0);
+
+    return dummy_bits / 8;
 }
 
 static void decode_fast_read_cmd(Flash *s)
@@ -1001,23 +1083,16 @@ static void decode_fast_read_cmd(Flash *s)
         s->needed_bytes += 1;
         break;
     case MAN_WINBOND:
-        s->needed_bytes += 8;
+        s->needed_bytes += 1;
         break;
     case MAN_NUMONYX:
-        s->needed_bytes += numonyx_extract_cfg_num_dummies(s);
+        s->needed_bytes += numonyx_extract_cfg_dummy_bytes(s);
         break;
     case MAN_MACRONIX:
-        if (extract32(s->volatile_cfg, 6, 2) == 1) {
-            s->needed_bytes += 6;
-        } else {
-            s->needed_bytes += 8;
-        }
+        s->needed_bytes += macronix_extract_cfg_dummy_bytes(s, 1);
         break;
     case MAN_SPANSION:
-        s->needed_bytes += extract32(s->spansion_cr2v,
-                                    SPANSION_DUMMY_CLK_POS,
-                                    SPANSION_DUMMY_CLK_LEN
-                                    );
+        s->needed_bytes += spansion_extract_cfg_dummy_bytes(s, 1);
         break;
     case MAN_ISSI:
         /*
@@ -1050,26 +1125,13 @@ static void decode_dio_read_cmd(Flash *s)
         break;
     case MAN_SPANSION:
         s->needed_bytes += SPANSION_CONTINUOUS_READ_MODE_CMD_LEN;
-        s->needed_bytes += extract32(s->spansion_cr2v,
-                                    SPANSION_DUMMY_CLK_POS,
-                                    SPANSION_DUMMY_CLK_LEN
-                                    );
+        s->needed_bytes += spansion_extract_cfg_dummy_bytes(s, 2);
         break;
     case MAN_NUMONYX:
-        s->needed_bytes += numonyx_extract_cfg_num_dummies(s);
+        s->needed_bytes += numonyx_extract_cfg_dummy_bytes(s);
         break;
     case MAN_MACRONIX:
-        switch (extract32(s->volatile_cfg, 6, 2)) {
-        case 1:
-            s->needed_bytes += 6;
-            break;
-        case 2:
-            s->needed_bytes += 8;
-            break;
-        default:
-            s->needed_bytes += 4;
-            break;
-        }
+        s->needed_bytes += macronix_extract_cfg_dummy_bytes(s, 2);
         break;
     case MAN_ISSI:
         /*
@@ -1096,30 +1158,17 @@ static void decode_qio_read_cmd(Flash *s)
     switch (get_man(s)) {
     case MAN_WINBOND:
         s->needed_bytes += WINBOND_CONTINUOUS_READ_MODE_CMD_LEN;
-        s->needed_bytes += 4;
+        s->needed_bytes += 2;
         break;
     case MAN_SPANSION:
         s->needed_bytes += SPANSION_CONTINUOUS_READ_MODE_CMD_LEN;
-        s->needed_bytes += extract32(s->spansion_cr2v,
-                                    SPANSION_DUMMY_CLK_POS,
-                                    SPANSION_DUMMY_CLK_LEN
-                                    );
+        s->needed_bytes += spansion_extract_cfg_dummy_bytes(s, 4);
         break;
     case MAN_NUMONYX:
-        s->needed_bytes += numonyx_extract_cfg_num_dummies(s);
+        s->needed_bytes += numonyx_extract_cfg_dummy_bytes(s);
         break;
     case MAN_MACRONIX:
-        switch (extract32(s->volatile_cfg, 6, 2)) {
-        case 1:
-            s->needed_bytes += 4;
-            break;
-        case 2:
-            s->needed_bytes += 8;
-            break;
-        default:
-            s->needed_bytes += 6;
-            break;
-        }
+        s->needed_bytes += macronix_extract_cfg_dummy_bytes(s, 4);
         break;
     case MAN_ISSI:
         /*

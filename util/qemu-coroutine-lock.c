@@ -30,7 +30,7 @@
 #include "qemu/coroutine_int.h"
 #include "qemu/processor.h"
 #include "qemu/queue.h"
-#include "block/aio.h"
+#include "qemu/aio.h"
 #include "trace.h"
 
 void qemu_co_queue_init(CoQueue *queue)
@@ -173,7 +173,7 @@ static CoWaitRecord *pop_waiter(CoMutex *mutex)
 
 static bool has_waiters(CoMutex *mutex)
 {
-    return QSLIST_EMPTY(&mutex->to_pop) || QSLIST_EMPTY(&mutex->from_push);
+    return !QSLIST_EMPTY(&mutex->to_pop) || !QSLIST_EMPTY(&mutex->from_push);
 }
 
 void qemu_co_mutex_init(CoMutex *mutex)

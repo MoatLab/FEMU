@@ -23,12 +23,12 @@
  * THE SOFTWARE.
  */
 #include "qemu/osdep.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/bitops.h"
 #include "qemu/log.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/ssi/xlnx-versal-ospi.h"
 
 #ifndef XILINX_VERSAL_OSPI_ERR_DEBUG
@@ -1569,15 +1569,11 @@ static RegisterAccessInfo ospi_regs_info[] = {
 };
 
 /* Return dev-obj from reg-region created by register_init_block32 */
-static XlnxVersalOspi *xilinx_ospi_of_mr(void *mr_accessor)
+static XlnxVersalOspi *xilinx_ospi_of_mr(void *opaque)
 {
-    RegisterInfoArray *reg_array = mr_accessor;
-    Object *dev;
+    RegisterInfoArray *reg_array = REGISTER_ARRAY(opaque);
 
-    dev = reg_array->mem.owner;
-    assert(dev);
-
-    return XILINX_VERSAL_OSPI(dev);
+    return XILINX_VERSAL_OSPI(register_array_get_owner(reg_array));
 }
 
 static void ospi_write(void *opaque, hwaddr addr, uint64_t value,

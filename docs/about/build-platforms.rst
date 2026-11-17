@@ -43,9 +43,7 @@ Those hosts are officially supported, with various accelerators:
    * - CPU Architecture
      - Accelerators
    * - Arm
-     - hvf (64 bit only), kvm (64 bit only), tcg, xen
-   * - MIPS (64 bit little endian only)
-     - kvm, tcg
+     - hvf, kvm, tcg, whpx, xen
    * - PPC
      - kvm, tcg
    * - RISC-V
@@ -55,7 +53,7 @@ Those hosts are officially supported, with various accelerators:
    * - SPARC
      - tcg
    * - x86
-     - hvf (64 bit only), kvm, nvmm, tcg, whpx (64 bit only), xen
+     - hvf, mshv, kvm, nvmm, tcg, whpx, xen
 
 Other host architectures are not supported. It is possible to build QEMU system
 emulation on an unsupported host architecture using the configure
@@ -116,16 +114,17 @@ Rust build dependencies
   bindgen tool, which is too big to package and distribute.  The minimum
   supported version of bindgen is 0.60.x.  For distributions that do not
   include bindgen or have an older version, it is recommended to install
-  a newer version using ``cargo install bindgen-cli``.
+  a newer version using ``cargo install --locked bindgen-cli``.
 
-  QEMU requires Rust 1.77.0.  This is available on all supported platforms
-  with one exception, namely the ``mips64el`` architecture on Debian bookworm.
-  For all other architectures, Debian bookworm provides a new-enough Rust
-  compiler in the ``rustc-web`` package.
+  QEMU requires Rust 1.83.0.  This is available on all supported platforms
+  except for the ``mips64el`` architecture on Debian bookworm.  For all other
+  architectures, Debian bookworm provides a new-enough Rust compiler
+  in the ``rustc-web`` package.
 
-  Also, on Ubuntu 22.04 or 24.04 this requires the ``rustc-1.77``
-  (or newer) package.  The path to ``rustc`` and ``rustdoc`` must be
-  provided manually to the configure script.
+  For Ubuntu 22.04 ("Jammy") and 24.04 ("Noble") updated versions of
+  Rust are available through packages such as ``rustc-1.83`` package;
+  the path to ``rustc`` and ``rustdoc`` has to be provided manually to
+  the configure script.
 
   Some distros prefer to avoid vendored crate sources, and instead use
   local sources from e.g. ``/usr/share/cargo/registry``.  QEMU includes a

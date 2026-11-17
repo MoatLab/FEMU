@@ -9,7 +9,7 @@
 #
 # Author: dgilbert@redhat.com
 
-#include "migration-test.h"
+#include "../bootfile.h"
 
 #define ACPI_ENABLE         0xf1
 #define ACPI_PORT_SMI_CMD   0xb2

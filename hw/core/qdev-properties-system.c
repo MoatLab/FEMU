@@ -11,13 +11,14 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qapi/qapi-types-block.h"
 #include "qapi/qapi-types-machine.h"
 #include "qapi/qapi-types-migration.h"
+#include "qapi/qapi-types-misc-arm.h"
 #include "qapi/qapi-visit-virtio.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/ctype.h"
@@ -27,7 +28,7 @@
 #include "qemu/error-report.h"
 #include "qdev-prop-internal.h"
 
-#include "audio/audio.h"
+#include "qemu/audio.h"
 #include "chardev/char-fe.h"
 #include "system/block-backend.h"
 #include "system/blockdev.h"
@@ -232,6 +233,7 @@ static void release_drive(Object *obj, const char *name, void *opaque)
     if (*ptr) {
         blockdev_auto_del(*ptr);
         blk_detach_dev(*ptr, dev);
+        *ptr = NULL;
     }
 }
 
@@ -258,10 +260,10 @@ const PropertyInfo qdev_prop_drive_iothread = {
 static void get_chr(Object *obj, Visitor *v, const char *name, void *opaque,
                     Error **errp)
 {
-    CharBackend *be = object_field_prop_ptr(obj, opaque);
+    CharFrontend *fe = object_field_prop_ptr(obj, opaque);
     char *p;
 
-    p = g_strdup(be->chr && be->chr->label ? be->chr->label : "");
+    p = g_strdup(fe->chr && fe->chr->label ? fe->chr->label : "");
     visit_type_str(v, name, &p, errp);
     g_free(p);
 }
@@ -271,7 +273,7 @@ static void set_chr(Object *obj, Visitor *v, const char *name, void *opaque,
 {
     ERRP_GUARD();
     const Property *prop = opaque;
-    CharBackend *be = object_field_prop_ptr(obj, prop);
+    CharFrontend *fe = object_field_prop_ptr(obj, prop);
     Chardev *s;
     char *str;
 
@@ -283,13 +285,13 @@ static void set_chr(Object *obj, Visitor *v, const char *name, void *opaque,
      * TODO Should this really be an error?  If no, the old value
      * needs to be released before we store the new one.
      */
-    if (!check_prop_still_unset(obj, name, be->chr, str, false, errp)) {
+    if (!check_prop_still_unset(obj, name, fe->chr, str, false, errp)) {
         return;
     }
 
     if (!*str) {
         g_free(str);
-        be->chr = NULL;
+        fe->chr = NULL;
         return;
     }
 
@@ -297,7 +299,7 @@ static void set_chr(Object *obj, Visitor *v, const char *name, void *opaque,
     if (s == NULL) {
         error_setg(errp, "Property '%s.%s' can't find value '%s'",
                    object_get_typename(obj), name, str);
-    } else if (!qemu_chr_fe_init(be, s, errp)) {
+    } else if (!qemu_chr_fe_init(fe, s, errp)) {
         error_prepend(errp, "Property '%s.%s' can't take value '%s': ",
                       object_get_typename(obj), name, str);
     }
@@ -307,9 +309,9 @@ static void set_chr(Object *obj, Visitor *v, const char *name, void *opaque,
 static void release_chr(Object *obj, const char *name, void *opaque)
 {
     const Property *prop = opaque;
-    CharBackend *be = object_field_prop_ptr(obj, prop);
+    CharFrontend *fe = object_field_prop_ptr(obj, prop);
 
-    qemu_chr_fe_deinit(be, false);
+    qemu_chr_fe_deinit(fe, false);
 }
 
 const PropertyInfo qdev_prop_chr = {
@@ -487,28 +489,27 @@ static void get_audiodev(Object *obj, Visitor *v, const char* name,
                          void *opaque, Error **errp)
 {
     const Property *prop = opaque;
-    QEMUSoundCard *card = object_field_prop_ptr(obj, prop);
-    char *p = g_strdup(audio_get_id(card));
+    AudioBackend **be = object_field_prop_ptr(obj, prop);
+    g_autofree char *id = g_strdup(audio_be_get_id(*be));
 
-    visit_type_str(v, name, &p, errp);
-    g_free(p);
+    visit_type_str(v, name, (char **)&id, errp);
 }
 
 static void set_audiodev(Object *obj, Visitor *v, const char* name,
                          void *opaque, Error **errp)
 {
     const Property *prop = opaque;
-    QEMUSoundCard *card = object_field_prop_ptr(obj, prop);
-    AudioState *state;
+    AudioBackend **be = object_field_prop_ptr(obj, prop);
+    AudioBackend *state;
     g_autofree char *str = NULL;
 
     if (!visit_type_str(v, name, &str, errp)) {
         return;
     }
 
-    state = audio_state_by_name(str, errp);
+    state = audio_be_by_name(str, errp);
     if (state) {
-        card->state = state;
+        *be = state;
     }
 }
 
@@ -680,7 +681,7 @@ const PropertyInfo qdev_prop_fdc_drive_type = {
 
 const PropertyInfo qdev_prop_multifd_compression = {
     .type = "MultiFDCompression",
-    .description = "multifd_compression values"
+    .description = "multifd compression method"
                    " (none/zlib/zstd/qpl/uadk/qatzip)",
     .enum_table = &MultiFDCompression_lookup,
     .get = qdev_propinfo_get_enum,
@@ -718,6 +719,32 @@ const PropertyInfo qdev_prop_zero_page_detection = {
     .type = "ZeroPageDetection",
     .description = "Zero page detection (none/legacy/multifd)",
     .enum_table = &ZeroPageDetection_lookup,
+    .get = qdev_propinfo_get_enum,
+    .set = qdev_propinfo_set_enum,
+    .set_default_value = qdev_propinfo_set_default_value_enum,
+};
+
+/* --- SsidSizeMode --- */
+
+QEMU_BUILD_BUG_ON(sizeof(SsidSizeMode) != sizeof(int));
+
+const PropertyInfo qdev_prop_ssidsize_mode = {
+    .type = "SsidSizeMode",
+    .description = "ssidsize mode: auto, 0-20",
+    .enum_table = &SsidSizeMode_lookup,
+    .get = qdev_propinfo_get_enum,
+    .set = qdev_propinfo_set_enum,
+    .set_default_value = qdev_propinfo_set_default_value_enum,
+};
+
+/* --- OasMode --- */
+
+QEMU_BUILD_BUG_ON(sizeof(OasMode) != sizeof(int));
+
+const PropertyInfo qdev_prop_oas_mode = {
+    .type = "OasMode",
+    .description = "oas mode: auto, 32, 36, 40, 42, 44, 48, 52, 56",
+    .enum_table = &OasMode_lookup,
     .get = qdev_propinfo_get_enum,
     .set = qdev_propinfo_set_enum,
     .set_default_value = qdev_propinfo_set_default_value_enum,
@@ -865,15 +892,14 @@ out:
     visit_end_alternate(v, (void **) &alt);
 }
 
-static int print_pci_devfn(Object *obj, const Property *prop, char *dest,
-                           size_t len)
+static char *print_pci_devfn(Object *obj, const Property *prop)
 {
     int32_t *ptr = object_field_prop_ptr(obj, prop);
 
     if (*ptr == -1) {
-        return snprintf(dest, len, "<unset>");
+        return g_strdup("<unset>");
     } else {
-        return snprintf(dest, len, "%02x.%x", *ptr >> 3, *ptr & 7);
+        return g_strdup_printf("%02x.%x", *ptr >> 3, *ptr & 7);
     }
 }
 

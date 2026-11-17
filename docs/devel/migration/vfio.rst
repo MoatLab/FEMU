@@ -23,6 +23,20 @@ and recommends that the initial bytes are sent and loaded in the destination
 before stopping the source VM. Enabling this migration capability will
 guarantee that and thus, can potentially reduce downtime even further.
 
+For example, in mlx5 devices, the initial bytes hold metadata used for time
+consuming pre-allocations of resources on the destination. Although init bytes
+may be small in size and sending them may take little time, loading them in the
+destination can take a significant amount of time. Switchover-ack guarantees
+that this pre-allocation doesn't happen during downtime.
+
+Initial bytes was originally defined to be monotonically decreasing, however
+there are cases where a new chunk of initial bytes should be transferred during
+precopy, e.g., due to a device reconfiguration, etc. The
+VFIO_PRECOPY_INFO_REINIT feature addresses this and when supported, allows to
+report a new initial bytes value regardless of any previously reported values.
+In this case, a new switchover ACK will be requested to make sure the new
+initial bytes are loaded in the destination before switching over.
+
 To support migration of multiple devices that might do P2P transactions between
 themselves, VFIO migration uAPI defines an intermediate P2P quiescent state.
 While in the P2P quiescent state, P2P DMA transactions cannot be initiated by
@@ -50,22 +64,14 @@ VFIO implements the device hooks for the iterative approach as follows:
 * A ``load_setup`` function that sets the VFIO device on the destination in
   _RESUMING state.
 
-* A ``state_pending_estimate`` function that reports an estimate of the
-  remaining pre-copy data that the vendor driver has yet to save for the VFIO
-  device.
-
-* A ``state_pending_exact`` function that reads pending_bytes from the vendor
-  driver, which indicates the amount of data that the vendor driver has yet to
-  save for the VFIO device.
+* A ``save_query_pending`` function that reports the remaining data that
+  the vendor driver has yet to save for the VFIO device.
 
 * An ``is_active_iterate`` function that indicates ``save_live_iterate`` is
   active only when the VFIO device is in pre-copy states.
 
 * A ``save_live_iterate`` function that reads the VFIO device's data from the
   vendor driver during iterative pre-copy phase.
-
-* A ``switchover_ack_needed`` function that checks if the VFIO device uses
-  "switchover-ack" migration capability when this capability is enabled.
 
 * A ``switchover_start`` function that in the multifd mode starts a thread that
   reassembles the multifd received data and loads it in-order into the device.

@@ -66,7 +66,7 @@ Modifying ``configure``
 ``configure`` is a shell script; it uses ``#!/bin/sh`` and therefore
 should be compatible with any POSIX shell. It is important to avoid
 using bash-isms to avoid breaking development platforms where bash is
-the primary host.
+not the default shell implementation.
 
 The configure script provides a variety of functions to help writing
 portable shell code and providing consistent behavior across architectures
@@ -88,7 +88,7 @@ and operating systems:
   ``$target_ar``, etc. to non-empty values.
 
 ``write_target_makefile``
-  Write a Makefile fragment to stdout, exposing the result of the most
+  Write a Makefile fragment to stdout, exposing the result of the most recent
   ``probe_target_compiler`` call as the usual Make variables (``CC``,
   ``AR``, ``LD``, etc.).
 
@@ -450,7 +450,7 @@ are run with ``make bench``.  Meson test suites such as ``unit`` can be ran
 with ``make check-unit``, and ``make check-tcg`` builds and runs "non-Meson"
 tests for all targets.
 
-If desired, it is also possible to use ``ninja`` and ``meson test``,
+If desired, it is also possible to use ``ninja`` and ``pyvenv/bin/meson test``,
 respectively to build emulators and run tests defined in meson.build.
 The main difference is that ``make`` needs the ``-jN`` flag in order to
 enable parallel builds or tests.
@@ -514,6 +514,18 @@ go through any pre-processing as seen with autotools, where configure
 generates ``Makefile`` from ``Makefile.in``.
 
 Built by configure:
+
+``run``
+  Used to run commands / scripts from the git checkout. Sets ``$PATH``
+  to point to locally built binaries, and activates the python venv
+  before running the requested command. Pass the command to run as
+  args, for example::
+
+    $ ./build/run ./script/qmp/qmp-shell-wrap qemu-system-x86_64
+
+  will use the ``python3`` binary and site-packages from the local
+  venv to run ``qmp-shell-wrap`` and spawn the QEMU emulator from
+  the build directory.
 
 ``config-host.mak``
   When configure has determined the characteristics of the build host it

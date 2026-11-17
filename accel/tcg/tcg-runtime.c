@@ -25,6 +25,7 @@
 #include "qemu/host-utils.h"
 #include "exec/cpu-common.h"
 #include "exec/helper-proto-common.h"
+#include "accel/tcg/cpu-loop.h"
 #include "accel/tcg/getpc.h"
 
 #define HELPER_H  "accel/tcg/tcg-runtime.h"
@@ -54,21 +55,6 @@ uint32_t HELPER(remu_i32)(uint32_t arg1, uint32_t arg2)
 }
 
 /* 64-bit helpers */
-
-uint64_t HELPER(shl_i64)(uint64_t arg1, uint64_t arg2)
-{
-    return arg1 << arg2;
-}
-
-uint64_t HELPER(shr_i64)(uint64_t arg1, uint64_t arg2)
-{
-    return arg1 >> arg2;
-}
-
-int64_t HELPER(sar_i64)(int64_t arg1, int64_t arg2)
-{
-    return arg1 >> arg2;
-}
 
 int64_t HELPER(div_i64)(int64_t arg1, int64_t arg2)
 {

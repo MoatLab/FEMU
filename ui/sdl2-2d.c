@@ -129,7 +129,7 @@ void sdl2_2d_refresh(DisplayChangeListener *dcl)
     struct sdl2_console *scon = container_of(dcl, struct sdl2_console, dcl);
 
     assert(!scon->opengl);
-    graphic_hw_update(dcl->con);
+    qemu_console_hw_update(dcl->con);
     sdl2_poll_events(scon);
 }
 

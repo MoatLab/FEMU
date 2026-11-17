@@ -53,6 +53,15 @@ dbus_display_chardev_export(DBusDisplay *dpy, DBusChardev *chr)
     sk = g_dbus_object_skeleton_new(path);
     g_dbus_object_skeleton_add_interface(
         sk, G_DBUS_INTERFACE_SKELETON(chr->iface));
+    if (chr->iface_vc_encoding) {
+        const char *interfaces[] = {
+            "org.qemu.Display1.Chardev.VCEncoding",
+            NULL
+        };
+        g_dbus_object_skeleton_add_interface(
+            sk, G_DBUS_INTERFACE_SKELETON(chr->iface_vc_encoding));
+        g_object_set(chr->iface, "interfaces", interfaces, NULL);
+    }
     g_dbus_object_manager_server_export(dpy->server, sk);
     chr->exported = true;
 }
@@ -176,9 +185,7 @@ dbus_chr_send_break(
     return DBUS_METHOD_INVOCATION_HANDLED;
 }
 
-static void
-dbus_chr_open(Chardev *chr, ChardevBackend *backend,
-              bool *be_opened, Error **errp)
+static bool dbus_chr_open(Chardev *chr, ChardevBackend *backend, Error **errp)
 {
     ERRP_GUARD();
 
@@ -205,13 +212,13 @@ dbus_chr_open(Chardev *chr, ChardevBackend *backend,
     opts = qemu_opts_create(qemu_find_opts("chardev"), NULL, 0, &error_abort);
     qemu_opt_set(opts, "server", "on", &error_abort);
     qemu_opt_set(opts, "wait", "off", &error_abort);
-    CHARDEV_CLASS(object_class_by_name(TYPE_CHARDEV_SOCKET))->parse(
+    CHARDEV_CLASS(object_class_by_name(TYPE_CHARDEV_SOCKET))->chr_parse(
         opts, be, errp);
     if (*errp) {
-        return;
+        return false;
     }
-    CHARDEV_CLASS(object_class_by_name(TYPE_CHARDEV_SOCKET))->open(
-        chr, be, be_opened, errp);
+    return CHARDEV_CLASS(object_class_by_name(TYPE_CHARDEV_SOCKET))->chr_open(
+        chr, be, errp);
 }
 
 static void
@@ -274,8 +281,8 @@ char_dbus_class_init(ObjectClass *oc, const void *data)
     DBusChardevClass *klass = DBUS_CHARDEV_CLASS(oc);
     ChardevClass *cc = CHARDEV_CLASS(oc);
 
-    cc->parse = dbus_chr_parse;
-    cc->open = dbus_chr_open;
+    cc->chr_parse = dbus_chr_parse;
+    cc->chr_open = dbus_chr_open;
     cc->chr_set_fe_open = dbus_chr_set_fe_open;
     cc->chr_set_echo = dbus_chr_set_echo;
     klass->parent_chr_be_event = cc->chr_be_event;
@@ -292,6 +299,7 @@ char_dbus_finalize(Object *obj)
     };
 
     dbus_display_notify(&event);
+    g_clear_object(&dc->iface_vc_encoding);
     g_clear_object(&dc->iface);
 }
 

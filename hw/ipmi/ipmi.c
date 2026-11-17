@@ -24,12 +24,12 @@
 
 #include "qemu/osdep.h"
 #include "hw/ipmi/ipmi.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "qom/object_interfaces.h"
 #include "system/runstate.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
-#include "hw/nmi.h"
+#include "hw/core/nmi.h"
 
 static uint32_t ipmi_current_uuid = 1;
 
@@ -97,8 +97,14 @@ static void isa_ipmi_bmc_check(const Object *obj, const char *name,
 {
     IPMIBmc *bmc = IPMI_BMC(val);
 
-    if (bmc->intf)
+    if (!bmc) {
+        error_setg(errp, "%s cannot be set to NULL", name);
+        return;
+    }
+
+    if (bmc->intf) {
         error_setg(errp, "BMC object is already in use");
+    }
 }
 
 void ipmi_bmc_find_and_link(Object *obj, Object **bmc)

@@ -19,8 +19,8 @@
 #include "system/ioport.h"
 #include "system/memory.h"
 #include "exec/tswap.h"
-#include "hw/qdev-core.h"
-#include "hw/irq.h"
+#include "hw/core/qdev.h"
+#include "hw/core/irq.h"
 #include "hw/core/cpu.h"
 #include "qemu/accel.h"
 #include "system/cpu-timers.h"
@@ -31,6 +31,8 @@
 #include "qemu/cutils.h"
 #include "qemu/target-info.h"
 #include "qom/object_interfaces.h"
+#include "qom/qom-qobject.h"
+#include "qobject/qobject.h"
 
 #define MAX_IRQ 256
 
@@ -44,7 +46,7 @@ struct QTest {
     bool has_machine_link;
     char *chr_name;
     Chardev *chr;
-    CharBackend qtest_chr;
+    CharFrontend qtest_chr;
     char *log;
 };
 
@@ -70,6 +72,10 @@ static void *qtest_server_send_opaque;
  * Line based protocol, request/response based.  Server can send async messages
  * so clients should always handle many async messages before the response
  * comes in.
+ *
+ * Extra ASCII space characters in command inputs are permitted and ignored.
+ * Lines containing only spaces are permitted and ignored.
+ * Lines that start with a '#' character (comments) are permitted and ignored.
  *
  * Valid requests
  * ^^^^^^^^^^^^^^
@@ -295,20 +301,20 @@ static void G_GNUC_PRINTF(1, 2) qtest_log_send(const char *fmt, ...)
 static void qtest_server_char_be_send(void *opaque, const char *str)
 {
     size_t len = strlen(str);
-    CharBackend* chr = (CharBackend *)opaque;
+    CharFrontend* chr = (CharFrontend *)opaque;
     qemu_chr_fe_write_all(chr, (uint8_t *)str, len);
     if (qtest_log_fp && qtest_opened) {
         fprintf(qtest_log_fp, "%s", str);
     }
 }
 
-static void qtest_send(CharBackend *chr, const char *str)
+static void qtest_send(CharFrontend *chr, const char *str)
 {
     qtest_log_timestamp();
     qtest_server_send(qtest_server_send_opaque, str);
 }
 
-void qtest_sendf(CharBackend *chr, const char *fmt, ...)
+void qtest_sendf(CharFrontend *chr, const char *fmt, ...)
 {
     va_list ap;
     gchar *buffer;
@@ -322,20 +328,17 @@ void qtest_sendf(CharBackend *chr, const char *fmt, ...)
 
 static void qtest_irq_handler(void *opaque, int n, int level)
 {
-    qemu_irq old_irq = *(qemu_irq *)opaque;
-    qemu_set_irq(old_irq, level);
-
     if (irq_levels[n] != level) {
-        CharBackend *chr = &qtest->qtest_chr;
+        CharFrontend *chr = &qtest->qtest_chr;
         irq_levels[n] = level;
         qtest_sendf(chr, "IRQ %s %d\n",
                     level ? "raise" : "lower", n);
     }
 }
 
-static bool (*process_command_cb)(CharBackend *chr, gchar **words);
+static bool (*process_command_cb)(CharFrontend *chr, gchar **words);
 
-void qtest_set_command_cb(bool (*pc_cb)(CharBackend *chr, gchar **words))
+void qtest_set_command_cb(bool (*pc_cb)(CharFrontend *chr, gchar **words))
 {
     assert(!process_command_cb);  /* Switch to a list if we need more than one */
 
@@ -351,7 +354,7 @@ static void qtest_install_gpio_out_intercept(DeviceState *dev, const char *name,
     *disconnected = qdev_intercept_gpio_out(dev, icpt, name, n);
 }
 
-static void qtest_process_command(CharBackend *chr, gchar **words)
+static void qtest_process_command(CharFrontend *chr, gchar **words)
 {
     const gchar *command;
 
@@ -369,7 +372,11 @@ static void qtest_process_command(CharBackend *chr, gchar **words)
         fprintf(qtest_log_fp, "\n");
     }
 
-    g_assert(command);
+    if (!command || command[0] == '#') {
+        /* Input line was blank or a comment: ignore it */
+        return;
+    }
+
     if (strcmp(words[0], "irq_intercept_out") == 0
         || strcmp(words[0], "irq_intercept_in") == 0) {
         DeviceState *dev;
@@ -413,7 +420,7 @@ static void qtest_process_command(CharBackend *chr, gchar **words)
                     interception_succeeded = true;
                 }
             } else {
-                qemu_irq_intercept_in(ngl->in, qtest_irq_handler,
+                qemu_irq_set_observer(ngl->in, qtest_irq_handler,
                                       ngl->num_in);
                 interception_succeeded = true;
             }
@@ -692,7 +699,7 @@ static void qtest_process_command(CharBackend *chr, gchar **words)
         }
 
         address_space_write(first_cpu->as, addr, MEMTXATTRS_UNSPECIFIED, data,
-                            len);
+                            out_len);
 
         qtest_send(chr, "OK\n");
     } else if (strcmp(words[0], "endianness") == 0) {
@@ -748,6 +755,50 @@ static void qtest_process_command(CharBackend *chr, gchar **words)
         new_ns = qemu_clock_advance_virtual_time(ns);
         qtest_sendf(chr, "%s %"PRIi64"\n",
                     new_ns == ns ? "OK" : "FAIL", new_ns);
+    } else if (strcmp(words[0], "qom-tests") == 0) {
+        GSList *list, *l;
+
+        list = object_class_get_list(NULL, false);
+        for (l = list; l; l = l->next) {
+            ObjectClass *klass = l->data;
+            const char *type_name = object_class_get_name(klass);
+            Object *obj;
+            ObjectPropertyIterator iter;
+            ObjectProperty *prop;
+
+            obj = object_new_with_class(klass);
+            object_property_iter_init(&iter, obj);
+            while ((prop = object_property_iter_next(&iter))) {
+                QObject *value;
+                Error *local_err = NULL;
+
+                value = object_property_get_qobject(obj, prop->name,
+                                                    &local_err);
+                if (local_err) {
+                    error_report("qom-tests: %s.%s: get failed: %s",
+                                 type_name, prop->name,
+                                 error_get_pretty(local_err));
+                    error_free(local_err);
+                    continue;
+                }
+
+                if (prop->set) {
+                    if (!object_property_set_qobject(obj, prop->name, value,
+                                                     &local_err)) {
+                        error_report("qom-tests: %s.%s: set failed: %s",
+                                     type_name, prop->name,
+                                     error_get_pretty(local_err));
+                        error_free(local_err);
+                    }
+                }
+
+                qobject_unref(value);
+            }
+
+            object_unref(obj);
+        }
+        g_slist_free(list);
+        qtest_send(chr, "OK\n");
     } else if (process_command_cb && process_command_cb(chr, words)) {
         /* Command got consumed by the callback handler */
     } else {
@@ -759,7 +810,7 @@ static void qtest_process_command(CharBackend *chr, gchar **words)
  * Process as much of @inbuf as we can in newline terminated chunks.
  * Remove the processed commands from @inbuf as we go.
  */
-static void qtest_process_inbuf(CharBackend *chr, GString *inbuf)
+static void qtest_process_inbuf(CharFrontend *chr, GString *inbuf)
 {
     char *end;
 
@@ -786,7 +837,7 @@ bool qtest_command_running(void)
 
 static void qtest_read(void *opaque, const uint8_t *buf, int size)
 {
-    CharBackend *chr = opaque;
+    CharFrontend *chr = opaque;
 
     g_string_append_len(inbuf, (const gchar *)buf, size);
     qtest_process_inbuf(chr, inbuf);
@@ -821,6 +872,10 @@ static void qtest_event(void *opaque, QEMUChrEvent event)
         }
         break;
     case CHR_EVENT_CLOSED:
+        if (!qtest_opened) {
+            /* Ignore CLOSED events if we have already closed the log */
+            break;
+        }
         qtest_opened = false;
         if (qtest_log_fp) {
             fprintf(qtest_log_fp, "[I +" FMT_timeval "] CLOSED\n", g_timer_elapsed(timer, NULL));
@@ -1021,10 +1076,20 @@ static void qtest_class_init(ObjectClass *oc, const void *data)
                                   qtest_get_log, qtest_set_log);
 }
 
+static void qtest_finalize(Object *obj)
+{
+    QTest *q = QTEST(obj);
+
+    g_free(q->chr_name);
+    g_free(q->log);
+    object_unref(q->chr);
+}
+
 static const TypeInfo qtest_info = {
     .name = TYPE_QTEST,
     .parent = TYPE_OBJECT,
     .class_init = qtest_class_init,
+    .instance_finalize = qtest_finalize,
     .instance_size = sizeof(QTest),
     .interfaces = (const InterfaceInfo[]) {
         { TYPE_USER_CREATABLE },

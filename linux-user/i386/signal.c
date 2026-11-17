@@ -60,10 +60,33 @@ struct target_fpx_sw_bytes {
 };
 QEMU_BUILD_BUG_ON(sizeof(struct target_fpx_sw_bytes) != 12*4);
 
+struct fpxreg {
+    uint16_t significand[4];
+    uint16_t exponent;
+    uint16_t padding[3];
+};
+
+struct xmmreg {
+    uint32_t element[4];
+};
+
+/*
+ * This corresponds to the kernel's _fpstate_32. Since we
+ * only use it for the fpstate_unused padding section in
+ * the target sigcontext, it doesn't actually matter what fields
+ * we define here as long as we get the size right.
+ */
 struct target_fpstate_32 {
     struct target_fregs_state fpstate;
-    X86LegacyXSaveArea fxstate;
+    uint32_t fxsr_env[6];
+    uint32_t mxcsr;
+    uint32_t reserved;
+    struct fpxreg fxsr_st[8];
+    struct xmmreg xmm[8];
+    uint32_t padding1[44];
+    uint32_t padding2[12]; /* aka sw_reserved */
 };
+QEMU_BUILD_BUG_ON(sizeof(struct target_fpstate_32) != 32 + 80 + 512);
 
 struct target_sigcontext_32 {
     uint16_t gs, __gsh;

@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-#
 # QEMU documentation build configuration file, created by
 # sphinx-quickstart on Thu Jan 31 16:40:14 2019.
 #
@@ -94,7 +92,7 @@ default_role = 'any'
 
 # General information about the project.
 project = u'QEMU'
-copyright = u'2025, The QEMU Project Developers'
+copyright = u'2026, The QEMU Project Developers'
 author = u'The QEMU Project Developers'
 
 # The version info for the project you're documenting, acts as replacement for
@@ -138,7 +136,7 @@ if micro >= 50:
 
 # These thresholds must match the constants
 # MACHINE_VER_DELETION_MAJOR  & MACHINE_VER_DEPRECATION_MAJOR
-# defined in include/hw/boards.h and the introductory text in
+# defined in include/hw/core/boards.h and the introductory text in
 # docs/about/deprecated.rst
 ver_machine_deprecation_version = "%d.%d.0" % (major - 3, minor)
 ver_machine_deletion_version = "%d.%d.0" % (major - 6, minor)
@@ -335,13 +333,18 @@ man_pages = [
     ('tools/qemu-trace-stap', 'qemu-trace-stap',
      'QEMU SystemTap trace tool',
      [], 1),
+    ('tools/qemu-vnc', 'qemu-vnc',
+     'QEMU standalone VNC server',
+     [], 1),
 ]
 man_make_section_directory = False
 
 # We use paths starting from qemu_docdir here so that you can run
 # sphinx-build from anywhere and the kerneldoc extension can still
 # find everything.
-kerneldoc_bin = ['perl', os.path.join(qemu_docdir, '../scripts/kernel-doc')]
+# Since kernel-doc is now a Python script, we should run it with whatever
+# Python this sphinx is using (rather than letting it find one via env)
+kerneldoc_bin = [sys.executable, os.path.join(qemu_docdir, '../scripts/kernel-doc.py')]
 kerneldoc_srctree = os.path.join(qemu_docdir, '..')
 hxtool_srctree = os.path.join(qemu_docdir, '..')
 qapidoc_srctree = os.path.join(qemu_docdir, '..')

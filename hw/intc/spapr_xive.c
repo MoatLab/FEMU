@@ -21,7 +21,7 @@
 #include "hw/ppc/spapr_xive.h"
 #include "hw/ppc/xive.h"
 #include "hw/ppc/xive_regs.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "trace.h"
 
 /*
@@ -578,7 +578,7 @@ static const VMStateDescription vmstate_spapr_xive = {
     .pre_save = vmstate_spapr_xive_pre_save,
     .post_load = NULL, /* handled at the machine level */
     .fields = (const VMStateField[]) {
-        VMSTATE_UINT32_EQUAL(nr_irqs, SpaprXive, NULL),
+        VMSTATE_UINT32_EQUAL(nr_irqs, SpaprXive),
         VMSTATE_STRUCT_VARRAY_POINTER_UINT32(eat, SpaprXive, nr_irqs,
                                      vmstate_spapr_xive_eas, XiveEAS),
         VMSTATE_STRUCT_VARRAY_POINTER_UINT32(endt, SpaprXive, nr_ends,

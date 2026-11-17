@@ -41,7 +41,7 @@ requires a working libudev):
 ----------------
 
 ``u2f-emulated`` is a completely software emulated U2F device.
-It uses `libu2f-emu <https://github.com/MattGorko/libu2f-emu>`__
+It uses `libu2f-emu <https://github.com/Agnoctopus/libu2f-emu>`__
 for the U2F key emulation. libu2f-emu
 provides a complete implementation of the U2F protocol device part for
 all specified transports given by the FIDO Alliance.

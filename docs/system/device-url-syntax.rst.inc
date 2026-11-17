@@ -33,7 +33,7 @@ These are specified using a special URL syntax.
 
    .. parsed-literal::
 
-      |qemu_system| -drive file=iscsi://user%password@192.0.2.1/iqn.2001-04.com.example/1
+      |qemu_system| -drive file=iscsi://user%password\@192.0.2.1/iqn.2001-04.com.example/1
 
    Example (CHAP username/password via environment variables):
 
@@ -79,50 +79,11 @@ These are specified using a special URL syntax.
 
    .. parsed-literal::
 
-      |qemu_system| -drive file=ssh://user@host/path/to/disk.img
+      |qemu_system| -drive file=ssh://user\@host/path/to/disk.img
       |qemu_system| -drive file.driver=ssh,file.user=user,file.host=host,file.port=22,file.path=/path/to/disk.img
 
    Currently authentication must be done using ssh-agent. Other
    authentication methods may be supported in future.
-
-``GlusterFS``
-   GlusterFS is a user space distributed file system. QEMU supports the
-   use of GlusterFS volumes for hosting VM disk images using TCP and Unix
-   Domain Sockets transport protocols.
-
-   Syntax for specifying a VM disk image on GlusterFS volume is
-
-   .. parsed-literal::
-
-      URI:
-      gluster[+type]://[host[:port]]/volume/path[?socket=...][,debug=N][,logfile=...]
-
-      JSON:
-      'json:{"driver":"qcow2","file":{"driver":"gluster","volume":"testvol","path":"a.img","debug":N,"logfile":"...",
-                                       "server":[{"type":"tcp","host":"...","port":"..."},
-                                                 {"type":"unix","socket":"..."}]}}'
-
-   Example
-
-   .. parsed-literal::
-
-      URI:
-      |qemu_system| --drive file=gluster://192.0.2.1/testvol/a.img,
-                                     file.debug=9,file.logfile=/var/log/qemu-gluster.log
-
-      JSON:
-      |qemu_system| 'json:{"driver":"qcow2",
-                                "file":{"driver":"gluster",
-                                         "volume":"testvol","path":"a.img",
-                                         "debug":9,"logfile":"/var/log/qemu-gluster.log",
-                                         "server":[{"type":"tcp","host":"1.2.3.4","port":24007},
-                                                   {"type":"unix","socket":"/var/run/glusterd.socket"}]}}'
-      |qemu_system| -drive driver=qcow2,file.driver=gluster,file.volume=testvol,file.path=/path/a.img,
-                                            file.debug=9,file.logfile=/var/log/qemu-gluster.log,
-                                            file.server.0.type=tcp,file.server.0.host=1.2.3.4,file.server.0.port=24007,
-                                            file.server.1.type=unix,file.server.1.socket=/var/run/glusterd.socket
-
-   See also http://www.gluster.org.
 
 ``HTTP/HTTPS/FTP/FTPS``
    QEMU supports read-only access to files accessed over http(s) and
@@ -178,6 +139,12 @@ These are specified using a special URL syntax.
       the time that CURL waits for a response from the remote server to
       get the size of the image to be downloaded. If not set, the
       default timeout of 5 seconds is used.
+
+   ``force-range``
+      Don't issue a HEAD HTTP request to discover if the http server
+      server supports range requests and rely only on GET requests. This
+      is especially useful for S3 presigned URLs where HEAD requests
+      are unauthorized. It defaults to 'false'.
 
    Note that when passing options to qemu explicitly, ``driver`` is the
    value of <protocol>.

@@ -9,9 +9,31 @@
 #ifndef GDBSTUB_INTERNALS_H
 #define GDBSTUB_INTERNALS_H
 
+#include "qemu/accel.h"
 #include "exec/cpu-common.h"
+#include "gdbstub/enums.h"
 
-#define MAX_PACKET_LENGTH 4096
+/*
+ * Most "large" transfers (e.g. memory reads, feature XML
+ * transfer) have mechanisms in the gdb protocol for splitting
+ * them. However, register values in particular cannot currently
+ * be split. This packet size must therefore be at least big enough
+ * for the worst-case register size. Currently that is Arm SME
+ * ZA storage with a 256x256 byte value. We also must account
+ * for the conversion from raw data to hex in gdb_memtohex(),
+ * which writes 2 * size bytes, and for other protocol overhead
+ * including command, register number and checksum which add
+ * another 4 bytes of overhead. However, to be consistent with
+ * the changes made in gdbserver to address this same requirement,
+ * we add a total of 32 bytes to account for protocol overhead
+ * (unclear why specifically 32 bytes), bringing the value of
+ * MAX_PACKET_LENGTH to 2 * 256 * 256 + 32 = 131104.
+ *
+ * The commit making this change for gdbserver can be found here:
+ * https://sourceware.org/git/?p=binutils-gdb.git;a=commit;h=
+ * b816042e88583f280ad186ff124ab84d31fb592b
+ */
+#define MAX_PACKET_LENGTH 131104
 
 /*
  * Shared structures and definitions
@@ -63,8 +85,8 @@ typedef struct GDBState {
     int process_num;
     GString *str_buf;
     GByteArray *mem_buf;
+    AccelGdbConfig accel_config;
     int sstep_flags;
-    int supported_sstep_flags;
     /*
      * Whether we are allowed to send a stop reply packet at this moment.
      * Must be set off after sending the stop reply itself.
@@ -133,7 +155,6 @@ CPUState *gdb_first_attached_cpu(void);
 void gdb_append_thread_id(CPUState *cpu, GString *buf);
 int gdb_get_cpu_index(CPUState *cpu);
 unsigned int gdb_get_max_cpus(void); /* both */
-bool gdb_can_reverse(void); /* system emulation, stub for user */
 int gdb_target_sigtrap(void); /* user */
 
 void gdb_create_default_process(GDBState *s);
@@ -197,9 +218,10 @@ void gdb_syscall_handling(const char *syscall_packet);
  * Break/Watch point support - there is an implementation for system
  * and user mode.
  */
-bool gdb_supports_guest_debug(void);
-int gdb_breakpoint_insert(CPUState *cs, int type, vaddr addr, vaddr len);
-int gdb_breakpoint_remove(CPUState *cs, int type, vaddr addr, vaddr len);
+int gdb_breakpoint_insert(CPUState *cs, GdbBreakpointType type,
+                          vaddr addr, vaddr len);
+int gdb_breakpoint_remove(CPUState *cs, GdbBreakpointType type,
+                          vaddr addr, vaddr len);
 void gdb_breakpoint_remove_all(CPUState *cs);
 
 /**
@@ -216,5 +238,15 @@ void gdb_breakpoint_remove_all(CPUState *cs);
  */
 int gdb_target_memory_rw_debug(CPUState *cs, hwaddr addr,
                                uint8_t *buf, int len, bool is_write);
+
+/**
+ * gdb_build_stop_packet() - craft the stop packet
+ * @buf: GString buffer for building the packet
+ * @cs: CPUState
+ *
+ * Craft the Stop/Reply packet when we halt.
+ */
+
+void gdb_build_stop_packet(GString *buf, CPUState *cs);
 
 #endif /* GDBSTUB_INTERNALS_H */

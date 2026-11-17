@@ -19,23 +19,19 @@
 #ifndef HW_RISCV_IOMMU_H
 #define HW_RISCV_IOMMU_H
 
-#include "qemu/osdep.h"
 #include "qom/object.h"
 
 #define TYPE_RISCV_IOMMU "riscv-iommu"
 OBJECT_DECLARE_SIMPLE_TYPE(RISCVIOMMUState, RISCV_IOMMU)
-typedef struct RISCVIOMMUState RISCVIOMMUState;
 
 #define TYPE_RISCV_IOMMU_MEMORY_REGION "riscv-iommu-mr"
 typedef struct RISCVIOMMUSpace RISCVIOMMUSpace;
 
 #define TYPE_RISCV_IOMMU_PCI "riscv-iommu-pci"
 OBJECT_DECLARE_SIMPLE_TYPE(RISCVIOMMUStatePci, RISCV_IOMMU_PCI)
-typedef struct RISCVIOMMUStatePci RISCVIOMMUStatePci;
 
 #define TYPE_RISCV_IOMMU_SYS "riscv-iommu-device"
 OBJECT_DECLARE_SIMPLE_TYPE(RISCVIOMMUStateSys, RISCV_IOMMU_SYS)
-typedef struct RISCVIOMMUStateSys RISCVIOMMUStateSys;
 
 #define FDT_IRQ_TYPE_EDGE_LOW 1
 

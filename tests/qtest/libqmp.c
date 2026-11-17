@@ -17,6 +17,7 @@
 #include "qemu/osdep.h"
 
 #include "libqmp.h"
+#include "libqtest.h"
 
 #ifndef _WIN32
 #include <sys/socket.h>
@@ -62,7 +63,7 @@ static void qmp_response(void *opaque, QObject *obj, Error *err)
 QDict *qmp_fd_receive(int fd)
 {
     QMPResponseParser qmp;
-    bool log = getenv("QTEST_LOG") != NULL;
+    bool log = qtest_verbose("qmp");
 
     qmp.response = NULL;
     json_message_parser_init(&qmp.parser, qmp_response, &qmp, NULL);
@@ -149,7 +150,7 @@ _qmp_fd_vsend_fds(int fd, int *fds, size_t fds_num,
 
     /* No need to send anything for an empty QObject.  */
     if (qobj) {
-        int log = getenv("QTEST_LOG") != NULL;
+        bool log = qtest_verbose("qmp");
         GString *str = qobject_to_json(qobj);
 
         /*
@@ -220,7 +221,7 @@ void qmp_fd_send(int fd, const char *fmt, ...)
 
 void qmp_fd_vsend_raw(int fd, const char *fmt, va_list ap)
 {
-    bool log = getenv("QTEST_LOG") != NULL;
+    bool log = qtest_verbose("qmp");
     char *str = g_strdup_vprintf(fmt, ap);
 
     if (log) {

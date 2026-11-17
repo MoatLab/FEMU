@@ -12,10 +12,12 @@
 #define DEFAULT_GDBSTUB_PORT "1234"
 
 /* GDB breakpoint/watchpoint types */
-#define GDB_BREAKPOINT_SW        0
-#define GDB_BREAKPOINT_HW        1
-#define GDB_WATCHPOINT_WRITE     2
-#define GDB_WATCHPOINT_READ      3
-#define GDB_WATCHPOINT_ACCESS    4
+typedef enum GdbBreakpointType {
+    GDB_BREAKPOINT_SW       = 0,
+    GDB_BREAKPOINT_HW       = 1,
+    GDB_WATCHPOINT_WRITE    = 2,
+    GDB_WATCHPOINT_READ     = 3,
+    GDB_WATCHPOINT_ACCESS   = 4,
+} GdbBreakpointType;
 
 #endif /* GDBSTUB_ENUMS_H */

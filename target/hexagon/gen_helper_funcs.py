@@ -69,7 +69,7 @@ def gen_helper_function(f, tag, tagregs, tagimms):
     if hex_common.need_slot(tag):
         if "A_LOAD" in hex_common.attribdict[tag]:
             f.write(hex_common.code_fmt(f"""\
-                bool pkt_has_store_s1 = slotval & 0x1;
+                bool pkt_has_scalar_store_s1 = slotval & 0x1;
             """))
         f.write(hex_common.code_fmt(f"""\
             uint32_t slot = slotval >> 1;
@@ -83,11 +83,6 @@ def gen_helper_function(f, tag, tagregs, tagimms):
     f.write(hex_common.code_fmt(f"""\
         {hex_common.semdict[tag]}
     """))
-
-    if "A_FPOP" in hex_common.attribdict[tag]:
-        f.write(hex_common.code_fmt(f"""\
-            arch_fpop_end(env);
-        """))
 
     ## Return the scalar result
     for regtype, regid in regs:
@@ -109,26 +104,23 @@ def main():
     tagimms = hex_common.get_tagimms()
 
     with open(args.out, "w") as f:
-        for tag in hex_common.tags:
-            ## Skip the priv instructions
-            if "A_PRIV" in hex_common.attribdict[tag]:
-                continue
-            ## Skip the guest instructions
-            if "A_GUEST" in hex_common.attribdict[tag]:
-                continue
-            ## Skip the diag instructions
-            if tag == "Y6_diag":
-                continue
-            if tag == "Y6_diag0":
-                continue
-            if tag == "Y6_diag1":
+        for tag in hex_common.get_user_tags():
+            if hex_common.tag_ignore(tag):
                 continue
             if hex_common.skip_qemu_helper(tag):
                 continue
             if hex_common.is_idef_parser_enabled(tag):
                 continue
-
             gen_helper_function(f, tag, tagregs, tagimms)
+
+        f.write("#if !defined(CONFIG_USER_ONLY)\n")
+        for tag in hex_common.get_sys_tags():
+            if hex_common.skip_qemu_helper(tag):
+                continue
+            if hex_common.is_idef_parser_enabled(tag):
+                continue
+            gen_helper_function(f, tag, tagregs, tagimms)
+        f.write("#endif\n")
 
 
 if __name__ == "__main__":

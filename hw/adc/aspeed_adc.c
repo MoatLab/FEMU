@@ -11,8 +11,8 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/log.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "hw/adc/aspeed_adc.h"
 #include "trace.h"
@@ -228,7 +228,8 @@ static void aspeed_adc_engine_write(void *opaque, hwaddr addr, uint64_t value,
         qemu_log_mask(LOG_UNIMP, "%s: engine[%u]: "
                       "0x%" HWADDR_PRIx " 0x%" PRIx64 "\n",
                       __func__, s->engine_id, addr, value);
-        break;
+        /* Do not update the regs[] array */
+        return;
     }
 
     s->regs[reg] = value;
@@ -252,9 +253,9 @@ static const uint32_t aspeed_adc_resets[ASPEED_ADC_NR_REGS] = {
     [CLOCK_CONTROL]      = 0x0000000f,
 };
 
-static void aspeed_adc_engine_reset(DeviceState *dev)
+static void aspeed_adc_engine_reset_hold(Object *obj, ResetType type)
 {
-    AspeedADCEngineState *s = ASPEED_ADC_ENGINE(dev);
+    AspeedADCEngineState *s = ASPEED_ADC_ENGINE(obj);
 
     memcpy(s->regs, aspeed_adc_resets, sizeof(aspeed_adc_resets));
 }
@@ -294,20 +295,14 @@ static const Property aspeed_adc_engine_properties[] = {
 static void aspeed_adc_engine_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     dc->realize = aspeed_adc_engine_realize;
-    device_class_set_legacy_reset(dc, aspeed_adc_engine_reset);
+    rc->phases.hold = aspeed_adc_engine_reset_hold;
     device_class_set_props(dc, aspeed_adc_engine_properties);
     dc->desc = "Aspeed Analog-to-Digital Engine";
     dc->vmsd = &vmstate_aspeed_adc_engine;
 }
-
-static const TypeInfo aspeed_adc_engine_info = {
-    .name = TYPE_ASPEED_ADC_ENGINE,
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(AspeedADCEngineState),
-    .class_init = aspeed_adc_engine_class_init,
-};
 
 static void aspeed_adc_instance_init(Object *obj)
 {
@@ -406,53 +401,45 @@ static void aspeed_2700_adc_class_init(ObjectClass *klass, const void *data)
     aac->nr_engines = 2;
 }
 
-static const TypeInfo aspeed_adc_info = {
-    .name = TYPE_ASPEED_ADC,
-    .parent = TYPE_SYS_BUS_DEVICE,
-    .instance_init = aspeed_adc_instance_init,
-    .instance_size = sizeof(AspeedADCState),
-    .class_init = aspeed_adc_class_init,
-    .class_size = sizeof(AspeedADCClass),
-    .abstract   = true,
+static const TypeInfo aspeed_adc_types[] = {
+    {
+        .name = TYPE_ASPEED_ADC_ENGINE,
+        .parent = TYPE_SYS_BUS_DEVICE,
+        .instance_size = sizeof(AspeedADCEngineState),
+        .class_init = aspeed_adc_engine_class_init,
+    },
+    {
+        .name = TYPE_ASPEED_ADC,
+        .parent = TYPE_SYS_BUS_DEVICE,
+        .instance_init = aspeed_adc_instance_init,
+        .instance_size = sizeof(AspeedADCState),
+        .class_init = aspeed_adc_class_init,
+        .class_size = sizeof(AspeedADCClass),
+        .abstract   = true,
+    },
+    {
+        .name = TYPE_ASPEED_1030_ADC,
+        .parent = TYPE_ASPEED_ADC,
+        .class_init = aspeed_1030_adc_class_init, /* No change since AST2600 */
+    },
+    {
+        .name = TYPE_ASPEED_2400_ADC,
+        .parent = TYPE_ASPEED_ADC,
+    },
+    {
+        .name = TYPE_ASPEED_2500_ADC,
+        .parent = TYPE_ASPEED_ADC,
+    },
+    {
+        .name = TYPE_ASPEED_2600_ADC,
+        .parent = TYPE_ASPEED_ADC,
+        .class_init = aspeed_2600_adc_class_init,
+    },
+    {
+        .name = TYPE_ASPEED_2700_ADC,
+        .parent = TYPE_ASPEED_ADC,
+        .class_init = aspeed_2700_adc_class_init,
+    }
 };
 
-static const TypeInfo aspeed_2400_adc_info = {
-    .name = TYPE_ASPEED_2400_ADC,
-    .parent = TYPE_ASPEED_ADC,
-};
-
-static const TypeInfo aspeed_2500_adc_info = {
-    .name = TYPE_ASPEED_2500_ADC,
-    .parent = TYPE_ASPEED_ADC,
-};
-
-static const TypeInfo aspeed_2600_adc_info = {
-    .name = TYPE_ASPEED_2600_ADC,
-    .parent = TYPE_ASPEED_ADC,
-    .class_init = aspeed_2600_adc_class_init,
-};
-
-static const TypeInfo aspeed_1030_adc_info = {
-    .name = TYPE_ASPEED_1030_ADC,
-    .parent = TYPE_ASPEED_ADC,
-    .class_init = aspeed_1030_adc_class_init, /* No change since AST2600 */
-};
-
-static const TypeInfo aspeed_2700_adc_info = {
-    .name = TYPE_ASPEED_2700_ADC,
-    .parent = TYPE_ASPEED_ADC,
-    .class_init = aspeed_2700_adc_class_init,
-};
-
-static void aspeed_adc_register_types(void)
-{
-    type_register_static(&aspeed_adc_engine_info);
-    type_register_static(&aspeed_adc_info);
-    type_register_static(&aspeed_2400_adc_info);
-    type_register_static(&aspeed_2500_adc_info);
-    type_register_static(&aspeed_2600_adc_info);
-    type_register_static(&aspeed_1030_adc_info);
-    type_register_static(&aspeed_2700_adc_info);
-}
-
-type_init(aspeed_adc_register_types);
+DEFINE_TYPES(aspeed_adc_types)

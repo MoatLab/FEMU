@@ -263,6 +263,7 @@ bool s390_has_feat(S390Feat feat)
         case S390_FEAT_SIE_PFMFI:
         case S390_FEAT_SIE_IBS:
         case S390_FEAT_CONFIGURATION_TOPOLOGY:
+        case S390_FEAT_SIE_ASTFLEIE2:
             return false;
             break;
         default:
@@ -553,6 +554,7 @@ static void check_consistency(const S390CPUModel *model)
         { S390_FEAT_PLO_QSTG, S390_FEAT_PLO_EXT },
         { S390_FEAT_PLO_QSTX, S390_FEAT_PLO_EXT },
         { S390_FEAT_PLO_QSTO, S390_FEAT_PLO_EXT },
+        { S390_FEAT_SIE_ASTFLEIE2, S390_FEAT_STFLE },
     };
     int i;
 
@@ -955,7 +957,7 @@ static void s390_qemu_cpu_model_class_init(ObjectClass *oc, const void *data)
 
     xcc->is_migration_safe = true;
     xcc->desc = g_strdup_printf("QEMU Virtual CPU version %s",
-                                qemu_hw_version());
+                                QEMU_HW_VERSION);
 }
 
 static void s390_max_cpu_model_class_init(ObjectClass *oc, const void *data)

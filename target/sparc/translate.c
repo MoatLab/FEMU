@@ -363,15 +363,15 @@ static bool use_goto_tb(DisasContext *s, target_ulong pc, target_ulong npc)
            translator_use_goto_tb(&s->base, npc);
 }
 
-static void gen_goto_tb(DisasContext *s, int tb_num,
+static void gen_goto_tb(DisasContext *s, unsigned tb_slot_idx,
                         target_ulong pc, target_ulong npc)
 {
     if (use_goto_tb(s, pc, npc))  {
         /* jump to same page: we can use a direct jump */
-        tcg_gen_goto_tb(tb_num);
+        tcg_gen_goto_tb(tb_slot_idx);
         tcg_gen_movi_tl(cpu_pc, pc);
         tcg_gen_movi_tl(cpu_npc, npc);
-        tcg_gen_exit_tb(s->base.tb, tb_num);
+        tcg_gen_exit_tb(s->base.tb, tb_slot_idx);
     } else {
         /* jump to another page: we can use an indirect jump */
         tcg_gen_movi_tl(cpu_pc, pc);
@@ -1764,7 +1764,7 @@ static DisasASI resolve_asi(DisasContext *dc, int asi, MemOp memop)
         case ASI_FL16_SL:
         case ASI_FL16_P:
         case ASI_FL16_PL:
-            memop = MO_TEUW;
+            memop = MO_BEUW;
             type = GET_ASI_SHORT;
             break;
         }
@@ -2215,7 +2215,7 @@ static void gen_ldda_asi(DisasContext *dc, DisasASI *da, TCGv addr, int rd)
              * byte swapped.  We perform one 128-bit LE load, so must swap
              * the order of the writebacks.
              */
-            if ((mop & MO_BSWAP) == MO_TE) {
+            if ((mop & MO_BSWAP) == MO_BE) {
                 tcg_gen_extr_i128_i64(lo, hi, t);
             } else {
                 tcg_gen_extr_i128_i64(hi, lo, t);
@@ -2235,7 +2235,7 @@ static void gen_ldda_asi(DisasContext *dc, DisasASI *da, TCGv addr, int rd)
             /* Note that LE ldda acts as if each 32-bit register
                result is byte swapped.  Having just performed one
                64-bit bswap, we need now to swap the writebacks.  */
-            if ((da->memop & MO_BSWAP) == MO_TE) {
+            if ((da->memop & MO_BSWAP) == MO_BE) {
                 tcg_gen_extr_i64_tl(lo, hi, tmp);
             } else {
                 tcg_gen_extr_i64_tl(hi, lo, tmp);
@@ -2252,7 +2252,7 @@ static void gen_ldda_asi(DisasContext *dc, DisasASI *da, TCGv addr, int rd)
             gen_helper_ld_code(tmp, tcg_env, addr, tcg_constant_i32(oi));
 
             /* See above.  */
-            if ((da->memop & MO_BSWAP) == MO_TE) {
+            if ((da->memop & MO_BSWAP) == MO_BE) {
                 tcg_gen_extr_i64_tl(lo, hi, tmp);
             } else {
                 tcg_gen_extr_i64_tl(hi, lo, tmp);
@@ -2277,7 +2277,7 @@ static void gen_ldda_asi(DisasContext *dc, DisasASI *da, TCGv addr, int rd)
             gen_helper_ld_asi(tmp, tcg_env, addr, r_asi, r_mop);
 
             /* See above.  */
-            if ((da->memop & MO_BSWAP) == MO_TE) {
+            if ((da->memop & MO_BSWAP) == MO_BE) {
                 tcg_gen_extr_i64_tl(lo, hi, tmp);
             } else {
                 tcg_gen_extr_i64_tl(hi, lo, tmp);
@@ -2310,7 +2310,7 @@ static void gen_stda_asi(DisasContext *dc, DisasASI *da, TCGv addr, int rd)
              * byte swapped.  We perform one 128-bit LE store, so must swap
              * the order of the construction.
              */
-            if ((mop & MO_BSWAP) == MO_TE) {
+            if ((mop & MO_BSWAP) == MO_BE) {
                 tcg_gen_concat_i64_i128(t, lo, hi);
             } else {
                 tcg_gen_concat_i64_i128(t, hi, lo);
@@ -2329,7 +2329,7 @@ static void gen_stda_asi(DisasContext *dc, DisasASI *da, TCGv addr, int rd)
             /* Note that LE stda acts as if each 32-bit register result is
                byte swapped.  We will perform one 64-bit LE store, so now
                we must swap the order of the construction.  */
-            if ((da->memop & MO_BSWAP) == MO_TE) {
+            if ((da->memop & MO_BSWAP) == MO_BE) {
                 tcg_gen_concat_tl_i64(t64, lo, hi);
             } else {
                 tcg_gen_concat_tl_i64(t64, hi, lo);
@@ -2345,7 +2345,7 @@ static void gen_stda_asi(DisasContext *dc, DisasASI *da, TCGv addr, int rd)
          * See comments for GET_ASI_COPY above.
          */
         {
-            MemOp mop = MO_TE | MO_128 | MO_ATOM_IFALIGN_PAIR;
+            MemOp mop = MO_BE | MO_128 | MO_ATOM_IFALIGN_PAIR;
             TCGv_i64 t8 = tcg_temp_new_i64();
             TCGv_i128 t16 = tcg_temp_new_i128();
             TCGv daddr = tcg_temp_new();
@@ -2368,7 +2368,7 @@ static void gen_stda_asi(DisasContext *dc, DisasASI *da, TCGv addr, int rd)
             TCGv_i64 t64 = tcg_temp_new_i64();
 
             /* See above.  */
-            if ((da->memop & MO_BSWAP) == MO_TE) {
+            if ((da->memop & MO_BSWAP) == MO_BE) {
                 tcg_gen_concat_tl_i64(t64, lo, hi);
             } else {
                 tcg_gen_concat_tl_i64(t64, hi, lo);
@@ -2487,7 +2487,7 @@ static int extract_qfpreg(DisasContext *dc, int x)
 
 #define TRANS(NAME, AVAIL, FUNC, ...) \
     static bool trans_##NAME(DisasContext *dc, arg_##NAME *a) \
-    { return avail_##AVAIL(dc) && FUNC(dc, __VA_ARGS__); }
+    { return avail_##AVAIL(dc) && FUNC(dc, ## __VA_ARGS__); }
 
 #define avail_ALL(C)      true
 #ifdef TARGET_SPARC64
@@ -2525,6 +2525,32 @@ static int extract_qfpreg(DisasContext *dc, int x)
 # define avail_VIS3B(C)   false
 # define avail_VIS4(C)    false
 #endif
+
+/*
+ * We decoded bit 13 as imm, and bits [12:0] as rs2_or_imm.
+ * For v9, if !imm, then the unused bits [12:5] must be zero.
+ * For v7 and v8, the unused bits are ignored; clear them here.
+ */
+static bool check_rs2(DisasContext *dc, int *rs2)
+{
+    if (unlikely(*rs2 & ~0x1f)) {
+        if (avail_64(dc)) {
+            return false;
+        }
+        *rs2 &= 0x1f;
+    }
+    return true;
+}
+
+static bool check_r_r_ri(DisasContext *dc, arg_r_r_ri *a)
+{
+    return a->imm || check_rs2(dc, &a->rs2_or_imm);
+}
+
+static bool check_r_r_ri_cc(DisasContext *dc, arg_r_r_ri_cc *a)
+{
+    return a->imm || check_rs2(dc, &a->rs2_or_imm);
+}
 
 /* Default case for non jump instructions. */
 static bool advance_pc(DisasContext *dc)
@@ -2823,11 +2849,14 @@ static bool trans_Tcc_i_v9(DisasContext *dc, arg_Tcc_i_v9 *a)
     return do_tcc(dc, a->cond, a->cc, a->rs1, true, a->i);
 }
 
-static bool trans_STBAR(DisasContext *dc, arg_STBAR *a)
+static bool do_stbar(DisasContext *dc)
 {
     tcg_gen_mb(TCG_MO_ST_ST | TCG_BAR_SC);
     return advance_pc(dc);
 }
+
+TRANS(STBAR_v8, 32, do_stbar)
+TRANS(STBAR_v9, 64, do_stbar)
 
 static bool trans_MEMBAR(DisasContext *dc, arg_MEMBAR *a)
 {
@@ -2860,18 +2889,8 @@ static TCGv do_rdy(DisasContext *dc, TCGv dst)
     return cpu_y;
 }
 
-static bool trans_RDY(DisasContext *dc, arg_RDY *a)
-{
-    /*
-     * TODO: Need a feature bit for sparcv8.  In the meantime, treat all
-     * 32-bit cpus like sparcv7, which ignores the rs1 field.
-     * This matches after all other ASR, so Leon3 Asr17 is handled first.
-     */
-    if (avail_64(dc) && a->rs1 != 0) {
-        return false;
-    }
-    return do_rd_special(dc, true, a->rd, do_rdy);
-}
+TRANS(RDY_v7, 32, do_rd_special, true, a->rd, do_rdy)
+TRANS(RDY_v9, 64, do_rd_special, true, a->rd, do_rdy)
 
 static TCGv do_rd_leon3_config(DisasContext *dc, TCGv dst)
 {
@@ -3256,8 +3275,7 @@ static bool do_wr_special(DisasContext *dc, arg_r_r_ri *a, bool priv,
 {
     TCGv src;
 
-    /* For simplicity, we under-decoded the rs2 form. */
-    if (!a->imm && (a->rs2_or_imm & ~0x1f)) {
+    if (!check_r_r_ri(dc, a)) {
         return false;
     }
     if (!priv) {
@@ -3700,8 +3718,7 @@ static bool do_arith_int(DisasContext *dc, arg_r_r_ri_cc *a,
 {
     TCGv dst, src1;
 
-    /* For simplicity, we under-decoded the rs2 form. */
-    if (!a->imm && a->rs2_or_imm & ~0x1f) {
+    if (!check_r_r_ri_cc(dc, a)) {
         return false;
     }
 
@@ -3785,11 +3802,11 @@ static bool trans_OR(DisasContext *dc, arg_r_r_ri_cc *a)
 {
     /* OR with %g0 is the canonical alias for MOV. */
     if (!a->cc && a->rs1 == 0) {
+        if (!check_r_r_ri_cc(dc, a)) {
+            return false;
+        }
         if (a->imm || a->rs2_or_imm == 0) {
             gen_store_gpr(dc, a->rd, tcg_constant_tl(a->rs2_or_imm));
-        } else if (a->rs2_or_imm & ~0x1f) {
-            /* For simplicity, we under-decoded the rs2 form. */
-            return false;
         } else {
             gen_store_gpr(dc, a->rd, cpu_regs[a->rs2_or_imm]);
         }
@@ -3806,8 +3823,7 @@ static bool trans_UDIV(DisasContext *dc, arg_r_r_ri *a)
     if (!avail_DIV(dc)) {
         return false;
     }
-    /* For simplicity, we under-decoded the rs2 form. */
-    if (!a->imm && a->rs2_or_imm & ~0x1f) {
+    if (!check_r_r_ri(dc, a)) {
         return false;
     }
 
@@ -3858,8 +3874,7 @@ static bool trans_UDIVX(DisasContext *dc, arg_r_r_ri *a)
     if (!avail_64(dc)) {
         return false;
     }
-    /* For simplicity, we under-decoded the rs2 form. */
-    if (!a->imm && a->rs2_or_imm & ~0x1f) {
+    if (!check_r_r_ri(dc, a)) {
         return false;
     }
 
@@ -3896,8 +3911,7 @@ static bool trans_SDIVX(DisasContext *dc, arg_r_r_ri *a)
     if (!avail_64(dc)) {
         return false;
     }
-    /* For simplicity, we under-decoded the rs2 form. */
-    if (!a->imm && a->rs2_or_imm & ~0x1f) {
+    if (!check_r_r_ri(dc, a)) {
         return false;
     }
 
@@ -4193,8 +4207,7 @@ TRANS(SRA_i, ALL, do_shift_i, a, false, false)
 
 static TCGv gen_rs2_or_imm(DisasContext *dc, bool imm, int rs2_or_imm)
 {
-    /* For simplicity, we under-decoded the rs2 form. */
-    if (!imm && rs2_or_imm & ~0x1f) {
+    if (!imm && !check_rs2(dc, &rs2_or_imm)) {
         return NULL;
     }
     if (imm || rs2_or_imm == 0) {
@@ -4257,8 +4270,7 @@ static bool do_add_special(DisasContext *dc, arg_r_r_ri *a,
 {
     TCGv src1, sum;
 
-    /* For simplicity, we under-decoded the rs2 form. */
-    if (!a->imm && a->rs2_or_imm & ~0x1f) {
+    if (!check_r_r_ri(dc, a)) {
         return false;
     }
 
@@ -4376,8 +4388,7 @@ static TCGv gen_ldst_addr(DisasContext *dc, int rs1, bool imm, int rs2_or_imm)
 {
     TCGv addr, tmp = NULL;
 
-    /* For simplicity, we under-decoded the rs2 form. */
-    if (!imm && rs2_or_imm & ~0x1f) {
+    if (!imm && !check_rs2(dc, &rs2_or_imm)) {
         return NULL;
     }
 
@@ -4417,13 +4428,13 @@ static bool do_ld_gpr(DisasContext *dc, arg_r_r_ri_asi *a, MemOp mop)
     return advance_pc(dc);
 }
 
-TRANS(LDUW, ALL, do_ld_gpr, a, MO_TEUL)
+TRANS(LDUW, ALL, do_ld_gpr, a, MO_BEUL)
 TRANS(LDUB, ALL, do_ld_gpr, a, MO_UB)
-TRANS(LDUH, ALL, do_ld_gpr, a, MO_TEUW)
+TRANS(LDUH, ALL, do_ld_gpr, a, MO_BEUW)
 TRANS(LDSB, ALL, do_ld_gpr, a, MO_SB)
-TRANS(LDSH, ALL, do_ld_gpr, a, MO_TESW)
-TRANS(LDSW, 64, do_ld_gpr, a, MO_TESL)
-TRANS(LDX, 64, do_ld_gpr, a, MO_TEUQ)
+TRANS(LDSH, ALL, do_ld_gpr, a, MO_BESW)
+TRANS(LDSW, 64, do_ld_gpr, a, MO_BESL)
+TRANS(LDX, 64, do_ld_gpr, a, MO_BEUQ)
 
 static bool do_st_gpr(DisasContext *dc, arg_r_r_ri_asi *a, MemOp mop)
 {
@@ -4440,10 +4451,10 @@ static bool do_st_gpr(DisasContext *dc, arg_r_r_ri_asi *a, MemOp mop)
     return advance_pc(dc);
 }
 
-TRANS(STW, ALL, do_st_gpr, a, MO_TEUL)
+TRANS(STW, ALL, do_st_gpr, a, MO_BEUL)
 TRANS(STB, ALL, do_st_gpr, a, MO_UB)
-TRANS(STH, ALL, do_st_gpr, a, MO_TEUW)
-TRANS(STX, 64, do_st_gpr, a, MO_TEUQ)
+TRANS(STH, ALL, do_st_gpr, a, MO_BEUW)
+TRANS(STX, 64, do_st_gpr, a, MO_BEUQ)
 
 static bool trans_LDD(DisasContext *dc, arg_r_r_ri_asi *a)
 {
@@ -4457,7 +4468,7 @@ static bool trans_LDD(DisasContext *dc, arg_r_r_ri_asi *a)
     if (addr == NULL) {
         return false;
     }
-    da = resolve_asi(dc, a->asi, MO_TEUQ);
+    da = resolve_asi(dc, a->asi, MO_BEUQ);
     gen_ldda_asi(dc, &da, addr, a->rd);
     return advance_pc(dc);
 }
@@ -4474,7 +4485,7 @@ static bool trans_STD(DisasContext *dc, arg_r_r_ri_asi *a)
     if (addr == NULL) {
         return false;
     }
-    da = resolve_asi(dc, a->asi, MO_TEUQ);
+    da = resolve_asi(dc, a->asi, MO_BEUQ);
     gen_stda_asi(dc, &da, addr, a->rd);
     return advance_pc(dc);
 }
@@ -4505,7 +4516,7 @@ static bool trans_SWAP(DisasContext *dc, arg_r_r_ri_asi *a)
     if (addr == NULL) {
         return false;
     }
-    da = resolve_asi(dc, a->asi, MO_TEUL);
+    da = resolve_asi(dc, a->asi, MO_BEUL);
 
     dst = gen_dest_gpr(dc, a->rd);
     src = gen_load_gpr(dc, a->rd);
@@ -4533,8 +4544,8 @@ static bool do_casa(DisasContext *dc, arg_r_r_ri_asi *a, MemOp mop)
     return advance_pc(dc);
 }
 
-TRANS(CASA, CASA, do_casa, a, MO_TEUL)
-TRANS(CASXA, 64, do_casa, a, MO_TEUQ)
+TRANS(CASA, CASA, do_casa, a, MO_BEUL)
+TRANS(CASXA, 64, do_casa, a, MO_BEUQ)
 
 static bool do_ld_fpr(DisasContext *dc, arg_r_r_ri_asi *a, MemOp sz)
 {
@@ -4550,7 +4561,7 @@ static bool do_ld_fpr(DisasContext *dc, arg_r_r_ri_asi *a, MemOp sz)
     if (sz == MO_128 && gen_trap_float128(dc)) {
         return true;
     }
-    da = resolve_asi(dc, a->asi, MO_TE | sz);
+    da = resolve_asi(dc, a->asi, MO_BE | sz);
     gen_ldf_asi(dc, &da, sz, addr, a->rd);
     gen_update_fprs_dirty(dc, a->rd);
     return advance_pc(dc);
@@ -4579,7 +4590,7 @@ static bool do_st_fpr(DisasContext *dc, arg_r_r_ri_asi *a, MemOp sz)
     if (sz == MO_128 && gen_trap_float128(dc)) {
         return true;
     }
-    da = resolve_asi(dc, a->asi, MO_TE | sz);
+    da = resolve_asi(dc, a->asi, MO_BE | sz);
     gen_stf_asi(dc, &da, sz, addr, a->rd);
     return advance_pc(dc);
 }
@@ -4618,7 +4629,7 @@ static bool trans_STDFQ(DisasContext *dc, arg_STDFQ *a)
     /* Store the single element from the queue. */
     TCGv_i64 fq = tcg_temp_new_i64();
     tcg_gen_ld_i64(fq, tcg_env, offsetof(CPUSPARCState, fq.d));
-    tcg_gen_qemu_st_i64(fq, addr, dc->mem_idx, MO_TEUQ | MO_ALIGN_4);
+    tcg_gen_qemu_st_i64(fq, addr, dc->mem_idx, MO_BEUQ | MO_ALIGN_4);
 
     /* Mark the queue empty, transitioning to fp_execute state. */
     tcg_gen_st_i32(tcg_constant_i32(0), tcg_env,
@@ -4644,7 +4655,7 @@ static bool trans_LDFSR(DisasContext *dc, arg_r_r_ri *a)
     }
 
     tmp = tcg_temp_new_i32();
-    tcg_gen_qemu_ld_i32(tmp, addr, dc->mem_idx, MO_TEUL | MO_ALIGN);
+    tcg_gen_qemu_ld_i32(tmp, addr, dc->mem_idx, MO_BEUL | MO_ALIGN);
 
     tcg_gen_extract_i32(cpu_fcc[0], tmp, FSR_FCC0_SHIFT, 2);
     /* LDFSR does not change FCC[1-3]. */
@@ -4668,7 +4679,7 @@ static bool do_ldxfsr(DisasContext *dc, arg_r_r_ri *a, bool entire)
     }
 
     t64 = tcg_temp_new_i64();
-    tcg_gen_qemu_ld_i64(t64, addr, dc->mem_idx, MO_TEUQ | MO_ALIGN);
+    tcg_gen_qemu_ld_i64(t64, addr, dc->mem_idx, MO_BEUQ | MO_ALIGN);
 
     lo = tcg_temp_new_i32();
     hi = cpu_fcc[3];
@@ -4711,8 +4722,8 @@ static bool do_stfsr(DisasContext *dc, arg_r_r_ri *a, MemOp mop)
     return advance_pc(dc);
 }
 
-TRANS(STFSR, ALL, do_stfsr, a, MO_TEUL)
-TRANS(STXFSR, 64, do_stfsr, a, MO_TEUQ)
+TRANS(STFSR, ALL, do_stfsr, a, MO_BEUL)
+TRANS(STXFSR, 64, do_stfsr, a, MO_BEUQ)
 
 static bool do_fc(DisasContext *dc, int rd, int32_t c)
 {
@@ -5724,7 +5735,7 @@ static void sparc_tr_insn_start(DisasContextBase *dcbase, CPUState *cs)
             g_assert_not_reached();
         }
     }
-    tcg_gen_insn_start(dc->pc, npc);
+    tcg_gen_insn_start(dc->pc, npc, 0);
 }
 
 static void sparc_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
@@ -5732,7 +5743,7 @@ static void sparc_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
     DisasContext *dc = container_of(dcbase, DisasContext, base);
     unsigned int insn;
 
-    insn = translator_ldl(cpu_env(cs), &dc->base, dc->pc);
+    insn = translator_ldl_end(cpu_env(cs), &dc->base, dc->pc, MO_BE);
     dc->base.pc_next += 4;
 
     if (!decode(dc, insn)) {
@@ -5842,7 +5853,8 @@ void sparc_translate_code(CPUState *cs, TranslationBlock *tb,
 {
     DisasContext dc = {};
 
-    translator_loop(cs, tb, max_insns, pc, host_pc, &sparc_tr_ops, &dc.base);
+    translator_loop(cs, tb, max_insns, pc, host_pc, &sparc_tr_ops, &dc.base,
+                    TCG_TYPE_VA);
 }
 
 void sparc_tcg_init(void)

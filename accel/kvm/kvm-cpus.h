@@ -10,14 +10,18 @@
 #ifndef KVM_CPUS_H
 #define KVM_CPUS_H
 
+#include "gdbstub/enums.h"
+
 int kvm_init_vcpu(CPUState *cpu, Error **errp);
 int kvm_cpu_exec(CPUState *cpu);
 void kvm_destroy_vcpu(CPUState *cpu);
 void kvm_cpu_synchronize_post_reset(CPUState *cpu);
 void kvm_cpu_synchronize_post_init(CPUState *cpu);
 void kvm_cpu_synchronize_pre_loadvm(CPUState *cpu);
-bool kvm_supports_guest_debug(void);
-int kvm_insert_breakpoint(CPUState *cpu, int type, vaddr addr, vaddr len);
-int kvm_remove_breakpoint(CPUState *cpu, int type, vaddr addr, vaddr len);
-void kvm_remove_all_breakpoints(CPUState *cpu);
+int kvm_insert_gdbstub_breakpoint(CPUState *cpu, GdbBreakpointType type,
+                                  vaddr addr, vaddr len);
+int kvm_remove_gdbstub_breakpoint(CPUState *cpu, GdbBreakpointType type,
+                                  vaddr addr, vaddr len);
+void kvm_remove_all_gdbstub_breakpoints(CPUState *cpu);
+
 #endif /* KVM_CPUS_H */

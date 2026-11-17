@@ -13,9 +13,9 @@
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
-#include "hw/usb.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
+#include "hw/usb/usb.h"
 #include "migration/vmstate.h"
 #include "desc.h"
 #include "chardev/char-serial.h"
@@ -105,7 +105,7 @@ struct USBSerialState {
     uint8_t xoff;
     QEMUSerialSetParams params;
     int latency;        /* ms */
-    CharBackend cs;
+    CharFrontend cs;
 };
 
 #define TYPE_USB_SERIAL "usb-serial-dev"

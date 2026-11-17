@@ -58,9 +58,7 @@ struct PCIESlot {
 
     PCIExpLinkSpeed speed;
     PCIExpLinkWidth width;
-
-    /* Disable ACS (really for a pcie_root_port) */
-    bool        disable_acs;
+    bool flitmode;
 
     /* Indicates whether any type of hot-plug is allowed on the slot */
     bool        hotplug;

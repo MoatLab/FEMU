@@ -22,15 +22,20 @@
 #include "qemu/osdep.h"
 #include <glib/gprintf.h>
 #include "hw/acpi/aml-build.h"
+#include "hw/acpi/acpi.h"
 #include "qemu/bswap.h"
 #include "qemu/bitops.h"
+#include "qemu/queue.h"
 #include "system/numa.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/acpi/tpm.h"
 #include "hw/pci/pci_host.h"
 #include "hw/pci/pci_bus.h"
 #include "hw/pci/pci_bridge.h"
+#include "hw/acpi/acpi_aml_interface.h"
 #include "qemu/cutils.h"
+#include "hw/core/cpu.h"
+#include "hw/acpi/wdat.h"
 
 static GArray *build_alloc_array(void)
 {
@@ -1057,6 +1062,33 @@ Aml *aml_irq_no_flags(uint8_t irq)
     return var;
 }
 
+/*
+ * ACPI 1.0b: 6.4.2.1.1 ASL Macro for IRQ Descriptor
+ *
+ * More verbose description at:
+ * ACPI 5.0: 19.5.63 IRQ (Interrupt Resource Descriptor Macro)
+ *           6.4.2.1 IRQ Descriptor
+ */
+Aml *aml_irq(uint8_t irq, AmlLevelAndEdge level_and_edge,
+             AmlActiveHighAndLow high_and_low, AmlShared shared)
+{
+    uint16_t irq_mask;
+    Aml *var = aml_alloc();
+    uint8_t irq_flags = level_and_edge | (high_and_low << 3) |
+                        (shared << 4);
+
+    assert((level_and_edge == AML_EDGE && high_and_low == AML_ACTIVE_HIGH) ||
+           (level_and_edge == AML_LEVEL && high_and_low == AML_ACTIVE_LOW));
+    assert(irq < 16);
+    build_append_byte(var->buf, 0x23); /* IRQ descriptor 3 byte form */
+
+    irq_mask = 1U << irq;
+    build_append_byte(var->buf, irq_mask & 0xFF); /* IRQ mask bits[7:0] */
+    build_append_byte(var->buf, irq_mask >> 8); /* IRQ mask bits[15:8] */
+    build_append_byte(var->buf, irq_flags); /* IRQ flags */
+    return var;
+}
+
 /* ACPI 1.0b: 16.2.5.4 Type 2 Opcodes Encoding: DefLNot */
 Aml *aml_lnot(Aml *arg)
 {
@@ -1741,6 +1773,7 @@ void acpi_table_end(BIOSLinker *linker, AcpiTable *desc)
     uint32_t table_len = desc->array->len - desc->table_offset;
     uint32_t table_len_le = cpu_to_le32(table_len);
     gchar *len_ptr = &desc->array->data[desc->table_offset + 4];
+    uint8_t *table;
 
     /* patch "Length" field that has been reserved by acpi_table_begin()
      * to the actual length, i.e. accumulated table length from
@@ -1748,8 +1781,14 @@ void acpi_table_end(BIOSLinker *linker, AcpiTable *desc)
      */
     memcpy(len_ptr, &table_len_le, sizeof table_len_le);
 
-    bios_linker_loader_add_checksum(linker, ACPI_BUILD_TABLE_FILE,
-        desc->table_offset, table_len, desc->table_offset + checksum_offset);
+    if (linker != NULL) {
+        bios_linker_loader_add_checksum(linker, ACPI_BUILD_TABLE_FILE,
+                                        desc->table_offset, table_len,
+                                        desc->table_offset + checksum_offset);
+    } else {
+        table = (uint8_t *) &desc->array->data[desc->table_offset];
+        table[checksum_offset] = acpi_checksum(table, table_len);
+    }
 }
 
 void *acpi_data_push(GArray *table_data, unsigned size)
@@ -2105,10 +2144,10 @@ void build_spcr(GArray *table_data, BIOSLinker *linker,
     build_append_int_noprefix(table_data, f->stop_bits, 1);
     /* Flow Control */
     build_append_int_noprefix(table_data, f->flow_control, 1);
-    /* Language */
-    build_append_int_noprefix(table_data, f->language, 1);
     /* Terminal Type */
     build_append_int_noprefix(table_data, f->terminal_type, 1);
+    /* Language */
+    build_append_int_noprefix(table_data, f->language, 1);
     /* PCI Device ID  */
     build_append_int_noprefix(table_data, f->pci_device_id, 2);
     /* PCI Vendor ID */
@@ -2140,20 +2179,143 @@ void build_spcr(GArray *table_data, BIOSLinker *linker,
     }
     acpi_table_end(linker, &table);
 }
+
+/*
+ * ACPI spec, Revision 6.3
+ * 5.2.29.2 Cache Type Structure (Type 1)
+ */
+static void build_cache_nodes(GArray *tbl, CPUCoreCaches *cache,
+                              uint32_t next_offset)
+{
+    const uint8_t node_length = 24;
+    int start_len = tbl->len;
+    int val;
+
+    build_append_byte(tbl, 1);                         /* Type 1 - cache */
+    build_append_byte(tbl, node_length);               /* Length */
+    build_append_int_noprefix(tbl, 0, 2);              /* Reserved */
+    build_append_int_noprefix(tbl, 0x7f, 4);           /* Flags */
+    build_append_int_noprefix(tbl, next_offset, 4);    /* Next Level of Cache */
+    build_append_int_noprefix(tbl, cache->size, 4);    /* Size */
+    build_append_int_noprefix(tbl, cache->sets, 4);    /* Number of sets */
+    build_append_byte(tbl, cache->associativity);      /* Associativity */
+    val = 0x3;
+    switch (cache->type) {
+    case INSTRUCTION_CACHE:
+        val |= (1 << 2); /* Instruction Cache */
+        break;
+    case DATA_CACHE:
+        val |= (0 << 2); /* Data Cache */
+        break;
+    case UNIFIED_CACHE:
+        val |= (3 << 2); /* Unified */
+        break;
+    }
+    build_append_byte(tbl, val);                        /* Attributes */
+    build_append_int_noprefix(tbl, cache->linesize, 2); /* Line size */
+    g_assert(tbl->len == start_len + node_length);
+}
+
+/*
+ * Build PPTT Cache Type structures (Type 1) from cache level `level_high`
+ * down to `level_low` (both inclusive), appending them to the PPTT table.
+ *
+ * On output, `data_offset` and `instr_offset` hold the PPTT offsets of the
+ * lowest-level data and instruction cache nodes respectively.  These offsets
+ * are referenced as private resources in the Processor Hierarchy Node (Type 0)
+ * that owns the caches.
+ */
+static bool build_caches(GArray *table_data, uint32_t pptt_start,
+                         int num_caches, CPUCoreCaches *caches,
+                         uint8_t level_high, /* Inclusive */
+                         uint8_t level_low,  /* Inclusive */
+                         uint32_t *data_offset,
+                         uint32_t *instr_offset)
+{
+    uint32_t next_level_offset_data = 0, next_level_offset_instruction = 0;
+    uint32_t this_offset, next_offset = 0;
+    int c, level;
+    bool found_cache = false;
+
+    /* Walk caches from top to bottom */
+    for (level = level_high; level >= level_low; level--) {
+        for (c = 0; c < num_caches; c++) {
+            if (caches[c].level != level) {
+                continue;
+            }
+
+            /* Assume only unified above l1 for now */
+            this_offset = table_data->len - pptt_start;
+            switch (caches[c].type) {
+            case INSTRUCTION_CACHE:
+                next_offset = next_level_offset_instruction;
+                break;
+            case DATA_CACHE:
+                next_offset = next_level_offset_data;
+                break;
+            case UNIFIED_CACHE:
+                /* Either is fine here */
+                next_offset = next_level_offset_instruction;
+                break;
+            }
+            build_cache_nodes(table_data, &caches[c], next_offset);
+            switch (caches[c].type) {
+            case INSTRUCTION_CACHE:
+                next_level_offset_instruction = this_offset;
+                break;
+            case DATA_CACHE:
+                next_level_offset_data = this_offset;
+                break;
+            case UNIFIED_CACHE:
+                next_level_offset_instruction = this_offset;
+                next_level_offset_data = this_offset;
+                break;
+            }
+            *data_offset = next_level_offset_data;
+            *instr_offset = next_level_offset_instruction;
+
+            found_cache = true;
+        }
+    }
+
+    return found_cache;
+}
+
 /*
  * ACPI spec, Revision 6.3
  * 5.2.29 Processor Properties Topology Table (PPTT)
  */
 void build_pptt(GArray *table_data, BIOSLinker *linker, MachineState *ms,
-                const char *oem_id, const char *oem_table_id)
+                const char *oem_id, const char *oem_table_id,
+                int num_caches, CPUCoreCaches *caches)
 {
     MachineClass *mc = MACHINE_GET_CLASS(ms);
     CPUArchIdList *cpus = ms->possible_cpus;
-    int64_t socket_id = -1, cluster_id = -1, core_id = -1;
-    uint32_t socket_offset = 0, cluster_offset = 0, core_offset = 0;
+    uint32_t core_data_offset = 0;
+    uint32_t core_instr_offset = 0;
+    uint32_t cluster_instr_offset = 0;
+    uint32_t cluster_data_offset = 0;
+    uint32_t node_data_offset = 0;
+    uint32_t node_instr_offset = 0;
+    int top_node = 3;
+    int top_cluster = 3;
+    int top_core = 3;
+    int bottom_node = 3;
+    int bottom_cluster = 3;
+    int bottom_core = 3;
+    int64_t socket_id = -1;
+    int64_t cluster_id = -1;
+    int64_t core_id = -1;
+    uint32_t socket_offset = 0;
+    uint32_t cluster_offset = 0;
+    uint32_t core_offset = 0;
     uint32_t pptt_start = table_data->len;
     uint32_t root_offset;
     int n;
+    uint32_t priv_rsrc[2];
+    uint32_t num_priv = 0;
+    bool cache_at_topo_level;
+
     AcpiTable table = { .sig = "PPTT", .rev = 2,
                         .oem_id = oem_id, .oem_table_id = oem_table_id };
 
@@ -2183,11 +2345,29 @@ void build_pptt(GArray *table_data, BIOSLinker *linker, MachineState *ms,
             socket_id = cpus->cpus[n].props.socket_id;
             cluster_id = -1;
             core_id = -1;
+            bottom_node = top_node;
+            num_priv = 0;
+            cache_at_topo_level =
+                machine_find_lowest_level_cache_at_topo_level(
+                    ms, &bottom_node, CPU_TOPOLOGY_LEVEL_SOCKET);
+            if (cache_at_topo_level) {
+                build_caches(table_data, pptt_start, num_caches, caches,
+                             top_node, bottom_node, &node_data_offset,
+                             &node_instr_offset);
+                priv_rsrc[0] = node_instr_offset;
+                priv_rsrc[1] = node_data_offset;
+                if (node_instr_offset || node_data_offset) {
+                    num_priv = node_instr_offset == node_data_offset ? 1 : 2;
+                }
+
+                top_cluster = bottom_node - 1;
+            }
+
             socket_offset = table_data->len - pptt_start;
             build_processor_hierarchy_node(table_data,
                 (1 << 0) | /* Physical package */
                 (1 << 4), /* Identical Implementation */
-                root_offset, socket_id, NULL, 0);
+                root_offset, socket_id, priv_rsrc, num_priv);
         }
 
         if (mc->smp_props.clusters_supported && mc->smp_props.has_clusters) {
@@ -2195,21 +2375,66 @@ void build_pptt(GArray *table_data, BIOSLinker *linker, MachineState *ms,
                 assert(cpus->cpus[n].props.cluster_id > cluster_id);
                 cluster_id = cpus->cpus[n].props.cluster_id;
                 core_id = -1;
+                bottom_cluster = top_cluster;
+                num_priv = 0;
+                cache_at_topo_level =
+                    machine_find_lowest_level_cache_at_topo_level(
+                        ms, &bottom_cluster, CPU_TOPOLOGY_LEVEL_CLUSTER);
+
+                if (cache_at_topo_level) {
+                    build_caches(table_data, pptt_start, num_caches, caches,
+                                 top_cluster, bottom_cluster,
+                                 &cluster_data_offset, &cluster_instr_offset);
+                    priv_rsrc[0] = cluster_instr_offset;
+                    priv_rsrc[1] = cluster_data_offset;
+                    if (cluster_instr_offset || cluster_data_offset) {
+                        num_priv =
+                            cluster_instr_offset == cluster_data_offset ? 1 : 2;
+                    }
+                    top_core = bottom_cluster - 1;
+                } else if (top_cluster == bottom_node - 1) {
+                    /* socket cache but no cluster cache */
+                    top_core = bottom_node - 1;
+                }
+
                 cluster_offset = table_data->len - pptt_start;
                 build_processor_hierarchy_node(table_data,
                     (0 << 0) | /* Not a physical package */
                     (1 << 4), /* Identical Implementation */
-                    socket_offset, cluster_id, NULL, 0);
+                    socket_offset, cluster_id, priv_rsrc, num_priv);
             }
         } else {
+            if (machine_defines_cache_at_topo_level(
+                    ms, CPU_TOPOLOGY_LEVEL_CLUSTER)) {
+                error_setg(&error_fatal, "Not clusters found for the cache");
+                return;
+            }
+
             cluster_offset = socket_offset;
+            top_core = bottom_node - 1; /* there is no cluster */
+        }
+
+        if (cpus->cpus[n].props.core_id != core_id) {
+            bottom_core = top_core;
+            num_priv = 0;
+            cache_at_topo_level =
+                machine_find_lowest_level_cache_at_topo_level(
+                    ms, &bottom_core, CPU_TOPOLOGY_LEVEL_CORE);
+            if (cache_at_topo_level) {
+                build_caches(table_data, pptt_start, num_caches, caches,
+                             top_core, bottom_core, &core_data_offset,
+                             &core_instr_offset);
+                priv_rsrc[0] = core_instr_offset;
+                priv_rsrc[1] = core_data_offset;
+                num_priv = core_instr_offset == core_data_offset ? 1 : 2;
+            }
         }
 
         if (ms->smp.threads == 1) {
             build_processor_hierarchy_node(table_data,
                 (1 << 1) | /* ACPI Processor ID valid */
-                (1 << 3),  /* Node is a Leaf */
-                cluster_offset, n, NULL, 0);
+                (1 << 3), /* Node is a Leaf */
+                cluster_offset, n, priv_rsrc, num_priv);
         } else {
             if (cpus->cpus[n].props.core_id != core_id) {
                 assert(cpus->cpus[n].props.core_id > core_id);
@@ -2218,7 +2443,7 @@ void build_pptt(GArray *table_data, BIOSLinker *linker, MachineState *ms,
                 build_processor_hierarchy_node(table_data,
                     (0 << 0) | /* Not a physical package */
                     (1 << 4), /* Identical Implementation */
-                    cluster_offset, core_id, NULL, 0);
+                    cluster_offset, core_id, priv_rsrc, num_priv);
             }
 
             build_processor_hierarchy_node(table_data,
@@ -2628,4 +2853,36 @@ Aml *aml_i2c_serial_bus_device(uint16_t address, const char *resource_source)
     g_array_append_vals(var->buf, resource_source, resource_source_len);
 
     return var;
+}
+
+/* ACPI 5.0b: 18.3.2.6.2 Event Notification For Generic Error Sources */
+Aml *aml_error_device(void)
+{
+    Aml *dev = aml_device(ACPI_APEI_ERROR_DEVICE);
+    aml_append(dev, aml_name_decl("_HID", aml_string("PNP0C33")));
+    aml_append(dev, aml_name_decl("_UID", aml_int(0)));
+
+    return dev;
+}
+
+void qbus_build_aml(BusState *bus, Aml *scope)
+{
+    BusChild *kid;
+
+    QTAILQ_FOREACH(kid, &bus->children, sibling) {
+        call_dev_aml_func(DEVICE(kid->child), scope);
+    }
+}
+
+void build_append_wdat_ins(GArray *table_data,
+                           WDATAction action, uint8_t flags,
+                           struct AcpiGenericAddress as,
+                           uint32_t val, uint32_t mask)
+{
+    build_append_int_noprefix(table_data, action, 1);    /* Watchdog Action */
+    build_append_int_noprefix(table_data, flags, 1);     /* Instruction Flags */
+    build_append_int_noprefix(table_data, 0, 2);         /* Reserved */
+    build_append_gas_from_struct(table_data, &as);       /* Register Region */
+    build_append_int_noprefix(table_data, val, 4);       /* Value */
+    build_append_int_noprefix(table_data, mask, 4);      /* Mask */
 }

@@ -18,7 +18,7 @@
 #ifndef IMX_SERIAL_H
 #define IMX_SERIAL_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "chardev/char-fe.h"
 #include "qom/object.h"
 #include "qemu/fifo32.h"
@@ -122,7 +122,7 @@ struct IMXSerialState {
     uint32_t ucr4;
 
     qemu_irq irq;
-    CharBackend chr;
+    CharFrontend chr;
 };
 
 #endif

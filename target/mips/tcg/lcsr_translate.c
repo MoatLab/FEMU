@@ -18,8 +18,8 @@
 
 static bool trans_CPUCFG(DisasContext *ctx, arg_CPUCFG *a)
 {
-    TCGv dest = tcg_temp_new();
-    TCGv src1 = tcg_temp_new();
+    TCGv_i64 dest = tcg_temp_new_i64();
+    TCGv_i64 src1 = tcg_temp_new_i64();
 
     gen_load_gpr(src1, a->rs);
     gen_helper_lcsr_cpucfg(dest, tcg_env, src1);
@@ -30,10 +30,10 @@ static bool trans_CPUCFG(DisasContext *ctx, arg_CPUCFG *a)
 
 #ifndef CONFIG_USER_ONLY
 static bool gen_rdcsr(DisasContext *ctx, arg_r *a,
-                        void (*func)(TCGv, TCGv_ptr, TCGv))
+                        void (*func)(TCGv_i64, TCGv_ptr, TCGv_i64))
 {
-    TCGv dest = tcg_temp_new();
-    TCGv src1 = tcg_temp_new();
+    TCGv_i64 dest = tcg_temp_new_i64();
+    TCGv_i64 src1 = tcg_temp_new_i64();
 
     check_cp0_enabled(ctx);
     gen_load_gpr(src1, a->rs);
@@ -44,10 +44,10 @@ static bool gen_rdcsr(DisasContext *ctx, arg_r *a,
 }
 
 static bool gen_wrcsr(DisasContext *ctx, arg_r *a,
-                        void (*func)(TCGv_ptr, TCGv, TCGv))
+                        void (*func)(TCGv_ptr, TCGv_i64, TCGv_i64))
 {
-    TCGv val = tcg_temp_new();
-    TCGv addr = tcg_temp_new();
+    TCGv_i64 val = tcg_temp_new_i64();
+    TCGv_i64 addr = tcg_temp_new_i64();
 
     check_cp0_enabled(ctx);
     gen_load_gpr(addr, a->rs);

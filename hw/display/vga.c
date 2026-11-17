@@ -25,6 +25,7 @@
 #include "qemu/osdep.h"
 #include "qemu/units.h"
 #include "system/reset.h"
+#include "system/ramblock.h"
 #include "qapi/error.h"
 #include "qemu/target-info.h"
 #include "hw/display/vga.h"
@@ -44,8 +45,10 @@
 
 bool have_vga = true;
 
-/* 16 state changes per vertical frame @60 Hz */
+/* frame counter bit 4: cursor blink toggles every 16 frames @60 Hz */
 #define VGA_TEXT_CURSOR_PERIOD_MS       (1000 * 2 * 16 / 60)
+/* frame counter bit 5: character blink toggles every 32 frames @60 Hz */
+#define VGA_TEXT_BLINK_PERIOD_MS        (1000 * 2 * 32 / 60)
 
 /* Address mask for non-VESA modes.  */
 #define VGA_VRAM_SIZE                   (256 * KiB)
@@ -1189,7 +1192,6 @@ static void vga_get_text_resolution(VGACommonState *s, int *pwidth, int *pheight
  * - double scan
  * - double width
  * - underline
- * - flashing
  */
 static void vga_draw_text(VGACommonState *s, int full_update)
 {
@@ -1239,16 +1241,19 @@ static void vga_draw_text(VGACommonState *s, int full_update)
         return;
     }
 
-    if (width != s->last_width || height != s->last_height ||
+    if (surface == NULL ||
+        surface_width(surface) != width * cw ||
+        surface_height(surface) != height * cheight ||
+        width != s->last_text_width || height != s->last_text_height ||
         cw != s->last_cw || cheight != s->last_ch || s->last_depth) {
         s->last_scr_width = width * cw;
         s->last_scr_height = height * cheight;
         qemu_console_resize(s->con, s->last_scr_width, s->last_scr_height);
         surface = qemu_console_surface(s->con);
-        dpy_text_resize(s->con, width, height);
+        qemu_console_text_resize(s->con, width, height);
         s->last_depth = 0;
-        s->last_width = width;
-        s->last_height = height;
+        s->last_text_width = width;
+        s->last_text_height = height;
         s->last_ch = cheight;
         s->last_cw = cw;
         full_update = 1;
@@ -1285,6 +1290,13 @@ static void vga_draw_text(VGACommonState *s, int full_update)
         s->cursor_blink_time = now + VGA_TEXT_CURSOR_PERIOD_MS / 2;
         s->cursor_visible_phase = !s->cursor_visible_phase;
     }
+    if (now >= s->blink_time) {
+        s->blink_time = now + VGA_TEXT_BLINK_PERIOD_MS / 2;
+        s->blink_visible_phase = !s->blink_visible_phase;
+        if (s->ar[VGA_ATC_MODE] & 0x08) {
+            full_update = 1;
+        }
+    }
 
     dest = surface_data(surface);
     linesize = surface_stride(surface);
@@ -1316,8 +1328,17 @@ static void vga_draw_text(VGACommonState *s, int full_update)
 #endif
                 font_ptr = font_base[(cattr >> 3) & 1];
                 font_ptr += 32 * 4 * ch;
-                bgcol = palette[cattr >> 4];
-                fgcol = palette[cattr & 0x0f];
+                if (s->ar[VGA_ATC_MODE] & 0x08) {
+                    bgcol = palette[(cattr >> 4) & 0x07];
+                    if ((cattr & 0x80) && !s->blink_visible_phase) {
+                        fgcol = bgcol;
+                    } else {
+                        fgcol = palette[cattr & 0x0f];
+                    }
+                } else {
+                    bgcol = palette[cattr >> 4];
+                    fgcol = palette[cattr & 0x0f];
+                }
                 if (cw == 16) {
                     vga_draw_glyph16(d1, linesize,
                                      font_ptr, cheight, fgcol, bgcol);
@@ -1364,8 +1385,8 @@ static void vga_draw_text(VGACommonState *s, int full_update)
             ch_attr_ptr++;
         }
         if (cx_max != -1) {
-            dpy_gfx_update(s->con, cx_min * cw, cy * cheight,
-                           (cx_max - cx_min + 1) * cw, cheight);
+            qemu_console_update(s->con, cx_min * cw, cy * cheight,
+                                (cx_max - cx_min + 1) * cw, cheight);
         }
         dest += linesize * cheight;
         line1 = line + cheight;
@@ -1609,7 +1630,7 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
      */
     format = qemu_default_pixman_format(depth, !byteswap);
     if (format) {
-        allocate_surface = !dpy_gfx_check_format(s->con, format)
+        allocate_surface = !qemu_console_check_format(s->con, format)
             || s->force_shadow || force_shadow;
     } else {
         allocate_surface = true;
@@ -1620,7 +1641,9 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
         height != s->last_height ||
         s->last_depth != depth ||
         s->last_byteswap != byteswap ||
-        allocate_surface != surface_is_allocated(surface)) {
+        allocate_surface != surface_is_allocated(surface) ||
+        disp_width != surface_width(surface) ||
+        height != surface_height(surface)) {
         /* display parameters changed -> need new display surface */
         s->last_scr_width = disp_width;
         s->last_scr_height = height;
@@ -1629,11 +1652,12 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
         s->last_line_offset = s->params.line_offset;
         s->last_depth = depth;
         s->last_byteswap = byteswap;
-        /* 16 extra pixels are needed for double-width planar modes.  */
-        s->panning_buf = g_realloc(s->panning_buf,
-                                   (disp_width + 16) * sizeof(uint32_t));
         full_update = 1;
     }
+
+    /* 16 extra pixels are needed for double-width planar modes. */
+    s->panning_buf = g_realloc(s->panning_buf,
+                               (disp_width + 16) * sizeof(uint32_t));
     if (surface_data(surface) != s->vram_ptr + (s->params.start_addr * 4)
         && !surface_is_allocated(surface)) {
         /* base address changed (page flip) -> shared display surfaces
@@ -1646,7 +1670,7 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
             surface = qemu_create_displaysurface_from(disp_width,
                     height, format, s->params.line_offset,
                     s->vram_ptr + (s->params.start_addr * 4));
-            dpy_gfx_replace_surface(s->con, surface);
+            qemu_console_set_surface(s->con, surface);
         } else {
             qemu_console_resize(s->con, disp_width, height);
             surface = qemu_console_surface(s->con);
@@ -1661,7 +1685,7 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
 
 #if 0
     printf("w=%d h=%d v=%d line_offset=%d cr[0x09]=0x%02x cr[0x17]=0x%02x linecmp=%d sr[0x01]=0x%02x\n",
-           width, height, v, line_offset, s->cr[9], s->cr[VGA_CRTC_MODE],
+           width, height, v, s->params.line_offset, s->cr[9], s->cr[VGA_CRTC_MODE],
            s->params.line_compare, sr(s, VGA_SEQ_CLOCK_MODE));
 #endif
     addr1 = (s->params.start_addr * 4);
@@ -1719,8 +1743,7 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
         } else {
             if (y_start >= 0) {
                 /* flush to display */
-                dpy_gfx_update(s->con, 0, y_start,
-                               disp_width, y - y_start);
+                qemu_console_update(s->con, 0, y_start, disp_width, y - y_start);
                 y_start = -1;
             }
         }
@@ -1744,8 +1767,7 @@ static void vga_draw_graphic(VGACommonState *s, int full_update)
     }
     if (y_start >= 0) {
         /* flush to display */
-        dpy_gfx_update(s->con, 0, y_start,
-                       disp_width, y - y_start);
+        qemu_console_update(s->con, 0, y_start, disp_width, y - y_start);
     }
     g_free(snap);
     memset(s->invalidated_y_table, 0, sizeof(s->invalidated_y_table));
@@ -1766,23 +1788,23 @@ static void vga_draw_blank(VGACommonState *s, int full_update)
         /* unshare buffer, otherwise the blanking corrupts vga vram */
         surface = qemu_create_displaysurface(s->last_scr_width,
                                              s->last_scr_height);
-        dpy_gfx_replace_surface(s->con, surface);
+        qemu_console_set_surface(s->con, surface);
     }
 
-    w = s->last_scr_width * surface_bytes_per_pixel(surface);
+    w = surface_width(surface) * surface_bytes_per_pixel(surface);
     d = surface_data(surface);
-    for(i = 0; i < s->last_scr_height; i++) {
+    for (i = 0; i < surface_height(surface); i++) {
         memset(d, 0, w);
         d += surface_stride(surface);
     }
-    dpy_gfx_update_full(s->con);
+    qemu_console_update_full(s->con);
 }
 
 #define GMODE_TEXT     0
 #define GMODE_GRAPH    1
 #define GMODE_BLANK 2
 
-static void vga_update_display(void *opaque)
+static bool vga_update_display(void *opaque)
 {
     VGACommonState *s = opaque;
     DisplaySurface *surface = qemu_console_surface(s->con);
@@ -1817,6 +1839,8 @@ static void vga_update_display(void *opaque)
             break;
         }
     }
+
+    return true;
 }
 
 /* force a full display refresh */
@@ -1826,6 +1850,8 @@ static void vga_invalidate_display(void *opaque)
 
     s->last_width = -1;
     s->last_height = -1;
+    s->last_text_width = -1;
+    s->last_text_height = -1;
 }
 
 void vga_common_reset(VGACommonState *s)
@@ -1868,6 +1894,8 @@ void vga_common_reset(VGACommonState *s)
     s->last_ch = 0;
     s->last_width = 0;
     s->last_height = 0;
+    s->last_text_width = 0;
+    s->last_text_height = 0;
     s->last_scr_width = 0;
     s->last_scr_height = 0;
     s->cursor_start = 0;
@@ -1898,13 +1926,13 @@ static void vga_reset(void *opaque)
         ((v & 0x00000800) << 10) | ((v & 0x00007000) >> 1))
 /* relay text rendering to the display driver
  * instead of doing a full vga_update_display() */
-static void vga_update_text(void *opaque, console_ch_t *chardata)
+static void vga_update_text(void *opaque, uint32_t *chardata)
 {
     VGACommonState *s =  opaque;
     int graphic_mode, i, cursor_offset, cursor_visible;
     int cw, cheight, width, height, size, c_min, c_max;
     uint32_t *src;
-    console_ch_t *dst, val;
+    uint32_t *dst, val;
     char msg_buffer[80];
     int full_update = 0;
 
@@ -1919,8 +1947,8 @@ static void vga_update_text(void *opaque, console_ch_t *chardata)
         s->graphic_mode = graphic_mode;
         full_update = 1;
     }
-    if (s->last_width == -1) {
-        s->last_width = 0;
+    if (s->last_text_width == -1) {
+        s->last_text_width = 0;
         full_update = 1;
     }
 
@@ -1959,15 +1987,15 @@ static void vga_update_text(void *opaque, console_ch_t *chardata)
             break;
         }
 
-        if (width != s->last_width || height != s->last_height ||
+        if (width != s->last_text_width || height != s->last_text_height ||
             cw != s->last_cw || cheight != s->last_ch) {
             s->last_scr_width = width * cw;
             s->last_scr_height = height * cheight;
             qemu_console_resize(s->con, s->last_scr_width, s->last_scr_height);
-            dpy_text_resize(s->con, width, height);
+            qemu_console_text_resize(s->con, width, height);
             s->last_depth = 0;
-            s->last_width = width;
-            s->last_height = height;
+            s->last_text_width = width;
+            s->last_text_height = height;
             s->last_ch = cheight;
             s->last_cw = cw;
             full_update = 1;
@@ -1989,11 +2017,11 @@ static void vga_update_text(void *opaque, console_ch_t *chardata)
             s->cr[VGA_CRTC_CURSOR_END] != s->cursor_end || full_update) {
             cursor_visible = !(s->cr[VGA_CRTC_CURSOR_START] & 0x20);
             if (cursor_visible && cursor_offset < size && cursor_offset >= 0)
-                dpy_text_cursor(s->con,
-                                TEXTMODE_X(cursor_offset),
-                                TEXTMODE_Y(cursor_offset));
+                qemu_console_text_set_cursor(s->con,
+                                             TEXTMODE_X(cursor_offset),
+                                             TEXTMODE_Y(cursor_offset));
             else
-                dpy_text_cursor(s->con, -1, -1);
+                qemu_console_text_set_cursor(s->con, -1, -1);
             s->cursor_offset = cursor_offset;
             s->cursor_start = s->cr[VGA_CRTC_CURSOR_START];
             s->cursor_end = s->cr[VGA_CRTC_CURSOR_END];
@@ -2004,14 +2032,14 @@ static void vga_update_text(void *opaque, console_ch_t *chardata)
 
         if (full_update) {
             for (i = 0; i < size; src ++, dst ++, i ++)
-                console_write_ch(dst, VMEM2CHTYPE(le32_to_cpu(*src)));
+                *dst = VMEM2CHTYPE(le32_to_cpu(*src));
 
-            dpy_text_update(s->con, 0, 0, width, height);
+            qemu_console_text_update(s->con, 0, 0, width, height);
         } else {
             c_max = 0;
 
             for (i = 0; i < size; src ++, dst ++, i ++) {
-                console_write_ch(&val, VMEM2CHTYPE(le32_to_cpu(*src)));
+                val = VMEM2CHTYPE(le32_to_cpu(*src));
                 if (*dst != val) {
                     *dst = val;
                     c_max = i;
@@ -2020,7 +2048,7 @@ static void vga_update_text(void *opaque, console_ch_t *chardata)
             }
             c_min = i;
             for (; i < size; src ++, dst ++, i ++) {
-                console_write_ch(&val, VMEM2CHTYPE(le32_to_cpu(*src)));
+                val = VMEM2CHTYPE(le32_to_cpu(*src));
                 if (*dst != val) {
                     *dst = val;
                     c_max = i;
@@ -2029,7 +2057,7 @@ static void vga_update_text(void *opaque, console_ch_t *chardata)
 
             if (c_min <= c_max) {
                 i = TEXTMODE_Y(c_min);
-                dpy_text_update(s->con, 0, i, width, TEXTMODE_Y(c_max) - i + 1);
+                qemu_console_text_update(s->con, 0, i, width, TEXTMODE_Y(c_max) - i + 1);
             }
         }
 
@@ -2052,22 +2080,22 @@ static void vga_update_text(void *opaque, console_ch_t *chardata)
     }
 
     /* Display a message */
-    s->last_width = 60;
-    s->last_height = height = 3;
-    dpy_text_cursor(s->con, -1, -1);
-    dpy_text_resize(s->con, s->last_width, height);
+    s->last_text_width = 60;
+    s->last_text_height = height = 3;
+    qemu_console_text_set_cursor(s->con, -1, -1);
+    qemu_console_text_resize(s->con, s->last_text_width, height);
 
-    for (dst = chardata, i = 0; i < s->last_width * height; i ++)
-        console_write_ch(dst ++, ' ');
+    for (dst = chardata, i = 0; i < s->last_text_width * height; i ++)
+        *dst++ = ' ';
 
     size = strlen(msg_buffer);
-    width = (s->last_width - size) / 2;
-    dst = chardata + s->last_width + width;
+    width = (s->last_text_width - size) / 2;
+    dst = chardata + s->last_text_width + width;
     for (i = 0; i < size; i ++)
-        console_write_ch(dst ++, ATTR2CHTYPE(msg_buffer[i], QEMU_COLOR_BLUE,
-                                             QEMU_COLOR_BLACK, 1));
+        *dst++ = ATTR2CHTYPE(msg_buffer[i], QEMU_COLOR_BLUE,
+                             QEMU_COLOR_BLACK, 1);
 
-    dpy_text_update(s->con, 0, 0, s->last_width, height);
+    qemu_console_text_update(s->con, 0, 0, s->last_text_width, height);
 }
 
 static uint64_t vga_mem_read(void *opaque, hwaddr addr,
@@ -2159,7 +2187,7 @@ const VMStateDescription vmstate_vga_common = {
         VMSTATE_BUFFER(palette, VGACommonState),
 
         VMSTATE_INT32(bank_offset, VGACommonState),
-        VMSTATE_UINT8_EQUAL(is_vbe_vmstate, VGACommonState, NULL),
+        VMSTATE_UINT8_EQUAL(is_vbe_vmstate, VGACommonState),
         VMSTATE_UINT16(vbe_index, VGACommonState),
         VMSTATE_UINT16_ARRAY(vbe_regs, VGACommonState, VBE_DISPI_INDEX_NB),
         VMSTATE_UINT32(vbe_start_addr, VGACommonState),
@@ -2234,8 +2262,8 @@ bool vga_common_init(VGACommonState *s, Object *obj, Error **errp)
         return false;
     }
 
-    memory_region_init_ram_nomigrate(&s->vram, obj, "vga.vram", s->vram_size,
-                                     &local_err);
+    memory_region_init_ram_flags_nomigrate(&s->vram, obj, "vga.vram",
+                                           s->vram_size, 0, &local_err);
     if (local_err) {
         error_propagate(errp, local_err);
         return false;

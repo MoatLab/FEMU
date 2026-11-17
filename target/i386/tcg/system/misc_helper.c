@@ -22,6 +22,7 @@
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "accel/tcg/cpu-ldst.h"
+#include "accel/tcg/cpu-loop.h"
 #include "system/address-spaces.h"
 #include "system/memory.h"
 #include "exec/cputlb.h"
@@ -42,26 +43,26 @@ target_ulong helper_inb(CPUX86State *env, uint32_t port)
 
 void helper_outw(CPUX86State *env, uint32_t port, uint32_t data)
 {
-    address_space_stw(&address_space_io, port, data,
-                      cpu_get_mem_attrs(env), NULL);
+    address_space_stw_le(&address_space_io, port, data,
+                         cpu_get_mem_attrs(env), NULL);
 }
 
 target_ulong helper_inw(CPUX86State *env, uint32_t port)
 {
-    return address_space_lduw(&address_space_io, port,
-                              cpu_get_mem_attrs(env), NULL);
+    return address_space_lduw_le(&address_space_io, port,
+                                 cpu_get_mem_attrs(env), NULL);
 }
 
 void helper_outl(CPUX86State *env, uint32_t port, uint32_t data)
 {
-    address_space_stl(&address_space_io, port, data,
-                      cpu_get_mem_attrs(env), NULL);
+    address_space_stl_le(&address_space_io, port, data,
+                         cpu_get_mem_attrs(env), NULL);
 }
 
 target_ulong helper_inl(CPUX86State *env, uint32_t port)
 {
-    return address_space_ldl(&address_space_io, port,
-                             cpu_get_mem_attrs(env), NULL);
+    return address_space_ldl_le(&address_space_io, port,
+                                cpu_get_mem_attrs(env), NULL);
 }
 
 target_ulong helper_read_cr8(CPUX86State *env)
@@ -299,7 +300,7 @@ void helper_wrmsr(CPUX86State *env)
         int index = (uint32_t)env->regs[R_ECX] - MSR_APIC_START;
 
         bql_lock();
-        ret = apic_msr_write(index, val);
+        ret = apic_msr_write(env_archcpu(env)->apic_state, index, val);
         bql_unlock();
         if (ret < 0) {
             goto error;
@@ -477,7 +478,7 @@ void helper_rdmsr(CPUX86State *env)
         int index = (uint32_t)env->regs[R_ECX] - MSR_APIC_START;
 
         bql_lock();
-        ret = apic_msr_read(index, &val);
+        ret = apic_msr_read(x86_cpu->apic_state, index, &val);
         bql_unlock();
         if (ret < 0) {
             raise_exception_err_ra(env, EXCP0D_GPF, 0, GETPC());

@@ -23,10 +23,12 @@ not implement ARMv8-A, will not have the ``aarch64`` CPU property.
 QEMU's support may be limited for some CPU features, only partially
 supporting the feature or only supporting the feature under certain
 configurations.  For example, the ``aarch64`` CPU feature, which, when
-disabled, enables the optional AArch32 CPU feature, is only supported
-when using the KVM accelerator and when running on a host CPU type that
-supports the feature.  While ``aarch64`` currently only works with KVM,
-it could work with TCG.  CPU features that are specific to KVM are
+disabled, enables the optional AArch32 CPU feature, can only be set to
+``off`` on the TCG and KVM accelerators, and it cannot be set to
+``off`` under KVM unless running on a host CPU type that supports
+running guests in AArch32.
+
+CPU features that are inherently specific to KVM are
 prefixed with "kvm-" and are described in "KVM VCPU Features".
 
 CPU Feature Probing
@@ -204,6 +206,17 @@ the list of KVM VCPU features and their descriptions.
   the guest scheduler behavior and/or be exposed to the guest
   userspace.
 
+``kvm-psci-version``
+  Set the Power State Coordination Interface (PSCI) firmware ABI version
+  that KVM provides to the guest. By default KVM will use the newest
+  version that it knows about (which is PSCI v1.3 in Linux v6.13).
+
+  You only need to set this if you want to be able to migrate this
+  VM to a host machine running an older kernel that does not
+  recognize the PSCI version that this host's kernel defaults to.
+
+  Current valid values are: 0.1, 0.2, 1.0, 1.1, 1.2, and 1.3.
+
 TCG VCPU Features
 =================
 
@@ -318,12 +331,23 @@ SVE CPU Property Parsing Semantics
      provided an error will be generated.  To avoid this error, one must
      enable at least one vector length prior to enabling SVE.
 
+  10) Enabling SVE (with ``sve=on`` or by default) enables all the SVE
+      sub-features that the CPU supports (for example, it may also
+      enable SVE2). There are not generally any lower-level controls
+      for disabling specific SVE sub-features.
+
+  11) Disabling SVE does not automatically disable SME. If you want to
+      disable both you must use ``sve=off,sme=off``. In particular,
+      for the ``max`` CPU, ``sve=off`` alone will give you a CPU with
+      SME only (and which therefore still has the SVE vector registers).
+      Most users will want to disable both at once.
+
 SVE CPU Property Examples
 -------------------------
 
-  1) Disable SVE::
+  1) Disable SVE and SME::
 
-     $ qemu-system-aarch64 -M virt -cpu max,sve=off
+     $ qemu-system-aarch64 -M virt -cpu max,sve=off,sme=off
 
   2) Implicitly enable all vector lengths for the ``max`` CPU type::
 
@@ -429,6 +453,11 @@ At least one vector length must be enabled when ``sme`` is enabled,
 and all vector lengths must be powers of 2.  The maximum vector
 length supported by qemu is 2048 bits.  Otherwise, there are no
 additional constraints on the set of vector lengths supported by SME.
+
+As with SVE, ``sme=on`` enables all the SME sub-features the CPU
+supports (for example, it may also enable SME2), and there are
+no lower-level controls for fine-grained disabling of specific
+SME sub-features.
 
 SME User-mode Default Vector Length Property
 --------------------------------------------

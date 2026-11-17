@@ -11,8 +11,8 @@
 #include "qemu/osdep.h"
 #include "qemu/datadir.h"
 #include "exec/target_page.h"
-#include "hw/irq.h"
-#include "hw/loader.h"
+#include "hw/core/irq.h"
+#include "hw/core/loader.h"
 #include "hw/nubus/nubus.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -68,7 +68,7 @@ static void nubus_device_realize(DeviceState *dev, Error **errp)
             path = g_strdup(nd->romfile);
         }
 
-        size = get_image_size(path);
+        size = get_image_size(path, NULL);
         if (size < 0) {
             error_setg(errp, "failed to find romfile \"%s\"", nd->romfile);
             g_free(path);

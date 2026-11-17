@@ -24,15 +24,17 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/mips/mips.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
+#include "exec/cpu-common.h"
 #include "migration/vmstate.h"
 #include "qapi/error.h"
 #include "qemu/timer.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "system/address-spaces.h"
+#include "system/physmem.h"
 #include "trace.h"
 #include "qom/object.h"
 
@@ -302,7 +304,7 @@ static void rc4030_write(void *opaque, hwaddr addr, uint64_t data,
         if (s->cache_ltag == 0x80000001 && s->cache_bmask == 0xf0f0f0f) {
             hwaddr dest = s->cache_ptag & ~0x1;
             dest += (s->cache_maint & 0x3) << 3;
-            cpu_physical_memory_write(dest, &val, 4);
+            physical_memory_write(dest, &val, 4);
         }
         break;
     /* Remote Speed Registers */

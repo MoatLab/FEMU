@@ -15,7 +15,7 @@
 #ifndef HW_PL011_H
 #define HW_PL011_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "chardev/char-fe.h"
 #include "qom/object.h"
 
@@ -47,10 +47,11 @@ struct PL011State {
     int read_pos;
     int read_count;
     int read_trigger;
-    CharBackend chr;
+    CharFrontend chr;
     qemu_irq irq[6];
     Clock *clk;
     bool migrate_clk;
+    bool logged_disabled_uart;
     const unsigned char *id;
     /*
      * Since some users embed this struct directly, we must

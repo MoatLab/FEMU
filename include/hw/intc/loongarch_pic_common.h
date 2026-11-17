@@ -7,8 +7,9 @@
 #ifndef HW_LOONGARCH_PIC_COMMON_H
 #define HW_LOONGARCH_PIC_COMMON_H
 
-#include "hw/pci-host/ls7a.h"
-#include "hw/sysbus.h"
+#include "hw/loongarch/virt.h"
+#include "hw/core/sysbus.h"
+#include "system/memory.h"
 
 #define PCH_PIC_INT_ID                  0x00
 #define  PCH_PIC_INT_ID_VAL             0x7

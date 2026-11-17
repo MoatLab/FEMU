@@ -21,9 +21,8 @@
 #define TRICORE_CPU_H
 
 #include "cpu-qom.h"
-#include "hw/registerfields.h"
+#include "hw/core/registerfields.h"
 #include "exec/cpu-common.h"
-#include "exec/cpu-defs.h"
 #include "qemu/cpu-float.h"
 #include "tricore-defs.h"
 
@@ -80,7 +79,7 @@ struct TriCoreCPUClass {
     ResettablePhases parent_phases;
 };
 
-hwaddr tricore_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
+hwaddr tricore_cpu_get_phys_addr_debug(CPUState *cpu, vaddr addr);
 void tricore_cpu_dump_state(CPUState *cpu, FILE *f, int flags);
 
 FIELD(PCXI, PCPN_13, 24, 8)

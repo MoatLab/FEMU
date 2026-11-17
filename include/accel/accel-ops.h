@@ -13,6 +13,8 @@
 
 struct AccelState {
     Object parent_obj;
+
+    AccelGdbConfig gdbstub;
 };
 
 struct AccelClass {
@@ -23,6 +25,8 @@ struct AccelClass {
     AccelOpsClass *ops;
 
     int (*init_machine)(AccelState *as, MachineState *ms);
+    /* used mainly by confidential guests to rebuild guest state upon reset */
+    int (*rebuild_guest)(MachineState *ms);
     bool (*cpu_common_realize)(CPUState *cpu, Error **errp);
     void (*cpu_common_unrealize)(CPUState *cpu);
     /* get_stats: Append statistics to @buf */
@@ -33,9 +37,6 @@ struct AccelClass {
     void (*pre_resume_vm)(AccelState *as, bool step_pending);
     bool (*has_memory)(AccelState *accel, AddressSpace *as,
                        hwaddr start_addr, hwaddr size);
-
-    /* gdbstub related hooks */
-    int (*gdbstub_supported_sstep_flags)(AccelState *as);
 
     bool *allowed;
     /*

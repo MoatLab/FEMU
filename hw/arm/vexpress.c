@@ -24,15 +24,16 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/datadir.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/arm/boot.h"
-#include "hw/arm/primecell.h"
+#include "hw/arm/machines-qom.h"
+#include "hw/misc/arm_sysctl.h"
 #include "hw/net/lan9118.h"
 #include "hw/i2c/i2c.h"
 #include "net/net.h"
 #include "system/system.h"
-#include "hw/boards.h"
-#include "hw/loader.h"
+#include "hw/core/boards.h"
+#include "hw/core/loader.h"
 #include "hw/block/flash.h"
 #include "system/device_tree.h"
 #include "qemu/error-report.h"
@@ -44,7 +45,6 @@
 #include "hw/sd/sd.h"
 #include "qobject/qlist.h"
 #include "qom/object.h"
-#include "audio/audio.h"
 #include "target/arm/cpu-qom.h"
 
 #define VEXPRESS_BOARD_ID 0x8e0
@@ -578,7 +578,7 @@ static void vexpress_common_init(MachineState *machine)
             exit(1);
         }
         image_size = load_image_targphys(fn, map[VE_NORFLASH0],
-                                         VEXPRESS_FLASH_SIZE);
+                                         VEXPRESS_FLASH_SIZE, NULL);
         g_free(fn);
         if (image_size < 0) {
             error_report("Could not load ROM image '%s'", machine->firmware);
@@ -850,6 +850,7 @@ static const TypeInfo vexpress_a9_info = {
     .parent = TYPE_VEXPRESS_MACHINE,
     .class_init = vexpress_a9_class_init,
     .instance_init = vexpress_a9_instance_init,
+    .interfaces = arm_machine_interfaces,
 };
 
 static const TypeInfo vexpress_a15_info = {
@@ -857,6 +858,7 @@ static const TypeInfo vexpress_a15_info = {
     .parent = TYPE_VEXPRESS_MACHINE,
     .class_init = vexpress_a15_class_init,
     .instance_init = vexpress_a15_instance_init,
+    .interfaces = arm_machine_interfaces,
 };
 
 static void vexpress_machine_init(void)

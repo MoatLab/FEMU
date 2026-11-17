@@ -19,9 +19,25 @@
 #define PPC_INTERNAL_H
 
 #include "exec/breakpoint.h"
-#include "hw/registerfields.h"
+#include "exec/memop.h"
+#include "hw/core/registerfields.h"
 #include "exec/page-protection.h"
-#include "accel/tcg/tb-cpu-state.h"
+
+static inline bool ppc_env_is_little_endian(const CPUPPCState *env)
+{
+    return FIELD_EX64(env->msr, MSR, LE);
+}
+
+/**
+ * ppc_data_endian_env:
+ * @env: the cpu context
+ *
+ * Return the MemOp endianness of the DATA path.
+ */
+static inline MemOp ppc_data_endian_env(const CPUPPCState *env)
+{
+    return ppc_env_is_little_endian(env) ? MO_LE : MO_BE;
+}
 
 /* PM instructions */
 typedef enum {
@@ -309,6 +325,10 @@ static inline int ger_pack_masks(int pmsk, int ymsk, int xmsk)
     return msk;
 }
 
+#ifdef CONFIG_TCG
+#include "accel/tcg/tb-cpu-state.h"
+
 TCGTBCPUState ppc_get_tb_cpu_state(CPUState *cs);
+#endif
 
 #endif /* PPC_INTERNAL_H */

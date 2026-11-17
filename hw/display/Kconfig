@@ -25,6 +25,10 @@ config PL110
     bool
     select FRAMEBUFFER
 
+config IMX6UL_LCDIF
+    bool
+    select FRAMEBUFFER
+
 config SII9022
     bool
     depends on I2C

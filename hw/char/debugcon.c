@@ -29,8 +29,8 @@
 #include "qemu/module.h"
 #include "chardev/char-fe.h"
 #include "hw/isa/isa.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "qom/object.h"
 
 #define TYPE_ISA_DEBUGCON_DEVICE "isa-debugcon"
@@ -40,7 +40,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(ISADebugconState, ISA_DEBUGCON_DEVICE)
 
 typedef struct DebugconState {
     MemoryRegion io;
-    CharBackend chr;
+    CharFrontend chr;
     uint32_t readback;
 } DebugconState;
 

@@ -1,4 +1,5 @@
 #include "./nvme.h"
+#include "system/memory_cached.h"
 
 /*
  * Does this transfer land inside the controller memory buffer? The buffer is a

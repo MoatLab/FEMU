@@ -20,6 +20,13 @@
 
 static char *tmpfs;
 
+static void set_multifd_compression(QTestState *from, QTestState *to,
+                                    const char *method)
+{
+    migrate_set_parameter_str(from, "multifd-compression", method);
+    migrate_set_parameter_str(to, "multifd-compression", method);
+}
+
 #ifdef CONFIG_ZSTD
 static void *
 migrate_hook_start_precopy_tcp_multifd_zstd(QTestState *from,
@@ -27,34 +34,28 @@ migrate_hook_start_precopy_tcp_multifd_zstd(QTestState *from,
 {
     migrate_set_parameter_int(from, "multifd-zstd-level", 2);
     migrate_set_parameter_int(to, "multifd-zstd-level", 2);
+    set_multifd_compression(from, to, "zstd");
 
-    return migrate_hook_start_precopy_tcp_multifd_common(from, to, "zstd");
+    return NULL;
 }
 
-static void test_multifd_tcp_zstd(void)
+static void test_multifd_tcp_zstd(char *name, MigrateCommon *args)
 {
-    MigrateCommon args = {
-        .listen_uri = "defer",
-        .start = {
-            .caps[MIGRATION_CAPABILITY_MULTIFD] = true,
-        },
-        .start_hook = migrate_hook_start_precopy_tcp_multifd_zstd,
-    };
-    test_precopy_common(&args);
+    args->start_hook = migrate_hook_start_precopy_tcp_multifd_zstd;
+
+    args->start.caps[MIGRATION_CAPABILITY_MULTIFD] = true;
+
+    test_precopy_common(args);
 }
 
-static void test_multifd_postcopy_tcp_zstd(void)
+static void test_multifd_postcopy_tcp_zstd(char *name, MigrateCommon *args)
 {
-    MigrateCommon args = {
-        .listen_uri = "defer",
-        .start = {
-            .caps[MIGRATION_CAPABILITY_MULTIFD] = true,
-            .caps[MIGRATION_CAPABILITY_POSTCOPY_RAM] = true,
-        },
-        .start_hook = migrate_hook_start_precopy_tcp_multifd_zstd,
-    };
+    args->start_hook = migrate_hook_start_precopy_tcp_multifd_zstd,
 
-    test_precopy_common(&args);
+    args->start.caps[MIGRATION_CAPABILITY_MULTIFD] = true;
+    args->start.caps[MIGRATION_CAPABILITY_POSTCOPY_RAM] = true;
+
+    test_precopy_common(args);
 }
 #endif /* CONFIG_ZSTD */
 
@@ -65,20 +66,18 @@ migrate_hook_start_precopy_tcp_multifd_qatzip(QTestState *from,
 {
     migrate_set_parameter_int(from, "multifd-qatzip-level", 2);
     migrate_set_parameter_int(to, "multifd-qatzip-level", 2);
+    set_multifd_compression(from, to, "qatzip");
 
-    return migrate_hook_start_precopy_tcp_multifd_common(from, to, "qatzip");
+    return NULL;
 }
 
-static void test_multifd_tcp_qatzip(void)
+static void test_multifd_tcp_qatzip(char *name, MigrateCommon *args)
 {
-    MigrateCommon args = {
-        .listen_uri = "defer",
-        .start = {
-            .caps[MIGRATION_CAPABILITY_MULTIFD] = true,
-        },
-        .start_hook = migrate_hook_start_precopy_tcp_multifd_qatzip,
-    };
-    test_precopy_common(&args);
+    args->start_hook = migrate_hook_start_precopy_tcp_multifd_qatzip;
+
+    args->start.caps[MIGRATION_CAPABILITY_MULTIFD] = true;
+
+    test_precopy_common(args);
 }
 #endif
 
@@ -87,19 +86,17 @@ static void *
 migrate_hook_start_precopy_tcp_multifd_qpl(QTestState *from,
                                            QTestState *to)
 {
-    return migrate_hook_start_precopy_tcp_multifd_common(from, to, "qpl");
+    set_multifd_compression(from, to, "qpl");
+    return NULL;
 }
 
-static void test_multifd_tcp_qpl(void)
+static void test_multifd_tcp_qpl(char *name, MigrateCommon *args)
 {
-    MigrateCommon args = {
-        .listen_uri = "defer",
-        .start = {
-            .caps[MIGRATION_CAPABILITY_MULTIFD] = true,
-        },
-        .start_hook = migrate_hook_start_precopy_tcp_multifd_qpl,
-    };
-    test_precopy_common(&args);
+    args->start_hook = migrate_hook_start_precopy_tcp_multifd_qpl;
+
+    args->start.caps[MIGRATION_CAPABILITY_MULTIFD] = true;
+
+    test_precopy_common(args);
 }
 #endif /* CONFIG_QPL */
 
@@ -108,19 +105,17 @@ static void *
 migrate_hook_start_precopy_tcp_multifd_uadk(QTestState *from,
                                             QTestState *to)
 {
-    return migrate_hook_start_precopy_tcp_multifd_common(from, to, "uadk");
+    set_multifd_compression(from, to, "uadk");
+    return NULL;
 }
 
-static void test_multifd_tcp_uadk(void)
+static void test_multifd_tcp_uadk(char *name, MigrateCommon *args)
 {
-    MigrateCommon args = {
-        .listen_uri = "defer",
-        .start = {
-            .caps[MIGRATION_CAPABILITY_MULTIFD] = true,
-        },
-        .start_hook = migrate_hook_start_precopy_tcp_multifd_uadk,
-    };
-    test_precopy_common(&args);
+    args->start_hook = migrate_hook_start_precopy_tcp_multifd_uadk;
+
+    args->start.caps[MIGRATION_CAPABILITY_MULTIFD] = true;
+
+    test_precopy_common(args);
 }
 #endif /* CONFIG_UADK */
 
@@ -132,25 +127,19 @@ migrate_hook_start_xbzrle(QTestState *from,
     return NULL;
 }
 
-static void test_precopy_unix_xbzrle(void)
+static void test_precopy_unix_xbzrle(char *name, MigrateCommon *args)
 {
-    g_autofree char *uri = g_strdup_printf("unix:%s/migsocket", tmpfs);
-    MigrateCommon args = {
-        .connect_uri = uri,
-        .listen_uri = uri,
-        .start_hook = migrate_hook_start_xbzrle,
-        .iterations = 2,
-        .start = {
-            .caps[MIGRATION_CAPABILITY_XBZRLE] = true,
-        },
-        /*
-         * XBZRLE needs pages to be modified when doing the 2nd+ round
-         * iteration to have real data pushed to the stream.
-         */
-        .live = true,
-    };
+    args->start_hook = migrate_hook_start_xbzrle;
+    args->iterations = 2;
+    /*
+     * XBZRLE needs pages to be modified when doing the 2nd+ round
+     * iteration to have real data pushed to the stream.
+     */
+    args->live = true;
 
-    test_precopy_common(&args);
+    args->start.caps[MIGRATION_CAPABILITY_XBZRLE] = true;
+
+    test_precopy_unix_common(args);
 }
 
 static void *
@@ -163,20 +152,18 @@ migrate_hook_start_precopy_tcp_multifd_zlib(QTestState *from,
      */
     migrate_set_parameter_int(from, "multifd-zlib-level", 2);
     migrate_set_parameter_int(to, "multifd-zlib-level", 2);
+    set_multifd_compression(from, to, "zlib");
 
-    return migrate_hook_start_precopy_tcp_multifd_common(from, to, "zlib");
+    return NULL;
 }
 
-static void test_multifd_tcp_zlib(void)
+static void test_multifd_tcp_zlib(char *name, MigrateCommon *args)
 {
-    MigrateCommon args = {
-        .listen_uri = "defer",
-        .start = {
-            .caps[MIGRATION_CAPABILITY_MULTIFD] = true,
-        },
-        .start_hook = migrate_hook_start_precopy_tcp_multifd_zlib,
-    };
-    test_precopy_common(&args);
+    args->start_hook = migrate_hook_start_precopy_tcp_multifd_zlib;
+
+    args->start.caps[MIGRATION_CAPABILITY_MULTIFD] = true;
+
+    test_precopy_common(args);
 }
 
 static void migration_test_add_compression_smoke(MigrationTestEnv *env)

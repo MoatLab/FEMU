@@ -28,10 +28,10 @@
 #ifndef HW_CANFD_XILINX_H
 #define HW_CANFD_XILINX_H
 
-#include "hw/register.h"
-#include "hw/ptimer.h"
+#include "hw/core/register.h"
+#include "hw/core/ptimer.h"
 #include "net/can_emu.h"
-#include "hw/qdev-clock.h"
+#include "hw/core/qdev-clock.h"
 
 #define TYPE_XILINX_CANFD "xlnx.versal-canfd"
 
@@ -54,14 +54,6 @@ typedef struct XlnxVersalCANFDState {
     qemu_irq                irq_addr_err;
 
     RegisterInfo            reg_info[XLNX_VERSAL_CANFD_R_MAX];
-    RegisterAccessInfo      *tx_regs;
-    RegisterAccessInfo      *rx0_regs;
-    RegisterAccessInfo      *rx1_regs;
-    RegisterAccessInfo      *af_regs;
-    RegisterAccessInfo      *txe_regs;
-    RegisterAccessInfo      *rx_mailbox_regs;
-    RegisterAccessInfo      *af_mask_regs_mailbox;
-
     uint32_t                regs[XLNX_VERSAL_CANFD_R_MAX];
 
     ptimer_state            *canfd_timer;

@@ -19,8 +19,8 @@
 
 #include "hw/s390x/sclp.h"
 #include "migration/vmstate.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/s390x/event-facility.h"
 #include "chardev/char-fe.h"
 #include "qom/object.h"
@@ -35,7 +35,7 @@ typedef struct ASCIIConsoleData {
 
 struct SCLPConsole {
     SCLPEvent event;
-    CharBackend chr;
+    CharFrontend chr;
     uint8_t iov[SIZE_BUFFER_VT220];
     uint32_t iov_sclp;      /* offset in buf for SCLP read operation       */
     uint32_t iov_bs;        /* offset in buf for char layer read operation */

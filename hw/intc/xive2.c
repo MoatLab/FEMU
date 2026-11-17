@@ -13,10 +13,12 @@
 #include "target/ppc/cpu.h"
 #include "system/cpus.h"
 #include "system/dma.h"
-#include "hw/qdev-properties.h"
+#include "system/physmem.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/ppc/xive.h"
 #include "hw/ppc/xive2.h"
 #include "hw/ppc/xive2_regs.h"
+#include "exec/cpu-common.h"
 #include "trace.h"
 
 static void xive2_router_end_notify(Xive2Router *xrtr, uint8_t end_blk,
@@ -93,6 +95,35 @@ static void xive2_nvgc_set_backlog(Xive2Nvgc *nvgc, uint8_t priority,
         shift = 8 * (2 - i);
         *ptr = (val >> shift) & 0xFF;
     }
+}
+
+static uint32_t xive2_nvgc_get_idx(uint32_t nvp_idx, uint8_t group)
+{
+    uint32_t nvgc_idx;
+
+    if (group > 0) {
+        nvgc_idx = (nvp_idx & (0xffffffffULL << group)) |
+                   ((1 << (group - 1)) - 1);
+    } else {
+        nvgc_idx = nvp_idx;
+    }
+
+    return nvgc_idx;
+}
+
+static uint8_t xive2_nvgc_get_blk(uint8_t nvp_blk, uint8_t crowd)
+{
+    uint8_t nvgc_blk;
+
+    if (crowd > 0) {
+        crowd = (crowd == 3) ? 4 : crowd;
+        nvgc_blk = (nvp_blk & (0xffffffffULL << crowd)) |
+                   ((1 << (crowd - 1)) - 1);
+    } else {
+        nvgc_blk = nvp_blk;
+    }
+
+    return nvgc_blk;
 }
 
 uint64_t xive2_presenter_nvgc_backlog_op(XivePresenter *xptr,
@@ -638,20 +669,8 @@ static void xive2_redistribute(Xive2Router *xrtr, XiveTCTX *tctx, uint8_t ring)
 
     trace_xive_redistribute(tctx->cs->cpu_index, ring, nvp_blk, nvp_idx);
     /* convert crowd/group to blk/idx */
-    if (group > 0) {
-        nvgc_idx = (nvp_idx & (0xffffffff << group)) |
-                   ((1 << (group - 1)) - 1);
-    } else {
-        nvgc_idx = nvp_idx;
-    }
-
-    if (crowd > 0) {
-        crowd = (crowd == 3) ? 4 : crowd;
-        nvgc_blk = (nvp_blk & (0xffffffff << crowd)) |
-                   ((1 << (crowd - 1)) - 1);
-    } else {
-        nvgc_blk = nvp_blk;
-    }
+    nvgc_idx = xive2_nvgc_get_idx(nvp_idx, group);
+    nvgc_blk = xive2_nvgc_get_blk(nvp_blk, crowd);
 
     /* Use blk/idx to retrieve the NVGC */
     if (xive2_router_get_nvgc(xrtr, crowd, nvgc_blk, nvgc_idx, &nvgc)) {
@@ -1152,7 +1171,7 @@ static void xive2_tctx_accept_el(XivePresenter *xptr, XiveTCTX *tctx,
         report_data[0] = (rd >> 8) & 0xff;
         report_data[1] = rd & 0xff;
     }
-    cpu_physical_memory_write(phys_addr, report_data, REPORT_LINE_GEN1_SIZE);
+    physical_memory_write(phys_addr, report_data, REPORT_LINE_GEN1_SIZE);
 }
 
 void xive2_tm_ack_os_el(XivePresenter *xptr, XiveTCTX *tctx,

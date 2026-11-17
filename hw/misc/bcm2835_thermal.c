@@ -1,7 +1,7 @@
 /*
  * BCM2835 dummy thermal sensor
  *
- * Copyright (C) 2019 Philippe Mathieu-Daudé <f4bug@amsat.org>
+ * Copyright (C) 2019 Philippe Mathieu-Daudé
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -10,7 +10,7 @@
 #include "qemu/log.h"
 #include "qapi/error.h"
 #include "hw/misc/bcm2835_thermal.h"
-#include "hw/registerfields.h"
+#include "hw/core/registerfields.h"
 #include "migration/vmstate.h"
 
 REG32(CTL, 0)

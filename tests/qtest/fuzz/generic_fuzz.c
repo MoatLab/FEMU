@@ -21,11 +21,11 @@
 #include "fuzz.h"
 #include "string.h"
 #include "system/memory.h"
-#include "system/ramblock.h"
-#include "hw/qdev-core.h"
+#include "system/ram_addr.h"
+#include "hw/core/qdev.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "generic_fuzz_configs.h"
 #include "hw/mem/sparse-mem.h"
 
@@ -776,7 +776,7 @@ static void generic_pre_fuzz(QTestState *s)
     if (!getenv("QEMU_FUZZ_OBJECTS")) {
         usage();
     }
-    if (getenv("QTEST_LOG")) {
+    if (qtest_verbose("fuzz")) {
         qtest_log_enabled = 1;
     }
     if (getenv("QEMU_AVOID_DOUBLE_FETCH")) {

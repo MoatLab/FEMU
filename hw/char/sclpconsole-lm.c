@@ -22,8 +22,8 @@
 #include "hw/s390x/sclp.h"
 #include "migration/vmstate.h"
 #include "hw/s390x/event-facility.h"
-#include "hw/qdev-properties.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/s390x/ebcdic.h"
 #include "qom/object.h"
 
@@ -41,7 +41,7 @@ typedef struct OprtnsCommand {
 
 struct SCLPConsoleLM {
     SCLPEvent event;
-    CharBackend chr;
+    CharFrontend chr;
     bool echo;                  /* immediate echo of input if true        */
     uint32_t write_errors;      /* errors writing to char layer           */
     uint32_t length;            /* length of byte stream in buffer        */
@@ -243,7 +243,8 @@ static int write_event_data(SCLPEvent *event, EventBufferHeader *ebh)
     SCLPConsoleLM *scon = SCLPLM_CONSOLE(event);
 
     len = be16_to_cpu(data->mdb.header.length);
-    if (len < sizeof(data->mdb.header)) {
+    if (len < sizeof(data->mdb.header) ||
+        len > be16_to_cpu(data->header.length) - sizeof(EventBufferHeader)) {
         return SCLP_RC_INCONSISTENT_LENGTHS;
     }
     len -= sizeof(data->mdb.header);

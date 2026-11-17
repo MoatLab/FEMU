@@ -86,6 +86,7 @@ struct riscv_iommu_pq_record {
 #define RISCV_IOMMU_CAP_SV57X4          BIT_ULL(19)
 #define RISCV_IOMMU_CAP_MSI_FLAT        BIT_ULL(22)
 #define RISCV_IOMMU_CAP_MSI_MRIF        BIT_ULL(23)
+#define RISCV_IOMMU_CAP_AMO_HWAD        BIT_ULL(24)
 #define RISCV_IOMMU_CAP_ATS             BIT_ULL(25)
 #define RISCV_IOMMU_CAP_T2GPA           BIT_ULL(26)
 #define RISCV_IOMMU_CAP_IGS             GENMASK_ULL(29, 28)
@@ -189,6 +190,7 @@ enum riscv_iommu_ddtp_modes {
 #define RISCV_IOMMU_REG_IPSR            0x0054
 #define RISCV_IOMMU_IPSR_CIP            BIT(0)
 #define RISCV_IOMMU_IPSR_FIP            BIT(1)
+#define RISCV_IOMMU_IPSR_PMIP           BIT(2)
 #define RISCV_IOMMU_IPSR_PIP            BIT(3)
 
 enum {
@@ -307,6 +309,9 @@ struct riscv_iommu_dc {
 #define RISCV_IOMMU_DC_IOHGATP_GSCID    GENMASK_ULL(59, 44)
 #define RISCV_IOMMU_DC_IOHGATP_MODE     RISCV_IOMMU_ATP_MODE_FIELD
 
+#define RISCV_IOMMU_DC_TC_RESERVED      (GENMASK_ULL(23, 12) \
+                                         | GENMASK_ULL(63, 32))
+
 enum riscv_iommu_dc_iohgatp_modes {
     RISCV_IOMMU_DC_IOHGATP_MODE_BARE = 0,
     RISCV_IOMMU_DC_IOHGATP_MODE_SV32X4 = 8,
@@ -343,6 +348,7 @@ struct riscv_iommu_command {
 #define RISCV_IOMMU_CMD_IOFENCE_OPCODE          2
 #define RISCV_IOMMU_CMD_IOFENCE_FUNC_C          0
 #define RISCV_IOMMU_CMD_IOFENCE_AV      BIT_ULL(10)
+#define RISCV_IOMMU_CMD_IOFENCE_RESERVED GENMASK_ULL(31, 14)
 #define RISCV_IOMMU_CMD_IOFENCE_DATA    GENMASK_ULL(63, 32)
 
 #define RISCV_IOMMU_CMD_IODIR_OPCODE            3

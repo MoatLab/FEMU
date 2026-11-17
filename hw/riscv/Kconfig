@@ -120,6 +120,19 @@ config SPIKE
     select RISCV_ACLINT
     select SIFIVE_PLIC
 
+config TENSTORRENT
+    bool
+    default y
+    depends on RISCV64
+    select RISCV_ACLINT
+    select RISCV_APLIC
+    select RISCV_IMSIC
+    select SERIAL_MM
+    select DEVICE_TREE
+    select DESIGNWARE_I2C
+    select DS1338
+    select TMP105
+
 config XIANGSHAN_KUNMINGHU
     bool
     default y
@@ -128,3 +141,24 @@ config XIANGSHAN_KUNMINGHU
     select RISCV_APLIC
     select RISCV_IMSIC
     select SERIAL_MM
+
+config MIPS_BOSTON_AIA
+    bool
+    default y
+    depends on RISCV64
+    select PCI_EXPRESS
+    select PCI_EXPRESS_XILINX
+    select RISCV_MIPS_CMGCR
+    select RISCV_MIPS_CPC
+    select RISCV_MIPS_CPS
+
+config K230
+    bool
+    default y
+    depends on RISCV64
+    select RISCV_ACLINT
+    select RISCV_APLIC
+    select RISCV_IMSIC
+    select SERIAL_MM
+    select UNIMP
+    select K230_WDT

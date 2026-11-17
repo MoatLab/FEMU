@@ -19,9 +19,10 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "hw/arm/fsl-imx6ul.h"
+#include "hw/display/imx6ul_lcdif.h"
 #include "hw/misc/unimp.h"
 #include "hw/usb/imx-usb-phy.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "system/system.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
@@ -135,6 +136,11 @@ static void fsl_imx6ul_init(Object *obj)
         snprintf(name, NAME_SIZE, "usb%d", i);
         object_initialize_child(obj, name, &s->usb[i], TYPE_CHIPIDEA);
     }
+
+    /*
+     * LCDIF
+     */
+    object_initialize_child(obj, "lcdif", &s->lcdif, TYPE_IMX6UL_LCDIF);
 
     /*
      * SDHCIs
@@ -656,8 +662,10 @@ static void fsl_imx6ul_realize(DeviceState *dev, Error **errp)
     /*
      * LCD
      */
-    create_unimplemented_device("lcdif", FSL_IMX6UL_LCDIF_ADDR,
-                                FSL_IMX6UL_LCDIF_SIZE);
+    sysbus_realize(SYS_BUS_DEVICE(&s->lcdif), &error_abort);
+    sysbus_mmio_map(SYS_BUS_DEVICE(&s->lcdif), 0, FSL_IMX6UL_LCDIF_ADDR);
+    sysbus_connect_irq(SYS_BUS_DEVICE(&s->lcdif), 0,
+                       qdev_get_gpio_in(gic, FSL_IMX6UL_LCDIF_IRQ));
 
     /*
      * CSU

@@ -18,8 +18,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/qdev-core.h"
-#include "hw/irq.h"
+#include "hw/core/qdev.h"
+#include "hw/core/irq.h"
 #include "qapi/error.h"
 
 static NamedGPIOList *qdev_get_named_gpio_list(DeviceState *dev,
@@ -129,7 +129,8 @@ void qdev_connect_gpio_out_named(DeviceState *dev, const char *name, int n,
     g_free(propname);
 }
 
-qemu_irq qdev_get_gpio_out_connector(DeviceState *dev, const char *name, int n)
+qemu_irq qdev_get_gpio_out_connector(const DeviceState *dev,
+                                     const char *name, int n)
 {
     g_autofree char *propname = g_strdup_printf("%s[%d]",
                                      name ? name : "unnamed-gpio-out", n);

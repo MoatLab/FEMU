@@ -16,10 +16,11 @@
 #include "qemu/bitops.h"
 #include "qemu/log.h"
 #include "qemu/main-loop.h"
+#include "qapi/error.h"
 #include "trace.h"
 #include "gicv3_internal.h"
-#include "hw/irq.h"
-#include "cpu.h"
+#include "hw/core/irq.h"
+#include "target/arm/cpu.h"
 #include "target/arm/cpregs.h"
 #include "target/arm/cpu-features.h"
 #include "target/arm/internals.h"
@@ -1869,9 +1870,40 @@ static void icc_ap_write(CPUARMState *env, const ARMCPRegInfo *ri,
      * at a priority outside the Non-secure range (128..255), since this
      * would otherwise allow malicious NS code to block delivery of S interrupts
      * by writing a bad value to these registers.
+     *
+     * The NS priority range (128..255) maps to APR bits starting at
+     * aprbit = 0x80 >> (8 - prebits). Depending on prebits, this boundary
+     * may fall within AP1R0 or AP1R1, so we cannot simply WI the entire
+     * register. Instead we calculate which bits within each register
+     * correspond to the Secure range and preserve those, while allowing
+     * NS code to modify only the NS range bits.
+     *
+     *   prebits=4: num_aprs=1, NS starts at AP1R0[8]
+     *   prebits=5: num_aprs=1, NS starts at AP1R0[16]
+     *   prebits=6: num_aprs=2, NS starts at AP1R1[0]
+     *   prebits=7: num_aprs=4, NS starts at AP1R2[0]
      */
-    if (grp == GICV3_G1NS && regno < 2 && arm_feature(env, ARM_FEATURE_EL3)) {
-        return;
+    if (grp == GICV3_G1NS && arm_feature(env, ARM_FEATURE_EL3)) {
+        int ns_start_bit = 0x80 >> (8 - cs->prebits);
+        int ns_start_regno = ns_start_bit / 32;
+        int ns_start_regbit = ns_start_bit % 32;
+
+        if (regno < ns_start_regno) {
+            /* This entire register is in the Secure range: WI */
+            return;
+        } else if (regno == ns_start_regno && ns_start_regbit > 0) {
+            /*
+             * This register is split: low bits are Secure, high bits are NS.
+             * Preserve the Secure bits (below ns_start_regbit) from the
+             * current value, and take the NS bits (at and above
+             * ns_start_regbit) from the written value.
+             */
+            uint32_t secure_mask = MAKE_64BIT_MASK(0, ns_start_regbit);
+
+            value = (cs->icc_apr[grp][regno] & secure_mask) |
+                    (value & ~secure_mask);
+        }
+        /* else: regno > ns_start_regno, entire register is NS: allow write */
     }
 
     if (cs->nmi_support) {
@@ -3016,7 +3048,7 @@ static void gicv3_cpuif_el_change_hook(ARMCPU *cpu, void *opaque)
     gicv3_cpuif_virt_irq_fiq_update(cs);
 }
 
-void gicv3_init_cpuif(GICv3State *s)
+void gicv3_init_cpuif(GICv3State *s, Error **errp)
 {
     /* Called from the GICv3 realize function; register our system
      * registers with the CPU
@@ -3024,8 +3056,19 @@ void gicv3_init_cpuif(GICv3State *s)
     int i;
 
     for (i = 0; i < s->num_cpu; i++) {
-        ARMCPU *cpu = ARM_CPU(qemu_get_cpu(i));
+        ARMCPU *cpu = ARM_CPU(qemu_get_cpu(s->first_cpu_idx + i));
         GICv3CPUState *cs = &s->cpu[i];
+
+        if (cpu_isar_feature(aa64_gcie, cpu)) {
+            /*
+             * Attempt to connect GICv3 to a CPU with GICv5 cpuif
+             * (almost certainly a bug in the board code)
+             */
+            error_setg(errp,
+                       "Cannot connect GICv3 to CPU %d which has GICv5 cpuif",
+                       i);
+            return;
+        }
 
         /*
          * If the CPU doesn't define a GICv3 configuration, probably because
@@ -3037,15 +3080,7 @@ void gicv3_init_cpuif(GICv3State *s)
          *  cpu->gic_pribits
          */
 
-        /* Note that we can't just use the GICv3CPUState as an opaque pointer
-         * in define_arm_cp_regs_with_opaque(), because when we're called back
-         * it might be with code translated by CPU 0 but run by CPU 1, in
-         * which case we'd get the wrong value.
-         * So instead we define the regs with no ri->opaque info, and
-         * get back to the GICv3CPUState from the CPUARMState.
-         *
-         * These CP regs callbacks can be called from either TCG or HVF code.
-         */
+        /* These CP regs callbacks can be called from either TCG or HVF. */
         define_arm_cp_regs(cpu, gicv3_cpuif_reginfo);
 
         /*

@@ -22,6 +22,7 @@
 #include "qemu.h"
 #include "user-internals.h"
 #include "user/cpu_loop.h"
+#include "target/hexagon/internal.h"
 #include "signal-common.h"
 #include "internal.h"
 
@@ -36,7 +37,7 @@ void cpu_loop(CPUHexagonState *env)
         cpu_exec_start(cs);
         trapnr = cpu_exec(cs);
         cpu_exec_end(cs);
-        process_queued_cpu_work(cs);
+        qemu_process_cpu_events(cs);
 
         switch (trapnr) {
         case EXCP_INTERRUPT:
@@ -56,13 +57,45 @@ void cpu_loop(CPUHexagonState *env)
                              0, 0);
             if (ret == -QEMU_ERESTARTSYS) {
                 env->gpr[HEX_REG_PC] -= 4;
-            } else if (ret != -QEMU_ESIGRETURN) {
+            } else if (ret != -QEMU_ESIGRETURN && ret != -QEMU_ESETPC) {
                 env->gpr[0] = ret;
+            }
+            break;
+        case HEX_EVENT_PRECISE:
+            switch (env->cause_code) {
+            case HEX_CAUSE_FETCH_NO_UPAGE:
+            case HEX_CAUSE_PRIV_NO_UREAD:
+            case HEX_CAUSE_PRIV_NO_UWRITE:
+            force_sig_fault(TARGET_SIGSEGV, TARGET_SEGV_MAPERR,
+                    env->gpr[HEX_REG_PC]);
+
+            break;
+            case HEX_CAUSE_PRIV_USER_NO_GINSN:
+            case HEX_CAUSE_PRIV_USER_NO_SINSN:
+            case HEX_CAUSE_INVALID_PACKET:
+            force_sig_fault(TARGET_SIGILL, TARGET_ILL_ILLOPC,
+                    env->gpr[HEX_REG_PC]);
+            break;
+            case HEX_CAUSE_MISALIGNED_LOAD:
+            case HEX_CAUSE_MISALIGNED_STORE:
+            force_sig_fault(TARGET_SIGBUS, TARGET_BUS_ADRALN,
+                    env->gpr[HEX_REG_PC]);
+            break;
+            default:
+                EXCP_DUMP(env, "\nqemu: unhandled CPU precise exception "
+                    "cause code 0x%x - aborting\n",
+                    env->cause_code);
+                exit(EXIT_FAILURE);
             }
             break;
         case HEX_CAUSE_PC_NOT_ALIGNED:
             force_sig_fault(TARGET_SIGBUS, TARGET_BUS_ADRALN,
                             env->gpr[HEX_REG_R31]);
+            break;
+        case HEX_CAUSE_INVALID_PACKET:
+        case HEX_CAUSE_REG_WRITE_CONFLICT:
+            force_sig_fault(TARGET_SIGILL, TARGET_ILL_ILLOPC,
+                            env->gpr[HEX_REG_PC]);
             break;
         case EXCP_ATOMIC:
             cpu_exec_step_atomic(cs);
@@ -79,9 +112,11 @@ void cpu_loop(CPUHexagonState *env)
     }
 }
 
-void target_cpu_copy_regs(CPUArchState *env, target_pt_regs *regs)
+void init_main_thread(CPUState *cs, struct image_info *info)
 {
-    env->gpr[HEX_REG_PC] = regs->sepc;
-    env->gpr[HEX_REG_SP] = regs->sp;
+    CPUArchState *env = cpu_env(cs);
+
+    env->gpr[HEX_REG_PC] = info->entry;
+    env->gpr[HEX_REG_SP] = info->start_stack;
     env->gpr[HEX_REG_USR] = 0x56000;
 }

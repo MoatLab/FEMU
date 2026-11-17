@@ -27,13 +27,13 @@
 #include "qemu/osdep.h"
 #include "hw/core/cpu.h"
 #include "system/dma.h"
-#include "hw/loader.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/loader.h"
+#include "hw/core/qdev-properties.h"
 #include "qapi/error.h"
 #include "qemu/module.h"
 #include "guest-loader.h"
 #include "system/device_tree.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 
 /*
  * Insert some FDT nodes for the loaded blob.
@@ -101,9 +101,9 @@ static void guest_loader_realize(DeviceState *dev, Error **errp)
 
     /* Default to the maximum size being the machine's ram size */
     size = load_image_targphys_as(file, s->addr, current_machine->ram_size,
-                                  NULL);
+                                  NULL, errp);
     if (size < 0) {
-        error_setg(errp, "Cannot load specified image %s", file);
+        error_prepend(errp, "Cannot load specified image %s: ", file);
         return;
     }
 

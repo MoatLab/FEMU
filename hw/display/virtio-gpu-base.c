@@ -69,7 +69,7 @@ virtio_gpu_base_generate_edid(VirtIOGPUBase *g, int scanout,
 
     for (output_idx = 0, node = g->conf.outputs;
          output_idx <= scanout && node; output_idx++, node = node->next) {
-        if (output_idx == scanout && node->value && node->value->name) {
+        if (output_idx == scanout && node->value->name) {
             info.name = node->value->name;
             break;
         }
@@ -83,11 +83,12 @@ static void virtio_gpu_invalidate_display(void *opaque)
 {
 }
 
-static void virtio_gpu_update_display(void *opaque)
+static bool virtio_gpu_update_display(void *opaque)
 {
+    return true;
 }
 
-static void virtio_gpu_text_update(void *opaque, console_ch_t *chardata)
+static void virtio_gpu_text_update(void *opaque, uint32_t *chardata)
 {
 }
 
@@ -194,17 +195,33 @@ virtio_gpu_base_device_realize(DeviceState *qdev,
         return false;
     }
 
+    g->enabled_output_bitmask = 1;
+
+    g->req_state[0].width = g->conf.xres;
+    g->req_state[0].height = g->conf.yres;
+
     for (output_idx = 0, node = g->conf.outputs;
          node; output_idx++, node = node->next) {
         if (output_idx == g->conf.max_outputs) {
             error_setg(errp, "invalid outputs > %d", g->conf.max_outputs);
             return false;
         }
-        if (node->value && node->value->name &&
+        if (node->value->name &&
             strlen(node->value->name) > EDID_NAME_MAX_LENGTH) {
             error_setg(errp, "invalid output name '%s' > %d",
                        node->value->name, EDID_NAME_MAX_LENGTH);
             return false;
+        }
+        if (node->value->has_xres != node->value->has_yres) {
+            error_setg(errp,
+                       "must set both outputs[%zd].xres and outputs[%zd].yres",
+                       output_idx, output_idx);
+            return false;
+        }
+        if (node->value->has_xres && node->value->has_yres) {
+            g->enabled_output_bitmask |= (1 << output_idx);
+            g->req_state[output_idx].width = node->value->xres;
+            g->req_state[output_idx].height = node->value->yres;
         }
     }
 
@@ -228,15 +245,10 @@ virtio_gpu_base_device_realize(DeviceState *qdev,
         virtio_add_queue(vdev, 16, cursor_cb);
     }
 
-    g->enabled_output_bitmask = 1;
-
-    g->req_state[0].width = g->conf.xres;
-    g->req_state[0].height = g->conf.yres;
-
     g->hw_ops = &virtio_gpu_ops;
     for (i = 0; i < g->conf.max_outputs; i++) {
         g->scanout[i].con =
-            graphic_console_init(DEVICE(g), i, &virtio_gpu_ops, g);
+            qemu_graphic_console_create(DEVICE(g), i, &virtio_gpu_ops, g);
     }
 
     return true;

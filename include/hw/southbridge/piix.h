@@ -17,6 +17,7 @@
 #include "hw/ide/pci.h"
 #include "hw/rtc/mc146818rtc.h"
 #include "hw/usb/hcd-uhci.h"
+#include "hw/core/irq.h"
 
 /* PIRQRC[A:D]: PIRQx Route Control Registers */
 #define PIIX_PIRQCA 0x60
@@ -51,6 +52,8 @@ struct PIIXState {
 
     qemu_irq cpu_intr;
     qemu_irq isa_irqs_in[ISA_NUM_IRQS];
+
+    IRQState i8259_irq;
 
     /* This member isn't used. Just for save/load compatibility */
     int32_t pci_irq_levels_vmstate[PIIX_NUM_PIRQS];

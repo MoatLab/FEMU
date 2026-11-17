@@ -4,7 +4,7 @@
  * Copyright (c) 2019 Red Hat, Inc.
  *
  * Author:
- *   Philippe Mathieu-Daudé <philmd@redhat.com>
+ *   Philippe Mathieu-Daudé
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *

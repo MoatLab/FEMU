@@ -75,15 +75,15 @@ typedef struct TPMState {
 
     size_t be_buffer_size;
 
-    bool ppi_enabled;
     TPMPPI ppi;
+    bool ppi_enabled;
 } TPMState;
 
 extern const VMStateDescription vmstate_locty;
 extern const MemoryRegionOps tpm_tis_memory_ops;
 
 int tpm_tis_pre_save(TPMState *s);
-void tpm_tis_reset(TPMState *s);
+void tpm_tis_reset(TPMState *s, bool ppi_enabled);
 enum TPMVersion tpm_tis_get_tpm_version(TPMState *s);
 void tpm_tis_request_completed(TPMState *s, int ret);
 uint32_t tpm_tis_read_data(TPMState *s, hwaddr addr, unsigned size);

@@ -26,7 +26,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/xtensa/mx_pic.h"
 #include "qemu/log.h"
 
@@ -68,6 +68,26 @@ struct XtensaMxPic {
         MemoryRegion reg;
     } cpu[MX_MAX_CPU];
 };
+
+/*
+ * Note that decode for these registers is rather strange by the usual
+ * MMIO standards -- the MIROUT and MIPICAUSE areas can be read and
+ * written at 32-bit length, returning different values for each byte
+ * offset, because the low bits of the address are treated as selecting
+ * an IRQ or a processor:
+ *
+ * 00nn         0...0p..p       Interrupt Routing, route IRQ n to processor p
+ * 01pp         0...0d..d       16 bits (d) 'ored' as single IPI to processor p
+ *
+ * This is because (like x86 IO port in/out accesses) the offset is
+ * not a memory-mapped address but is really a register number,
+ * accessed via the Xtensa RER/WER "external register" instructions.
+ *
+ * We set .valid and .impl to both allow unaligned = true to permit
+ * these byte-offsets. Because this device is not a true memory mapped
+ * device but is accessible only via the Xtensa RER/WER "external
+ * register" interface, all accesses are guaranteed 32 bits.
+ */
 
 static uint64_t xtensa_mx_pic_ext_reg_read(void *opaque, hwaddr offset,
                                            unsigned size)
@@ -267,7 +287,14 @@ static const MemoryRegionOps xtensa_mx_pic_ops = {
     .read = xtensa_mx_pic_ext_reg_read,
     .write = xtensa_mx_pic_ext_reg_write,
     .endianness = DEVICE_NATIVE_ENDIAN,
+    .impl = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+        .unaligned = true,
+    },
     .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
         .unaligned = true,
     },
 };
@@ -316,7 +343,7 @@ static void xtensa_mx_pic_set_irq(void *opaque, int irq, int active)
 
 XtensaMxPic *xtensa_mx_pic_init(unsigned n_irq)
 {
-    XtensaMxPic *mx = calloc(1, sizeof(XtensaMxPic));
+    XtensaMxPic *mx = g_new0(XtensaMxPic, 1);
 
     mx->n_irq = n_irq + 1;
     mx->irq_inputs = qemu_allocate_irqs(xtensa_mx_pic_set_irq, mx,

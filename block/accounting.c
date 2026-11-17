@@ -28,6 +28,7 @@
 #include "block/block_int.h"
 #include "qemu/timer.h"
 #include "system/qtest.h"
+#include "qapi/error.h"
 
 static QEMUClockType clock_type = QEMU_CLOCK_REALTIME;
 static const int qtest_latency_ns = NANOSECONDS_PER_SECOND / 1000;
@@ -56,13 +57,24 @@ static bool bool_from_onoffauto(OnOffAuto val, bool def)
     }
 }
 
-void block_acct_setup(BlockAcctStats *stats, enum OnOffAuto account_invalid,
-                      enum OnOffAuto account_failed)
+bool block_acct_setup(BlockAcctStats *stats, enum OnOffAuto account_invalid,
+                      enum OnOffAuto account_failed, uint32_t *stats_intervals,
+                      uint32_t num_stats_intervals, Error **errp)
 {
     stats->account_invalid = bool_from_onoffauto(account_invalid,
                                                  stats->account_invalid);
     stats->account_failed = bool_from_onoffauto(account_failed,
                                                 stats->account_failed);
+    if (stats_intervals) {
+        for (int i = 0; i < num_stats_intervals; i++) {
+            if (stats_intervals[i] <= 0) {
+                error_setg(errp, "Invalid interval length: %u", stats_intervals[i]);
+                return false;
+            }
+            block_acct_add_interval(stats, stats_intervals[i]);
+        }
+    }
+    return true;
 }
 
 void block_acct_cleanup(BlockAcctStats *stats)
@@ -173,6 +185,17 @@ int block_latency_histogram_set(BlockAcctStats *stats, enum BlockAcctType type,
         prev = entry->value;
     }
 
+    /*
+     * block_latency_histogram_account() assumes that it can always access
+     * hist->boundaries[0], so require at least one boundary. A histogram with
+     * a single bin is useless anyway.
+     */
+    if (new_nbins <= 1) {
+        return -EINVAL;
+    }
+
+    qemu_mutex_lock(&stats->lock);
+
     hist->nbins = new_nbins;
     g_free(hist->boundaries);
     hist->boundaries = g_new(uint64_t, hist->nbins - 1);
@@ -185,6 +208,8 @@ int block_latency_histogram_set(BlockAcctStats *stats, enum BlockAcctType type,
     g_free(hist->bins);
     hist->bins = g_new0(uint64_t, hist->nbins);
 
+    qemu_mutex_unlock(&stats->lock);
+
     return 0;
 }
 
@@ -192,12 +217,16 @@ void block_latency_histograms_clear(BlockAcctStats *stats)
 {
     int i;
 
+    qemu_mutex_lock(&stats->lock);
+
     for (i = 0; i < BLOCK_MAX_IOTYPE; i++) {
         BlockLatencyHistogram *hist = &stats->latency_histogram[i];
         g_free(hist->bins);
         g_free(hist->boundaries);
         memset(hist, 0, sizeof(*hist));
     }
+
+    qemu_mutex_unlock(&stats->lock);
 }
 
 static void block_account_one_io(BlockAcctStats *stats, BlockAcctCookie *cookie,
@@ -289,10 +318,9 @@ double block_acct_queue_depth(BlockAcctTimedStats *stats,
     uint64_t sum, elapsed;
 
     assert(type < BLOCK_MAX_IOTYPE);
+    assert(qemu_mutex_trylock(&stats->stats->lock) == -EBUSY);
 
-    qemu_mutex_lock(&stats->stats->lock);
     sum = timed_average_sum(&stats->latency[type], &elapsed);
-    qemu_mutex_unlock(&stats->stats->lock);
 
     return (double) sum / elapsed;
 }

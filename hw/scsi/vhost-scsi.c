@@ -15,6 +15,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "standard-headers/linux/vhost_types.h"
 #include <linux/vhost.h>
 #include <sys/ioctl.h>
 #include "qapi/error.h"
@@ -26,8 +27,8 @@
 #include "hw/virtio/vhost.h"
 #include "hw/virtio/virtio-scsi.h"
 #include "hw/virtio/virtio-bus.h"
-#include "hw/fw-path-provider.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/fw-path-provider.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/cutils.h"
 #include "system/system.h"
 
@@ -245,8 +246,7 @@ static void vhost_scsi_realize(DeviceState *dev, Error **errp)
     } else {
         vhostfd = open("/dev/vhost-scsi", O_RDWR);
         if (vhostfd < 0) {
-            error_setg(errp, "vhost-scsi: open vhost char device failed: %s",
-                       strerror(errno));
+            error_setg_file_open(errp, errno, "/dev/vhost-scsi");
             return;
         }
     }
@@ -276,7 +276,6 @@ static void vhost_scsi_realize(DeviceState *dev, Error **errp)
     vqs = g_new0(struct vhost_virtqueue, vsc->dev.nvqs);
     vsc->dev.vqs = vqs;
     vsc->dev.vq_index = 0;
-    vsc->dev.backend_features = 0;
 
     ret = vhost_dev_init(&vsc->dev, (void *)(uintptr_t)vhostfd,
                          VHOST_BACKEND_TYPE_KERNEL, 0, errp);

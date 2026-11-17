@@ -28,7 +28,7 @@
 #ifndef XTENSA_MEMORY_H
 #define XTENSA_MEMORY_H
 
-#include "cpu.h"
+#include "target/xtensa/cpu.h"
 
 void xtensa_create_memory_regions(const XtensaMemory *memory,
                                   const char *name,

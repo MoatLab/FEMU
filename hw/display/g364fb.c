@@ -19,16 +19,16 @@
 
 #include "qemu/osdep.h"
 #include "qemu/units.h"
-#include "hw/hw.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/hw-error.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
 #include "ui/console.h"
 #include "ui/pixel_ops.h"
 #include "trace.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
 
@@ -191,8 +191,8 @@ static void g364fb_draw_graphic8(G364State *s)
         } else {
             int dy;
             if (xmax || ymax) {
-                dpy_gfx_update(s->con, xmin, ymin,
-                               xmax - xmin + 1, ymax - ymin + 1);
+                qemu_console_update(s->con, xmin, ymin,
+                                   xmax - xmin + 1, ymax - ymin + 1);
                 xmin = s->width;
                 xmax = 0;
                 ymin = s->height;
@@ -211,7 +211,7 @@ static void g364fb_draw_graphic8(G364State *s)
 
 done:
     if (xmax || ymax) {
-        dpy_gfx_update(s->con, xmin, ymin, xmax - xmin + 1, ymax - ymin + 1);
+        qemu_console_update(s->con, xmin, ymin, xmax - xmin + 1, ymax - ymin + 1);
     }
     g_free(snap);
 }
@@ -234,19 +234,20 @@ static void g364fb_draw_blank(G364State *s)
         d += surface_stride(surface);
     }
 
-    dpy_gfx_update_full(s->con);
+    qemu_console_update_full(s->con);
     s->blanked = 1;
 }
 
-static void g364fb_update_display(void *opaque)
+static bool g364fb_update_display(void *opaque)
 {
     G364State *s = opaque;
     DisplaySurface *surface = qemu_console_surface(s->con);
 
     qemu_flush_coalesced_mmio_buffer();
 
-    if (s->width == 0 || s->height == 0)
-        return;
+    if (s->width == 0 || s->height == 0) {
+        return true;
+    }
 
     if (s->width != surface_width(surface) ||
         s->height != surface_height(surface)) {
@@ -262,6 +263,8 @@ static void g364fb_update_display(void *opaque)
     }
 
     qemu_irq_raise(s->irq);
+
+    return true;
 }
 
 static inline void g364fb_invalidate_display(void *opaque)
@@ -475,7 +478,7 @@ static const GraphicHwOps g364fb_ops = {
 
 static void g364fb_init(DeviceState *dev, G364State *s)
 {
-    s->con = graphic_console_init(dev, 0, &g364fb_ops, s);
+    s->con = qemu_graphic_console_create(dev, 0, &g364fb_ops, s);
 
     memory_region_init_io(&s->mem_ctrl, OBJECT(dev), &g364fb_ctrl_ops, s,
                           "ctrl", 0x180000);

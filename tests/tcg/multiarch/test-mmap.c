@@ -22,6 +22,7 @@
  * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -41,7 +42,7 @@ do                                                             \
   }                                                            \
 } while (0)
 
-unsigned char *dummybuf;
+unsigned char *dummybuf; /* length is 2*pagesize */
 static unsigned int pagesize;
 static unsigned int pagemask;
 int test_fd;
@@ -441,15 +442,71 @@ void check_invalid_mmaps(void)
 
     /* Attempt to map a zero length page.  */
     addr = mmap(NULL, 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    fprintf(stdout, "%s addr=%p", __func__, (void *)addr);
+    fprintf(stdout, "%s addr=%p errno=%d\n", __func__, (void *)addr, errno);
     fail_unless(addr == MAP_FAILED);
     fail_unless(errno == EINVAL);
 
     /* Attempt to map a over length page.  */
     addr = mmap(NULL, -4, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    fprintf(stdout, "%s addr=%p", __func__, (void *)addr);
+    fprintf(stdout, "%s addr=%p errno=%d\n", __func__, (void *)addr, errno);
     fail_unless(addr == MAP_FAILED);
     fail_unless(errno == ENOMEM);
+
+    /* Attempt to remap a region which exceeds the bounds of memory. */
+    addr = mremap((void *)((uintptr_t)pagesize * 10), SIZE_MAX & ~(size_t)pagemask, pagesize, 0);
+    fprintf(stdout, "%s mremap addr=%p errno=%d\n", __func__, (void *)addr, errno);
+    fail_unless(addr == MAP_FAILED);
+    fail_unless(errno == EFAULT);
+
+    fprintf(stdout, " passed\n");
+}
+
+void check_shrink_mmaps(void)
+{
+    unsigned char *a, *b, *c;
+    a = mmap(NULL, pagesize * 2, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    fprintf(stdout, "%s addr=%p errno=%d\n", __func__, (void *)a, errno);
+    b = mmap(NULL, pagesize * 2, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    fprintf(stdout, "%s addr=%p errno=%d\n", __func__, (void *)b, errno);
+    c = mmap(NULL, pagesize * 2, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    fprintf(stdout, "%s addr=%p errno=%d\n", __func__, (void *)c, errno);
+
+    fail_unless(a != MAP_FAILED);
+    fail_unless(b != MAP_FAILED);
+    fail_unless(c != MAP_FAILED);
+
+    /* Ensure we can read the full mappings */
+    memcpy(dummybuf, a, 2 * pagesize);
+    memcpy(dummybuf, b, 2 * pagesize);
+    memcpy(dummybuf, c, 2 * pagesize);
+
+    /* Shrink the middle mapping in-place; the others should be unaffected */
+    b = mremap(b, pagesize * 2, pagesize, 0);
+    fprintf(stdout, "%s mremap addr=%p errno=%d\n", __func__, (void *)b, errno);
+    fail_unless(b != MAP_FAILED);
+
+    /* Ensure we can still access all valid mappings */
+    memcpy(dummybuf, a, 2 * pagesize);
+    memcpy(dummybuf, b, pagesize);
+    memcpy(dummybuf, c, 2 * pagesize);
+
+    munmap(a, 2 * pagesize);
+    munmap(b, pagesize);
+    munmap(c, 2 * pagesize);
+
+    fprintf(stdout, " passed\n");
+}
+
+void check_mmaps_beyond_addr_space(void)
+{
+    unsigned char *addr;
+    addr = mmap((void *)(-(unsigned long)pagesize * 10), pagesize * 2,
+                PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    fprintf(stdout, "%s addr=%p errno=%d", __func__, (void *)addr, errno);
+    fail_unless(addr != MAP_FAILED);
+
+    memcpy(dummybuf, addr, 2 * pagesize);
+    munmap(addr, 2 * pagesize);
 
     fprintf(stdout, " passed\n");
 }
@@ -468,7 +525,7 @@ int main(int argc, char **argv)
 
 	/* Assume pagesize is a power of two.  */
 	pagemask = pagesize - 1;
-	dummybuf = malloc (pagesize);
+	dummybuf = malloc (pagesize * 2);
 	printf ("pagesize=%u pagemask=%x\n", pagesize, pagemask);
 
 	test_fd = mkstemp(tempname);
@@ -496,6 +553,8 @@ int main(int argc, char **argv)
 	check_file_fixed_eof_mmaps();
 	check_file_unfixed_eof_mmaps();
 	check_invalid_mmaps();
+    check_shrink_mmaps();
+    check_mmaps_beyond_addr_space();
 
 	/* Fails at the moment.  */
 	/* check_aligned_anonymous_fixed_mmaps_collide_with_host(); */

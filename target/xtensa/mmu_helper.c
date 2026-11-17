@@ -316,7 +316,7 @@ static void xtensa_tlb_set_entry(CPUXtensaState *env, bool dtlb,
     }
 }
 
-hwaddr xtensa_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
+hwaddr xtensa_cpu_get_phys_addr_debug(CPUState *cs, vaddr addr)
 {
     XtensaCPU *cpu = XTENSA_CPU(cs);
     uint32_t paddr;

@@ -34,6 +34,7 @@ void write_fcc(CPULoongArchState *env, uint64_t val)
 int loongarch_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n)
 {
     CPULoongArchState *env = cpu_env(cs);
+    CPUSysState *sys = env_sys(env);
 
     if (0 <= n && n <= 34) {
         uint64_t val;
@@ -46,7 +47,7 @@ int loongarch_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n)
         } else if (n == 33) {
             val = env->pc;
         } else /* if (n == 34) */ {
-            val = env->CSR_BADV;
+            val = sys->CSR_BADV;
         }
 
         if (is_la64(env)) {
@@ -62,7 +63,7 @@ int loongarch_cpu_gdb_read_register(CPUState *cs, GByteArray *mem_buf, int n)
 int loongarch_cpu_gdb_write_register(CPUState *cs, uint8_t *mem_buf, int n)
 {
     CPULoongArchState *env = cpu_env(cs);
-    target_ulong tmp;
+    uint64_t tmp;
     int length = 0;
 
     if (n < 0 || n > 34) {
@@ -180,16 +181,16 @@ void loongarch_cpu_register_gdb_regs_for_features(CPUState *cs)
 
     if (FIELD_EX32(env->cpucfg[2], CPUCFG2, FP)) {
         gdb_register_coprocessor(cs, loongarch_gdb_get_fpu, loongarch_gdb_set_fpu,
-                                 gdb_find_static_feature("loongarch-fpu.xml"), 0);
+                                 gdb_find_static_feature("loongarch-fpu.xml"));
     }
 
     if (FIELD_EX32(env->cpucfg[2], CPUCFG2, LSX)) {
         gdb_register_coprocessor(cs, loongarch_gdb_get_lsx, loongarch_gdb_set_lsx,
-                                 gdb_find_static_feature("loongarch-lsx.xml"), 0);
+                                 gdb_find_static_feature("loongarch-lsx.xml"));
     }
 
     if (FIELD_EX32(env->cpucfg[2], CPUCFG2, LASX)) {
         gdb_register_coprocessor(cs, loongarch_gdb_get_lasx, loongarch_gdb_set_lasx,
-                                 gdb_find_static_feature("loongarch-lasx.xml"), 0);
+                                 gdb_find_static_feature("loongarch-lasx.xml"));
     }
 }

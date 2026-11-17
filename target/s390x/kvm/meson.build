@@ -1,5 +1,5 @@
 
-s390x_ss.add(when: 'CONFIG_KVM', if_true: files(
+s390x_system_ss.add(when: 'CONFIG_KVM', if_true: files(
   'pv.c',
   'kvm.c',
   'stsi-topology.c'

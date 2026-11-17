@@ -365,6 +365,31 @@ sub read_mailmap {
     close($mailmap_file);
 }
 
+my %gitlabmap;
+
+read_gitlabmap(".gitlab-map-auto");
+read_gitlabmap(".gitlab-map-manual");
+
+sub read_gitlabmap {
+    my $mapfile = shift;
+    open MAP, "<$mapfile"
+	or die "cannot open $mapfile: $!";
+
+    while (<MAP>) {
+	next if /^#/;
+	next if /^\s*$/;
+
+	if (/^(\S+)\t(.*)$/) {
+	    my $handle = $1;
+	    my $realname = $2;
+
+	    $gitlabmap{$realname} = $handle;
+	}
+    }
+
+    close MAP;
+}
+
 ## use the filenames on the command line or find the filenames in the patchfiles
 
 my @files = ();
@@ -384,6 +409,7 @@ foreach my $file (@ARGV) {
 	} elsif (!(stat $file)) {
 	    die "$P: file '${file}' not found: $!\n";
 	}
+	$file =~ s,^./,,;
     }
     if ($from_filename) {
 	push(@files, $file);
@@ -1067,6 +1093,18 @@ sub email_inuse {
     return 0;
 }
 
+sub gitlab_handle {
+    my $name = shift;
+
+    $name =~ s/"//g;
+
+    my $gitlab_handle;
+    if (exists $gitlabmap{$name}) {
+	return $gitlabmap{$name};
+    }
+    return undef;
+}
+
 sub push_email_address {
     my ($line, $role) = @_;
 
@@ -1076,10 +1114,14 @@ sub push_email_address {
 	return 0;
     }
 
+    my $gitlab_handle = gitlab_handle($name);
+
     if (!$email_remove_duplicates) {
-	push(@email_to, [format_email($name, $address, $email_usename), $role]);
+	push(@email_to, [format_email($name, $address, $email_usename),
+			 $role, $gitlab_handle]);
     } elsif (!email_inuse($name, $address)) {
-	push(@email_to, [format_email($name, $address, $email_usename), $role]);
+	push(@email_to, [format_email($name, $address, $email_usename),
+			 $role, $gitlab_handle]);
 	$email_hash_name{lc($name)}++ if ($name ne "");
 	$email_hash_address{lc($address)}++;
     }
@@ -2025,10 +2067,14 @@ sub merge_email {
     my %saw;
 
     for (@_) {
-	my ($address, $role) = @$_;
+	my ($address, $role, $gitlab_handle) = @$_;
 	if (!$saw{$address}) {
 	    if ($output_roles) {
-		push(@lines, "$address ($role)");
+		if (defined $gitlab_handle) {
+		    push(@lines, "$address ($role, gitlab:\@$gitlab_handle)");
+		} else {
+		    push(@lines, "$address ($role)");
+		}
 	    } else {
 		push(@lines, $address);
 	    }

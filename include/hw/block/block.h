@@ -13,7 +13,7 @@
 
 #include "exec/hwaddr.h"
 #include "qapi/qapi-types-block-core.h"
-#include "hw/qdev-properties-system.h"
+#include "hw/core/qdev-properties-system.h"
 
 /* Configuration */
 
@@ -34,6 +34,8 @@ typedef struct BlockConf {
     OnOffAuto account_invalid, account_failed;
     BlockdevOnError rerror;
     BlockdevOnError werror;
+    uint32_t num_stats_intervals;
+    uint32_t *stats_intervals;
 } BlockConf;
 
 static inline unsigned int get_physical_block_exp(BlockConf *conf)
@@ -47,6 +49,18 @@ static inline unsigned int get_physical_block_exp(BlockConf *conf)
     }
 
     return exp;
+}
+
+#define DEFAULT_BLOCK_CONF (BlockConf) {                                \
+    .bootindex = -1,                                                    \
+    .backend_defaults = ON_OFF_AUTO_AUTO,                               \
+    .discard_granularity = -1,                                          \
+    .wce = ON_OFF_AUTO_AUTO,                                            \
+    .share_rw = false,                                                  \
+    .account_invalid = ON_OFF_AUTO_AUTO,                                \
+    .account_failed = ON_OFF_AUTO_AUTO,                                 \
+    .rerror = BLOCKDEV_ON_ERROR_AUTO,                                   \
+    .werror = BLOCKDEV_ON_ERROR_AUTO,                                   \
 }
 
 #define DEFINE_BLOCK_PROPERTIES_BASE(_state, _conf)                     \
@@ -66,7 +80,10 @@ static inline unsigned int get_physical_block_exp(BlockConf *conf)
     DEFINE_PROP_ON_OFF_AUTO("account-invalid", _state,                  \
                             _conf.account_invalid, ON_OFF_AUTO_AUTO),   \
     DEFINE_PROP_ON_OFF_AUTO("account-failed", _state,                   \
-                            _conf.account_failed, ON_OFF_AUTO_AUTO)
+                            _conf.account_failed, ON_OFF_AUTO_AUTO),    \
+    DEFINE_PROP_ARRAY("stats-intervals", _state,                        \
+                     _conf.num_stats_intervals, _conf.stats_intervals,  \
+                     qdev_prop_uint32, uint32_t)
 
 #define DEFINE_BLOCK_PROPERTIES(_state, _conf)                          \
     DEFINE_PROP_DRIVE("drive", _state, _conf.blk),                      \

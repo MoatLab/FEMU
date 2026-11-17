@@ -20,7 +20,6 @@
 
 #include "qemu/osdep.h"
 #include <getopt.h>
-#include <stdbool.h>
 #include <sys/ioctl.h>
 #ifdef CONFIG_LIBCAP_NG
 #include <cap-ng.h>
@@ -213,8 +212,10 @@ static void coroutine_fn vh_co_entry(void *opaque)
     uint64_t vmsr;
     int r;
 
-    qio_channel_set_blocking(QIO_CHANNEL(client->ioc),
-                             false, NULL);
+    if (!qio_channel_set_blocking(QIO_CHANNEL(client->ioc),
+                                  false, &local_err)) {
+        goto out;
+    }
 
     qio_channel_set_follow_coroutine_ctx(QIO_CHANNEL(client->ioc), true);
 

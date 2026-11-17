@@ -109,6 +109,20 @@ enum PVSCSICommands {
 #define PVSCSI_COMMAND_NOT_ENOUGH_DATA       (-2)
 
 /*
+ * About endianess for the below structs:
+ *
+ * These structs are used to describe the data that is exchanged between the
+ * guest and the PVSCSI device. The endianess of the fields in these structs
+ * is not defined by any standard. The current implemented drivers are designed
+ * to only work on x86 architecture, so there is no endianess awareness in the
+ * drivers and thus we have no idea whether the fields should be in little-
+ * endian or target native endian format.
+ *
+ * Considering the above, we assume that PVSCSI is implicitly little-endian and
+ * expect the fields in these structs to be in little-endian format.
+ */
+
+/*
  * Command descriptor for PVSCSI_CMD_RESET_DEVICE --
  */
 

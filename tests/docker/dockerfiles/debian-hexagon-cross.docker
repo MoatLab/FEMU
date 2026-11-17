@@ -5,18 +5,24 @@
 # needs to be able to build QEMU itself in CI we include its
 # build-deps.
 #
-FROM docker.io/library/debian:11-slim
+FROM docker.io/library/debian:13-slim
 
-# Duplicate deb line as deb-src
-RUN cat /etc/apt/sources.list | sed "s/^deb\ /deb-src /" >> /etc/apt/sources.list
+# Add deb-src repository sources
+RUN sed -i "s/^Types: deb$/Types: deb deb-src/" \
+    /etc/apt/sources.list.d/debian.sources
+
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt install -yy eatmydata && \
     DEBIAN_FRONTEND=noninteractive eatmydata \
 # Install common build utilities
     apt-get install -y --no-install-recommends \
         curl \
+        wget \
+        gnupg \
+        lsb-release \
         ccache \
         xz-utils \
+        zstd \
         ca-certificates \
         bison \
         flex \
@@ -24,6 +30,7 @@ RUN apt-get update && \
         ninja-build \
         python3-pip \
         python3-setuptools \
+        python3-tomli \
         python3-venv \
         python3-wheel && \
 # Install QEMU build deps for use in CI
@@ -36,17 +43,22 @@ RUN apt-get update && \
     ln -s /usr/bin/ccache /usr/libexec/ccache-wrappers/gcc && \
     dpkg-query --showformat '${Package}_${Version}_${Architecture}\n' --show > /packages.txt
 
-RUN /usr/bin/pip3 install tomli
+ENV LLVM_VERSION=22
+ENV TOOLCHAIN_RELEASE=22.1.8
+ENV TOOLCHAIN_URL=https://artifacts.codelinaro.org/artifactory/codelinaro-toolchain-for-hexagon/${TOOLCHAIN_RELEASE}________/hexagon-debs-${TOOLCHAIN_RELEASE}________.tar.gz
+ENV CCACHE_WRAPPERSDIR=/usr/libexec/ccache-wrappers
+ENV MAKE=/usr/bin/make
 
-ENV TOOLCHAIN_INSTALL /opt
-ENV TOOLCHAIN_RELEASE 12.Dec.2023
-ENV TOOLCHAIN_BASENAME "clang+llvm-${TOOLCHAIN_RELEASE}-cross-hexagon-unknown-linux-musl"
-ENV TOOLCHAIN_URL https://codelinaro.jfrog.io/artifactory/codelinaro-toolchain-for-hexagon/${TOOLCHAIN_RELEASE}/${TOOLCHAIN_BASENAME}.tar.xz
-ENV CCACHE_WRAPPERSDIR "/usr/libexec/ccache-wrappers"
+RUN curl -#SL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh && \
+    chmod +x /tmp/llvm.sh && \
+    DEBIAN_FRONTEND=noninteractive eatmydata /tmp/llvm.sh ${LLVM_VERSION} && \
+    rm -f /tmp/llvm.sh && \
+    mkdir -p /tmp/hexagon-debs && \
+    curl -#SL "$TOOLCHAIN_URL" | tar -xzC /tmp/hexagon-debs && \
+    DEBIAN_FRONTEND=noninteractive eatmydata \
+    apt-get install -y /tmp/hexagon-debs/*.deb && \
+    rm -rf /tmp/hexagon-debs
 
-RUN curl -#SL "$TOOLCHAIN_URL" | tar -xJC "$TOOLCHAIN_INSTALL"
-ENV PATH $PATH:${TOOLCHAIN_INSTALL}/${TOOLCHAIN_BASENAME}/x86_64-linux-gnu/bin
-ENV MAKE /usr/bin/make
 # As a final step configure the user (if env is defined)
 ARG USER
 ARG UID

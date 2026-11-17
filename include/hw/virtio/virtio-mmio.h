@@ -22,7 +22,7 @@
 #ifndef HW_VIRTIO_MMIO_H
 #define HW_VIRTIO_MMIO_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/virtio/virtio-bus.h"
 
 /* QOM macros */
@@ -66,10 +66,10 @@ struct VirtIOMMIOProxy {
     uint32_t guest_page_shift;
     /* virtio-bus */
     VirtioBusState bus;
-    bool format_transport_address;
     /* Fields only used for non-legacy (v2) devices */
     uint32_t guest_features[2];
     VirtIOMMIOQueue vqs[VIRTIO_QUEUE_MAX];
+    uint16_t override_queue_size;
 };
 
 #endif

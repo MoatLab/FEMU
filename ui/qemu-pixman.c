@@ -288,7 +288,12 @@ qemu_pixman_shareable_free(qemu_pixman_shareable handle,
                            void *ptr, size_t size)
 {
 #ifdef WIN32
-    qemu_win32_map_free(ptr, handle, &error_warn);
+    Error *err = NULL;
+
+    qemu_win32_map_free(ptr, handle, &err);
+    if (err) {
+        error_report_err(err);
+    }
 #else
     qemu_memfd_free(ptr, size, handle);
 #endif
@@ -315,11 +320,17 @@ qemu_pixman_image_new_shareable(pixman_image_t **image,
                                 Error **errp)
 {
     ERRP_GUARD();
-    size_t size = height * rowstride_bytes;
+    size_t size;
     void *bits = NULL;
 
     g_return_val_if_fail(image != NULL, false);
     g_return_val_if_fail(handle != NULL, false);
+
+    if (!qemu_pixman_image_calc_size(format, width, height,
+                                     &rowstride_bytes, &size)) {
+        error_setg(errp, "Image dimensions overflow");
+        return false;
+    }
 
     bits = qemu_pixman_shareable_alloc(name, size, handle, errp);
     if (!bits) {

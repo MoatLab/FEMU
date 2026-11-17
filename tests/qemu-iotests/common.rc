@@ -719,7 +719,7 @@ _img_info()
     regex_json_spec_start='^ *"format-specific": \{'
     regex_json_child_start='^ *"children": \['
     $QEMU_IMG info $QEMU_IMG_EXTRA_ARGS "$@" "$TEST_IMG" 2>&1 | \
-        sed -e "s#$REMOTE_TEST_DIR#TEST_DIR#g" \
+        gsed -e "s#$REMOTE_TEST_DIR#TEST_DIR#g" \
             -e "s#$IMGPROTO:$TEST_DIR#TEST_DIR#g" \
             -e "s#$TEST_DIR#TEST_DIR#g" \
             -e "s#$SOCK_DIR/fuse-#TEST_DIR/#g" \
@@ -981,6 +981,20 @@ _require_drivers()
     done
 }
 
+# Skip if FUSE is unusable: not compiled in, or the export failed to
+# mount. $1 is the failing 'block-export-add' reply.
+_notrun_on_fuse_error()
+{
+    case "$1" in
+        *"Parameter 'type' does not accept value 'fuse'"*)
+            _notrun "No FUSE support"
+            ;;
+        *"Failed to mount FUSE session"*)
+            _notrun "FUSE not usable in this environment"
+            ;;
+    esac
+}
+
 # Check that we have a file system that allows huge (but very sparse) files
 #
 _require_large_file()
@@ -1008,7 +1022,7 @@ _require_disk_usage()
     else
         FILENAME="$TEST_IMG_FILE"
     fi
-    if [ -e "FILENAME" ]; then
+    if [ -e "$FILENAME" ]; then
         echo "unwilling to overwrite existing file"
         exit 1
     fi
@@ -1053,6 +1067,20 @@ _require_one_device_of()
     _notrun "$* not available"
 }
 
+_require_secret()
+{
+    if [ -e "$TEST_IMG" ]; then
+        echo "unwilling to overwrite existing file"
+        exit 1
+    fi
+    if $QEMU_IMG create -f $IMGFMT --object secret,id=sec0,data=123 \
+                 -o encryption=on,encrypt.key-secret=sec0 "$TEST_IMG" 1M 2>&1 \
+                 | grep "Unsupported cipher" ; then
+        _notrun "missing cipher support"
+    fi
+    rm -f "$TEST_IMG"
+}
+
 _qcow2_dump_header()
 {
     if [[ "$1" == "--no-filter-compression" ]]; then
@@ -1071,6 +1099,22 @@ _qcow2_dump_header()
         $PYTHON qcow2.py "$img" dump-header
     else
         $PYTHON qcow2.py "$img" dump-header | _filter_qcow2_compression_type_bit
+    fi
+}
+
+# This must be referenced after any _require_  lines, so that
+# test filtering happens first
+_flaky_test()
+{
+    if test -z "$1"
+    then
+	echo "A GitLab issue URL must be provided for a flaky test"
+	exit 1
+    fi
+
+    if test -z "$QEMU_TEST_FLAKY_TESTS"
+    then
+	_notrun "Test is flaky (see $1) and \$QEMU_TEST_FLAKY_TESTS is not set"
     fi
 }
 

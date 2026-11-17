@@ -11,7 +11,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/bitops.h"
-#include "cpu.h"
+#include "target/mips/cpu.h"
 #include "hw/mips/bootloader.h"
 
 typedef enum bl_reg {

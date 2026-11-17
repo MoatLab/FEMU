@@ -22,7 +22,6 @@
 
 #include "cpu-qom.h"
 #include "exec/cpu-common.h"
-#include "exec/cpu-defs.h"
 #include "exec/cpu-interrupt.h"
 #include "qemu/cpu-float.h"
 
@@ -283,7 +282,7 @@ extern const VMStateDescription vmstate_alpha_cpu;
 
 void alpha_cpu_do_interrupt(CPUState *cpu);
 bool alpha_cpu_exec_interrupt(CPUState *cpu, int int_req);
-hwaddr alpha_cpu_get_phys_page_debug(CPUState *cpu, vaddr addr);
+hwaddr alpha_cpu_get_phys_addr_debug(CPUState *cpu, vaddr addr);
 #endif /* !CONFIG_USER_ONLY */
 void alpha_cpu_dump_state(CPUState *cs, FILE *f, int flags);
 int alpha_cpu_gdb_read_register(CPUState *cpu, GByteArray *buf, int reg);
@@ -311,9 +310,9 @@ enum {
 };
 
 /* Alpha-specific interrupt pending bits.  */
-#define CPU_INTERRUPT_TIMER	CPU_INTERRUPT_TGT_EXT_0
-#define CPU_INTERRUPT_SMP	CPU_INTERRUPT_TGT_EXT_1
-#define CPU_INTERRUPT_MCHK	CPU_INTERRUPT_TGT_EXT_2
+#define CPU_INTERRUPT_TIMER     CPU_INTERRUPT_TGT_EXT_0
+#define CPU_INTERRUPT_SMP       CPU_INTERRUPT_TGT_EXT_1
+#define CPU_INTERRUPT_MCHK      CPU_INTERRUPT_TGT_EXT_2
 
 /* OSF/1 Page table bits.  */
 enum {

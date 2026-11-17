@@ -15,7 +15,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/resettable.h"
+#include "hw/core/resettable.h"
 #include "hw/core/resetcontainer.h"
 
 struct ResettableContainer {
@@ -66,6 +66,9 @@ static void resettable_container_init(Object *obj)
 
 static void resettable_container_finalize(Object *obj)
 {
+    ResettableContainer *rc = RESETTABLE_CONTAINER(obj);
+
+    g_ptr_array_unref(rc->children);
 }
 
 static void resettable_container_class_init(ObjectClass *klass,

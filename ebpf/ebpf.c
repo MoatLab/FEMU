@@ -40,7 +40,7 @@ void ebpf_register_binary_data(int id, const void *data, size_t datalen)
 
 const void *ebpf_find_binary_by_id(int id, size_t *sz, Error **errp)
 {
-    struct ElfBinaryDataEntry *it = NULL;
+    struct ElfBinaryDataEntry *it;
     QSLIST_FOREACH(it, &ebpf_elf_obj_list, node) {
         if (id == it->id) {
             *sz = it->datalen;

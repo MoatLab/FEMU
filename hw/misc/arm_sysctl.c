@@ -8,14 +8,14 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/irq.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "qemu/timer.h"
 #include "system/runstate.h"
 #include "qemu/bitops.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
+#include "hw/misc/arm_sysctl.h"
 #include "migration/vmstate.h"
-#include "hw/arm/primecell.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qom/object.h"
@@ -618,9 +618,7 @@ static void arm_sysctl_finalize(Object *obj)
 {
     arm_sysctl_state *s = ARM_SYSCTL(obj);
 
-    g_free(s->db_voltage);
     g_free(s->db_clock);
-    g_free(s->db_clock_reset);
 }
 
 static const Property arm_sysctl_properties[] = {

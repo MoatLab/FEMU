@@ -30,8 +30,8 @@
 #include "acpi-microvm.h"
 #include "microvm-dt.h"
 
-#include "hw/loader.h"
-#include "hw/irq.h"
+#include "hw/core/loader.h"
+#include "hw/core/irq.h"
 #include "hw/i386/kvm/clock.h"
 #include "hw/i386/microvm.h"
 #include "hw/i386/x86.h"
@@ -159,7 +159,6 @@ static int microvm_ioapics(MicrovmMachineState *mms)
 
 static void microvm_devices_init(MicrovmMachineState *mms)
 {
-    const char *default_firmware;
     X86MachineState *x86ms = X86_MACHINE(mms);
     ISABus *isa_bus;
     GSIState *gsi_state;
@@ -276,10 +275,12 @@ static void microvm_devices_init(MicrovmMachineState *mms)
         serial_hds_isa_init(isa_bus, 0, 1);
     }
 
-    default_firmware = x86_machine_is_acpi_enabled(x86ms)
-            ? MICROVM_BIOS_FILENAME
-            : MICROVM_QBOOT_FILENAME;
-    x86_bios_rom_init(x86ms, default_firmware, get_system_memory(), true);
+    if (!x86ms->igvm) {
+        const char *default_firmware = x86_machine_is_acpi_enabled(x86ms)
+                ? MICROVM_BIOS_FILENAME
+                : MICROVM_QBOOT_FILENAME;
+        x86_bios_rom_init(x86ms, default_firmware, get_system_memory(), true);
+    }
 }
 
 static void microvm_memory_init(MicrovmMachineState *mms)
@@ -319,8 +320,7 @@ static void microvm_memory_init(MicrovmMachineState *mms)
         e820_add_entry(0x100000000ULL, x86ms->above_4g_mem_size, E820_RAM);
     }
 
-    fw_cfg = fw_cfg_init_io_dma(FW_CFG_IO_BASE, FW_CFG_IO_BASE + 4,
-                                &address_space_memory);
+    fw_cfg = fw_cfg_init_io_dma(FW_CFG_IO_BASE, &address_space_memory);
 
     fw_cfg_add_i16(fw_cfg, FW_CFG_NB_CPUS, machine->smp.cpus);
     fw_cfg_add_i16(fw_cfg, FW_CFG_MAX_CPUS, machine->smp.max_cpus);
@@ -330,7 +330,7 @@ static void microvm_memory_init(MicrovmMachineState *mms)
     rom_set_fw(fw_cfg);
 
     if (machine->kernel_filename != NULL) {
-        mmc->x86_load_linux(x86ms, fw_cfg, 0, true);
+        mmc->x86_load_linux(x86ms, fw_cfg, 0);
     }
 
     if (mms->option_roms) {
@@ -640,7 +640,6 @@ GlobalProperty microvm_properties[] = {
 
 static void microvm_class_init(ObjectClass *oc, const void *data)
 {
-    X86MachineClass *x86mc = X86_MACHINE_CLASS(oc);
     MicrovmMachineClass *mmc = MICROVM_MACHINE_CLASS(oc);
     MachineClass *mc = MACHINE_CLASS(oc);
     HotplugHandlerClass *hc = HOTPLUG_HANDLER_CLASS(oc);
@@ -673,8 +672,6 @@ static void microvm_class_init(ObjectClass *oc, const void *data)
     hc->plug = microvm_device_plug_cb;
     hc->unplug_request = microvm_device_unplug_request_cb;
     hc->unplug = microvm_device_unplug_cb;
-
-    x86mc->fwcfg_dma_enabled = true;
 
     object_class_property_add(oc, MICROVM_MACHINE_RTC, "OnOffAuto",
                               microvm_machine_get_rtc,
@@ -720,6 +717,16 @@ static void microvm_class_init(ObjectClass *oc, const void *data)
 
     compat_props_add(mc->compat_props, microvm_properties,
                      G_N_ELEMENTS(microvm_properties));
+
+#if defined(CONFIG_IGVM)
+    object_class_property_add_link(oc, "igvm-cfg",
+                                   TYPE_IGVM_CFG,
+                                   offsetof(X86MachineState, igvm),
+                                   object_property_allow_set_link,
+                                   OBJ_PROP_LINK_STRONG);
+    object_class_property_set_description(oc, "igvm-cfg",
+                                          "Set IGVM configuration");
+#endif
 }
 
 static const TypeInfo microvm_machine_info = {

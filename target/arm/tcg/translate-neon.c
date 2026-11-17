@@ -135,7 +135,7 @@ static bool do_neon_ddda(DisasContext *s, int q, int vd, int vn, int vm,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -165,7 +165,7 @@ static bool do_neon_ddda_env(DisasContext *s, int q, int vd, int vn, int vm,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -197,7 +197,7 @@ static bool do_neon_ddda_fpst(DisasContext *s, int q, int vd, int vn, int vm,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -249,7 +249,7 @@ static bool trans_VCADD(DisasContext *s, arg_VCADD *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -319,7 +319,7 @@ static bool trans_VFML(DisasContext *s, arg_VFML *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -413,7 +413,7 @@ static bool trans_VFML_scalar(DisasContext *s, arg_VFML_scalar *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -506,7 +506,7 @@ static bool trans_VLDST_multiple(DisasContext *s, arg_VLDST_multiple *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -520,7 +520,7 @@ static bool trans_VLDST_multiple(DisasContext *s, arg_VLDST_multiple *a)
     if (a->align) {
         align = pow2_align(a->align + 2); /* 4 ** a->align */
     } else {
-        align = s->align_mem ? MO_ALIGN : 0;
+        align = MO_ALIGN | (s->align_mem ? 0 : MO_ALIGN_TLB_ONLY);
     }
 
     /*
@@ -617,7 +617,7 @@ static bool trans_VLD_all_lanes(DisasContext *s, arg_VLD_all_lanes *a)
         }
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -714,7 +714,7 @@ static bool trans_VLDST_single(DisasContext *s, arg_VLDST_single *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -798,7 +798,7 @@ static bool do_3same(DisasContext *s, arg_3same *a, GVecGen3Fn fn)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -1076,7 +1076,7 @@ static bool do_vector_2sh(DisasContext *s, arg_2reg_shift *a, GVecGen2iFn *fn)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -1126,7 +1126,7 @@ static bool do_2shift_narrow_64(DisasContext *s, arg_2reg_shift *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -1177,7 +1177,7 @@ static bool do_2shift_narrow_32(DisasContext *s, arg_2reg_shift *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -1302,7 +1302,7 @@ static bool do_vshll_2sh(DisasContext *s, arg_2reg_shift *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -1392,7 +1392,7 @@ static bool do_fp_2sh(DisasContext *s, arg_2reg_shift *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -1436,7 +1436,7 @@ static bool do_1reg_imm(DisasContext *s, arg_1reg_imm *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -1499,7 +1499,7 @@ static bool do_prewiden_3d(DisasContext *s, arg_3diff *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -1606,7 +1606,7 @@ static bool do_narrow_3d(DisasContext *s, arg_3diff *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -1696,7 +1696,7 @@ static bool do_long_3d(DisasContext *s, arg_3diff *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -1967,7 +1967,7 @@ static bool trans_VMULL_P_3d(DisasContext *s, arg_3diff *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2041,7 +2041,7 @@ static bool do_2scalar(DisasContext *s, arg_2scalar *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2139,7 +2139,7 @@ static bool do_2scalar_fp_vec(DisasContext *s, arg_2scalar *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2236,7 +2236,7 @@ static bool do_vqrdmlah_2sc(DisasContext *s, arg_2scalar *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2307,7 +2307,7 @@ static bool do_2scalar_long(DisasContext *s, arg_2scalar *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2451,7 +2451,7 @@ static bool trans_VEXT(DisasContext *s, arg_VEXT *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2520,7 +2520,7 @@ static bool trans_VTBL(DisasContext *s, arg_VTBL *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2555,7 +2555,7 @@ static bool trans_VDUP_scalar(DisasContext *s, arg_VDUP_scalar *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2591,7 +2591,7 @@ static bool do_zip_uzp(DisasContext *s, arg_2misc *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2660,7 +2660,7 @@ static bool do_vmovn(DisasContext *s, arg_2misc *a,
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2724,7 +2724,7 @@ static bool trans_VSHLL(DisasContext *s, arg_2misc *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2764,7 +2764,7 @@ static bool trans_VCVT_B16_F32(DisasContext *s, arg_2misc *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2804,7 +2804,7 @@ static bool trans_VCVT_F16_F32(DisasContext *s, arg_2misc *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2850,7 +2850,7 @@ static bool trans_VCVT_F32_F16(DisasContext *s, arg_2misc *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -2900,7 +2900,7 @@ static bool do_2misc_vec(DisasContext *s, arg_2misc *a, GVecGen2Fn *fn)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -3028,7 +3028,7 @@ static bool do_2misc(DisasContext *s, arg_2misc *a, NeonGenOneOpFn *fn)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -3232,7 +3232,7 @@ static bool trans_VSWP(DisasContext *s, arg_2misc *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 
@@ -3305,7 +3305,7 @@ static bool trans_VTRN(DisasContext *s, arg_2misc *a)
         return false;
     }
 
-    if (!vfp_access_check(s)) {
+    if (!neon_access_check(s)) {
         return true;
     }
 

@@ -15,7 +15,7 @@
 #define IAC 255
 
 /* character device */
-typedef struct CharBackend CharBackend;
+typedef struct CharFrontend CharFrontend;
 
 typedef enum {
     CHR_EVENT_BREAK, /* serial break char */
@@ -60,10 +60,11 @@ struct Chardev {
     Object parent_obj;
 
     QemuMutex chr_write_lock;
-    CharBackend *be;
+    CharFrontend *fe;
     char *label;
-    char *filename;
     int logfd;
+    bool logtimestamp;
+    bool log_line_start;
     int be_open;
     /* used to coordinate the chardev-change special-case: */
     bool handover_yank_instance;
@@ -247,21 +248,20 @@ OBJECT_DECLARE_TYPE(Chardev, ChardevClass, CHARDEV)
 
 #define CHARDEV_IS_RINGBUF(chr) \
     object_dynamic_cast(OBJECT(chr), TYPE_CHARDEV_RINGBUF)
-#define CHARDEV_IS_PTY(chr) \
-    object_dynamic_cast(OBJECT(chr), TYPE_CHARDEV_PTY)
 
 struct ChardevClass {
     ObjectClass parent_class;
 
     bool internal; /* TODO: eventually use TYPE_USER_CREATABLE */
     bool supports_yank;
+    bool supports_size_opts;
+    bool supports_encoding_opts;
 
     /* parse command line options and populate QAPI @backend */
-    void (*parse)(QemuOpts *opts, ChardevBackend *backend, Error **errp);
+    void (*chr_parse)(QemuOpts *opts, ChardevBackend *backend, Error **errp);
 
     /* called after construction, open/starts the backend */
-    void (*open)(Chardev *chr, ChardevBackend *backend,
-                 bool *be_opened, Error **errp);
+    bool (*chr_open)(Chardev *chr, ChardevBackend *backend, Error **errp);
 
     /* write buf to the backend */
     int (*chr_write)(Chardev *s, const uint8_t *buf, int len);
@@ -282,10 +282,10 @@ struct ChardevClass {
     int (*chr_ioctl)(Chardev *s, int cmd, void *arg);
 
     /* get ancillary-received fds during last read */
-    int (*get_msgfds)(Chardev *s, int* fds, int num);
+    int (*chr_get_msgfds)(Chardev *s, int* fds, int num);
 
     /* set ancillary fds to be sent with next write */
-    int (*set_msgfds)(Chardev *s, int *fds, int num);
+    int (*chr_set_msgfds)(Chardev *s, int *fds, int num);
 
     /* accept the given fd */
     int (*chr_add_client)(Chardev *chr, int fd);
@@ -307,6 +307,14 @@ struct ChardevClass {
 
     /* handle various events */
     void (*chr_be_event)(Chardev *s, QEMUChrEvent event);
+
+    void (*chr_listener_cleanup)(Chardev *chr);
+
+    /* return PTY name if available */
+    char *(*chr_get_pty_name)(Chardev *s);
+
+    /* get filename for reporting */
+    char *(*chr_get_filename)(Chardev *s);
 };
 
 Chardev *qemu_chardev_new(const char *id, const char *typename,
@@ -320,5 +328,27 @@ GSource *qemu_chr_timeout_add_ms(Chardev *chr, guint ms,
 
 void suspend_mux_open(void);
 void resume_mux_open(void);
+
+char *qemu_chr_get_pty_name(Chardev *chr);
+char *qemu_chr_get_filename(Chardev *chr);
+
+#define CHARDEV_VC_ENCODING_PROPERTY_DEFINE(cast_func)          \
+static int get_encoding(Object *obj, Error **errp)              \
+{                                                               \
+    return cast_func(obj)->encoding;                            \
+}                                                               \
+                                                                \
+static void set_encoding(Object *obj, int value, Error **errp)  \
+{                                                               \
+    cast_func(obj)->encoding = value;                           \
+}
+
+static inline void chardev_vc_add_encoding_prop(ObjectClass *oc,
+    int (*get)(Object *, Error **),
+    void (*set)(Object *, int, Error **))
+{
+    object_class_property_add_enum(oc, "encoding", "ChardevVCEncoding",
+                                   &ChardevVCEncoding_lookup, get, set);
+}
 
 #endif

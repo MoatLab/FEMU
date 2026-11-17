@@ -26,14 +26,9 @@ import contextlib
 import json
 import shutil
 import sys
-from multiprocessing import Pool
+from multiprocessing import get_context
 from typing import List, Optional, Any, Sequence, Dict
 from testenv import TestEnv
-
-if sys.version_info >= (3, 9):
-    from contextlib import AbstractContextManager as ContextManager
-else:
-    from typing import ContextManager
 
 
 def silent_unlink(path: Path) -> None:
@@ -57,7 +52,7 @@ def file_diff(file1: str, file2: str) -> List[str]:
         return res
 
 
-class LastElapsedTime(ContextManager['LastElapsedTime']):
+class LastElapsedTime(contextlib.AbstractContextManager['LastElapsedTime']):
     """ Cache for elapsed time for tests, to show it during new test run
 
     It is safe to use get() at any time.  To use update(), you must either
@@ -112,7 +107,7 @@ class TestResult:
         self.interrupted = interrupted
 
 
-class TestRunner(ContextManager['TestRunner']):
+class TestRunner(contextlib.AbstractContextManager['TestRunner']):
     shared_self = None
 
     @staticmethod
@@ -130,7 +125,7 @@ class TestRunner(ContextManager['TestRunner']):
         assert TestRunner.shared_self is None
         TestRunner.shared_self = self
 
-        with Pool(jobs) as p:
+        with get_context('fork').Pool(jobs) as p:
             results = p.starmap(self.proc_run_test,
                                 zip(tests, [test_field_width] * len(tests)))
 
@@ -179,7 +174,7 @@ class TestRunner(ContextManager['TestRunner']):
             elif status == 'fail':
                 print(f'not ok {self.env.imgfmt} {test}')
             elif status == 'not run':
-                print(f'ok {self.env.imgfmt} {test} # SKIP')
+                print(f'ok {self.env.imgfmt} {test} # SKIP {description}')
             return
 
         if lasttime:
@@ -268,9 +263,20 @@ class TestRunner(ContextManager['TestRunner']):
             Path(env[d]).mkdir(parents=True, exist_ok=True)
 
         test_dir = env['TEST_DIR']
+        f_asan = Path(test_dir, f_test.name + '.out.asan')
         f_bad = Path(test_dir, f_test.name + '.out.bad')
         f_notrun = Path(test_dir, f_test.name + '.notrun')
         f_casenotrun = Path(test_dir, f_test.name + '.casenotrun')
+
+        env['ASAN_OPTIONS'] = f'detect_leaks=0:log_path={f_asan}'
+
+        def unlink_asan():
+            with os.scandir(test_dir) as it:
+                for entry in it:
+                    if entry.name.startswith(f_asan.name):
+                        os.unlink(entry)
+
+        unlink_asan()
 
         for p in (f_notrun, f_casenotrun):
             silent_unlink(p)
@@ -317,6 +323,7 @@ class TestRunner(ContextManager['TestRunner']):
                               description=f'output mismatch (see {f_bad})',
                               diff=diff, casenotrun=casenotrun)
         else:
+            unlink_asan()
             f_bad.unlink()
             return TestResult(status='pass', elapsed=elapsed,
                               casenotrun=casenotrun)

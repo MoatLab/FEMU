@@ -10,13 +10,13 @@
 
 use bilge::prelude::*;
 use bits::bits;
-use qemu_api::{impl_vmstate_bitsized, impl_vmstate_forward};
+use migration::{impl_vmstate_bitsized, impl_vmstate_forward};
 
 /// Offset of each register from the base memory address of the device.
 #[doc(alias = "offset")]
 #[allow(non_camel_case_types)]
 #[repr(u64)]
-#[derive(Debug, Eq, PartialEq, qemu_api_macros::TryInto)]
+#[derive(Debug, Eq, PartialEq, common::TryInto)]
 pub enum RegisterOffset {
     /// Data Register
     ///
@@ -255,6 +255,7 @@ pub enum Mode {
 
 #[bitsize(2)]
 #[derive(Clone, Copy, Debug, Eq, FromBits, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 /// `WLEN` Word length, field of [Line Control register](LineControl).
 ///
 /// These bits indicate the number of data bits transmitted or received in a

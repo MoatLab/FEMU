@@ -48,8 +48,9 @@
 #include "qapi/error.h"
 #include "qapi/qapi-commands-machine.h"
 #include "qapi/type-helpers.h"
+#include "qemu/units.h"
 #include "trace.h"
-#include "hw/hw.h"
+#include "hw/core/hw-error.h"
 #include "disas/disas.h"
 #include "migration/cpr.h"
 #include "migration/vmstate.h"
@@ -57,27 +58,43 @@
 #include "system/reset.h"
 #include "system/system.h"
 #include "uboot_image.h"
-#include "hw/loader.h"
+#include "hw/core/loader.h"
 #include "hw/nvram/fw_cfg.h"
 #include "system/memory.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "qemu/cutils.h"
 #include "system/runstate.h"
 #include "tcg/debuginfo.h"
 
 #include <zlib.h>
 
+#ifdef CONFIG_ZSTD
+#include <zstd.h>
+#include <zstd_errors.h>
+#endif
+
 static int roms_loaded;
 
 /* return the size or -1 if error */
-int64_t get_image_size(const char *filename)
+int64_t get_image_size(const char *filename, Error **errp)
 {
     int fd;
     int64_t size;
-    fd = open(filename, O_RDONLY | O_BINARY);
-    if (fd < 0)
+
+    fd = qemu_open(filename, O_RDONLY | O_BINARY, errp);
+
+    if (fd < 0) {
         return -1;
+    }
+
     size = lseek(fd, 0, SEEK_END);
+
+    if (size < 0) {
+        error_setg_errno(errp, errno, "lseek failure: %s", filename);
+        close(fd);
+        return -1;
+    }
+
     close(fd);
     return size;
 }
@@ -118,25 +135,42 @@ ssize_t read_targphys(const char *name,
 }
 
 ssize_t load_image_targphys(const char *filename,
-                            hwaddr addr, uint64_t max_sz)
+                            hwaddr addr, uint64_t max_sz, Error **errp)
 {
-    return load_image_targphys_as(filename, addr, max_sz, NULL);
+    return load_image_targphys_as(filename, addr, max_sz, NULL, errp);
 }
 
 /* return the size or -1 if error */
 ssize_t load_image_targphys_as(const char *filename,
-                               hwaddr addr, uint64_t max_sz, AddressSpace *as)
+                               hwaddr addr, uint64_t max_sz, AddressSpace *as,
+                               Error **errp)
 {
     ssize_t size;
 
-    size = get_image_size(filename);
-    if (size < 0 || size > max_sz) {
+    size = get_image_size(filename, errp);
+    if (size < 0) {
         return -1;
     }
-    if (size > 0) {
-        if (rom_add_file_fixed_as(filename, addr, -1, as) < 0) {
-            return -1;
-        }
+
+    if (size == 0) {
+        error_setg(errp, "empty file: %s", filename);
+        return -1;
+    }
+
+    if (size > max_sz) {
+        char *size_str = size_to_str(max_sz);
+
+        error_setg(errp, "%s exceeds maximum image size (%s)",
+                   filename, size_str);
+
+        g_free(size_str);
+        return -1;
+    }
+
+    if (rom_add_file_fixed_as(filename, addr, -1, as) < 0) {
+        error_setg(errp, "could not load '%s' at %" HWADDR_PRIx,
+                   filename, addr);
+        return -1;
     }
     return size;
 }
@@ -150,7 +184,7 @@ ssize_t load_image_mr(const char *filename, MemoryRegion *mr)
         return -1;
     }
 
-    size = get_image_size(filename);
+    size = get_image_size(filename, NULL);
 
     if (size < 0 || size > memory_region_size(mr)) {
         return -1;
@@ -295,10 +329,6 @@ static void *load_at(int fd, off_t offset, size_t size)
     return ptr;
 }
 
-#ifdef ELF_CLASS
-#undef ELF_CLASS
-#endif
-
 #define ELF_CLASS   ELFCLASS32
 #include "elf.h"
 
@@ -350,8 +380,9 @@ const char *load_elf_strerror(ssize_t error)
     }
 }
 
-void load_elf_hdr(const char *filename, void *hdr, bool *is64, Error **errp)
+bool load_elf_hdr(const char *filename, void *hdr, bool *is64, Error **errp)
 {
+    bool ok = false;
     int fd;
     uint8_t e_ident_local[EI_NIDENT];
     uint8_t *e_ident;
@@ -365,8 +396,8 @@ void load_elf_hdr(const char *filename, void *hdr, bool *is64, Error **errp)
 
     fd = open(filename, O_RDONLY | O_BINARY);
     if (fd < 0) {
-        error_setg_errno(errp, errno, "Failed to open file: %s", filename);
-        return;
+        error_setg_file_open(errp, errno, filename);
+        return false;
     }
     if (read(fd, hdr, EI_NIDENT) != EI_NIDENT) {
         error_setg_errno(errp, errno, "Failed to read file: %s", filename);
@@ -401,8 +432,11 @@ void load_elf_hdr(const char *filename, void *hdr, bool *is64, Error **errp)
         off += br;
     }
 
+    ok = true;
+
 fail:
     close(fd);
+    return ok;
 }
 
 /* return < 0 if error, otherwise the number of bytes loaded in memory */
@@ -725,7 +759,7 @@ static ssize_t load_uboot_image(const char *filename, hwaddr *ep,
         ssize_t bytes;
 
         compressed_data = data;
-        max_bytes = UBOOT_MAX_GUNZIP_BYTES;
+        max_bytes = UBOOT_MAX_DECOMPRESSED_BYTES;
         data = g_malloc(max_bytes);
 
         bytes = gunzip(data, max_bytes, compressed_data, hdr->ih_size);
@@ -800,8 +834,8 @@ ssize_t load_image_gzipped_buffer(const char *filename, uint64_t max_sz,
         goto out;
     }
 
-    if (max_sz > LOAD_IMAGE_MAX_GUNZIP_BYTES) {
-        max_sz = LOAD_IMAGE_MAX_GUNZIP_BYTES;
+    if (max_sz > LOAD_IMAGE_MAX_DECOMPRESSED_BYTES) {
+        max_sz = LOAD_IMAGE_MAX_DECOMPRESSED_BYTES;
     }
 
     data = g_malloc(max_sz);
@@ -867,8 +901,9 @@ struct linux_efi_zboot_header {
  */
 ssize_t unpack_efi_zboot_image(uint8_t **buffer, ssize_t *size)
 {
+    const size_t max_bytes = LOAD_IMAGE_MAX_DECOMPRESSED_BYTES;
     const struct linux_efi_zboot_header *header;
-    uint8_t *data = NULL;
+    g_autofree uint8_t *data = NULL;
     ssize_t ploff, plsize;
     ssize_t bytes;
 
@@ -886,14 +921,6 @@ ssize_t unpack_efi_zboot_image(uint8_t **buffer, ssize_t *size)
         return 0;
     }
 
-    if (strcmp(header->compression_type, "gzip") != 0) {
-        fprintf(stderr,
-                "unable to handle EFI zboot image with \"%.*s\" compression\n",
-                (int)sizeof(header->compression_type) - 1,
-                header->compression_type);
-        return -1;
-    }
-
     ploff = ldl_le_p(&header->payload_offset);
     plsize = ldl_le_p(&header->payload_size);
 
@@ -902,16 +929,30 @@ ssize_t unpack_efi_zboot_image(uint8_t **buffer, ssize_t *size)
         return -1;
     }
 
-    data = g_malloc(LOAD_IMAGE_MAX_GUNZIP_BYTES);
-    bytes = gunzip(data, LOAD_IMAGE_MAX_GUNZIP_BYTES, *buffer + ploff, plsize);
+    data = g_malloc(max_bytes);
+
+    if (strcmp(header->compression_type, "gzip") == 0) {
+        bytes = gunzip(data, max_bytes, *buffer + ploff, plsize);
+#ifdef CONFIG_ZSTD
+    } else if (strcmp(header->compression_type, "zstd") == 0) {
+        size_t ret = ZSTD_decompress(data, max_bytes, *buffer + ploff, plsize);
+        bytes = ZSTD_isError(ret) ? -1 : (ssize_t) ret;
+#endif
+    } else {
+        fprintf(stderr,
+                "unable to handle EFI zboot image with \"%.*s\" compression\n",
+                (int)sizeof(header->compression_type) - 1,
+                header->compression_type);
+        return -1;
+    }
+
     if (bytes < 0) {
         fprintf(stderr, "failed to decompress EFI zboot image\n");
-        g_free(data);
         return -1;
     }
 
     g_free(*buffer);
-    *buffer = g_realloc(data, bytes);
+    *buffer = g_realloc(g_steal_pointer(&data), bytes);
     *size = bytes;
     return bytes;
 }
@@ -1246,7 +1287,7 @@ static void rom_reset(void *unused)
          * that the instruction cache for that new region is clear, so that the
          * CPU definitely fetches its instructions from the just written data.
          */
-        cpu_flush_icache_range(rom->addr, rom->datasize);
+        address_space_flush_icache_range(rom->as, rom->addr, rom->datasize);
 
         trace_loader_write_rom(rom->name, rom->addr, rom->datasize, rom->isrom);
     }

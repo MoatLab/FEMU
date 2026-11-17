@@ -53,18 +53,131 @@ static void ufs_build_scsi_response_upiu(UfsRequest *req, uint8_t *sense,
         response = UFS_COMMAND_RESULT_FAIL;
     }
 
-    data_segment_length =
-        cpu_to_be16(sense_len + sizeof(req->rsp_upiu.sr.sense_data_len));
+    data_segment_length = sense_len + sizeof(req->rsp_upiu.sr.sense_data_len);
     ufs_build_upiu_header(req, UFS_UPIU_TRANSACTION_RESPONSE, flags, response,
                           status, data_segment_length);
+}
+
+#define UFS_GROUP_NUMBER_MASK 0x1F
+#define UFS_WB_GROUP_NUMBER_DEFAULT 0x00 /* 00000b */
+#define UFS_WB_GROUP_NUMBER_PINNED 0x18 /* 11000b */
+static bool ufs_wb_check_write_pinned(UfsHc *u, UfsRequest *req)
+{
+    uint8_t cmd = req->req_upiu.sc.cdb[0];
+    uint8_t group_number = UFS_WB_GROUP_NUMBER_DEFAULT;
+
+    if (u->attributes.wb_buffer_partial_flush_mode != UFS_WB_FLUSH_PINNED) {
+        return false;
+    }
+
+    if (cmd == WRITE_16) {
+        group_number = req->req_upiu.sc.cdb[14] & UFS_GROUP_NUMBER_MASK;
+
+    } else if (cmd == WRITE_10) {
+        group_number = req->req_upiu.sc.cdb[6] & UFS_GROUP_NUMBER_MASK;
+    }
+
+    return (group_number == UFS_WB_GROUP_NUMBER_PINNED);
+}
+
+static void ufs_wb_process_write_normal(UfsHc *u, uint32_t transfered_len)
+{
+    UfsWb *wb = &u->wb;
+    uint64_t curr_bytes, used_bytes, remain_bytes;
+
+    if (!wb->curr_bytes) {
+        return;
+    }
+
+    curr_bytes = wb->curr_bytes - wb->pinned_curr_bytes;
+    used_bytes = wb->used_bytes - wb->pinned_used_bytes;
+
+    if (used_bytes >= curr_bytes) {
+        return;
+    }
+
+    remain_bytes = curr_bytes - used_bytes;
+    wb->used_bytes += MIN(remain_bytes, transfered_len);
+}
+
+#define UFS_WB_TOTAL_WRITTEN_DIV (10 * 1024 * 1024) /* 10MiB */
+static void ufs_wb_process_write_pinned(UfsHc *u, uint32_t transfered_len)
+{
+    UfsWb *wb = &u->wb;
+    uint64_t remain_bytes, remain_data;
+    uint32_t total_written;
+
+    if (!wb->pinned_curr_bytes) {
+        ufs_wb_process_write_normal(u, transfered_len);
+        return;
+    }
+
+    if (wb->pinned_used_bytes >= wb->pinned_curr_bytes) {
+        ufs_wb_process_write_normal(u, transfered_len);
+        return;
+    }
+
+    remain_bytes = wb->pinned_curr_bytes - wb->pinned_used_bytes;
+    if (remain_bytes >= transfered_len) {
+        wb->pinned_total_written_bytes += transfered_len;
+        wb->pinned_used_bytes += transfered_len;
+        wb->used_bytes += transfered_len;
+        remain_data = 0;
+
+    } else {
+        wb->pinned_total_written_bytes += remain_bytes;
+        wb->pinned_used_bytes += remain_bytes;
+        wb->used_bytes += remain_bytes;
+        remain_data = transfered_len - remain_bytes;
+    }
+
+    total_written = wb->pinned_total_written_bytes / UFS_WB_TOTAL_WRITTEN_DIV;
+    u->attributes.pinned_wb_cumm_written_size = cpu_to_be32(total_written);
+
+    ufs_wb_process_write_normal(u, remain_data);
+}
+
+static void ufs_wb_process_write_req(UfsRequest *req, uint32_t transfered_len)
+{
+    UfsHc *u = req->hc;
+
+    if (!u->flags.wb_en || !ufs_is_write_req(req)) {
+        return;
+    }
+
+    if (ufs_wb_check_write_pinned(u, req)) {
+        ufs_wb_process_write_pinned(u, transfered_len);
+    } else {
+        ufs_wb_process_write_normal(u, transfered_len);
+    }
+
+    ufs_wb_update_avail_buffer(u);
+}
+
+#define UFS_HID_MAX_FRAGMENTS 1024
+static void ufs_hid_count_fragments(UfsRequest *req)
+{
+    UfsHc *u = req->hc;
+
+    if (!ufs_is_write_req(req)) {
+        return;
+    }
+
+    u->hid_fragment_count =
+        MIN(u->hid_fragment_count + 1, UFS_HID_MAX_FRAGMENTS);
 }
 
 static void ufs_scsi_command_complete(SCSIRequest *scsi_req, size_t resid)
 {
     UfsRequest *req = scsi_req->hba_private;
     int16_t status = scsi_req->status;
-
     uint32_t transfered_len = scsi_req->cmd.xfer - resid;
+
+    /* WB / HID accounting should only happen for successful commands */
+    if (status == GOOD) {
+        ufs_wb_process_write_req(req, transfered_len);
+        ufs_hid_count_fragments(req);
+    }
 
     ufs_build_scsi_response_upiu(req, scsi_req->sense, scsi_req->sense_len,
                                  transfered_len, status);
@@ -102,6 +215,10 @@ static int ufs_emulate_report_luns(UfsRequest *req, uint8_t *outbuf,
         return SCSI_COMMAND_FAIL;
     }
 
+    if (outbuf_len < 8) {
+        return SCSI_COMMAND_FAIL;
+    }
+    memset(outbuf, 0, 8);
     len += 8;
 
     for (uint8_t lun = 0; lun < UFS_MAX_LUS; ++lun) {
@@ -413,10 +530,7 @@ static void ufs_lu_unrealize(DeviceState *dev)
 {
     UfsLu *lu = DO_UPCAST(UfsLu, qdev, dev);
 
-    if (lu->scsi_dev) {
-        object_unref(OBJECT(lu->scsi_dev));
-        lu->scsi_dev = NULL;
-    }
+    lu->scsi_dev = NULL;
 }
 
 static void ufs_lu_class_init(ObjectClass *oc, const void *data)

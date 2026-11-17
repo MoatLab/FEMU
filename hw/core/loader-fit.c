@@ -21,8 +21,8 @@
 #include "qapi/error.h"
 #include "qemu/units.h"
 #include "system/memory.h"
-#include "hw/loader.h"
-#include "hw/loader-fit.h"
+#include "hw/core/loader.h"
+#include "hw/core/loader-fit.h"
 #include "qemu/cutils.h"
 #include "qemu/error-report.h"
 #include "system/device_tree.h"
@@ -70,7 +70,7 @@ static void *fit_load_image_alloc(const void *itb, const char *name,
     }
 
     if (!strcmp(comp, "gzip")) {
-        uncomp_len = UBOOT_MAX_GUNZIP_BYTES;
+        uncomp_len = UBOOT_MAX_DECOMPRESSED_BYTES;
         uncomp_data = g_malloc(uncomp_len);
 
         uncomp_len = gunzip(uncomp_data, uncomp_len, (void *) data, sz);

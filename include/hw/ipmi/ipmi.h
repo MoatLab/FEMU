@@ -26,7 +26,7 @@
 #define HW_IPMI_H
 
 #include "system/memory.h"
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 #include "qom/object.h"
 
 #define MAX_IPMI_MSG_SIZE 300
@@ -45,6 +45,7 @@ enum ipmi_op {
 #define IPMI_CHANNEL_IPMB                0x00
 #define IPMI_CHANNEL_SYSTEM              0x0f
 #define IPMI_CHANNEL_MEDIUM_IPMB         0x01
+#define IPMI_CHANNEL_MEDIUM_802_3_LAN    0x04
 #define IPMI_CHANNEL_MEDIUM_SYSTEM       0x0c
 #define IPMI_CHANNEL_PROTOCOL_IPMB       0x01
 #define IPMI_CHANNEL_PROTOCOL_KCS        0x05

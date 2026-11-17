@@ -27,14 +27,14 @@
 #include "migration/vmstate.h"
 #include "trace.h"
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "hw/xen/xen.h"
 #include "hw/i386/x86.h"
 #include "hw/i386/pc.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
-#include "hw/irq.h"
+#include "hw/core/irq.h"
 #include "hw/xen/xen_backend_ops.h"
 
 #include "xen_evtchn.h"
@@ -1877,7 +1877,7 @@ int xen_physdev_map_pirq(struct physdev_map_pirq *map)
             return pirq;
         }
         map->pirq = pirq;
-    } else if (pirq > s->nr_pirqs) {
+    } else if (pirq >= s->nr_pirqs) {
         return -EINVAL;
     } else {
         /*

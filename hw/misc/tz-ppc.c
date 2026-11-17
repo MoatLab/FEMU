@@ -14,12 +14,12 @@
 #include "qemu/module.h"
 #include "qapi/error.h"
 #include "trace.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
-#include "hw/registerfields.h"
-#include "hw/irq.h"
+#include "hw/core/registerfields.h"
+#include "hw/core/irq.h"
 #include "hw/misc/tz-ppc.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 
 static void tz_ppc_update_irq(TZPPC *s)
 {
@@ -273,8 +273,8 @@ static void tz_ppc_realize(DeviceState *dev, Error **errp)
             continue;
         }
 
-        name = g_strdup_printf("tz-ppc-port[%d]", i);
-
+        name = g_strdup_printf("tz-ppc-port[%s]",
+                               memory_region_name(port->downstream));
         port->ppc = s;
         address_space_init(&port->downstream_as, port->downstream, name);
 

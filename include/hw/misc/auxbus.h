@@ -26,15 +26,17 @@
 #define HW_MISC_AUXBUS_H
 
 #include "system/memory.h"
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 #include "qom/object.h"
 
-typedef struct AUXSlave AUXSlave;
 typedef enum AUXCommand AUXCommand;
 typedef enum AUXReply AUXReply;
 
 #define TYPE_AUXTOI2C "aux-to-i2c-bridge"
 OBJECT_DECLARE_SIMPLE_TYPE(AUXTOI2CState, AUXTOI2C)
+
+#define TYPE_AUX_SLAVE "aux-slave"
+OBJECT_DECLARE_SIMPLE_TYPE(AUXSlave, AUX_SLAVE)
 
 enum AUXCommand {
     WRITE_I2C = 0,
@@ -72,9 +74,6 @@ struct AUXBus {
     MemoryRegion *aux_io;
     AddressSpace aux_addr_space;
 };
-
-#define TYPE_AUX_SLAVE "aux-slave"
-OBJECT_DECLARE_SIMPLE_TYPE(AUXSlave, AUX_SLAVE)
 
 struct AUXSlave {
     /* < private > */

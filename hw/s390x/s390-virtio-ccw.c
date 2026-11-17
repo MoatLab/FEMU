@@ -13,9 +13,8 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "system/ram_addr.h"
 #include "system/confidential-guest-support.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "hw/s390x/sclp.h"
 #include "hw/s390x/s390_flic.h"
 #include "virtio-ccw.h"
@@ -36,8 +35,8 @@
 #include "hw/s390x/ap-bridge.h"
 #include "migration/register.h"
 #include "target/s390x/cpu_models.h"
-#include "hw/nmi.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/nmi.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/s390x/tod.h"
 #include "system/system.h"
 #include "system/cpus.h"
@@ -365,7 +364,24 @@ static void s390_cpu_plug(HotplugHandler *hotplug_dev,
     }
 }
 
-static inline void s390_do_cpu_ipl(CPUState *cs, run_on_cpu_data arg)
+static void s390_do_cpu_reset(CPUState *cs, run_on_cpu_data arg)
+{
+    resettable_reset(OBJECT(cs), RESET_TYPE_S390_CPU_NORMAL);
+}
+
+static void s390_do_cpu_initial_reset(CPUState *cs, run_on_cpu_data arg)
+{
+    resettable_reset(OBJECT(cs), RESET_TYPE_S390_CPU_INITIAL);
+}
+
+static void s390_do_cpu_load_normal(CPUState *cs, run_on_cpu_data arg)
+{
+    S390CPUClass *scc = S390_CPU_GET_CLASS(cs);
+
+    scc->load_normal(cs);
+}
+
+static void s390_do_cpu_ipl(CPUState *cs, run_on_cpu_data arg)
 {
     S390CPU *cpu = S390_CPU(cs);
 
@@ -716,26 +732,6 @@ static void s390_nmi(NMIState *n, int cpu_index, Error **errp)
     s390_cpu_restart(S390_CPU(cs));
 }
 
-static ram_addr_t s390_fixup_ram_size(ram_addr_t sz)
-{
-    /* same logic as in sclp.c */
-    int increment_size = 20;
-    ram_addr_t newsz;
-
-    while ((sz >> increment_size) > MAX_STORAGE_INCREMENTS) {
-        increment_size++;
-    }
-    newsz = sz >> increment_size << increment_size;
-
-    if (sz != newsz) {
-        qemu_printf("Ram size %" PRIu64 "MB was fixed up to %" PRIu64
-                    "MB to match machine restrictions. Consider updating "
-                    "the guest definition.\n", (uint64_t) (sz / MiB),
-                    (uint64_t) (newsz / MiB));
-    }
-    return newsz;
-}
-
 static inline bool machine_get_aes_key_wrap(Object *obj, Error **errp)
 {
     S390CcwMachineState *ms = S390_CCW_MACHINE(obj);
@@ -791,6 +787,21 @@ static void machine_set_loadparm(Object *obj, Visitor *v,
     s390_ipl_fmt_loadparm(ms->loadparm, val, errp);
     g_free(val);
 }
+
+ /*
+  * S390x-specific global compatibility properties.
+  *
+  * On the s390 kernel, legacy virtio-pci is not usable because I/O BARs
+  * are not supported (IO_SPACE_LIMIT is 0), and would only result in
+  * unusable BARs and firmware warnings.
+  *
+  * Therefore, starting from v11.1, disable legacy virtio-pci by default,
+  * while older machine types keep legacy behavior for compatibility.
+  */
+static GlobalProperty hw_compat_s390x[] = {
+    { TYPE_VIRTIO_PCI, "disable-legacy", "on", .optional = true},
+};
+static const size_t hw_compat_s390x_len = G_N_ELEMENTS(hw_compat_s390x);
 
 static void ccw_machine_class_init(ObjectClass *oc, const void *data)
 {
@@ -882,6 +893,9 @@ static const TypeInfo ccw_machine_info = {
         const void *data)                                                     \
     {                                                                         \
         MachineClass *mc = MACHINE_CLASS(oc);                                 \
+        /* Apply global s390x-wide default properties */                      \
+        compat_props_add(mc->compat_props, hw_compat_s390x,                   \
+                         hw_compat_s390x_len);                                \
         MACHINE_VER_SYM(class_options, ccw, __VA_ARGS__)(mc);                 \
         mc->desc = "Virtual s390x machine (version " MACHINE_VER_STR(__VA_ARGS__) ")"; \
         mc->init = MACHINE_VER_SYM(mach_init, ccw, __VA_ARGS__);              \
@@ -911,14 +925,58 @@ static const TypeInfo ccw_machine_info = {
     DEFINE_CCW_MACHINE_IMPL(false, major, minor)
 
 
+static void ccw_machine_11_1_instance_options(MachineState *machine)
+{
+}
+
+static void ccw_machine_11_1_class_options(MachineClass *mc)
+{
+}
+DEFINE_CCW_MACHINE_AS_LATEST(11, 1);
+
+static void ccw_machine_11_0_instance_options(MachineState *machine)
+{
+    ccw_machine_11_1_instance_options(machine);
+}
+
+static void ccw_machine_11_0_class_options(MachineClass *mc)
+{
+    /*
+     * Preserve v11.0 and older version behavior:
+     * keep legacy virtio-pci enabled.
+     */
+    static GlobalProperty compat[] = {
+        { TYPE_VIRTIO_PCI, "disable-legacy", "off", .optional = true },
+    };
+    ccw_machine_11_1_class_options(mc);
+    compat_props_add(mc->compat_props, compat, G_N_ELEMENTS(compat));
+    compat_props_add(mc->compat_props, hw_compat_11_0, hw_compat_11_0_len);
+}
+DEFINE_CCW_MACHINE(11, 0);
+
+static void ccw_machine_10_2_instance_options(MachineState *machine)
+{
+    ccw_machine_11_0_instance_options(machine);
+}
+
+static void ccw_machine_10_2_class_options(MachineClass *mc)
+{
+    ccw_machine_11_0_class_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_10_2, hw_compat_10_2_len);
+}
+DEFINE_CCW_MACHINE(10, 2);
+
 static void ccw_machine_10_1_instance_options(MachineState *machine)
 {
+    ccw_machine_10_2_instance_options(machine);
 }
 
 static void ccw_machine_10_1_class_options(MachineClass *mc)
 {
+    ccw_machine_10_2_class_options(mc);
+    compat_props_add(mc->compat_props, hw_compat_10_1, hw_compat_10_1_len);
 }
-DEFINE_CCW_MACHINE_AS_LATEST(10, 1);
+DEFINE_CCW_MACHINE(10, 1);
 
 static void ccw_machine_10_0_instance_options(MachineState *machine)
 {
@@ -1141,31 +1199,6 @@ static void ccw_machine_5_1_class_options(MachineClass *mc)
     compat_props_add(mc->compat_props, hw_compat_5_1, hw_compat_5_1_len);
 }
 DEFINE_CCW_MACHINE(5, 1);
-
-static void ccw_machine_5_0_instance_options(MachineState *machine)
-{
-    ccw_machine_5_1_instance_options(machine);
-}
-
-static void ccw_machine_5_0_class_options(MachineClass *mc)
-{
-    ccw_machine_5_1_class_options(mc);
-    compat_props_add(mc->compat_props, hw_compat_5_0, hw_compat_5_0_len);
-}
-DEFINE_CCW_MACHINE(5, 0);
-
-static void ccw_machine_4_2_instance_options(MachineState *machine)
-{
-    ccw_machine_5_0_instance_options(machine);
-}
-
-static void ccw_machine_4_2_class_options(MachineClass *mc)
-{
-    ccw_machine_5_0_class_options(mc);
-    mc->fixup_ram_size = s390_fixup_ram_size;
-    compat_props_add(mc->compat_props, hw_compat_4_2, hw_compat_4_2_len);
-}
-DEFINE_CCW_MACHINE(4, 2);
 
 static void ccw_machine_register_types(void)
 {

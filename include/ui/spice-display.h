@@ -121,6 +121,7 @@ struct SimpleSpiceDisplay {
     QEMUBH *gl_unblock_bh;
     QEMUTimer *gl_unblock_timer;
     QemuGLShader *gls;
+    GLuint gl_surface_mem_obj;
     int gl_updates;
     bool have_scanout;
     bool have_surface;

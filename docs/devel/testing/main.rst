@@ -52,6 +52,21 @@ Before running tests, it is best to build QEMU programs first. Some tests
 expect the executables to exist and will fail with obscure messages if they
 cannot find them.
 
+The timeouts for QEMU tests are set conservatively so you should not
+in general find that tests time out. However, if you are running on a
+particularly slow host or with a slow configuration (such as a build
+with the clang address-sanitizer enabled) you can globally raise all
+the timeouts, by setting the ``TIMEOUT_MULTIPLIER`` environment
+variable. For instance:
+
+.. code::
+
+ TIMEOUT_MULTIPLIER=3 make check
+
+will run with all the default timeouts multiplied by three. You can
+also disable timeouts entirely by setting the environment variable to
+``0``.
+
 .. _unit-tests:
 
 Unit tests
@@ -178,12 +193,72 @@ parser (either fixing a bug or extending/modifying the syntax). To do this:
 
   ``qapi-schema += foo.json``
 
+The reference output can be automatically updated to match the latest QAPI
+code generator by running the tests with the QEMU_TEST_REGENERATE environment
+variable set.
+
+.. code::
+
+   QEMU_TEST_REGENERATE=1 make check-qapi-schema
+
+The resulting changes must be reviewed by the author to ensure they match
+the intended results before adding the updated reference output to the
+same commit that alters the generator code.
+
+.. _tracetool-tests:
+
+Tracetool tests
+~~~~~~~~~~~~~~~
+
+The tracetool tests validate the generated source files used for defining
+probes for various tracing backends and source formats. The test operates
+by running the tracetool program against a sample trace-events file, and
+comparing the generated output against known good reference output. The
+tests can be run with:
+
+.. code::
+
+  make check-tracetool
+
+The reference output is stored in files under tests/tracetool, and when
+the tracetool backend/format output is intentionally changed, the reference
+files need to be updated. This can be automated by setting the
+QEMU_TEST_REGENERATE=1 environment variable:
+
+.. code::
+
+   QEMU_TEST_REGENERATE=1 make check-tracetool
+
+The resulting changes must be reviewed by the author to ensure they match
+the intended results, before adding the updated reference output to the
+same commit that alters the generator code.
+
 check-block
 ~~~~~~~~~~~
 
-``make check-block`` runs a subset of the block layer iotests (the tests that
-are in the "auto" group).
-See the "QEMU iotests" section below for more information.
+There are a variety of ways to exercise the block layer I/O tests
+via make targets for a selection of formats / protocols (collectively
+referred to as ``drivers`` below).
+
+A default ``make check`` or ``make check-block`` command will exercise
+the ``qcow2`` format, using the tests tagged into the ``auto`` group
+only.
+
+These targets accept the ``SPEED`` variable to augment the set of tests
+to run. A slightly more comprehensive test plan can be run by defining
+``SPEED=slow``, which enables all tests for the ``qcow2`` and ``raw``
+drivers. The most comprehensive test plan can be run by defining
+``SPEED=thorough``, which enables all available tests for the drivers
+``luks``, ``nbd``, ``parallels``, ``qcow2``, ``qed``, ``raw``, ``vdi``,
+``vhdx``, ``vmdk``, and ``vpc``.
+
+Each of drivers also has its own dedicated make target, named
+``make check-block-$DRIVER`` which will run all available tests for
+the designated driver and does not require the ``SPEED`` variable
+to be set.
+
+See the "QEMU iotests" section below for more information on the
+block I/O test framework that is leveraged by these ``make`` targets.
 
 .. _qemu-iotests:
 
@@ -476,8 +551,8 @@ mappings to distribution package names for a wide variety of third
 party projects.  ``lcitool`` applies the mappings to a list of build
 pre-requisites in ``tests/lcitool/projects/qemu.yml``, determines the
 list of native packages to install on each distribution, and uses them
-to generate build environments (dockerfiles and Cirrus CI variable files)
-that are consistent across OS distribution.
+to generate build environments (dockerfiles) that are consistent across OS
+distribution.
 
 
 Adding new build pre-requisites
@@ -636,13 +711,13 @@ https://github.com/google/sanitizers/wiki/ThreadSanitizerCppManual
 
 Thread Sanitizer in Docker
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
-TSan is currently supported in the ubuntu2204 docker.
+TSan is currently supported in all our host docker images (for instance, ubuntu2404).
 
 The test-tsan test will build using TSan and then run make check.
 
 .. code::
 
-  make docker-test-tsan@ubuntu2204
+  make docker-test-tsan@ubuntu2404
 
 TSan warnings under docker are placed in files located at build/tsan/.
 
@@ -918,6 +993,9 @@ Python. You can run the functional tests simply by executing:
   make check-functional
 
 See :ref:`checkfunctional-ref` for more details.
+
+The harness for the functional tests also honours the
+``TIMEOUT_MULTIPLIER`` environment variable.
 
 .. _checktcg-ref:
 

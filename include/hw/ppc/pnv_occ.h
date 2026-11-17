@@ -21,7 +21,7 @@
 #define PPC_PNV_OCC_H
 
 #include "system/memory.h"
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 
 #define TYPE_PNV_OCC "pnv-occ"
 OBJECT_DECLARE_TYPE(PnvOCC, PnvOCCClass,
@@ -46,6 +46,10 @@ struct PnvOCC {
 
     /* OCC Misc interrupt */
     uint64_t occmisc;
+
+    /* OCC Flags */
+#define NR_FLAG_REGS 8
+    uint32_t occflags[NR_FLAG_REGS];
 
     qemu_irq psi_irq;
 

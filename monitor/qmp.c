@@ -28,9 +28,11 @@
 #include "monitor-internal.h"
 #include "qapi/error.h"
 #include "qapi/qapi-commands-control.h"
+#include "qapi/qapi-commands-char.h"
 #include "qobject/qdict.h"
 #include "qobject/qjson.h"
 #include "qobject/qlist.h"
+#include "qom/object_interfaces.h"
 #include "trace.h"
 
 /*
@@ -71,6 +73,109 @@ typedef struct QMPRequest QMPRequest;
 
 QmpCommandList qmp_commands, qmp_cap_negotiation_commands;
 
+/* Monitor being serviced by the dispatcher.  Protected by BQL. */
+static MonitorQMP *qmp_dispatcher_current_mon;
+
+OBJECT_DEFINE_TYPE(MonitorQMP, monitor_qmp, MONITOR_QMP, MONITOR);
+
+static void monitor_qmp_cleanup_req_queue_locked(MonitorQMP *mon);
+
+static void monitor_qmp_finalize(Object *obj)
+{
+    MonitorQMP *mon = MONITOR_QMP(obj);
+
+    json_message_parser_destroy(&mon->parser);
+    qemu_mutex_destroy(&mon->qmp_queue_lock);
+    monitor_qmp_cleanup_req_queue_locked(mon);
+    g_queue_free(mon->qmp_requests);
+}
+
+static bool monitor_qmp_get_pretty(Object *obj, Error **errp)
+{
+    MonitorQMP *mon = MONITOR_QMP(obj);
+
+    return mon->pretty;
+}
+
+static void monitor_qmp_set_pretty(Object *obj, bool val, Error **errp)
+{
+    MonitorQMP *mon = MONITOR_QMP(obj);
+
+    mon->pretty = val;
+}
+
+static int monitor_qmp_get_close_action(Object *obj, Error **errp)
+{
+    MonitorQMP *mon = MONITOR_QMP(obj);
+
+    return mon->close_action;
+}
+
+static void monitor_qmp_set_close_action(Object *obj, int val, Error **errp)
+{
+    MonitorQMP *mon = MONITOR_QMP(obj);
+
+    mon->close_action = val;
+}
+
+static void monitor_qmp_emit_event(Monitor *mon, QAPIEvent event, QDict *qdict);
+static bool monitor_qmp_requires_iothread(const Monitor *mon);
+static void monitor_qmp_complete(UserCreatable *uc, Error **errp);
+static bool monitor_qmp_prepare_delete(UserCreatable *uc, Error **errp);
+static void monitor_qmp_accept_input(Monitor *mon);
+
+static void monitor_qmp_class_init(ObjectClass *cls, const void *data)
+{
+    MonitorClass *moncls = MONITOR_CLASS(cls);
+    UserCreatableClass *ucc = USER_CREATABLE_CLASS(cls);
+
+    object_class_property_add_bool(cls, "pretty",
+                                   monitor_qmp_get_pretty,
+                                   monitor_qmp_set_pretty);
+    object_class_property_add_enum(cls, "close-action",
+                                   "MonitorQMPCloseAction",
+                                   &MonitorQMPCloseAction_lookup,
+                                   monitor_qmp_get_close_action,
+                                   monitor_qmp_set_close_action);
+
+    moncls->emit_event = monitor_qmp_emit_event;
+    moncls->requires_iothread = monitor_qmp_requires_iothread;
+    moncls->accept_input = monitor_qmp_accept_input;
+
+    ucc->complete = monitor_qmp_complete;
+    ucc->prepare_delete = monitor_qmp_prepare_delete;
+}
+
+static void handle_qmp_command(void *opaque, QObject *req, Error *err);
+static void monitor_qmp_init(Object *obj)
+{
+    MonitorQMP *mon = MONITOR_QMP(obj);
+
+    qemu_mutex_init(&mon->qmp_queue_lock);
+    mon->qmp_requests = g_queue_new();
+
+    json_message_parser_init(&mon->parser, handle_qmp_command, mon, NULL);
+}
+
+static void monitor_qmp_emit_event(Monitor *mon, QAPIEvent event, QDict *qdict)
+{
+    MonitorQMP *qmp = MONITOR_QMP(mon);
+
+    WITH_QEMU_LOCK_GUARD(&mon->mon_lock) {
+        if (qmp->commands == &qmp_cap_negotiation_commands) {
+            return;
+        }
+    }
+
+    qmp_send_response(qmp, qdict);
+}
+
+static bool monitor_qmp_requires_iothread(const Monitor *mon)
+{
+    return qemu_chr_has_feature(mon->chr.chr,
+                                QEMU_CHAR_FEATURE_GCONTEXT);
+}
+
 static bool qmp_oob_enabled(MonitorQMP *mon)
 {
     return mon->capab[QMP_CAPABILITY_OOB];
@@ -80,7 +185,8 @@ static void monitor_qmp_caps_reset(MonitorQMP *mon)
 {
     memset(mon->capab_offered, 0, sizeof(mon->capab_offered));
     memset(mon->capab, 0, sizeof(mon->capab));
-    mon->capab_offered[QMP_CAPABILITY_OOB] = mon->common.use_io_thread;
+    mon->capab_offered[QMP_CAPABILITY_OOB] =
+        monitor_requires_iothread(MONITOR(mon));
 }
 
 static void qmp_request_free(QMPRequest *req)
@@ -96,6 +202,12 @@ static void monitor_qmp_cleanup_req_queue_locked(MonitorQMP *mon)
     while (!g_queue_is_empty(mon->qmp_requests)) {
         qmp_request_free(g_queue_pop_head(mon->qmp_requests));
     }
+}
+
+static void monitor_qmp_drain_queue(MonitorQMP *mon)
+{
+    QEMU_LOCK_GUARD(&mon->qmp_queue_lock);
+    monitor_qmp_cleanup_req_queue_locked(mon);
 }
 
 static void monitor_qmp_cleanup_queue_and_resume(MonitorQMP *mon)
@@ -124,7 +236,7 @@ static void monitor_qmp_cleanup_queue_and_resume(MonitorQMP *mon)
          * when we get here while the monitor is suspended.  An
          * unfortunately timed CHR_EVENT_CLOSED can do the trick.
          */
-        monitor_resume(&mon->common);
+        monitor_resume(&mon->parent_obj);
     }
 
 }
@@ -139,7 +251,7 @@ void qmp_send_response(MonitorQMP *mon, const QDict *rsp)
     trace_monitor_qmp_respond(mon, json->str);
 
     g_string_append_c(json, '\n');
-    monitor_puts(&mon->common, json->str);
+    monitor_puts(&mon->parent_obj, json->str);
 
     g_string_free(json, true);
 }
@@ -166,7 +278,7 @@ static void monitor_qmp_dispatch(MonitorQMP *mon, QObject *req)
     QDict *error;
 
     rsp = qmp_dispatch(mon->commands, req, qmp_oob_enabled(mon),
-                       &mon->common);
+                       &mon->parent_obj);
 
     if (mon->commands == &qmp_cap_negotiation_commands) {
         error = qdict_get_qdict(rsp, "error");
@@ -203,11 +315,12 @@ static QMPRequest *monitor_qmp_requests_pop_any_with_lock(void)
     MonitorQMP *qmp_mon;
 
     QTAILQ_FOREACH(mon, &mon_list, entry) {
-        if (!monitor_is_qmp(mon)) {
+        qmp_mon = MONITOR_QMP(
+            object_dynamic_cast(OBJECT(mon), TYPE_MONITOR_QMP));
+        if (!qmp_mon) {
             continue;
         }
 
-        qmp_mon = container_of(mon, MonitorQMP, common);
         qemu_mutex_lock(&qmp_mon->qmp_queue_lock);
         req_obj = g_queue_pop_head(qmp_mon->qmp_requests);
         if (req_obj) {
@@ -229,7 +342,8 @@ static QMPRequest *monitor_qmp_requests_pop_any_with_lock(void)
     return req_obj;
 }
 
-static QMPRequest *monitor_qmp_dispatcher_pop_any(void)
+static QMPRequest * coroutine_fn
+monitor_qmp_dispatcher_pop_any(void)
 {
     while (true) {
         /*
@@ -287,6 +401,7 @@ void coroutine_fn monitor_qmp_dispatcher_co(void *data)
          */
 
         mon = req_obj->mon;
+        qmp_dispatcher_current_mon = mon;
 
         /*
          * We need to resume the monitor if handle_qmp_command()
@@ -302,7 +417,7 @@ void coroutine_fn monitor_qmp_dispatcher_co(void *data)
         oob_enabled = qmp_oob_enabled(mon);
         if (oob_enabled
             && mon->qmp_requests->length == QMP_REQ_QUEUE_LEN_MAX - 1) {
-            monitor_resume(&mon->common);
+            monitor_resume(&mon->parent_obj);
         }
 
         /*
@@ -343,10 +458,11 @@ void coroutine_fn monitor_qmp_dispatcher_co(void *data)
         }
 
         if (!oob_enabled) {
-            monitor_resume(&mon->common);
+            monitor_resume(&mon->parent_obj);
         }
 
         qmp_request_free(req_obj);
+        qmp_dispatcher_current_mon = NULL;
     }
     qatomic_set(&qmp_dispatcher_co, NULL);
 }
@@ -408,7 +524,7 @@ static void handle_qmp_command(void *opaque, QObject *req, Error *err)
          */
         if (!qmp_oob_enabled(mon) ||
             mon->qmp_requests->length == QMP_REQ_QUEUE_LEN_MAX - 1) {
-            monitor_suspend(&mon->common);
+            monitor_suspend(&mon->parent_obj);
         }
 
         /*
@@ -455,15 +571,55 @@ static QDict *qmp_greeting(MonitorQMP *mon)
         ver, cap_list);
 }
 
+static void monitor_qmp_self_delete_bh(void *opaque)
+{
+    MonitorQMP *mon = opaque;
+    const char *mon_id = object_get_canonical_path_component(
+        OBJECT(mon));
+    g_autofree char *chardev_id = g_strdup(mon->parent_obj.chardev_id);
+    Error *local_error = NULL;
+
+    if (!mon_id) {
+        /*
+         * Another monitor raced & ran 'object-del' on 'mon'
+         * before this BH got scheduled, so we have a ref on
+         * mon from monitor_qmp_event but it is already
+         * unparented.
+         */
+        object_unref(mon);
+        return;
+    }
+
+    user_creatable_del(mon_id, &local_error);
+    /* Pairs with ref from monitor_qmp_event */
+    object_unref(mon);
+    if (local_error != NULL) {
+        error_report_err(local_error);
+    } else {
+        qmp_chardev_remove(chardev_id, NULL);
+    }
+}
+
 static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
 {
     QDict *data;
     MonitorQMP *mon = opaque;
 
+    /*
+     * Protect against race if a client drops & quickly
+     * reconnects - we'll have the delete BH scheduled
+     * so must not honour a new open request
+     */
+    if (mon->delete_pending) {
+        return;
+    }
+
     switch (event) {
     case CHR_EVENT_OPENED:
-        mon->commands = &qmp_cap_negotiation_commands;
-        monitor_qmp_caps_reset(mon);
+        WITH_QEMU_LOCK_GUARD(&mon->parent_obj.mon_lock) {
+            mon->commands = &qmp_cap_negotiation_commands;
+            monitor_qmp_caps_reset(mon);
+        }
         data = qmp_greeting(mon);
         qmp_send_response(mon, data);
         qobject_unref(data);
@@ -480,6 +636,28 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
         json_message_parser_init(&mon->parser, handle_qmp_command,
                                  mon, NULL);
         monitor_fdsets_cleanup();
+        switch (mon->close_action) {
+        case MONITOR_QMP_CLOSE_ACTION_NONE:
+            break;
+        case MONITOR_QMP_CLOSE_ACTION_DELETE:
+            mon->delete_pending = true;
+            /*
+             * Do NOT run in the AIO context associated with the
+             * monitor. We need to run in the default AIO context
+             * which is the same context in which 'qmp_object_del'
+             * will execute
+             *
+             * Hold an extra ref in case a separate monitor races
+             * with the BH by processing an explicit 'object-del'.
+             * Will be released by monitor_qmp_self_delete_bh
+             */
+            object_ref(mon);
+            aio_bh_schedule_oneshot(qemu_get_aio_context(),
+                                    monitor_qmp_self_delete_bh, mon);
+            break;
+        default:
+            g_assert_not_reached();
+        }
         break;
     case CHR_EVENT_BREAK:
     case CHR_EVENT_MUX_IN:
@@ -489,12 +667,9 @@ static void monitor_qmp_event(void *opaque, QEMUChrEvent event)
     }
 }
 
-void monitor_data_destroy_qmp(MonitorQMP *mon)
+static bool monitor_qmp_dispatcher_is_servicing(MonitorQMP *mon)
 {
-    json_message_parser_destroy(&mon->parser);
-    qemu_mutex_destroy(&mon->qmp_queue_lock);
-    monitor_qmp_cleanup_req_queue_locked(mon);
-    g_queue_free(mon->qmp_requests);
+    return qmp_dispatcher_current_mon == mon;
 }
 
 static void monitor_qmp_setup_handlers_bh(void *opaque)
@@ -502,53 +677,131 @@ static void monitor_qmp_setup_handlers_bh(void *opaque)
     MonitorQMP *mon = opaque;
     GMainContext *context;
 
-    assert(mon->common.use_io_thread);
+    assert(monitor_requires_iothread(MONITOR(mon)));
     context = iothread_get_g_main_context(mon_iothread);
     assert(context);
-    qemu_chr_fe_set_handlers(&mon->common.chr, monitor_can_read,
+    qemu_chr_fe_set_handlers(&mon->parent_obj.chr, monitor_can_read,
                              monitor_qmp_read, monitor_qmp_event,
-                             NULL, &mon->common, context, true);
-    monitor_list_append(&mon->common);
+                             NULL, &mon->parent_obj, context, true);
+    monitor_list_append(&mon->parent_obj);
+    qatomic_set(&mon->setup_pending, false);
 }
 
-void monitor_init_qmp(Chardev *chr, bool pretty, Error **errp)
+void monitor_new_qmp(const char *id, const char *chardev_id,
+                     bool pretty, Error **errp)
 {
-    MonitorQMP *mon = g_new0(MonitorQMP, 1);
+    g_autofree char *autoid = id ? NULL : monitor_compat_id();
+    object_new_with_props(TYPE_MONITOR_QMP,
+                          object_get_objects_root(),
+                          id ? id : autoid,
+                          errp,
+                          "chardev", chardev_id,
+                          "pretty", pretty ? "yes" : "no",
+                          NULL);
+}
 
-    if (!qemu_chr_fe_init(&mon->common.chr, chr, errp)) {
-        g_free(mon);
+static void monitor_qmp_complete(UserCreatable *uc, Error **errp)
+{
+    MonitorQMP *mon = MONITOR_QMP(uc);
+    UserCreatableClass *ucc_parent =
+        USER_CREATABLE_CLASS(
+            object_class_get_parent(
+                OBJECT_CLASS(MONITOR_QMP_GET_CLASS(mon))));
+    ERRP_GUARD();
+
+    ucc_parent->complete(uc, errp);
+    if (*errp) {
         return;
     }
-    qemu_chr_fe_set_echo(&mon->common.chr, true);
 
-    /* Note: we run QMP monitor in I/O thread when @chr supports that */
-    monitor_data_init(&mon->common, true, false,
-                      qemu_chr_has_feature(chr, QEMU_CHAR_FEATURE_GCONTEXT));
+    qemu_chr_fe_set_echo(&mon->parent_obj.chr, true);
 
-    mon->pretty = pretty;
-
-    qemu_mutex_init(&mon->qmp_queue_lock);
-    mon->qmp_requests = g_queue_new();
-
-    json_message_parser_init(&mon->parser, handle_qmp_command, mon, NULL);
-    if (mon->common.use_io_thread) {
+    if (monitor_requires_iothread(MONITOR(mon))) {
         /*
          * Make sure the old iowatch is gone.  It's possible when
          * e.g. the chardev is in client mode, with wait=on.
          */
-        remove_fd_in_watch(chr);
+        remove_fd_in_watch(mon->parent_obj.chr.chr);
+        /*
+         * Clean up listener IO sources early to prevent racy fd
+         * handling between the main thread and the I/O thread.
+         */
+        remove_listener_fd_in_watch(mon->parent_obj.chr.chr);
         /*
          * We can't call qemu_chr_fe_set_handlers() directly here
          * since chardev might be running in the monitor I/O
          * thread.  Schedule a bottom half.
          */
+        mon->setup_pending = true;
         aio_bh_schedule_oneshot(iothread_get_aio_context(mon_iothread),
                                 monitor_qmp_setup_handlers_bh, mon);
         /* The bottom half will add @mon to @mon_list */
     } else {
-        qemu_chr_fe_set_handlers(&mon->common.chr, monitor_can_read,
+        qemu_chr_fe_set_handlers(&mon->parent_obj.chr, monitor_can_read,
                                  monitor_qmp_read, monitor_qmp_event,
-                                 NULL, &mon->common, NULL, true);
-        monitor_list_append(&mon->common);
+                                 NULL, &mon->parent_obj, NULL, true);
+        monitor_list_append(&mon->parent_obj);
+    }
+}
+
+static void monitor_qmp_iothread_quiesce(void *opaque)
+{
+    /* No-op: synchronization point only */
+}
+
+static bool monitor_qmp_prepare_delete(UserCreatable *uc, Error **errp)
+{
+    Monitor *mon = MONITOR(uc);
+    MonitorQMP *qmp = MONITOR_QMP(uc);
+
+    if (monitor_qmp_dispatcher_is_servicing(qmp)) {
+        error_setg(errp, "Cannot delete the current QMP monitor");
+        return false;
+    }
+
+    if (qatomic_read(&qmp->setup_pending)) {
+        error_setg(errp, "monitor is still initializing");
+        return false;
+    }
+
+    /* Remove from mon_list before chardev disconnect. */
+    WITH_QEMU_LOCK_GUARD(&monitor_lock) {
+        QTAILQ_REMOVE(&mon_list, mon, entry);
+    }
+
+    /* Cancel out_watch while gcontext still points to the right ctx. */
+    WITH_QEMU_LOCK_GUARD(&mon->mon_lock) {
+        monitor_cancel_out_watch(mon);
+    }
+
+    qemu_chr_fe_set_handlers(&mon->chr, NULL, NULL, NULL, NULL,
+                             NULL, NULL, true);
+
+    /* Drain requests from any in-flight monitor_qmp_read(). */
+    monitor_qmp_drain_queue(qmp);
+
+    WITH_QEMU_LOCK_GUARD(&mon->mon_lock) {
+        /* Disable flushes before cancel -- gcontext is already wrong. */
+        qemu_chr_fe_set_open(&mon->chr, false);
+        monitor_cancel_out_watch(mon);
+    }
+
+    /* Synchronize with in-flight iothread callbacks. */
+    if (monitor_requires_iothread(mon)) {
+        aio_wait_bh_oneshot(iothread_get_aio_context(mon_iothread),
+                            monitor_qmp_iothread_quiesce, NULL);
+    }
+
+    /* Catch requests from a racing monitor_qmp_read(). */
+    monitor_qmp_drain_queue(qmp);
+    monitor_fdsets_cleanup();
+
+    return true;
+}
+
+static void monitor_qmp_accept_input(Monitor *mon)
+{
+    WITH_QEMU_LOCK_GUARD(&mon->mon_lock) {
+        qemu_chr_fe_accept_input(&mon->chr);
     }
 }

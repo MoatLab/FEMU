@@ -12,16 +12,18 @@
 
 #include "qemu/osdep.h"
 #include "system/hostmem.h"
-#include "hw/boards.h"
+#include "system/ramblock.h"
+#include "hw/core/boards.h"
 #include "qapi/error.h"
 #include "qapi/qapi-builtin-visit.h"
 #include "qapi/visitor.h"
 #include "qemu/config-file.h"
+#include "qom/compat-properties.h"
 #include "qom/object_interfaces.h"
 #include "qemu/mmap-alloc.h"
 #include "qemu/madvise.h"
 #include "qemu/cutils.h"
-#include "hw/qdev-core.h"
+#include "hw/core/qdev.h"
 
 #ifdef CONFIG_NUMA
 #include <numaif.h>
@@ -432,9 +434,12 @@ host_memory_backend_memory_complete(UserCreatable *uc, Error **errp)
 }
 
 static bool
-host_memory_backend_can_be_deleted(UserCreatable *uc)
+host_memory_backend_prepare_delete(UserCreatable *uc, Error **errp)
 {
     if (host_memory_backend_is_mapped(MEMORY_BACKEND(uc))) {
+        error_setg(errp,
+                   "Cannot delete host memory backend '%s' which is mapped",
+                   object_get_canonical_path_component(OBJECT(uc)));
         return false;
     } else {
         return true;
@@ -506,7 +511,7 @@ host_memory_backend_class_init(ObjectClass *oc, const void *data)
     UserCreatableClass *ucc = USER_CREATABLE_CLASS(oc);
 
     ucc->complete = host_memory_backend_memory_complete;
-    ucc->can_be_deleted = host_memory_backend_can_be_deleted;
+    ucc->prepare_delete = host_memory_backend_prepare_delete;
 
     object_class_property_add_bool(oc, "merge",
         host_memory_backend_get_merge,

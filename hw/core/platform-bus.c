@@ -20,8 +20,8 @@
  */
 
 #include "qemu/osdep.h"
-#include "hw/platform-bus.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/platform-bus.h"
+#include "hw/core/qdev-properties.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/module.h"
@@ -59,8 +59,7 @@ hwaddr platform_bus_get_mmio_addr(PlatformBusDevice *pbus, SysBusDevice *sbdev,
     Object *pbus_mr_obj = OBJECT(pbus_mr);
     Object *parent_mr;
 
-    if (!memory_region_is_mapped(sbdev_mr)) {
-        /* Region is not mapped? */
+    if (!sbdev_mr || !memory_region_is_mapped(sbdev_mr)) {
         return -1;
     }
 

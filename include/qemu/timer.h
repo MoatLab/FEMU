@@ -6,6 +6,7 @@
 #include "qemu/host-utils.h"
 
 #define NANOSECONDS_PER_SECOND 1000000000LL
+#define MICROSECONDS_PER_SECOND 1000000LL
 
 /* timers */
 
@@ -699,7 +700,7 @@ void timer_mod_anticipate(QEMUTimer *ts, int64_t expire_time);
  *
  * Returns: true if the timer is pending
  */
-bool timer_pending(QEMUTimer *ts);
+bool timer_pending(const QEMUTimer *ts);
 
 /**
  * timer_expired:
@@ -710,7 +711,7 @@ bool timer_pending(QEMUTimer *ts);
  *
  * Returns: true if the timer has expired
  */
-bool timer_expired(QEMUTimer *timer_head, int64_t current_time);
+bool timer_expired(const QEMUTimer *timer_head, int64_t current_time);
 
 /**
  * timer_expire_time_ns:
@@ -720,7 +721,7 @@ bool timer_expired(QEMUTimer *timer_head, int64_t current_time);
  *
  * Returns: the expiry time in nanoseconds
  */
-uint64_t timer_expire_time_ns(QEMUTimer *ts);
+uint64_t timer_expire_time_ns(const QEMUTimer *ts);
 
 /**
  * timer_get:
@@ -786,11 +787,12 @@ static inline int64_t qemu_soonest_timeout(int64_t timeout1, int64_t timeout2)
 }
 
 /**
- * initclocks:
+ * qemu_init_clocks:
+ * @notify_cb: optional call-back for timer expiry
  *
  * Initialise the clock & timer infrastructure
  */
-void init_clocks(QEMUTimerListNotifyCB *notify_cb);
+void qemu_init_clocks(QEMUTimerListNotifyCB *notify_cb);
 
 static inline int64_t get_max_clock_jump(void)
 {
@@ -850,12 +852,11 @@ static inline int64_t get_clock(void)
 /*******************************************/
 /* host CPU ticks (if available) */
 
-#if defined(_ARCH_PPC)
+#if defined(_ARCH_PPC64)
 
 static inline int64_t cpu_get_host_ticks(void)
 {
     int64_t retval;
-#ifdef _ARCH_PPC64
     /* This reads timebase in one 64bit go and includes Cell workaround from:
        http://ozlabs.org/pipermail/linuxppc-dev/2006-October/027052.html
     */
@@ -863,26 +864,7 @@ static inline int64_t cpu_get_host_ticks(void)
                           "cmpwi   %0,0\n\t"
                           "beq-    $-8"
                           : "=r" (retval));
-#else
-    /* http://ozlabs.org/pipermail/linuxppc-dev/1999-October/003889.html */
-    unsigned long junk;
-    __asm__ __volatile__ ("mfspr   %1,269\n\t"  /* mftbu */
-                          "mfspr   %L0,268\n\t" /* mftb */
-                          "mfspr   %0,269\n\t"  /* mftbu */
-                          "cmpw    %0,%1\n\t"
-                          "bne     $-16"
-                          : "=r" (retval), "=r" (junk));
-#endif
     return retval;
-}
-
-#elif defined(__i386__)
-
-static inline int64_t cpu_get_host_ticks(void)
-{
-    int64_t val;
-    asm volatile ("rdtsc" : "=A" (val));
-    return val;
 }
 
 #elif defined(__x86_64__)
@@ -907,7 +889,7 @@ static inline int64_t cpu_get_host_ticks(void)
     return val;
 }
 
-#elif defined(__s390__)
+#elif defined(__s390x__)
 
 static inline int64_t cpu_get_host_ticks(void)
 {
@@ -938,36 +920,6 @@ static inline int64_t cpu_get_host_ticks (void)
                  : "=r"(rval.i32.high), "=r"(rval.i32.low) : : "g1");
     return rval.i64;
 #endif
-}
-
-#elif defined(__mips__) && \
-    ((defined(__mips_isa_rev) && __mips_isa_rev >= 2) || defined(__linux__))
-/*
- * binutils wants to use rdhwr only on mips32r2
- * but as linux kernel emulate it, it's fine
- * to use it.
- *
- */
-#define MIPS_RDHWR(rd, value) {                         \
-        __asm__ __volatile__ (".set   push\n\t"         \
-                              ".set mips32r2\n\t"       \
-                              "rdhwr  %0, "rd"\n\t"     \
-                              ".set   pop"              \
-                              : "=r" (value));          \
-    }
-
-static inline int64_t cpu_get_host_ticks(void)
-{
-    /* On kernels >= 2.6.25 rdhwr <reg>, $2 and $3 are emulated */
-    uint32_t count;
-    static uint32_t cyc_per_count = 0;
-
-    if (!cyc_per_count) {
-        MIPS_RDHWR("$3", cyc_per_count);
-    }
-
-    MIPS_RDHWR("$2", count);
-    return (int64_t)(count * cyc_per_count);
 }
 
 #elif defined(__alpha__)

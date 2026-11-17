@@ -35,6 +35,7 @@
 #include "system/tcg.h"
 #include "cpu-qom.h"
 #include "cpu.h"
+#include "target/riscv/tcg/csr.h"
 
 static void riscv_cpu_add_definition(gpointer data, gpointer user_data)
 {
@@ -90,27 +91,14 @@ static void riscv_obj_add_qdict_prop(Object *obj, QDict *qdict_out,
     }
 }
 
-static void riscv_obj_add_multiext_props(Object *obj, QDict *qdict_out,
-                                         const RISCVCPUMultiExtConfig *arr)
+static void riscv_obj_add_multiext_props(Object *obj, QDict *qdict_out)
 {
-    for (int i = 0; arr[i].name != NULL; i++) {
-        riscv_obj_add_qdict_prop(obj, qdict_out, arr[i].name);
-    }
-}
+    const RISCVIsaExtData *edata;
 
-static void riscv_obj_add_named_feats_qdict(Object *obj, QDict *qdict_out)
-{
-    const RISCVCPUMultiExtConfig *named_cfg;
-    RISCVCPU *cpu = RISCV_CPU(obj);
-    QObject *value;
-    bool flag_val;
-
-    for (int i = 0; riscv_cpu_named_features[i].name != NULL; i++) {
-        named_cfg = &riscv_cpu_named_features[i];
-        flag_val = isa_ext_is_enabled(cpu, named_cfg->offset);
-        value = QOBJECT(qbool_from_bool(flag_val));
-
-        qdict_put_obj(qdict_out, named_cfg->name, value);
+    for (edata = isa_edata_arr; edata && edata->name; edata++) {
+        if (edata->prop_name) {
+            riscv_obj_add_qdict_prop(obj, qdict_out, edata->prop_name);
+        }
     }
 }
 
@@ -220,10 +208,7 @@ CpuModelExpansionInfo *qmp_query_cpu_model_expansion(CpuModelExpansionType type,
 
     qdict_out = qdict_new();
 
-    riscv_obj_add_multiext_props(obj, qdict_out, riscv_cpu_extensions);
-    riscv_obj_add_multiext_props(obj, qdict_out, riscv_cpu_experimental_exts);
-    riscv_obj_add_multiext_props(obj, qdict_out, riscv_cpu_vendor_exts);
-    riscv_obj_add_named_feats_qdict(obj, qdict_out);
+    riscv_obj_add_multiext_props(obj, qdict_out);
     riscv_obj_add_profiles_qdict(obj, qdict_out);
 
     /* Add our CPU boolean options too */

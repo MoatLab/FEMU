@@ -16,7 +16,7 @@
 #include "system/kvm.h"
 #include "hw/block/block.h"
 
-#include "hw/registerfields.h"
+#include "hw/core/registerfields.h"
 
 #include "backend/dram.h"
 #include "inc/rte_ring.h"

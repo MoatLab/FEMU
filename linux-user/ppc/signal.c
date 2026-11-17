@@ -210,6 +210,18 @@ QEMU_BUILD_BUG_ON(offsetof(struct target_rt_sigframe, uc.tuc_mcontext)
 
 #endif
 
+#ifdef TARGET_PPC64
+#define RT_SIGFRAME_ADJUST 0
+#else
+/*
+ * For 32-bit rt sigframes we have an extra 16 bytes of gap
+ * on top of __SIGNAL_FRAMESIZE; this is to get the siginfo
+ * and ucontext in the same positions as in older kernels.
+ * See Linux's arch/powerpc/kernel/signal_32.c.
+ */
+#define RT_SIGFRAME_ADJUST 16
+#endif
+
 #if defined(TARGET_PPC64)
 
 struct target_func_ptr {
@@ -408,7 +420,7 @@ static void restore_user_regs(CPUPPCState *env,
             __get_user(*fpr, &frame->mc_fregs[i]);
         }
         __get_user(fpscr, &frame->mc_fregs[32]);
-        env->fpscr = (uint32_t) fpscr;
+        ppc_store_fpscr(env, (uint32_t) fpscr);
     }
 
 #if !defined(TARGET_PPC64)
@@ -525,7 +537,7 @@ void setup_rt_frame(int sig, struct target_sigaction *ka,
     env->fpscr = 0;
 
     /* Create a stack frame for the caller of the handler.  */
-    newsp = rt_sf_addr - (SIGNAL_FRAMESIZE + 16);
+    newsp = rt_sf_addr - (SIGNAL_FRAMESIZE + RT_SIGFRAME_ADJUST);
     err |= put_user(env->gpr[1], newsp, target_ulong);
 
     if (err)
@@ -641,7 +653,7 @@ long do_rt_sigreturn(CPUPPCState *env)
     struct target_rt_sigframe *rt_sf = NULL;
     target_ulong rt_sf_addr;
 
-    rt_sf_addr = env->gpr[1] + SIGNAL_FRAMESIZE + 16;
+    rt_sf_addr = env->gpr[1] + SIGNAL_FRAMESIZE + RT_SIGFRAME_ADJUST;
     if (!lock_user_struct(VERIFY_READ, rt_sf, rt_sf_addr, 1))
         goto sigsegv;
 

@@ -11,8 +11,9 @@
 #ifndef HW_INPUT_STELLARIS_GAMEPAD_H
 #define HW_INPUT_STELLARIS_GAMEPAD_H
 
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "qom/object.h"
+#include "ui/input.h"
 
 /*
  * QEMU interface:
@@ -28,6 +29,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(StellarisGamepad, STELLARIS_GAMEPAD)
 struct StellarisGamepad {
     SysBusDevice parent_obj;
 
+    QemuInputHandlerState *hs;
     uint32_t num_buttons;
     qemu_irq *irqs;
     uint32_t *keycodes;

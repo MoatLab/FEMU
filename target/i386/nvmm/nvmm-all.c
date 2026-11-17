@@ -15,6 +15,8 @@
 #include "accel/accel-ops.h"
 #include "system/nvmm.h"
 #include "system/cpus.h"
+#include "system/memory.h"
+#include "system/ramlist.h"
 #include "system/runstate.h"
 #include "qemu/main-loop.h"
 #include "qemu/error-report.h"
@@ -413,22 +415,22 @@ nvmm_vcpu_pre_run(CPUState *cpu)
      * Force the VCPU out of its inner loop to process any INIT requests
      * or commit pending TPR access.
      */
-    if (cpu->interrupt_request & (CPU_INTERRUPT_INIT | CPU_INTERRUPT_TPR)) {
-        cpu->exit_request = 1;
+    if (cpu_test_interrupt(cpu, CPU_INTERRUPT_INIT | CPU_INTERRUPT_TPR)) {
+        qatomic_set(&cpu->exit_request, true);
     }
 
-    if (!has_event && (cpu->interrupt_request & CPU_INTERRUPT_NMI)) {
+    if (!has_event && cpu_test_interrupt(cpu, CPU_INTERRUPT_NMI)) {
         if (nvmm_can_take_nmi(cpu)) {
-            cpu->interrupt_request &= ~CPU_INTERRUPT_NMI;
+            cpu_reset_interrupt(cpu, CPU_INTERRUPT_NMI);
             event->type = NVMM_VCPU_EVENT_INTR;
             event->vector = 2;
             has_event = true;
         }
     }
 
-    if (!has_event && (cpu->interrupt_request & CPU_INTERRUPT_HARD)) {
+    if (!has_event && cpu_test_interrupt(cpu, CPU_INTERRUPT_HARD)) {
         if (nvmm_can_take_int(cpu)) {
-            cpu->interrupt_request &= ~CPU_INTERRUPT_HARD;
+            cpu_reset_interrupt(cpu, CPU_INTERRUPT_HARD);
             event->type = NVMM_VCPU_EVENT_INTR;
             event->vector = cpu_get_pic_interrupt(env);
             has_event = true;
@@ -436,8 +438,8 @@ nvmm_vcpu_pre_run(CPUState *cpu)
     }
 
     /* Don't want SMIs. */
-    if (cpu->interrupt_request & CPU_INTERRUPT_SMI) {
-        cpu->interrupt_request &= ~CPU_INTERRUPT_SMI;
+    if (cpu_test_interrupt(cpu, CPU_INTERRUPT_SMI)) {
+        cpu_reset_interrupt(cpu, CPU_INTERRUPT_SMI);
     }
 
     if (sync_tpr) {
@@ -516,7 +518,9 @@ nvmm_io_callback(struct nvmm_io *io)
 static void
 nvmm_mem_callback(struct nvmm_mem *mem)
 {
-    cpu_physical_memory_rw(mem->gpa, mem->data, mem->size, mem->write);
+    /* TODO: Get CPUState via mem->vcpu? */
+    address_space_rw(&address_space_memory, mem->gpa, MEMTXATTRS_UNSPECIFIED,
+                     mem->data, mem->size, mem->write);
 
     /* Needed, otherwise infinite loop. */
     current_cpu->vcpu_dirty = false;
@@ -651,9 +655,9 @@ nvmm_handle_halted(struct nvmm_machine *mach, CPUState *cpu,
 
     bql_lock();
 
-    if (!((cpu->interrupt_request & CPU_INTERRUPT_HARD) &&
+    if (!(cpu_test_interrupt(cpu, CPU_INTERRUPT_HARD) &&
           (cpu_env(cpu)->eflags & IF_MASK)) &&
-        !(cpu->interrupt_request & CPU_INTERRUPT_NMI)) {
+        !cpu_test_interrupt(cpu, CPU_INTERRUPT_NMI)) {
         cpu->exception_index = EXCP_HLT;
         cpu->halted = true;
         ret = 1;
@@ -691,26 +695,27 @@ nvmm_vcpu_loop(CPUState *cpu)
      * Some asynchronous events must be handled outside of the inner
      * VCPU loop. They are handled here.
      */
-    if (cpu->interrupt_request & CPU_INTERRUPT_INIT) {
+    if (cpu_test_interrupt(cpu, CPU_INTERRUPT_INIT)) {
         nvmm_cpu_synchronize_state(cpu);
         do_cpu_init(x86_cpu);
         /* set int/nmi windows back to the reset state */
     }
-    if (cpu->interrupt_request & CPU_INTERRUPT_POLL) {
-        cpu->interrupt_request &= ~CPU_INTERRUPT_POLL;
+    if (cpu_test_interrupt(cpu, CPU_INTERRUPT_POLL)) {
+        cpu_reset_interrupt(cpu, CPU_INTERRUPT_POLL);
         apic_poll_irq(x86_cpu->apic_state);
     }
-    if (((cpu->interrupt_request & CPU_INTERRUPT_HARD) &&
+    if ((cpu_test_interrupt(cpu, CPU_INTERRUPT_HARD) &&
          (env->eflags & IF_MASK)) ||
-        (cpu->interrupt_request & CPU_INTERRUPT_NMI)) {
+        cpu_test_interrupt(cpu, CPU_INTERRUPT_NMI)) {
         cpu->halted = false;
     }
-    if (cpu->interrupt_request & CPU_INTERRUPT_SIPI) {
+    if (cpu_test_interrupt(cpu, CPU_INTERRUPT_SIPI)) {
+        cpu_reset_interrupt(cpu, CPU_INTERRUPT_SIPI);
         nvmm_cpu_synchronize_state(cpu);
         do_cpu_sipi(x86_cpu);
     }
-    if (cpu->interrupt_request & CPU_INTERRUPT_TPR) {
-        cpu->interrupt_request &= ~CPU_INTERRUPT_TPR;
+    if (cpu_test_interrupt(cpu, CPU_INTERRUPT_TPR)) {
+        cpu_reset_interrupt(cpu, CPU_INTERRUPT_TPR);
         nvmm_cpu_synchronize_state(cpu);
         apic_handle_tpr_access_report(x86_cpu->apic_state, env->eip,
             env->tpr_access_type);
@@ -743,7 +748,8 @@ nvmm_vcpu_loop(CPUState *cpu)
 
         nvmm_vcpu_pre_run(cpu);
 
-        if (qatomic_read(&cpu->exit_request)) {
+        /* Corresponding store-release is in cpu_exit. */
+        if (qatomic_load_acquire(&cpu->exit_request)) {
 #if NVMM_USER_VERSION >= 2
             nvmm_vcpu_stop(vcpu);
 #else
@@ -751,8 +757,6 @@ nvmm_vcpu_loop(CPUState *cpu)
 #endif
         }
 
-        /* Read exit_request before the kernel reads the immediate exit flag */
-        smp_rmb();
         ret = nvmm_vcpu_run(mach, vcpu);
         if (ret == -1) {
             error_report("NVMM: Failed to exec a virtual processor,"
@@ -817,8 +821,6 @@ nvmm_vcpu_loop(CPUState *cpu)
 
     cpu_exec_end(cpu);
     bql_lock();
-
-    qatomic_set(&cpu->exit_request, false);
 
     return ret < 0;
 }
@@ -984,7 +986,7 @@ nvmm_init_vcpu(CPUState *cpu)
         }
     }
 
-    qcpu->vcpu_dirty = true;
+    cpu->vcpu_dirty = true;
     cpu->accel = qcpu;
 
     return 0;

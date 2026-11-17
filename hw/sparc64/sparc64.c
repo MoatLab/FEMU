@@ -25,8 +25,8 @@
 
 #include "qemu/osdep.h"
 #include "qapi/error.h"
-#include "cpu.h"
-#include "hw/boards.h"
+#include "target/sparc/cpu.h"
+#include "hw/core/boards.h"
 #include "hw/sparc/sparc64.h"
 #include "qemu/timer.h"
 #include "system/reset.h"

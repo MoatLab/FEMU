@@ -10,6 +10,7 @@
 
 #include "chardev/char-fe.h"
 #include "hw/virtio/virtio.h"
+#include "qapi/qapi-types-virtio.h"
 
 enum VhostUserProtocolFeature {
     VHOST_USER_PROTOCOL_F_MQ = 0,
@@ -32,6 +33,9 @@ enum VhostUserProtocolFeature {
     /* Feature 17 reserved for VHOST_USER_PROTOCOL_F_XEN_MMAP. */
     VHOST_USER_PROTOCOL_F_SHARED_OBJECT = 18,
     VHOST_USER_PROTOCOL_F_DEVICE_STATE = 19,
+    VHOST_USER_PROTOCOL_F_GET_VRING_BASE_INFLIGHT = 20,
+    VHOST_USER_PROTOCOL_F_GPA_ADDRESSES = 21,
+    VHOST_USER_PROTOCOL_F_SHMEM = 22,
     VHOST_USER_PROTOCOL_F_MAX
 };
 
@@ -64,10 +68,11 @@ typedef struct VhostUserHostNotifier {
  * @memory_slots:
  */
 typedef struct VhostUserState {
-    CharBackend *chr;
+    CharFrontend *chr;
     GPtrArray *notifiers;
     int memory_slots;
     bool supports_config;
+    bool supports_inflight_migration;
 } VhostUserState;
 
 /**
@@ -82,7 +87,7 @@ typedef struct VhostUserState {
  *
  * Return: true on success, false on error while setting errp.
  */
-bool vhost_user_init(VhostUserState *user, CharBackend *chr, Error **errp);
+bool vhost_user_init(VhostUserState *user, CharFrontend *chr, Error **errp);
 
 /**
  * vhost_user_cleanup() - cleanup state
@@ -96,7 +101,7 @@ void vhost_user_cleanup(VhostUserState *user);
 /**
  * vhost_user_async_close() - cleanup vhost-user post connection drop
  * @d: DeviceState for the associated device (passed to callback)
- * @chardev: the CharBackend associated with the connection
+ * @chardev: the CharFrontend associated with the connection
  * @vhost: the common vhost device
  * @cb: the user callback function to complete the clean-up
  *
@@ -108,7 +113,10 @@ void vhost_user_cleanup(VhostUserState *user);
 typedef void (*vu_async_close_fn)(DeviceState *cb);
 
 void vhost_user_async_close(DeviceState *d,
-                            CharBackend *chardev, struct vhost_dev *vhost,
+                            CharFrontend *chardev, struct vhost_dev *vhost,
                             vu_async_close_fn cb);
+
+void vhost_user_qmp_status(struct vhost_dev *dev, VirtioStatus *status);
+bool vhost_user_has_protocol_feature(struct vhost_dev *dev, uint64_t feature);
 
 #endif

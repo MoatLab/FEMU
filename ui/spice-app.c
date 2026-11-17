@@ -49,8 +49,7 @@ struct VCChardev {
 
 struct VCChardevClass {
     ChardevClass parent;
-    void (*parent_open)(Chardev *chr, ChardevBackend *backend,
-                        bool *be_opened, Error **errp);
+    bool (*parent_init)(Chardev *chr, ChardevBackend *backend, Error **errp);
 };
 
 #define TYPE_CHARDEV_VC "chardev-vc"
@@ -67,14 +66,12 @@ chr_spice_backend_new(void)
     return be;
 }
 
-static void vc_chr_open(Chardev *chr,
-                        ChardevBackend *backend,
-                        bool *be_opened,
-                        Error **errp)
+static bool vc_chr_open(Chardev *chr, ChardevBackend *backend, Error **errp)
 {
     VCChardevClass *vc = CHARDEV_VC_GET_CLASS(chr);
     ChardevBackend *be;
     const char *fqdn = NULL;
+    bool ok;
 
     if (strstart(chr->label, "serial", NULL)) {
         fqdn = "org.qemu.console.serial.0";
@@ -87,8 +84,9 @@ static void vc_chr_open(Chardev *chr,
     be = chr_spice_backend_new();
     be->u.spiceport.data->fqdn = fqdn ?
         g_strdup(fqdn) : g_strdup_printf("org.qemu.console.%s", chr->label);
-    vc->parent_open(chr, be, be_opened, errp);
+    ok = vc->parent_init(chr, be, errp);
     qapi_free_ChardevBackend(be);
+    return ok;
 }
 
 static void vc_chr_set_echo(Chardev *chr, bool echo)
@@ -106,10 +104,10 @@ static void char_vc_class_init(ObjectClass *oc, const void *data)
     VCChardevClass *vc = CHARDEV_VC_CLASS(oc);
     ChardevClass *cc = CHARDEV_CLASS(oc);
 
-    vc->parent_open = cc->open;
+    vc->parent_init = cc->chr_open;
 
-    cc->parse = vc_chr_parse;
-    cc->open = vc_chr_open;
+    cc->chr_parse = vc_chr_parse;
+    cc->chr_open = vc_chr_open;
     cc->chr_set_echo = vc_chr_set_echo;
 }
 
@@ -121,16 +119,17 @@ static const TypeInfo char_vc_type_info = {
     .class_size = sizeof(VCChardevClass),
 };
 
-static void spice_app_atexit(void)
+static void spice_app_cleanup(void)
 {
     if (sock_path) {
         unlink(sock_path);
+        g_clear_pointer(&sock_path, g_free);
     }
     if (tmp_dir) {
         rmdir(tmp_dir);
+        tmp_dir = NULL;
     }
-    g_free(sock_path);
-    g_free(app_dir);
+    g_clear_pointer(&app_dir, g_free);
 }
 
 static void spice_app_display_early_init(DisplayOptions *opts)
@@ -148,12 +147,10 @@ static void spice_app_display_early_init(DisplayOptions *opts)
         exit(1);
     }
 
-    atexit(spice_app_atexit);
-
     if (qemu_name) {
         app_dir = g_build_filename(g_get_user_runtime_dir(),
                                    "qemu", qemu_name, NULL);
-        if (g_mkdir_with_parents(app_dir, S_IRWXU) < -1) {
+        if (g_mkdir_with_parents(app_dir, S_IRWXU) < 0) {
             error_report("Failed to create directory %s: %s",
                          app_dir, strerror(errno));
             exit(1);
@@ -220,6 +217,7 @@ static QemuDisplay qemu_display_spice_app = {
     .type       = DISPLAY_TYPE_SPICE_APP,
     .early_init = spice_app_display_early_init,
     .init       = spice_app_display_init,
+    .cleanup    = spice_app_cleanup,
     .vc         = "vc",
 };
 

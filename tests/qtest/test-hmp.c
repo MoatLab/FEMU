@@ -135,7 +135,6 @@ static void test_machine(gconstpointer data)
 
     qtest_quit(qts);
     g_free(args);
-    g_free((void *)data);
 }
 
 static void add_machine_test_case(const char *mname)
@@ -143,13 +142,14 @@ static void add_machine_test_case(const char *mname)
     char *path;
 
     path = g_strdup_printf("hmp/%s", mname);
-    qtest_add_data_func(path, g_strdup(mname), test_machine);
+    qtest_add_data_func(path, mname, test_machine);
     g_free(path);
 }
 
 int main(int argc, char **argv)
 {
     char *v_env = getenv("V");
+    g_autofree char *machine_opts = g_strdup("none -m 2");
 
     if (v_env && atoi(v_env) >= 2) {
         verbose = true;
@@ -160,7 +160,7 @@ int main(int argc, char **argv)
     qtest_cb_for_every_machine(add_machine_test_case, g_test_quick());
 
     /* as none machine has no memory by default, add a test case with memory */
-    qtest_add_data_func("hmp/none+2MB", g_strdup("none -m 2"), test_machine);
+    qtest_add_data_func("hmp/none+2MB", machine_opts, test_machine);
 
     return g_test_run();
 }

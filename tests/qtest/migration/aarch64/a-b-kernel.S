@@ -11,7 +11,7 @@
 # pc-relative address. Also the branch instructions should use relative
 # addresses only.
 
-#include "../migration-test.h"
+#include "../bootfile.h"
 
 .section .text
 

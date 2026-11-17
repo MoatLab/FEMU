@@ -32,10 +32,10 @@
 #include "hw/usb/hcd-ohci.h"
 #include "hw/char/serial-mm.h"
 #include "ui/console.h"
-#include "hw/sysbus.h"
+#include "hw/core/sysbus.h"
 #include "migration/vmstate.h"
 #include "hw/pci/pci_device.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/i2c/i2c.h"
 #include "hw/display/i2c-ddc.h"
 #include "qemu/range.h"
@@ -571,6 +571,25 @@ static uint32_t get_local_mem_size_index(uint32_t size)
     return index;
 }
 
+static void set_new_local_mem_size_index(SM501State *s, uint32_t idx)
+{
+    /*
+     * Update local_mem_size_index on guest write. We don't allow this
+     * to be set to larger than the actual RAM size. (The guest will
+     * still read back the SYSTEM_CONTROL.Size bits that it wrote.)
+     */
+    if (idx < ARRAY_SIZE(sm501_mem_local_size) &&
+        sm501_mem_local_size[idx] <= memory_region_size(&s->local_mem_region)) {
+        s->local_mem_size_index = idx;
+        return;
+    }
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "sm501: Guest set DRAM_CONTROL.Size to 0x%x but "
+                  "local memory is not that large\n",
+                  idx);
+    /* Don't change the effective size, leave it as whatever it was */
+}
+
 static ram_addr_t get_fb_addr(SM501State *s, int crt)
 {
     return (crt ? s->dc_crt_fb_addr : s->dc_panel_fb_addr) & 0x3FFFFF0;
@@ -682,6 +701,28 @@ static inline void hwc_invalidate(SM501State *s, int crt)
                             get_fb_addr(s, crt) + start, end - start);
 }
 
+static bool sm501_rect_outside_vram(SM501State *s, uint32_t base,
+                                    uint32_t x, uint32_t y,
+                                    uint32_t width, uint32_t height,
+                                    uint32_t pitch, uint32_t bypp)
+{
+    /*
+     * Return true if the 2D area specified by the arguments is
+     * partially or completely outside the VRAM (a guest error)
+     *
+     * Limits on the input sizes mean we can't overflow as long as
+     * we do all the arithmetic at 64 bits.
+     */
+    uint64_t rect_size, last_addr;
+
+    assert(x <= UINT16_MAX && y <= UINT16_MAX && height <= UINT16_MAX &&
+           pitch <= UINT16_MAX && bypp <= 8);
+    rect_size = (((uint64_t)y + height) * pitch + x + width) * bypp;
+    last_addr = base + rect_size;
+
+    return last_addr >= get_local_mem_size(s);
+}
+
 static void sm501_2d_operation(SM501State *s)
 {
     int cmd = (s->twoD_control >> 16) & 0x1F;
@@ -723,13 +764,16 @@ static void sm501_2d_operation(SM501State *s)
     }
 
     if (rtl) {
+        if (dst_x < (width - 1) || dst_y < (height - 1)) {
+            qemu_log_mask(LOG_GUEST_ERROR, "sm501: RTL op out of bounds\n");
+            return;
+        }
         dst_x -= width - 1;
         dst_y -= height - 1;
     }
 
-    if (dst_base >= get_local_mem_size(s) ||
-        dst_base + (dst_x + width + (dst_y + height) * dst_pitch) * bypp >=
-        get_local_mem_size(s)) {
+    if (sm501_rect_outside_vram(s, dst_base, dst_x, dst_y, width, height,
+                                dst_pitch, bypp)) {
         qemu_log_mask(LOG_GUEST_ERROR, "sm501: 2D op dest is outside vram.\n");
         return;
     }
@@ -748,13 +792,16 @@ static void sm501_2d_operation(SM501State *s)
         }
 
         if (rtl) {
+            if (src_x < (width - 1) || src_y < (height - 1)) {
+                qemu_log_mask(LOG_GUEST_ERROR, "sm501: RTL op out of bounds\n");
+                return;
+            }
             src_x -= width - 1;
             src_y -= height - 1;
         }
 
-        if (src_base >= get_local_mem_size(s) ||
-            src_base + (src_x + width + (src_y + height) * src_pitch) * bypp >=
-            get_local_mem_size(s)) {
+        if (sm501_rect_outside_vram(s, src_base, src_x, src_y, width, height,
+                                    src_pitch, bypp)) {
             qemu_log_mask(LOG_GUEST_ERROR,
                           "sm501: 2D op src is outside vram.\n");
             return;
@@ -962,7 +1009,7 @@ static uint64_t sm501_system_config_read(void *opaque, hwaddr addr,
         ret = 0x050100A0;
         break;
     case SM501_DRAM_CONTROL:
-        ret = (s->dram_control & 0x07F107C0) | s->local_mem_size_index << 13;
+        ret = (s->dram_control & 0x07F1E7C0);
         break;
     case SM501_ARBTRTN_CONTROL:
         ret = s->arbitration_control;
@@ -1021,8 +1068,7 @@ static void sm501_system_config_write(void *opaque, hwaddr addr,
         s->gpio_63_32_control = value & 0xFF80FFFF;
         break;
     case SM501_DRAM_CONTROL:
-        s->local_mem_size_index = (value >> 13) & 0x7;
-        /* TODO : check validity of size change */
+        set_new_local_mem_size_index(s, (value >> 13) & 0x7);
         s->dram_control &= 0x80000000;
         s->dram_control |= value & 0x7FFFFFC3;
         break;
@@ -1716,7 +1762,7 @@ static void draw_hwc_line_32(uint8_t *d, const uint8_t *s, int width,
     }
 }
 
-static void sm501_update_display(void *opaque)
+static bool sm501_update_display(void *opaque)
 {
     SM501State *s = opaque;
     DisplaySurface *surface = qemu_console_surface(s->con);
@@ -1740,7 +1786,7 @@ static void sm501_update_display(void *opaque)
 
     if (!((crt ? s->dc_crt_control : s->dc_panel_control)
           & SM501_DC_CRT_CONTROL_ENABLE)) {
-        return;
+        return true;
     }
 
     palette = (uint32_t *)(crt ? &s->dc_palette[SM501_DC_CRT_PALETTE -
@@ -1761,7 +1807,7 @@ static void sm501_update_display(void *opaque)
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "sm501: update display"
                       "invalid control register value.\n");
-        return;
+        return true;
     }
 
     /* set up to draw hardware cursor */
@@ -1822,7 +1868,7 @@ static void sm501_update_display(void *opaque)
         } else {
             if (y_start >= 0) {
                 /* flush to display */
-                dpy_gfx_update(s->con, 0, y_start, width, y - y_start);
+                qemu_console_update(s->con, 0, y_start, width, y - y_start);
                 y_start = -1;
             }
         }
@@ -1831,8 +1877,10 @@ static void sm501_update_display(void *opaque)
 
     /* complete flush to display */
     if (y_start >= 0) {
-        dpy_gfx_update(s->con, 0, y_start, width, y - y_start);
+        qemu_console_update(s->con, 0, y_start, width, y - y_start);
     }
+
+    return true;
 }
 
 static const GraphicHwOps sm501_ops = {
@@ -1934,7 +1982,7 @@ static void sm501_init(SM501State *s, DeviceState *dev,
                                 &s->twoD_engine_region);
 
     /* create qemu graphic console */
-    s->con = graphic_console_init(dev, 0, &sm501_ops, s);
+    s->con = qemu_graphic_console_create(dev, 0, &sm501_ops, s);
 }
 
 static const VMStateDescription vmstate_sm501_state = {

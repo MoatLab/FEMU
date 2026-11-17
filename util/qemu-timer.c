@@ -30,6 +30,7 @@
 #include "exec/icount.h"
 #include "system/replay.h"
 #include "system/cpus.h"
+#include "hw/core/cpu.h"
 
 #ifdef CONFIG_POSIX
 #include <pthread.h>
@@ -89,7 +90,7 @@ static inline QEMUClock *qemu_clock_ptr(QEMUClockType type)
     return &qemu_clocks[type];
 }
 
-static bool timer_expired_ns(QEMUTimer *timer_head, int64_t current_time)
+static bool timer_expired_ns(const QEMUTimer *timer_head, int64_t current_time)
 {
     return timer_head && (timer_head->expire_time <= current_time);
 }
@@ -387,10 +388,39 @@ static void timer_del_locked(QEMUTimerList *timer_list, QEMUTimer *ts)
     }
 }
 
+static void timer_fire(CPUState *cpu, run_on_cpu_data data)
+{
+    QEMUTimer *t = data.host_ptr;
+
+    t->cb(t->opaque);
+}
+
 static bool timer_mod_ns_locked(QEMUTimerList *timer_list,
                                 QEMUTimer *ts, int64_t expire_time)
 {
     QEMUTimer **pt, *t;
+
+    /*
+     * Normally during record-replay virtual clock timers and CPU work are
+     * deterministically ordered. This is because the virtual clock can be
+     * advanced only by instructions running on a CPU.
+     *
+     * A notable exception are timers that are armed already expired. Their
+     * expiration is not constrained by instruction execution, and, therefore,
+     * their ordering relative to CPU work is affected by what the
+     * record-replay thread is doing when they are armed. This introduces
+     * non-determinism.
+     *
+     * Convert such timers to CPU work in order to avoid it.
+     */
+    if (replay_mode != REPLAY_MODE_NONE &&
+        timer_list->clock->type == QEMU_CLOCK_VIRTUAL &&
+        !(ts->attributes & QEMU_TIMER_ATTR_EXTERNAL) &&
+        expire_time <= qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL)) {
+        async_run_on_cpu(first_cpu, timer_fire,
+                         RUN_ON_CPU_HOST_PTR(ts));
+        return false;
+    }
 
     /* add the timer in the sorted list */
     pt = &timer_list->active_timers;
@@ -475,12 +505,12 @@ void timer_mod_anticipate(QEMUTimer *ts, int64_t expire_time)
     timer_mod_anticipate_ns(ts, expire_time * ts->scale);
 }
 
-bool timer_pending(QEMUTimer *ts)
+bool timer_pending(const QEMUTimer *ts)
 {
     return ts->expire_time >= 0;
 }
 
-bool timer_expired(QEMUTimer *timer_head, int64_t current_time)
+bool timer_expired(const QEMUTimer *timer_head, int64_t current_time)
 {
     return timer_expired_ns(timer_head, current_time * timer_head->scale);
 }
@@ -637,7 +667,7 @@ static void qemu_virtual_clock_set_ns(int64_t time)
     return cpus_set_virtual_clock(time);
 }
 
-void init_clocks(QEMUTimerListNotifyCB *notify_cb)
+void qemu_init_clocks(QEMUTimerListNotifyCB *notify_cb)
 {
     QEMUClockType type;
     for (type = 0; type < QEMU_CLOCK_MAX; type++) {
@@ -649,7 +679,7 @@ void init_clocks(QEMUTimerListNotifyCB *notify_cb)
 #endif
 }
 
-uint64_t timer_expire_time_ns(QEMUTimer *ts)
+uint64_t timer_expire_time_ns(const QEMUTimer *ts)
 {
     return timer_pending(ts) ? ts->expire_time : -1;
 }

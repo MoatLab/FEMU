@@ -64,7 +64,8 @@
  *
  * = Reporting and destroying errors =
  *
- * Report an error to the current monitor if we have one, else stderr:
+ * Report an error to the current HMP monitor if we have one, else
+ * stderr:
  *     error_report_err(err);
  * This frees the error object.
  *
@@ -437,7 +438,25 @@ Error *error_copy(const Error *err);
  */
 void error_free(Error *err);
 
-G_DEFINE_AUTOPTR_CLEANUP_FUNC(Error, error_free)
+/*
+ * Poison g_autoptr(Error) to prevent its use.
+ *
+ * Functions that report or propagate an error take ownership of the
+ * Error object.  Explicit error_free() is needed when you handle an
+ * error in some other way.  This is rare.
+ *
+ * g_autoptr(Error) would call error_free() automatically on return.
+ * To avoid a double-free, we'd have to manually clear the pointer
+ * every time we propagate or report.
+ *
+ * Thus, g_autoptr(Error) would make the rare case easier to get right
+ * (less prone to leaks), and the common case easier to get wrong
+ * (more prone to double-free).
+ */
+extern void
+__attribute__((error("Do not use g_autoptr() to declare Error * variables")))
+error_free_poisoned(Error *err);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(Error, error_free_poisoned)
 
 /*
  * Convenience function to assert that *@errp is set, then silently free it.
@@ -532,12 +551,6 @@ static inline void error_propagator_cleanup(ErrorPropagator *prop)
 }
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(ErrorPropagator, error_propagator_cleanup);
-
-/*
- * Special error destination to warn on error.
- * See error_setg() and error_propagate() for details.
- */
-extern Error *error_warn;
 
 /*
  * Special error destination to abort on error.

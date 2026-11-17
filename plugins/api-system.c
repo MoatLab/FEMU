@@ -14,7 +14,7 @@
 #include "qemu/main-loop.h"
 #include "qapi/error.h"
 #include "migration/blocker.h"
-#include "hw/boards.h"
+#include "hw/core/boards.h"
 #include "qemu/plugin-memory.h"
 #include "qemu/plugin.h"
 
@@ -108,7 +108,7 @@ const void *qemu_plugin_request_time_control(void)
         has_control = true;
         error_setg(&migration_blocker,
                    "TCG plugin time control does not support migration");
-        migrate_add_blocker(&migration_blocker, NULL);
+        migrate_add_blocker(&migration_blocker, &error_fatal);
         return &has_control;
     }
     return NULL;

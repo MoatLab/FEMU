@@ -164,6 +164,8 @@ ixtlbx          000001 b:5 r:5 ... 000000 addr:1 0 00000        \
 
 # pcxl and pcxl2 Fast TLB Insert instructions
 ixtlbxf         000001 00000 r:5 00 0 data:1 01000 addr:1 0 00000
+# workaround for non-standard encoding as used in HP-UX 9
+ixtlbxf         000001 01001 r:5 01 0 data:1 01000 addr:1 0 00000
 
 # pa2.0 tlb insert idtlbt and iitlbt instructions
 ixtlbt          000001 r2:5 r1:5 000 data:1 100000 0 00000    # idtlbt
@@ -365,10 +367,10 @@ fstd            011100 ..... ..... .. ............1.    @ldstim11
 &mpyadd         rm1 rm2 ta ra tm
 @mpyadd         ...... rm1:5 rm2:5 ta:5 ra:5 . tm:5     &mpyadd
 
-fmpyadd_f       000110 ..... ..... ..... ..... 0 .....  @mpyadd
-fmpyadd_d       000110 ..... ..... ..... ..... 1 .....  @mpyadd
-fmpysub_f       100110 ..... ..... ..... ..... 0 .....  @mpyadd
-fmpysub_d       100110 ..... ..... ..... ..... 1 .....  @mpyadd
+fmpyadd_f       000110 ..... ..... ..... ..... 1 .....  @mpyadd
+fmpyadd_d       000110 ..... ..... ..... ..... 0 .....  @mpyadd
+fmpysub_f       100110 ..... ..... ..... ..... 1 .....  @mpyadd
+fmpysub_d       100110 ..... ..... ..... ..... 0 .....  @mpyadd
 
 ####
 # Conditional Branches

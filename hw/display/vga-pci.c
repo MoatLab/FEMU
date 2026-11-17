@@ -26,14 +26,14 @@
 
 #include "qemu/osdep.h"
 #include "hw/pci/pci_device.h"
-#include "hw/qdev-properties.h"
+#include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "vga_int.h"
 #include "ui/pixel_ops.h"
 #include "ui/console.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
-#include "hw/loader.h"
+#include "hw/core/loader.h"
 #include "hw/display/edid.h"
 #include "qom/object.h"
 #include "hw/acpi/acpi_aml_interface.h"
@@ -247,7 +247,7 @@ static void pci_std_vga_realize(PCIDevice *dev, Error **errp)
     vga_init(s, OBJECT(dev), pci_address_space(dev), pci_address_space_io(dev),
              true);
 
-    s->con = graphic_console_init(DEVICE(dev), 0, s->hw_ops, s);
+    s->con = qemu_graphic_console_create(DEVICE(dev), 0, s->hw_ops, s);
 
     /* XXX: VGA_RAM_SIZE must be a power of two */
     pci_register_bar(&d->dev, 0, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->vram);
@@ -282,7 +282,7 @@ static void pci_secondary_vga_realize(PCIDevice *dev, Error **errp)
     if (!vga_common_init(s, OBJECT(dev), errp)) {
         return;
     }
-    s->con = graphic_console_init(DEVICE(dev), 0, s->hw_ops, s);
+    s->con = qemu_graphic_console_create(DEVICE(dev), 0, s->hw_ops, s);
 
     /* mmio bar */
     memory_region_init_io(&d->mmio, OBJECT(dev), &unassigned_io_ops, NULL,
@@ -306,7 +306,7 @@ static void pci_secondary_vga_exit(PCIDevice *dev)
     PCIVGAState *d = PCI_VGA(dev);
     VGACommonState *s = &d->vga;
 
-    graphic_console_close(s->con);
+    qemu_graphic_console_close(s->con);
     memory_region_del_subregion(&d->mmio, &d->mrs[0]);
     memory_region_del_subregion(&d->mmio, &d->mrs[1]);
     if (d->flags & (1 << PCI_VGA_FLAG_ENABLE_QEXT)) {
@@ -338,7 +338,6 @@ static const Property vga_pci_properties[] = {
     DEFINE_PROP_BIT("edid",
                     PCIVGAState, flags, PCI_VGA_FLAG_ENABLE_EDID, true),
     DEFINE_EDID_PROPERTIES(PCIVGAState, edid_info),
-    DEFINE_PROP_BOOL("global-vmstate", PCIVGAState, vga.global_vmstate, false),
 };
 
 static const Property secondary_pci_properties[] = {
