@@ -1067,11 +1067,13 @@ class NvmeController:
 
 def no_pin() -> None:
     """Keep the device from pinning its memory backend, as
-    check-doc-examples.py does: the check needs no stable latency."""
+    check-doc-examples.py does: the check needs no stable latency. The
+    limit stays below a 1 MiB backend but leaves room for QEMU's io_uring
+    rings, which newer kernels charge to it."""
     import resource
     _, hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
-    low = 64 * 1024 if hard == resource.RLIM_INFINITY else min(64 * 1024,
-                                                                  hard)
+    want = 960 * 1024
+    low = want if hard == resource.RLIM_INFINITY else min(want, hard)
     resource.setrlimit(resource.RLIMIT_MEMLOCK, (low, low))
 
 
