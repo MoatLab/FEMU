@@ -533,8 +533,15 @@ def femu_io(val):
     return MODE_IO.get(mode, "rw")
 
 
+# Below the smallest documented backend (1 MiB), so no backend pins, but
+# room for QEMU's io_uring rings: newer kernels charge them to this limit,
+# and QEMU 11.1 stops when a second AioContext cannot get its ring.
+NO_PIN_MEMLOCK = 960 * 1024
+
+
 def no_pin(_=None):
-    resource.setrlimit(resource.RLIMIT_MEMLOCK, (64 * 1024, 64 * 1024))
+    limit = (NO_PIN_MEMLOCK, NO_PIN_MEMLOCK)
+    resource.setrlimit(resource.RLIMIT_MEMLOCK, limit)
 
 
 def realize(qemu, args, counts, allow, timeout):
