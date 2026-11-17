@@ -68,6 +68,42 @@ guest-visible machine. `FEMU_MACHINE` sets another one.
 | `run-*.sh` for NVMe modes, `guest-conformance.sh` | `pc-i440fx-10.1` |
 | `run-cxlssd.sh`, the guest boot test | `pc-q35-10.1` |
 
+## QEMU canary
+
+Once a week, the `QEMU canary` workflow merges FEMU master with QEMU
+master. It builds the result and runs the FEMU qtests. You can also start
+it by hand with another QEMU ref.
+
+```
+ QEMU base (v + VERSION) --+
+ FEMU master --------------+--> qemu-canary.py --> build --> FEMU qtests
+ QEMU master --------------+      report.txt
+```
+
+`hw/femu/scripts/qemu-canary.py` does the merge. Two lists in the script
+hold the conflicts that follow FEMU policy:
+
+- QEMU changes a file that FEMU does not ship, for example GitLab CI.
+- QEMU has a submodule where FEMU ships a directory, for example
+  `roms/edk2`.
+
+Any other conflict makes the run red, and `report.txt` names the path. A
+red run shows work for the next base move. It does not block a push.
+
+## Move to a new QEMU base
+
+Do a base move about twice a year, after a QEMU release.
+
+1. Run the canary on the release tag. Fix each conflict and build error.
+2. Make one commit, `Rebase FEMU onto QEMU X.Y.Z`, with `VERSION` set to
+   `X.Y.Z`.
+3. Keep the pinned machine types. Compare the guest view on the old and
+   the new base.
+4. Update the file table on this page.
+
+CI checks only the `hw/femu/` part of the base move commit, since the
+rest is upstream QEMU code.
+
 ## Update an old checkout
 
 QEMU 11.1 installs `qemu.qmp` into the build `pyvenv` at configure time.

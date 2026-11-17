@@ -1,0 +1,181 @@
+name: QEMU canary
+
+# Once a week, merge FEMU master with QEMU master, build it and run the
+# FEMU qtests. A red run means a QEMU change breaks FEMU; the artifact
+# holds the merge report and the logs. The run is a sample of QEMU
+# master on that day; it opens no issue and posts nothing.
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      qemu_ref:
+        description: QEMU ref to merge with (branch or tag)
+        default: master
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    if: github.repository == 'MoatLab/FEMU'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      QEMU_URL: https://gitlab.com/qemu-project/qemu.git
+      QEMU_REF: ${{ inputs.qemu_ref || 'master' }}
+      OUT: ${{ github.workspace }}/canary
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Fetch the QEMU base and the QEMU ref
+      id: fetch
+      run: |
+        # merge-tree takes the base as an argument, so one commit of each
+        # side is enough: depth 1 holds its trees and blobs.
+        base="v$(cat VERSION)"
+        git fetch -q --depth=1 "$QEMU_URL" \
+          "+refs/tags/$base:refs/tags/$base" \
+          "+$QEMU_REF:refs/remotes/qemu/canary"
+        mkdir -p "$OUT"
+        {
+          echo "QEMU_URL=$QEMU_URL"
+          echo "QEMU_REF=$QEMU_REF"
+          echo "RUN_DATE=$(date -u +%Y-%m-%dT%H:%MZ)"
+        } > "$OUT/run.txt"
+
+    - name: Merge FEMU with QEMU
+      id: merge
+      run: |
+        python3 hw/femu/scripts/qemu-canary.py --self-test
+        python3 hw/femu/scripts/qemu-canary.py HEAD qemu/canary "$OUT"
+
+    - name: Install dependencies
+      id: deps
+      if: steps.merge.outcome == 'success'
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential pkg-config libglib2.0-dev \
+          libpixman-1-dev libfdt-dev zlib1g-dev libaio-dev \
+          libcap-ng-dev libattr1-dev ninja-build python3-pip \
+          libslirp-dev libseccomp-dev libssh-dev liblzo2-dev \
+          libsnappy-dev libbz2-dev liblzma-dev libzstd-dev \
+          libgcrypt20-dev libgnutls28-dev uuid-dev libcap-dev \
+          libxml2-dev libmount-dev liburing-dev flex bison
+
+    - name: Configure the merged tree
+      id: configure
+      if: steps.merge.outcome == 'success'
+      run: |
+        # The femu-compile.sh profile; computational storage uBPF stays off.
+        # Configure also downloads the meson subprojects, so a network
+        # failure stops here and not in the build.
+        mkdir "$OUT/src/build-femu"
+        cd "$OUT/src/build-femu"
+        ../configure --enable-kvm --target-list=x86_64-softmmu \
+          --enable-slirp --disable-libnfs --disable-libiscsi \
+          --disable-curl > "$OUT/configure.log" 2>&1 ||
+          { tail -40 "$OUT/configure.log"; exit 1; }
+
+    - name: Build the merged tree
+      id: build
+      if: steps.configure.outcome == 'success'
+      run: |
+        cd "$OUT/src/build-femu"
+        ninja -k 0 qemu-system-x86_64 tests/qtest/qos-test \
+          > "$OUT/build.log" 2>&1 ||
+          { grep -m 40 'error' "$OUT/build.log"; exit 1; }
+
+    - name: Run the FEMU qtests
+      id: qtest
+      if: steps.build.outcome == 'success'
+      env:
+        # qos-test -l starts QEMU to list the devices, so it needs this too
+        QTEST_QEMU_BINARY: ./qemu-system-x86_64
+      run: |
+        cd "$OUT/src/build-femu"
+        B=/x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests
+        shard=../hw/femu/scripts/qtest-shard.py
+        ./tests/qtest/qos-test -l > "$OUT/qos.list"
+        # an empty FEMU test list fails here, before the run
+        python3 "$shard" --shards 1 --check --skip fuzz < "$OUT/qos.list"
+        args=$(python3 "$shard" --shards 1 --index 0 --skip fuzz < "$OUT/qos.list")
+        rc=0
+        # shellcheck disable=SC2086
+        timeout 5400 ./tests/qtest/qos-test -m quick --tap -p "$B" $args \
+          > "$OUT/qtest.tap" 2> "$OUT/qtest-stderr.log" || rc=$?
+        # each test must have a result and none may fail
+        python3 "$shard" --shards 1 --index 0 --skip fuzz \
+          --ran "$OUT/qtest.tap" < "$OUT/qos.list"
+        {
+          echo "QTEST_OK=$(grep -c '^ok ' "$OUT/qtest.tap")"
+          echo "QTEST_SKIP=$(grep -c '^ok .*# SKIP' "$OUT/qtest.tap")"
+          echo "QTEST_NOT_OK=$(grep -c '^not ok ' "$OUT/qtest.tap")"
+        } >> "$OUT/run.txt"
+        exit "$rc"
+
+    - name: Restore the guest kernel source
+      # after a qtest failure too: the guest boot is its own result
+      if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ~/femu-guest/linux-*.tar.xz
+        key: guest-kernel-${{ hashFiles('hw/femu/scripts/build-guest-kernel.sh') }}
+
+    - name: Boot a Linux guest on each FEMU mode
+      id: guest
+      if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+      run: |
+        # The guest boot test of ci.yml, on the merged tree: four modes
+        # under TCG, each must pass, none may skip.
+        # keep the guest build and test logs in the artifact
+        trap 'mkdir -p "$OUT/guest"; cp "$HOME"/femu-guest/*.log "$OUT/guest/" 2>/dev/null; cp -r "$OUT/src/build-femu/tests/functional" "$OUT/guest/" 2>/dev/null; true' EXIT
+        sudo apt install -y libelf-dev busybox-static cpio bc
+        bash hw/femu/scripts/build-guest-kernel.sh "$HOME/femu-guest"
+        bash hw/femu/scripts/build-guest-initramfs.sh "$HOME/femu-guest"
+        B=$OUT/src/build-femu
+        rc=0
+        FEMU_GUEST_KERNEL=$HOME/femu-guest/bzImage \
+        FEMU_GUEST_INITRD=$HOME/femu-guest/initramfs.cpio.gz \
+        FEMU_GUEST_REQUIRED=1 FEMU_GUEST_ACCEL=tcg \
+        QEMU_TEST_QEMU_BINARY=$B/qemu-system-x86_64 \
+        QEMU_BUILD_ROOT=$B MESON_BUILD_ROOT=$B \
+        PYTHONPATH=$OUT/src/python:$OUT/src/tests/functional \
+          timeout 900 "$B/pyvenv/bin/python3" \
+          "$OUT/src/hw/femu/tests/functional/test_x86_64_femu_guest.py" \
+          > "$OUT/guest-boot.log" 2>&1 || rc=$?
+        cat "$OUT/guest-boot.log"
+        test "$rc" -eq 0
+        test "$(grep -c '^ok ' "$OUT/guest-boot.log")" -eq 4
+        ! grep -q '# SKIP' "$OUT/guest-boot.log"
+
+    - name: Record the stage results
+      if: always()
+      run: |
+        mkdir -p "$OUT"
+        {
+          echo "STAGE fetch=${{ steps.fetch.outcome }}"
+          echo "STAGE merge=${{ steps.merge.outcome }}"
+          echo "STAGE deps=${{ steps.deps.outcome }}"
+          echo "STAGE configure=${{ steps.configure.outcome }}"
+          echo "STAGE build=${{ steps.build.outcome }}"
+          echo "STAGE qtest=${{ steps.qtest.outcome }}"
+          echo "STAGE guest=${{ steps.guest.outcome }}"
+        } >> "$OUT/run.txt"
+        cat "$OUT/run.txt"
+
+    - name: Upload the canary report
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+      with:
+        name: qemu-canary
+        path: |
+          canary/report.txt
+          canary/run.txt
+          canary/merge-tree.out
+          canary/qos.list
+          canary/*.log
+          canary/qtest.tap
+          canary/guest/
+        if-no-files-found: warn

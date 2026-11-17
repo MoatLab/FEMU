@@ -561,6 +561,13 @@ jobs:
         python3 hw/femu/scripts/check-unit-tests.py --self-test
         python3 hw/femu/scripts/check-unit-tests.py
 
+    - name: Check the QEMU canary merge script
+      run: |
+        # qemu-canary.py runs once a week; its self-test runs on each push.
+        # It merges small trees with each conflict kind and checks the
+        # report and the exported files.
+        python3 hw/femu/scripts/qemu-canary.py --self-test
+
     - name: Check that a test names each property
       run: |
         # A property that no test names, and that
