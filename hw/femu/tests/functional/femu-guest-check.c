@@ -496,8 +496,37 @@ static int zone_verify(int fd, uint64_t epoch)
 }
 
 /*
+ * One I/O command on namespace 1 through passthru, @len bytes at LBA
+ * @slba. Returns the NVMe status without DNR (0 is success), or -1 for
+ * a transport error. Passthru errors are quiet, so an expected failure
+ * prints no block layer I/O error.
+ */
+static int io_cmd(int fd, uint8_t opc, uint64_t slba, void *data,
+                  uint32_t len, int lbasz, uint32_t cdw12, uint32_t cdw13)
+{
+    struct nvme_passthru_cmd c = { 0 };
+    int r;
+
+    c.opcode = opc;
+    c.nsid = 1;
+    c.addr = (uintptr_t)data;
+    c.data_len = len;
+    c.cdw10 = (uint32_t)slba;
+    c.cdw11 = (uint32_t)(slba >> 32);
+    c.cdw12 = (len / lbasz - 1) | cdw12;
+    c.cdw13 = cdw13;
+    r = ioctl(fd, NVME_IOCTL_IO_CMD, &c);
+    return r < 0 ? -1 : (r & 0x7ff);
+}
+
+#define NVME_SC_ZONE_FULL   0x1b9   /* SCT 1h, SC B9h: Zone Is Full */
+
+/*
  * Zone 1, written to its capacity: the zone is Full, the bytes read
- * back, and a write into it fails. The host checks one Full zone.
+ * back, and a passthru write into it fails with Zone Is Full. The block
+ * layer of Linux 6.10 and later stops a plain write to a Full zone
+ * before the device sees it, so passthru is the one way to test the
+ * device. The host checks one Full zone.
  */
 static int zone_fill(int fd, struct blk_zone *z0)
 {
@@ -505,6 +534,7 @@ static int zone_fill(int fd, struct blk_zone *z0)
     uint32_t flags = 0;
     uint64_t n;
     uint64_t *buf;
+    int lbasz = 0;
     int err;
 
     if (!zone_at(fd, z0->start + z0->len, &z, &flags)) {
@@ -532,10 +562,15 @@ static int zone_fill(int fd, struct blk_zone *z0)
     if (posix_memalign((void **)&buf, BLK, BLK)) {
         return fail("zone", "alloc");
     }
+    if (ioctl(fd, BLKSSZGET, &lbasz) || lbasz <= 0 || BLK % lbasz) {
+        free(buf);
+        return fail("zone", "lba-size");
+    }
     fill(buf, 0, 4);
-    err = pwrite(fd, buf, BLK, (off_t)z.start * 512) == BLK;
+    err = io_cmd(fd, 0x01, z.start * 512 / lbasz, buf, BLK, lbasz, 0, 0);
     free(buf);
-    if (err) {
+    if (err != NVME_SC_ZONE_FULL) {
+        printf("FEMU-CHECK zone write-into-full status=0x%x\n", err);
         errno = 0;
         return fail("zone", "write-into-full");
     }
@@ -669,7 +704,6 @@ static int check_fdp(void)
     uint16_t nruhsd = 0;
     uint64_t before[FDP_NRUH];
     uint64_t after[FDP_NRUH];
-    struct nvme_passthru_cmd w = { 0 };
     int lbasz = 0;
     int ctl = open("/dev/nvme0", O_RDWR);
     int fd = open("/dev/nvme0n1", O_RDWR);
@@ -709,17 +743,19 @@ static int check_fdp(void)
         return fail("fdp", "lba-size");
     }
     memset(id, 0x5a, BLK);
-    w.opcode = 0x01;
-    w.nsid = 1;
-    w.addr = (uintptr_t)id;
-    w.data_len = BLK;
-    w.cdw12 = (BLK / lbasz - 1) | (2u << 20);   /* NLB, DTYPE 2 */
-    w.cdw13 = 1u << 16;                         /* DSPEC: handle 1 */
-    if (ioctl(fd, NVME_IOCTL_IO_CMD, &w)) {
-        errno = errno ? errno : EIO;
+    /* DTYPE 2 (data placement) in CDW12, DSPEC handle 1 in CDW13 */
+    if (io_cmd(fd, 0x01, 0, id, BLK, lbasz, 2u << 20, 1u << 16)) {
+        errno = 0;
         return fail("fdp", "placed-write");
     }
-    if (ruh_status(fd, after, &nruhsd)) {
+    memset(id, 0, BLK);
+    if (io_cmd(fd, 0x02, 0, id, BLK, lbasz, 0, 0) || id[0] != 0x5a ||
+        memcmp(id, id + 1, BLK - 1)) {
+        errno = 0;
+        return fail("fdp", "placed-bytes-differ");
+    }
+    nruhsd = 0;
+    if (ruh_status(fd, after, &nruhsd) || nruhsd != FDP_NRUH) {
         errno = 0;
         return fail("fdp", "ruh-status-2");
     }
