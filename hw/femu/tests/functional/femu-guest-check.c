@@ -12,6 +12,7 @@
  * it with the size of the device line.
  *
  *   nossd, bbssd: dev serial queues data
+ *   fdp:          dev serial queues fdp data
  *   zns:          dev serial queues zone
  *   kv:           kvdev serial irq kv
  *
@@ -35,6 +36,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <linux/blkzoned.h>
+#include <linux/fs.h>
 #include <linux/nvme_ioctl.h>
 
 #define BLK         4096
@@ -416,21 +418,32 @@ static int check_data(void)
     return ok("data");
 }
 
-static bool zone0(int fd, struct blk_zone *z)
+/* the zone that holds @sector; false on a failed report */
+static bool zone_at(int fd, uint64_t sector, struct blk_zone *z,
+                    uint32_t *flags)
 {
     struct {
         struct blk_zone_report r;
         struct blk_zone z;
-    } rep = { .r = { .sector = 0, .nr_zones = 1 } };
+    } rep = { .r = { .sector = sector, .nr_zones = 1 } };
 
     if (ioctl(fd, BLKREPORTZONE, &rep) || rep.r.nr_zones != 1) {
         return false;
     }
     *z = rep.z;
+    if (flags) {
+        *flags = rep.r.flags;
+    }
     return true;
 }
 
-static int zone_write(int fd, uint64_t epoch)
+static bool zone0(int fd, struct blk_zone *z)
+{
+    return zone_at(fd, 0, z, NULL);
+}
+
+/* @n blocks of @epoch from byte @base */
+static int zone_write_n(int fd, off_t base, uint64_t n, uint64_t epoch)
 {
     uint64_t *buf;
     uint64_t b;
@@ -438,9 +451,9 @@ static int zone_write(int fd, uint64_t epoch)
     if (posix_memalign((void **)&buf, BLK, BLK)) {
         return -ENOMEM;
     }
-    for (b = 0; b < ZONE_BLKS; b++) {
+    for (b = 0; b < n; b++) {
         fill(buf, b, epoch);
-        if (pwrite(fd, buf, BLK, (off_t)b * BLK) != BLK) {
+        if (pwrite(fd, buf, BLK, base + (off_t)b * BLK) != BLK) {
             free(buf);
             return errno ? -errno : -EIO;
         }
@@ -449,7 +462,12 @@ static int zone_write(int fd, uint64_t epoch)
     return 0;
 }
 
-static int zone_verify(int fd, uint64_t epoch)
+static int zone_write(int fd, uint64_t epoch)
+{
+    return zone_write_n(fd, 0, ZONE_BLKS, epoch);
+}
+
+static int zone_verify_n(int fd, off_t base, uint64_t n, uint64_t epoch)
 {
     uint64_t *buf;
     uint64_t *want;
@@ -460,9 +478,9 @@ static int zone_verify(int fd, uint64_t epoch)
         posix_memalign((void **)&want, BLK, BLK)) {
         return -1;
     }
-    for (b = 0; b < ZONE_BLKS && !r; b++) {
+    for (b = 0; b < n && !r; b++) {
         fill(want, b, epoch);
-        if (pread(fd, buf, BLK, (off_t)b * BLK) != BLK ||
+        if (pread(fd, buf, BLK, base + (off_t)b * BLK) != BLK ||
             memcmp(buf, want, BLK)) {
             r = -1;
         }
@@ -472,9 +490,63 @@ static int zone_verify(int fd, uint64_t epoch)
     return r;
 }
 
+static int zone_verify(int fd, uint64_t epoch)
+{
+    return zone_verify_n(fd, 0, ZONE_BLKS, epoch);
+}
+
+/*
+ * Zone 1, written to its capacity: the zone is Full, the bytes read
+ * back, and a write into it fails. The host checks one Full zone.
+ */
+static int zone_fill(int fd, struct blk_zone *z0)
+{
+    struct blk_zone z;
+    uint32_t flags = 0;
+    uint64_t n;
+    uint64_t *buf;
+    int err;
+
+    if (!zone_at(fd, z0->start + z0->len, &z, &flags)) {
+        return fail("zone", "report-1");
+    }
+    if (!(flags & BLK_ZONE_REP_CAPACITY) || !z.capacity ||
+        z.capacity % (BLK / 512) || z.wp != z.start) {
+        errno = 0;
+        return fail("zone", "zone-1-not-empty");
+    }
+    n = z.capacity * 512 / BLK;
+    err = zone_write_n(fd, (off_t)z.start * 512, n, 3);
+    if (err) {
+        errno = -err;
+        return fail("zone", "fill");
+    }
+    if (!zone_at(fd, z.start, &z, NULL) || z.cond != BLK_ZONE_COND_FULL) {
+        errno = 0;
+        return fail("zone", "not-full");
+    }
+    if (zone_verify_n(fd, (off_t)z.start * 512, n, 3)) {
+        errno = 0;
+        return fail("zone", "fill-bytes-differ");
+    }
+    if (posix_memalign((void **)&buf, BLK, BLK)) {
+        return fail("zone", "alloc");
+    }
+    fill(buf, 0, 4);
+    err = pwrite(fd, buf, BLK, (off_t)z.start * 512) == BLK;
+    free(buf);
+    if (err) {
+        errno = 0;
+        return fail("zone", "write-into-full");
+    }
+    printf("FEMU-CHECK zone full cap=%llu\n", (unsigned long long)n);
+    return 0;
+}
+
 /*
  * Zone 0: sequential writes move the write pointer, the data reads back,
- * a reset moves the pointer back, and a second epoch writes again.
+ * a reset moves the pointer back, and a second epoch writes again. Then
+ * zone 1 is written to its capacity (zone_fill).
  */
 static int check_zone(void)
 {
@@ -524,8 +596,149 @@ static int check_zone(void)
         errno = -err;
         return fail("zone", "rewrite");
     }
+    if (zone_fill(fd, &z)) {
+        return 1;
+    }
     close(fd);
     return ok("zone");
+}
+
+#define FDP_NRUH    4       /* fdp.nruh of the host's femu-subsys */
+
+static int admin(int fd, uint8_t opc, uint32_t nsid, uint32_t cdw10,
+                 uint32_t cdw11, void *data, uint32_t len, uint32_t *result)
+{
+    struct nvme_admin_cmd c = { 0 };
+    int r;
+
+    c.opcode = opc;
+    c.nsid = nsid;
+    c.cdw10 = cdw10;
+    c.cdw11 = cdw11;
+    c.addr = (uintptr_t)data;
+    c.data_len = len;
+    r = ioctl(fd, NVME_IOCTL_ADMIN_CMD, &c);
+    if (result) {
+        *result = c.result;
+    }
+    return r;
+}
+
+/* RUAMW of each placement handle, from I/O Management Receive */
+static int ruh_status(int fd, uint64_t ruamw[FDP_NRUH], uint16_t *nruhsd)
+{
+    struct nvme_passthru_cmd c = { 0 };
+    uint8_t st[16 + 32 * FDP_NRUH] __attribute__((aligned(8)));
+    int i;
+
+    memset(st, 0, sizeof(st));
+    c.opcode = 0x12;
+    c.nsid = 1;
+    c.cdw10 = 1;                        /* RUH Status */
+    c.cdw11 = sizeof(st) / 4 - 1;
+    c.addr = (uintptr_t)st;
+    c.data_len = sizeof(st);
+    if (ioctl(fd, NVME_IOCTL_IO_CMD, &c)) {
+        return -1;
+    }
+    memcpy(nruhsd, st + 14, 2);
+    for (i = 0; i < FDP_NRUH; i++) {
+        uint16_t pid;
+
+        memcpy(&pid, st + 16 + 32 * i, 2);
+        if (pid != i) {
+            return -1;
+        }
+        memcpy(&ruamw[i], st + 16 + 32 * i + 8, 8);
+    }
+    return 0;
+}
+
+/*
+ * FDP: Identify says FDP is supported, the FDP feature of the namespace's
+ * endurance group is on, RUH Status has FDP_NRUH handles, and a write
+ * with directive type 2 (data placement), placement handle 1 uses only
+ * the RU of handle 1.
+ */
+static int check_fdp(void)
+{
+    uint8_t *id;
+    uint32_t ctratt;
+    uint32_t res = 0;
+    uint16_t endgid;
+    uint16_t nruhsd = 0;
+    uint64_t before[FDP_NRUH];
+    uint64_t after[FDP_NRUH];
+    struct nvme_passthru_cmd w = { 0 };
+    int lbasz = 0;
+    int ctl = open("/dev/nvme0", O_RDWR);
+    int fd = open("/dev/nvme0n1", O_RDWR);
+    int i;
+
+    if (ctl < 0 || fd < 0 || posix_memalign((void **)&id, BLK, BLK)) {
+        return fail("fdp", "open");
+    }
+    if (admin(ctl, 0x06, 0, 1, 0, id, BLK, NULL)) {
+        return fail("fdp", "identify-ctrl");
+    }
+    memcpy(&ctratt, id + 96, 4);
+    if (!(ctratt & (1u << 19))) {
+        errno = 0;
+        return fail("fdp", "no-fdps");
+    }
+    if (admin(ctl, 0x06, 1, 0, 0, id, BLK, NULL)) {
+        return fail("fdp", "identify-ns");
+    }
+    memcpy(&endgid, id + 102, 2);
+    if (!endgid) {
+        errno = 0;
+        return fail("fdp", "no-endgid");
+    }
+    if (admin(ctl, 0x0a, 0, 0x1d, endgid, NULL, 0, &res)) {
+        return fail("fdp", "get-feature");
+    }
+    if (!(res & 1)) {
+        errno = 0;
+        return fail("fdp", "fdpe-off");
+    }
+    if (ruh_status(fd, before, &nruhsd) || nruhsd != FDP_NRUH) {
+        errno = 0;
+        return fail("fdp", "ruh-status");
+    }
+    if (ioctl(fd, BLKSSZGET, &lbasz) || lbasz <= 0 || BLK % lbasz) {
+        return fail("fdp", "lba-size");
+    }
+    memset(id, 0x5a, BLK);
+    w.opcode = 0x01;
+    w.nsid = 1;
+    w.addr = (uintptr_t)id;
+    w.data_len = BLK;
+    w.cdw12 = (BLK / lbasz - 1) | (2u << 20);   /* NLB, DTYPE 2 */
+    w.cdw13 = 1u << 16;                         /* DSPEC: handle 1 */
+    if (ioctl(fd, NVME_IOCTL_IO_CMD, &w)) {
+        errno = errno ? errno : EIO;
+        return fail("fdp", "placed-write");
+    }
+    if (ruh_status(fd, after, &nruhsd)) {
+        errno = 0;
+        return fail("fdp", "ruh-status-2");
+    }
+    for (i = 0; i < FDP_NRUH; i++) {
+        if ((i == 1) != (after[i] < before[i]) ||
+            (i != 1 && after[i] != before[i])) {
+            printf("FEMU-CHECK fdp ruamw h%d %llu to %llu\n", i,
+                   (unsigned long long)before[i],
+                   (unsigned long long)after[i]);
+            errno = 0;
+            return fail("fdp", "wrong-handle");
+        }
+    }
+    printf("FEMU-CHECK fdp handle-1 ruamw %llu to %llu\n",
+           (unsigned long long)before[1], (unsigned long long)after[1]);
+    free(id);
+    close(fd);
+    close(ctl);
+    return ok("fdp");
 }
 
 /*
@@ -617,6 +830,9 @@ int main(int argc, char **argv)
     }
     if (!strcmp(g_mode, "zns")) {
         return check_zone();
+    }
+    if (!strcmp(g_mode, "fdp") && check_fdp()) {
+        return 1;
     }
     return check_data();
 }

@@ -34,8 +34,16 @@ MODES = {
                   serial='vSSD0',
                   checks=['dev', 'serial', 'queues', 'data'],
                   size=4 * MIB, gc=True),
+    # FDP on the bbssd geometry with more blocks: FDP keeps an open unit
+    # for each of the 4 handles and for GC, so it needs more free lines
+    'fdp': dict(dev='femu_mode=1,devsz_mb=4,subsys=fs0,' +
+                BBSSD_GEOMETRY.replace('blks_per_pl=40', 'blks_per_pl=64'),
+                pre=('-device', 'femu-subsys,id=fs0,nqn=fs0,fdp=on,fdp.nruh=4'),
+                serial='vSSD0',
+                checks=['dev', 'serial', 'queues', 'fdp', 'data'],
+                size=4 * MIB, gc=True, handles=4),
     'zns': dict(dev='femu_mode=3,devsz_mb=64', serial='vZNSSD0',
-                checks=['dev', 'serial', 'queues', 'zone']),
+                checks=['dev', 'serial', 'queues', 'zone'], full=1),
     'kv': dict(dev='femu_mode=5,devsz_mb=64', serial='vKVSSD0',
                checks=['kvdev', 'serial', 'irq', 'kv']),
 }
@@ -136,7 +144,7 @@ class FemuGuest(QemuSystemTest):
                     '-append', f'console=ttyS0 femu.mode={name} '
                                f'femu.serial={m["serial"]} panic=-1'
                                + (' femu.view=1' if view else ''),
-                    '-no-reboot', '-device', dev)
+                    '-no-reboot', *m.get('pre', ()), '-device', dev)
         if mopts:
             vm.add_args('-machine', mopts)
         vm.launch()
@@ -153,7 +161,7 @@ class FemuGuest(QemuSystemTest):
         ns = None
         if name == 'bbssd':
             ns = self.query_ns(vm, kind='lines', limit=4096)
-        elif name == 'zns':
+        elif name in ('zns', 'fdp'):
             ns = self.query_ns(vm)
         vm.shutdown()
         # a sanitizer report or a crash at quit must fail the mode
@@ -187,11 +195,28 @@ class FemuGuest(QemuSystemTest):
             moved = ns['counters']['gc-write-pages']
             self.log.info('gc-write-pages: %d', moved)
             self.assertGreater(moved, 0, 'GC relocated no page')
+        if m.get('gc') and 'lines' in ns:
             # every logical page is written and none is trimmed, so the
             # valid pages of all lines must be the namespace pages
             self.assertNotIn('next-offset', ns)
             vpc = sum(ln['vpc'] for ln in ns['lines'])
             self.assertEqual(vpc, m['size'] // 4096, 'valid pages differ')
+        if m.get('handles'):
+            hs = ns['fdp']['handles']
+            self.assertEqual(len(hs), m['handles'], 'FDP handles differ')
+            # the guest placed one 4 KiB write on handle 1; Linux writes
+            # with no placement go to handle 0, so 2 and 3 stay at 0
+            host = {h['id']: h['host-bytes'] for h in hs}
+            self.log.info('fdp host-bytes: %s', host)
+            self.assertEqual(host.get(1), 4096, 'handle 1 bytes')
+            self.assertEqual(host.get(2), 0, 'handle 2 bytes')
+            self.assertEqual(host.get(3), 0, 'handle 3 bytes')
+            self.assertGreaterEqual(host.get(0, 0), m['size'], 'handle 0')
+        if 'full' in m:
+            # the guest filled zone 1; a zone left Full by FEMU itself
+            # or a fill that never reached Full changes this count
+            self.assertEqual(ns['zone-counts']['full'], m['full'],
+                             'Full zones differ')
 
     def expected_size(self, name, ns):
         if name != 'zns':
@@ -204,6 +229,9 @@ class FemuGuest(QemuSystemTest):
 
     def test_bbssd(self):
         self.check_mode('bbssd')
+
+    def test_fdp(self):
+        self.check_mode('fdp')
 
     def test_zns(self):
         self.check_mode('zns')

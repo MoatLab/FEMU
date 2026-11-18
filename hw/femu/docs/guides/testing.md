@@ -154,7 +154,7 @@ Set `QEMU=` for a build elsewhere. CI runs the same self-tests.
 
 ## Guest boot test
 
-CI boots a small Linux guest on NoSSD, bbssd, ZNS and KV under TCG. The
+CI boots a small Linux guest on NoSSD, bbssd, FDP, ZNS and KV under TCG. The
 guest uses the real NVMe driver, so it covers what qtests skip: probe,
 MSI-X queues, and block-layer I/O.
 
@@ -169,7 +169,9 @@ MSI-X queues, and block-layer I/O.
  host:  exact check set, size, no panic, no FEMU-DMESG line,
         QEMU exit code 0, no sanitizer report;
         bbssd: GC count > 0 and
-        valid pages equal the namespace pages; then QMP quit
+        valid pages equal the namespace pages;
+        FDP: GC count > 0, 4 handles, handle 1 has 4096 host bytes;
+        ZNS: one Full zone; then QMP quit
 ```
 
 The checks of each mode:
@@ -177,7 +179,8 @@ The checks of each mode:
 | Mode | Checks |
 | --- | --- |
 | NoSSD, bbssd | namespace size, serial, one I/O queue per CPU, three passes of patterned `O_DIRECT` writes read back, interrupts on both queues |
-| ZNS | as above, then zone 0: reset, write, write pointer, read back, reset, rewrite |
+| FDP | as NoSSD, after the FDP check: Identify FDP support, the FDP feature on, RUH Status with 4 handles, and one write placed on handle 1 that lowers only that handle's RUAMW |
+| ZNS | as above, then zone 0: reset, write, write pointer, read back, reset, rewrite; then zone 1 written to its capacity: Full, read back, a write into it fails |
 | KV | generic node `/dev/ng0n1`, serial, MSI-X, Store, Retrieve, Delete, then Retrieve gives 87h |
 
 The interrupt checks read the vector mode from
