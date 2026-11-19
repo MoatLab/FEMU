@@ -37210,6 +37210,118 @@ static void femu_test_checkpoint_reuse(void *obj, void *data,
     rmdir(dir);
 }
 
+/*
+ * persist_load_only in a read-only directory with no lock file: checkpoint
+ * B holds page 2 = 0x21. Two readers load B, make no lock file and leave
+ * the bytes and the inode of B. While a reader holds B, a writer of B and
+ * a save to B fail in the directory made writable again. After the readers
+ * leave, the writer starts. A new lock file has mode 0644. Root ignores
+ * the directory mode, so root skips the test.
+ */
+static void femu_test_checkpoint_ro_dir(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *dir = NULL;
+    g_autofree char *b = NULL;
+    g_autofree char *lock_b = NULL;
+    g_autofree char *rb = NULL;
+    g_autofree char *wb = NULL;
+    g_autofree char *sum_b = NULL;
+    FemuCtrlState c1 = { 0 };
+    FemuCtrlState c2 = { 0 };
+    QPCIDevice *p1;
+    QPCIDevice *p2;
+    struct stat st;
+    uint64_t ino_b;
+    uint64_t buf;
+    int fd_b;
+    char *err;
+
+    if (geteuid() == 0) {
+        g_test_skip("root can write a read-only directory");
+        return;
+    }
+    dir = g_dir_make_tmp("femu-rodir-XXXXXX", NULL);
+    b = g_build_filename(dir, "b", NULL);
+    lock_b = g_strconcat(b, ".lock", NULL);
+    rb = g_strdup_printf(",'femu_mode':1,'persist_file':'%s',"
+                         "'persist_load_only':true", b);
+    wb = g_strdup_printf(",'femu_mode':1,'persist_file':'%s'", b);
+    buf = guest_alloc(alloc, 4096);
+
+    femu_ckpt_add(qts, "ck", 5, ",'femu_mode':1");
+    p1 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c1, p1, alloc);
+    femu_create_io_queues(&c1);
+    femu_ns_page(&c1, buf, 1, 2, 0x21, true);
+    g_assert_null(femu_save_data(qts, "ck", b));
+    femu_disable(&c1);
+    femu_queue_free(&c1, &c1.io);
+    qpci_unplug_acpi_device_test(qts, "ck", 5);
+    g_free(p1);
+    sum_b = femu_ckpt_sum(b);
+    ino_b = femu_ckpt_hold(b, &fd_b);
+
+    /* the save made the lock file for every user; the test removes it */
+    g_assert_cmpint(stat(lock_b, &st), ==, 0);
+    g_assert_cmpuint(st.st_mode & 0777, ==, 0644);
+    g_assert_cmpint(unlink(lock_b), ==, 0);
+    g_assert_cmpint(chmod(dir, 0500), ==, 0);
+
+    memset(&c1, 0, sizeof(c1));
+    femu_ckpt_add(qts, "r1", 5, rb);
+    femu_ckpt_add(qts, "r2", 6, rb);
+    p1 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    p2 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(6, 0));
+    femu_enable(&c1, p1, alloc);
+    femu_create_io_queues(&c1);
+    femu_enable(&c2, p2, alloc);
+    femu_create_io_queues(&c2);
+    femu_ns_page(&c1, buf, 1, 2, 0x21, false);
+    femu_ns_page(&c2, buf, 1, 2, 0x21, false);
+    g_assert_false(g_file_test(lock_b, G_FILE_TEST_EXISTS));
+
+    /* the readers hold B itself: a writer and a save see them */
+    g_assert_cmpint(chmod(dir, 0700), ==, 0);
+    err = femu_ckpt_try_add(qts, "w", 7, wb);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    femu_ckpt_add(qts, "x", 7, ",'femu_mode':1");
+    err = femu_save_data(qts, "x", b);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    qpci_unplug_acpi_device_test(qts, "x", 7);
+    femu_ckpt_same(b, sum_b, ino_b);
+
+    /* one reader still holds B; with none, the writer starts */
+    femu_disable(&c1);
+    femu_queue_free(&c1, &c1.io);
+    qpci_unplug_acpi_device_test(qts, "r1", 5);
+    g_free(p1);
+    err = femu_ckpt_try_add(qts, "w", 7, wb);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    femu_disable(&c2);
+    femu_queue_free(&c2, &c2.io);
+    qpci_unplug_acpi_device_test(qts, "r2", 6);
+    g_free(p2);
+    femu_ckpt_same(b, sum_b, ino_b);
+    femu_ckpt_add(qts, "w", 7, wb);
+    qpci_unplug_acpi_device_test(qts, "w", 7);
+
+    close(fd_b);
+    guest_free(alloc, buf);
+    unlink(lock_b);
+    unlink(b);
+    rmdir(dir);
+    qos_invalidate_command_line();
+}
+
 /* hot-add bbssd device pd at slot 5 on a 384-page FTL, with @extra */
 static void femu_ckpt_add_ftl(QTestState *qts, const char *extra)
 {
@@ -68388,6 +68500,8 @@ static void femu_register_nodes(void)
     });
     qos_add_test("checkpoint", "femu", femu_test_checkpoint, NULL);
     qos_add_test("checkpoint-reuse", "femu", femu_test_checkpoint_reuse,
+                 NULL);
+    qos_add_test("checkpoint-ro-dir", "femu", femu_test_checkpoint_ro_dir,
                  NULL);
     qos_add_test("zns-slc-zones", "femu", femu_test_zns_slc_zones,
                  &(QOSGraphTestOptions) {

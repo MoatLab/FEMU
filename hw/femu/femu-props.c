@@ -156,11 +156,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "timing yet; off (default) adds nothing to the media path" },
     { "persist_load_only",
       "with persist_file: the file is a checkpoint that realize loads and "
-      "nothing saves, so each run starts from it. The file must exist; "
-      "FILE.lock is made if missing, so a directory the device cannot "
-      "write needs it already. FILE.lock is held shared, so other devices "
+      "nothing saves, so each run starts from it. The file must exist. "
+      "FILE.lock is made if missing and held shared, so other devices "
       "and QEMU processes can "
-      "load the same file, and a device that saves it cannot start. The "
+      "load the same file, and a device that saves it cannot start. With "
+      "no FILE.lock in a read-only directory the device holds the file "
+      "itself, shared, and warns. The "
       "guest still writes the device; femu-save-data can write another "
       "file. off (default)" },
     { "persist_ftl",

@@ -707,6 +707,32 @@ A later run loads it with `-device femu,...,persist_file=FILE`. With
 `persist_load_only=on` that run never saves the file, so many runs and
 devices can start from one checkpoint.
 
+A reader is a device with `persist_load_only=on`. A writer is a device
+that saves the file, or a `femu-save-data` to it.
+
+```text
+ reader realize
+   open FILE.lock (make it with mode 0644 if missing)
+     |-- opened ----------------------------> shared lock on FILE.lock
+     |-- missing, read-only directory ------> shared lock on FILE, warning
+     `-- other error (no read permission) --> realize fails
+
+ writer realize or save
+   exclusive lock on FILE.lock
+     |-- held by a device -----------------> fails
+     `-- taken --> reader lock on FILE? ---> yes: fails, no: starts
+```
+
+- A checkpoint in a read-only directory needs no lock file.
+- FEMU makes a lock file with mode 0644, so a second user can share it.
+- A lock file that the reader cannot read fails realize. Give it mode 0644.
+- A writer needs write access to the directory. It refuses to start while
+  a reader holds FILE.lock or FILE.
+- The lock is `flock(2)`. On NFS, Linux implements it with byte-range
+  locks (`flock(2)`, NOTES), so the NFS server must support locks.
+- The lock file is empty. FEMU does not remove it, because a removal lets
+  two later users lock two different files.
+
 ```text
  {"execute": "femu-save-data", "arguments": {"file": "/vm/femu-ckpt"}}
    pollers and FTL thread pause --> write file.XXXXXX, fsync, rename --> resume

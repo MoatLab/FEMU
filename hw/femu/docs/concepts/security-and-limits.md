@@ -93,7 +93,8 @@ These are chosen on the host, not by the guest:
   Unplug or the end of QEMU writes it; a QEMU that is killed writes
   nothing. The file then keeps the data of the last clean end or the last
   `femu-save-data`. With `persist_load_only=on` nothing writes it,
-  and FILE.lock is held shared. With
+  and FILE.lock is held shared (the file itself where a read-only
+  directory has no FILE.lock). With
   `persist_ftl`, a load checks every FTL record (mapping owners, page,
   block and line counts, list membership, the write pointer, the aging
   records, a CRC) before it changes the FTL, so a damaged file fails

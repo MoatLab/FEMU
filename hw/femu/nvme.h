@@ -3117,6 +3117,7 @@ typedef struct FemuCtrl {
     bool            ocp_inj_set;
     uint32_t        ocp_inj_reads;
     int             persist_lock_fd; /* holds persist_path.lock */
+    bool            persist_lock_on_file; /* the fd is persist_path */
     uint64_t        pel_power_cycles;
     struct FemuPel  *pel;               /* Persistent Event log */
     NvmeAerHold     *aer_held;     /* outstanding AERs, aerl + 1 entries */

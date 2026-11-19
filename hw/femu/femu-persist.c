@@ -560,25 +560,110 @@ bool femu_path_in_use(FemuCtrl *self, const char *path, bool traces_only)
                                           persist_path_match, &u);
 }
 
-/* hold FILE.lock for the device's life; another holder fails realize */
+/*
+ * Open FILE.lock, and make it when it is missing. Mode 0644, also against
+ * the umask, lets a second user share the empty file. @absent is set when
+ * the file is missing and the directory does not take it.
+ */
+static int persist_open_lock(const char *lock, int acc, bool *absent)
+{
+    int fd = open(lock, acc | O_CLOEXEC);
+
+    *absent = false;
+    if (fd >= 0 || errno != ENOENT) {
+        return fd;
+    }
+    fd = open(lock, acc | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+        if (fchmod(fd, 0644) < 0) {
+            warn_report("persist_file: cannot set the mode of '%s': %s",
+                        lock, strerror(errno));
+        }
+        return fd;
+    }
+    if (errno == EEXIST) {
+        return open(lock, acc | O_CLOEXEC);
+    }
+    *absent = errno == EACCES || errno == EROFS || errno == EPERM;
+    return -1;
+}
+
+/*
+ * Whether a persist_load_only device holds @path itself, which it does
+ * where it could not make FILE.lock. The caller holds FILE.lock, so no
+ * such device can start after this test.
+ */
+static bool persist_file_held(const char *path)
+{
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    bool held;
+
+    if (fd < 0) {
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+    }
+    if (fd < 0) {
+        return false;
+    }
+    held = flock(fd, LOCK_EX | LOCK_NB) < 0 && errno == EWOULDBLOCK;
+    close(fd);
+    return held;
+}
+
+/*
+ * Hold FILE.lock for the device's life; another holder fails realize.
+ * Readers of a checkpoint share the lock, and a device that saves the
+ * file is alone. A reader that finds no FILE.lock in a directory it
+ * cannot write holds the checkpoint file itself, shared.
+ */
 static bool persist_lock(FemuCtrl *n, Error **errp)
 {
     g_autofree char *lock = g_strconcat(n->persist_path, ".lock", NULL);
     bool reader = n->persist_load_only;
-    int fd = open(lock, (reader ? O_RDONLY : O_RDWR) | O_CREAT | O_CLOEXEC,
-                  0600);
+    bool on_file = false;
+    bool absent;
+    int fd = persist_open_lock(lock, reader ? O_RDONLY : O_RDWR, &absent);
 
-    if (fd < 0) {
+    if (fd < 0 && reader && absent) {
+        fd = open(n->persist_path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0 && errno == ENOENT) {
+            error_setg(errp, "persist_load_only needs an existing "
+                       "persist_file; '%s' does not exist", n->persist_path);
+            return false;
+        }
+        if (fd < 0) {
+            error_setg_errno(errp, errno, "persist_file: cannot open '%s'",
+                             n->persist_path);
+            return false;
+        }
+        on_file = true;
+    } else if (fd < 0) {
         error_setg_errno(errp, errno, "persist_file: cannot open '%s'", lock);
         return false;
     }
-    /* readers of a checkpoint share it; a device that saves it is alone */
     if (flock(fd, (reader ? LOCK_SH : LOCK_EX) | LOCK_NB) < 0) {
         error_setg(errp, "persist_file '%s' is in use by another device",
                    n->persist_path);
         close(fd);
         return false;
     }
+    /*
+     * A device that saves the file makes FILE.lock first and tests the
+     * file second. A reader that holds the file looks for FILE.lock again,
+     * so one of the two sees the other.
+     */
+    if (on_file ? access(lock, F_OK) == 0 :
+        !reader && persist_file_held(n->persist_path)) {
+        error_setg(errp, "persist_file '%s' is in use by another device",
+                   n->persist_path);
+        close(fd);
+        return false;
+    }
+    if (on_file) {
+        warn_report("persist_load_only: no '%s' and its directory is "
+                    "read-only; the device holds '%s' itself", lock,
+                    n->persist_path);
+    }
+    n->persist_lock_on_file = on_file;
     n->persist_lock_fd = fd;
     return true;
 }
@@ -593,6 +678,7 @@ static void persist_unlock(FemuCtrl *n)
         close(n->persist_lock_fd);
         n->persist_lock_fd = -1;
     }
+    n->persist_lock_on_file = false;
     g_clear_pointer(&n->persist_path, g_free);
 }
 
@@ -868,7 +954,12 @@ bool femu_persist_init(FemuCtrl *n, Error **errp)
         persist_unlock(n);
         return false;
     }
-    fd = open(n->persist_path, O_RDONLY | O_CLOEXEC);
+    /*
+     * A reader that holds the file loads from that descriptor: over NFS a
+     * close of a second one could drop the lock.
+     */
+    fd = n->persist_lock_on_file ? n->persist_lock_fd :
+         open(n->persist_path, O_RDONLY | O_CLOEXEC);
     if (fd < 0 && errno == ENOENT && n->persist_load_only) {
         error_setg(errp, "persist_load_only needs an existing persist_file; "
                    "'%s' does not exist", n->persist_path);
@@ -883,7 +974,9 @@ bool femu_persist_init(FemuCtrl *n, Error **errp)
     }
     if (fd >= 0) {
         ok = persist_load(n, fd, errp);
-        close(fd);
+        if (!n->persist_lock_on_file) {
+            close(fd);
+        }
         if (!ok) {
             persist_unlock(n);
             return false;
@@ -961,6 +1054,7 @@ bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp)
     g_autofree char *path = NULL;
     g_autofree char *lock = NULL;
     int fd = -1;
+    bool absent;
     bool resume;
     bool ok;
 
@@ -1003,8 +1097,9 @@ bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp)
     }
     if (!n->persist_path || strcmp(path, n->persist_path)) {
         lock = g_strconcat(path, ".lock", NULL);
-        fd = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-        if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) < 0) {
+        fd = persist_open_lock(lock, O_RDWR, &absent);
+        if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) < 0 ||
+            persist_file_held(path)) {
             error_setg(errp, "femu-save-data: '%s' is in use by a device",
                        path);
             if (fd >= 0) {
