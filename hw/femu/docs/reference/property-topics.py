@@ -36,6 +36,7 @@ DEVICES = [
                       "x-persist-schema", "x-place-fail", "x-place-skip",
                       "x-rain-check",
                       "x-rain-fail",
+                      "x-backend-size",
                       "x-query-delay-ms", "x-range-waits",
                       "x-rber-u", "x-sdc", "x-stage-hold-ms",
                       "x-stream-test", "x-tier-check", "x-tier-fold-stop",

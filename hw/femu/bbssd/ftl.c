@@ -309,8 +309,13 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     /* configure the NAND media-layer timing (reads spp, points at ssd->ch) */
     bb_nand_media_init(ssd);
 
-    /* initialize maptbl */
-    ssd_init_maptbl(ssd);
+    /*
+     * A key-value namespace maps keys to values itself and never reads the
+     * block L2P: 8 bytes per physical page it would not use.
+     */
+    if (!ns || !NS_KVSSD(ns)) {
+        ssd_init_maptbl(ssd);
+    }
 
     /* initialize rmap */
     ssd_init_rmap(ssd);

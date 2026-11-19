@@ -4743,6 +4743,25 @@ static bool femu_opal_config_check(FemuCtrl *n, Error **errp)
     return true;
 }
 
+/*
+ * A key-value namespace keeps its values in its own arena, so a controller
+ * whose namespaces are all key-value needs no data backend. One block
+ * namespace among them still needs it.
+ */
+static int femu_all_ns_kv(FemuCtrl *n, bool *all_kv, Error **errp)
+{
+    g_autofree uint8_t *modes = g_new0(uint8_t, MAX(1, n->num_namespaces));
+
+    if (nvme_resolve_ns_modes(n, modes, errp)) {
+        return -1;
+    }
+    *all_kv = n->num_namespaces > 0;
+    for (int i = 0; i < n->num_namespaces; i++) {
+        *all_kv &= modes[i] == FEMU_KVSSD_MODE;
+    }
+    return 0;
+}
+
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
@@ -4969,12 +4988,20 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         /* prepare() lent the medium's backend; the pollers bring its locks */
         backend_init_range_locks(n->mbe);
     } else {
-        if (init_dram_backend(&n->mbe, bs_size)) {
+        bool all_kv;
+
+        if (femu_all_ns_kv(n, &all_kv, errp)) {
+            return;
+        }
+        if (all_kv) {
+            n->mbe = NULL;
+        } else if (init_dram_backend(&n->mbe, bs_size)) {
             error_setg(errp, "femu: cannot allocate the %" PRId64 " MiB "
                        "memory backend; lower devsz_mb", bs_size / MiB);
             return;
+        } else {
+            n->mbe->femu_mode = n->femu_mode;
         }
-        n->mbe->femu_mode = n->femu_mode;
     }
 
     /* the host-link model is armed only when a knob asks for it */
@@ -5982,6 +6009,11 @@ static void femu_test_namespace(Object *obj, const char *value, Error **errp)
         nvme_ns_release(n, &ns);
         return;
     }
+    if (!n->mbe && (!strcmp(value, "seed-sanitize") ||
+                    !strcmp(value, "check-sanitize"))) {
+        error_setg(errp, "the device has no data backend");
+        return;
+    }
     if (!n->sq[0] && !strcmp(value, "seed-sanitize")) {
         memset(n->mbe->logical_space, 0x5a, n->mbe->size);
         return;
@@ -6957,6 +6989,17 @@ static void femu_test_add_u32(Object *obj, const char *name, uint32_t *field,
                         writable ? femu_test_u32_set : NULL, NULL, field);
 }
 
+/* bytes of the data backend; 0 when the device has none */
+static void femu_test_backend_size_get(Object *obj, Visitor *v,
+                                       const char *name, void *opaque,
+                                       Error **errp)
+{
+    SsdDramBackend *b = FEMU(obj)->mbe;
+    uint64_t value = b ? b->size : 0;
+
+    visit_type_uint64(v, name, &value, errp);
+}
+
 /* lock takes in the memory backend that had to wait for another access */
 static void femu_test_range_waits_get(Object *obj, Visitor *v,
                                       const char *name, void *opaque,
@@ -7216,6 +7259,8 @@ static void femu_instance_init(Object *obj)
                             femu_test_copy_held_get, NULL, NULL, NULL);
         object_property_add(obj, "x-range-waits", "uint64",
                             femu_test_range_waits_get, NULL, NULL, NULL);
+        object_property_add(obj, "x-backend-size", "uint64",
+                            femu_test_backend_size_get, NULL, NULL, NULL);
         object_property_add(obj, "x-opal-gkey", "uint64",
                             femu_test_opal_gkey_get, NULL, NULL, NULL);
         object_property_add_bool(obj, "x-opal-power-cycle", NULL,

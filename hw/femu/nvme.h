@@ -2361,7 +2361,7 @@ typedef struct NvmeNamespace {
     uint64_t        backend_offset;
     uint64_t        meta_start_offset;
     uint64_t        tbl_dsk_start_offset;
-    uint32_t        tbl_entries;
+    uint64_t        tbl_entries;
     uint64_t        *tbl;
     Oc12Bbt   **bbtbl;
 

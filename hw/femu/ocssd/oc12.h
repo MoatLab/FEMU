@@ -225,8 +225,8 @@ typedef struct Oc12Ctrl {
     uint8_t     debug;
     uint8_t     strict;
     uint8_t     *meta_buf;
-    int         meta_tbytes;
-    int         meta_len;
+    uint64_t    meta_tbytes;
+    uint32_t    meta_len;
     uint8_t     int_meta_size;       /* # of bytes for "internal" metadata */
     /* NAND timing: the shared media layer, busy-until per LUN and channel */
     NandMedia   media;

@@ -8,10 +8,7 @@ static inline int qemu_fls(int i)
 
 static void oc12_tbl_initialize(NvmeNamespace *ns)
 {
-    uint32_t len = ns->tbl_entries;
-    int i;
-
-    for (i = 0; i < len; i++) {
+    for (uint64_t i = 0; i < ns->tbl_entries; i++) {
         ns->tbl[i] = OC12_LBA_UNMAPPED;
     }
 }
@@ -812,7 +809,7 @@ fail_free:
     return err;
 }
 
-static uint32_t oc12_tbl_size(NvmeNamespace *ns)
+static uint64_t oc12_tbl_size(NvmeNamespace *ns)
 {
     return ns->tbl_entries * sizeof(*(ns->tbl));
 }
@@ -995,8 +992,8 @@ static int oc12_read_tbls(FemuCtrl *n)
 {
     for (uint32_t i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
-        uint32_t tbl_size = oc12_tbl_size(ns);
-        femu_debug("tbl_size=%d\n", tbl_size);
+        uint64_t tbl_size = oc12_tbl_size(ns);
+        femu_debug("tbl_size=%" PRIu64 "\n", tbl_size);
         assert(tbl_size);
     }
 
@@ -1113,11 +1110,17 @@ static int oc12_init_meta(Oc12Ctrl *ln)
      * Then comes the tgt_oob_len which is the following ln->param.sos bytes
      */
     ln->meta_len    = ln->int_meta_size + ln->params.sos;
-    ln->meta_tbytes = ln->meta_len * ln->params.total_secs;
+    /* 64-bit: 20 bytes per sector passed INT_MAX near 51 GiB */
+    ln->meta_tbytes = (uint64_t)ln->meta_len * ln->params.total_secs;
 
     /* Coperd: we put all the meta data into this buffer */
     femu_debug("Allocating OOB: %.1f MB\n", ln->meta_tbytes / 1024 / 1024.0);
-    ln->meta_buf = g_malloc0(ln->meta_tbytes);
+    ln->meta_buf = g_try_malloc0(ln->meta_tbytes);
+    if (!ln->meta_buf) {
+        femu_err("ocssd: cannot allocate %" PRIu64 " bytes of OOB metadata\n",
+                 ln->meta_tbytes);
+        return -1;
+    }
 
     return 0;
 }
@@ -1384,6 +1387,14 @@ static int oc12_init_more(FemuCtrl *n, Error **errp)
             return -1;
         }
 
+        /* sector counts and address strides are 32-bit fields */
+        if (ns->ns_blks > UINT32_MAX) {
+            error_setg(errp, "FEMU ocssd: OCSSD 1.2 addresses at most %" PRIu64
+                       " sectors, the namespace has %" PRIu64
+                       "; lower devsz_mb", (uint64_t)UINT32_MAX, ns->ns_blks);
+            return -1;
+        }
+
         c->cpar = cpu_to_le16(0);
         c->mccap = 1;
         ret = oc12_init_bbtbl(n, ns);
@@ -1438,7 +1449,13 @@ static int oc12_init_more(FemuCtrl *n, Error **errp)
         if (ns->tbl) {
             qemu_vfree(ns->tbl);
         }
-        ns->tbl = qemu_memalign(4096, oc12_tbl_size(ns));
+        /* 8 bytes per sector: a 32-bit size wrapped to 0 at 256 GiB */
+        ns->tbl = qemu_try_memalign(4096, oc12_tbl_size(ns));
+        if (!ns->tbl) {
+            error_setg(errp, "FEMU ocssd: cannot allocate the %" PRIu64
+                       " MiB translation table", oc12_tbl_size(ns) / MiB);
+            return -1;
+        }
         oc12_tbl_initialize(ns);
     }
 

@@ -13,6 +13,7 @@
 #include "qemu/module.h"
 #include "qemu/crc32c.h"
 #include "qemu/host-utils.h"
+#include "qemu/units.h"
 #include "libqtest.h"
 #include "qobject/qdict.h"
 #include "qobject/qjson.h"
@@ -44087,6 +44088,50 @@ static char *femu_realize_stderr(const char *opts)
     return femu_realize_stderr_after("", opts);
 }
 
+/*
+ * A controller whose namespaces are all key-value keeps the values in its
+ * own arena, so it allocates no data backend. One block namespace among
+ * them keeps the backend, and so does a plain NoSSD controller.
+ */
+static const struct {
+    const char *opts;
+    uint64_t backend;
+} femu_kv_backend_cases[] = {
+    { "femu_mode=5,devsz_mb=64", 0 },
+    { "femu_mode=5,devsz_mb=64,namespaces=2", 0 },
+    { "femu_mode=2,devsz_mb=64,namespaces=2,namespace_modes=kvssd,,kvssd", 0 },
+    { "femu_mode=1,devsz_mb=2,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+      "blks_per_pl=64,pls_per_lun=2,luns_per_ch=1,nchs=2,namespaces=2,"
+      "namespace_modes=bbssd,,kvssd", 2 * MiB },
+    { "femu_mode=2,devsz_mb=64", 64 * MiB },
+};
+
+static void femu_test_kv_no_backend(void *obj, void *data,
+                                    QGuestAllocator *unused)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(femu_kv_backend_cases); i++) {
+        QTestState *qts = qtest_initf("-machine pc -nodefaults "
+                                      "-device femu,addr=5,id=kvb,%s",
+                                      femu_kv_backend_cases[i].opts);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                               "'path':'/machine/peripheral/kvb',"
+                               "'property':'x-backend-size'}}");
+
+        g_assert_cmpuint(qdict_get_int(rsp, "return"), ==,
+                         femu_kv_backend_cases[i].backend);
+        qobject_unref(rsp);
+        if (!femu_kv_backend_cases[i].backend) {
+            /* the sanitize fixtures need a backend and say so */
+            rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                            "'path':'/machine/peripheral/kvb',"
+                            "'property':'x-ns-test','value':'seed-sanitize'}}");
+            g_assert_true(qdict_haskey(rsp, "error"));
+            qobject_unref(rsp);
+        }
+        qtest_quit(qts);
+    }
+}
+
 static void femu_test_ignored_props(void *obj, void *data,
                                     QGuestAllocator *unused)
 {
@@ -64597,6 +64642,7 @@ static void femu_register_nodes(void)
 
     qos_add_test("doc-examples", "femu", femu_test_doc_examples, NULL);
     qos_add_test("ignored-props", "femu", femu_test_ignored_props, NULL);
+    qos_add_test("kv-no-backend", "femu", femu_test_kv_no_backend, NULL);
     qos_add_test("multiplane-warnings", "femu", femu_test_multiplane_warnings,
                  NULL);
     qos_add_test("cxl-geometry-bounds", "femu", femu_test_cxl_geometry_bounds,
