@@ -26163,6 +26163,84 @@ static void femu_test_oc12_small_sectors(void *obj, void *data,
     guest_free(alloc, ppas);
 }
 
+#define FEMU_OC12_GET_L2P   0xea
+
+/* Get L2P Table: @nlb entries of 8 bytes from entry @slba, to @buf */
+static uint16_t femu_oc12_get_l2p(FemuCtrlState *c, uint64_t slba,
+                                  uint32_t nlb, uint64_t buf)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = FEMU_OC12_GET_L2P;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(buf + 4096);
+    cmd.cdw10 = cpu_to_le32((uint32_t)slba);
+    cmd.cdw11 = cpu_to_le32((uint32_t)(slba >> 32));
+    cmd.cdw12 = cpu_to_le32(nlb);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* @len bytes at @addr all hold @byte */
+static void femu_oc12_all(QTestState *qts, uint64_t addr, size_t len,
+                          uint8_t byte)
+{
+    g_autofree uint8_t *got = g_malloc(len);
+    size_t i;
+
+    qtest_memread(qts, addr, got, len);
+    for (i = 0; i < len; i++) {
+        g_assert_cmphex(got[i], ==, byte);
+    }
+}
+
+/*
+ * Open-Channel 1.2 Get L2P Table. The table has one entry of 8 bytes for
+ * each block of the namespace, and each entry reads unmapped (all ones).
+ * A transfer of two pages moves 1024 entries and no byte more. The last
+ * entries come back; one entry past the end, and a start at the end, are
+ * Invalid Field and leave the host buffer as it was.
+ */
+static void femu_test_oc12_l2p_bounds(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 4 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    uint64_t entries;
+    uint32_t lba_size;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_identify_ns(&c, &entries, &lba_size);
+    g_assert_cmpuint(entries, >, 1024);
+
+    qtest_memset(qts, buf, 0x55, 3 * 4096);
+    g_assert_cmphex(femu_oc12_get_l2p(&c, 0, 1024, buf), ==, NVME_SUCCESS);
+    femu_oc12_all(qts, buf, 2 * 4096, 0xff);
+    femu_oc12_all(qts, buf + 2 * 4096, 4096, 0x55);
+
+    qtest_memset(qts, buf, 0x55, 3 * 4096);
+    g_assert_cmphex(femu_oc12_get_l2p(&c, entries - 3, 3, buf), ==,
+                    NVME_SUCCESS);
+    femu_oc12_all(qts, buf, 24, 0xff);
+    femu_oc12_all(qts, buf + 24, 3 * 4096 - 24, 0x55);
+
+    qtest_memset(qts, buf, 0x55, 3 * 4096);
+    g_assert_cmphex(femu_oc12_get_l2p(&c, entries - 3, 4, buf), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_oc12_get_l2p(&c, entries, 1, buf), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_oc12_get_l2p(&c, UINT64_MAX, 2, buf), ==,
+                    NVME_INVALID_FIELD);
+    femu_oc12_all(qts, buf, 3 * 4096, 0x55);
+
+    guest_free(alloc, raw);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 #define FEMU_OC12_SET_BBT   0xf1
 #define FEMU_OC12_GET_BBT   0xf2
 
@@ -73824,6 +73902,10 @@ static void femu_register_nodes(void)
     qos_add_test("oc12-small-sectors", "femu", femu_test_oc12_small_sectors,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=0,lver=1"
+    });
+    qos_add_test("oc12-l2p-bounds", "femu", femu_test_oc12_l2p_bounds,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=oc12-l2p,femu_mode=0,lver=1"
     });
     qos_add_test("oc12-bad-blocks", "femu", femu_test_oc12_bad_blocks,
                  &(QOSGraphTestOptions) {

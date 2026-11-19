@@ -8,7 +8,9 @@ static inline int qemu_fls(int i)
 
 static void oc12_tbl_initialize(NvmeNamespace *ns)
 {
-    for (uint64_t i = 0; i < ns->tbl_entries; i++) {
+    uint64_t i;
+
+    for (i = 0; i < ns->tbl_entries; i++) {
         ns->tbl[i] = OC12_LBA_UNMAPPED;
     }
 }
@@ -809,6 +811,7 @@ fail_free:
     return err;
 }
 
+/* bytes: 4 GiB or more from 2^29 entries, so not a 32-bit value */
 static uint64_t oc12_tbl_size(NvmeNamespace *ns)
 {
     return ns->tbl_entries * sizeof(*(ns->tbl));
@@ -838,7 +841,7 @@ static uint16_t oc12_get_l2p_tbl(FemuCtrl *n, NvmeCmd *cmd)
     uint64_t prp1 = le64_to_cpu(gtbl->prp1);
     uint64_t prp2 = le64_to_cpu(gtbl->prp2);
     uint32_t nsid = le32_to_cpu(gtbl->nsid);
-    uint64_t xfer_len = nlb * sizeof(*(ns->tbl));
+    uint64_t xfer_len = (uint64_t)nlb * sizeof(uint64_t);
 
     if (nsid == 0 || nsid > n->num_namespaces) {
         return NVME_INVALID_NSID | NVME_DNR;
@@ -849,6 +852,10 @@ static uint16_t oc12_get_l2p_tbl(FemuCtrl *n, NvmeCmd *cmd)
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     if ((slba + nlb) > ns->tbl_entries) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    /* the data pointer is walked with a 32-bit length */
+    if (xfer_len > UINT32_MAX) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
