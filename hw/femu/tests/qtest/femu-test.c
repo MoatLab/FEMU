@@ -45643,6 +45643,8 @@ static void femu_test_mem_limit_modes(void *obj, void *data,
 /*
  * The limit applies to realize only. A Format and a namespace Create
  * after realize allocate with no take, so x-mem-taken keeps its value.
+ * The reply drops after the Delete and grows after the Create, so the
+ * commands did free and allocate.
  */
 static void femu_test_mem_limit_commands(void *obj, void *data,
                                          QGuestAllocator *alloc)
@@ -45652,6 +45654,7 @@ static void femu_test_mem_limit_commands(void *obj, void *data,
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 4096);
     uint64_t taken = femu_mem_taken(qts, "mlc");
+    uint64_t deleted;
     uint32_t nsid;
     uint16_t cntlid;
 
@@ -45663,10 +45666,14 @@ static void femu_test_mem_limit_commands(void *obj, void *data,
     g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
     g_assert_cmpuint(femu_mem_taken(qts, "mlc"), ==, taken);
     g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    /* the delete frees, and the create allocates: the commands ran */
+    deleted = femu_mem_total(qts, "mlc", NULL);
+    g_assert_cmpuint(deleted, <, taken);
     g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
     g_assert_cmpint(femu_ns_attach(&c, buf, nsid, cntlid, true), ==,
                     NVME_SUCCESS);
     g_assert_cmpint(FEMU_SC(femu_format(&c, nsid, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_mem_total(qts, "mlc", NULL), >, deleted);
     g_assert_cmpuint(femu_mem_taken(qts, "mlc"), ==, taken);
     femu_disable(&c);
     guest_free(alloc, buf);
