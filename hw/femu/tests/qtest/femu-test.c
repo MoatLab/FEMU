@@ -66142,6 +66142,131 @@ static void femu_dpt_target_intact(FemuDpt *t, const FemuDptTarget *tg)
 }
 
 /*
+ * Read, Write and Compare of @len bytes each end with @sc, and the
+ * namespace keeps its data. The caller checks the memory side.
+ */
+static void femu_dpt_refused(FemuDpt *t, FemuCtrlState *c, uint32_t len,
+                             uint64_t prp1, uint64_t prp2,
+                             const NvmeSglDescriptor *sgl, uint16_t sc)
+{
+    static const uint8_t ops[] = {
+        NVME_CMD_READ, NVME_CMD_WRITE, NVME_CMD_COMPARE,
+    };
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(ops); i++) {
+        g_test_message("opcode 0x%x", ops[i]);
+        g_assert_cmphex(femu_dpt_cmd(c, ops[i], 0, len, prp1, prp2, sgl),
+                        ==, sc);
+    }
+    femu_dpt_ns_is(t, c, 0, FEMU_DPT_NS_BYTES, FEMU_DPT_NS_SEED);
+}
+
+/* an SGL data block descriptor */
+static NvmeSglDescriptor femu_dpt_blk(uint64_t addr, uint32_t len)
+{
+    NvmeSglDescriptor d = { 0 };
+
+    d.addr = cpu_to_le64(addr);
+    d.len = cpu_to_le32(len);
+    return d;
+}
+
+/*
+ * Write @nr descriptors to @list and return a descriptor of @type
+ * (Segment or Last Segment) that points at them.
+ */
+static NvmeSglDescriptor femu_dpt_seg(FemuDpt *t, uint64_t list,
+                                      const NvmeSglDescriptor *d, int nr,
+                                      uint8_t type)
+{
+    NvmeSglDescriptor s = { 0 };
+
+    qtest_memwrite(t->qts, list, d, nr * sizeof(*d));
+    s.addr = cpu_to_le64(list);
+    s.len = cpu_to_le32(nr * sizeof(*d));
+    s.type = type << 4;
+    return s;
+}
+
+/* bytes [off, off + FEMU_DPT_PAGE) of the namespace equal @want */
+static void femu_dpt_ns_equals(FemuDpt *t, FemuCtrlState *c, uint32_t off,
+                               const uint8_t *want)
+{
+    uint8_t got[FEMU_DPT_PAGE];
+
+    qtest_memset(t->qts, t->scratch, 0, FEMU_DPT_PAGE);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, off, FEMU_DPT_PAGE,
+                                 t->scratch, 0, NULL), ==, NVME_SUCCESS);
+    qtest_memread(t->qts, t->scratch, got, sizeof(got));
+    g_assert_cmpmem(got, sizeof(got), want, FEMU_DPT_PAGE);
+}
+
+/*
+ * A ROM is a source and never a destination. A Read into it fails and
+ * leaves it as it was; a Write from it stores its bytes, and a Compare
+ * against those bytes then matches.
+ */
+static void femu_dpt_rom(FemuDpt *t, FemuCtrlState *c,
+                         const NvmeSglDescriptor *sgl)
+{
+    uint8_t rom[FEMU_DPT_PAGE];
+    uint8_t after[FEMU_DPT_PAGE];
+
+    g_test_message("target: ROM");
+    qtest_memread(t->qts, FEMU_DPT_ROM, rom, sizeof(rom));
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, FEMU_DPT_PAGE,
+                                 FEMU_DPT_ROM, 0, sgl), ==,
+                    NVME_DATA_TRAS_ERROR);
+    qtest_memread(t->qts, FEMU_DPT_ROM, after, sizeof(after));
+    g_assert_cmpmem(after, sizeof(after), rom, sizeof(rom));
+    femu_dpt_ns_is(t, c, 0, FEMU_DPT_NS_BYTES, FEMU_DPT_NS_SEED);
+
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_WRITE, 0, FEMU_DPT_PAGE,
+                                 FEMU_DPT_ROM, 0, sgl), ==, NVME_SUCCESS);
+    femu_dpt_ns_equals(t, c, 0, rom);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_COMPARE, 0, FEMU_DPT_PAGE,
+                                 FEMU_DPT_ROM, 0, sgl), ==, NVME_SUCCESS);
+    femu_dpt_ns_put(t, c, FEMU_DPT_NS_SEED);
+}
+
+/*
+ * One page between the namespace and @addr: a Read fills @addr byte for
+ * byte, a Write stores it, and a Compare of equal data matches.
+ */
+static void femu_dpt_page_ok(FemuDpt *t, FemuCtrlState *c, uint64_t addr,
+                             const NvmeSglDescriptor *sgl)
+{
+    femu_dpt_mem_put(t, addr, FEMU_DPT_PAGE, FEMU_DPT_GUARD_SEED, 0);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, FEMU_DPT_PAGE, addr, 0,
+                                 sgl), ==, NVME_SUCCESS);
+    femu_dpt_mem_is(t, addr, FEMU_DPT_PAGE, FEMU_DPT_NS_SEED, 0);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_COMPARE, 0, FEMU_DPT_PAGE, addr,
+                                 0, sgl), ==, NVME_SUCCESS);
+
+    femu_dpt_mem_put(t, addr, FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED, 0);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_COMPARE, 0, FEMU_DPT_PAGE, addr,
+                                 0, sgl), ==, NVME_CMP_FAILURE);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_WRITE, 0, FEMU_DPT_PAGE, addr, 0,
+                                 sgl), ==, NVME_SUCCESS);
+    femu_dpt_ns_is(t, c, 0, FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED);
+    femu_dpt_ns_is(t, c, FEMU_DPT_PAGE, FEMU_DPT_NS_BYTES - FEMU_DPT_PAGE,
+                   FEMU_DPT_NS_SEED);
+    femu_dpt_ns_put(t, c, FEMU_DPT_NS_SEED);
+}
+
+/* page 0 of the namespace: new data in its first @len bytes, old after */
+static void femu_dpt_ns_half(FemuDpt *t, FemuCtrlState *c, uint32_t len)
+{
+    qtest_memset(t->qts, t->scratch, 0, FEMU_DPT_PAGE);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, FEMU_DPT_PAGE,
+                                 t->scratch, 0, NULL), ==, NVME_SUCCESS);
+    femu_dpt_mem_is(t, t->scratch, len, FEMU_DPT_NEW_SEED, 0);
+    femu_dpt_mem_is(t, t->scratch + len, FEMU_DPT_PAGE - len,
+                    FEMU_DPT_NS_SEED, len);
+}
+
+/*
  * Compare returns the status of the PRP mapper, as Read and Write do. It
  * returned Invalid Field for each mapper failure: a list page that cannot
  * be read is a Data Transfer Error, and an offset in PRP2 or in a list
@@ -66194,6 +66319,447 @@ static void femu_test_dma_target_compare_status(void *obj, void *data,
                                  t.ent[0], 0, NULL), ==, NVME_CMP_FAILURE);
     femu_dpt_ns_is(&t, c, 0, FEMU_DPT_NS_BYTES, FEMU_DPT_NS_SEED);
 
+    femu_dpt_stop(&t);
+}
+
+/*
+ * PRP1 alone, one page. RAM works both ways and a ROM is a source only.
+ * The CMB of the same device is refused with Invalid Field, as the media
+ * path takes no iovec. Each target that is not memory gets Data Transfer
+ * Error, and no byte of it or of the namespace changes.
+ */
+static void femu_test_dma_target_prp1(void *obj, void *data,
+                                      QGuestAllocator *unused)
+{
+    FemuDptTarget tg[3];
+    FemuDptTarget own;
+    FemuDpt t;
+    int i;
+
+    femu_dpt_start(&t);
+    femu_dpt_targets(&t, tg);
+
+    /* control: the same command form with RAM */
+    femu_dpt_page_ok(&t, &t.a, t.ent[0], NULL);
+
+    own = (FemuDptTarget) { "own CMB", t.own_cmb.addr + FEMU_DPT_PAGE,
+                            true };
+    femu_dpt_target_prep(&t, &own);
+    femu_dpt_refused(&t, &t.a, FEMU_DPT_PAGE, own.addr, 0, NULL,
+                     NVME_INVALID_FIELD);
+    femu_dpt_target_intact(&t, &own);
+
+    for (i = 0; i < 3; i++) {
+        femu_dpt_target_prep(&t, &tg[i]);
+        femu_dpt_refused(&t, &t.a, FEMU_DPT_PAGE, tg[i].addr, 0, NULL,
+                         NVME_DATA_TRAS_ERROR);
+        femu_dpt_target_intact(&t, &tg[i]);
+    }
+
+    femu_dpt_rom(&t, &t.a, NULL);
+    femu_dpt_stop(&t);
+}
+
+/*
+ * PRP2 and PRP lists. An entry after the first may name the CMB of the
+ * same device, and so may the list page itself. A refused list page
+ * moves nothing. A refused entry after the first fails the command, and
+ * the entries before it have moved: a Read filled them and a Write
+ * stored them.
+ */
+static void femu_test_dma_target_prp_list(void *obj, void *data,
+                                          QGuestAllocator *unused)
+{
+    const uint32_t len3 = 3 * FEMU_DPT_PAGE;
+    uint64_t own = 0;
+    uint64_t own_list = 0;
+    uint64_t low = FEMU_DPT_RAM_TOP - FEMU_DPT_PAGE;
+    uint64_t ents[2];
+    FemuDptTarget tg[3];
+    FemuDpt t;
+    FemuCtrlState *c;
+    int i;
+
+    femu_dpt_start(&t);
+    c = &t.a;
+    femu_dpt_targets(&t, tg);
+    own = t.own_cmb.addr + FEMU_DPT_PAGE;
+    own_list = t.own_cmb.addr + 2 * FEMU_DPT_PAGE;
+
+    /* two pages: PRP1 in RAM, PRP2 in the own CMB */
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, 2 * FEMU_DPT_PAGE,
+                                 t.ent[0], own, NULL), ==, NVME_SUCCESS);
+    femu_dpt_mem_is(&t, t.ent[0], FEMU_DPT_PAGE, FEMU_DPT_NS_SEED, 0);
+    femu_dpt_mem_is(&t, own, FEMU_DPT_PAGE, FEMU_DPT_NS_SEED,
+                    FEMU_DPT_PAGE);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_COMPARE, 0, 2 * FEMU_DPT_PAGE,
+                                 t.ent[0], own, NULL), ==, NVME_SUCCESS);
+    femu_dpt_mem_put(&t, t.ent[0], FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED, 0);
+    femu_dpt_mem_put(&t, own, FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED,
+                     FEMU_DPT_PAGE);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_WRITE, 0, 2 * FEMU_DPT_PAGE,
+                                 t.ent[0], own, NULL), ==, NVME_SUCCESS);
+    femu_dpt_ns_is(&t, c, 0, 2 * FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED);
+    femu_dpt_ns_put(&t, c, FEMU_DPT_NS_SEED);
+
+    /* two pages: PRP1 in the own CMB, PRP2 in RAM */
+    femu_dpt_guard_put(&t, own, FEMU_DPT_PAGE);
+    femu_dpt_refused(&t, c, 2 * FEMU_DPT_PAGE, own, t.ent[1], NULL,
+                     NVME_INVALID_FIELD);
+    femu_dpt_guard_is(&t, own, FEMU_DPT_PAGE);
+
+    /* three pages: the list page lies in the own CMB */
+    ents[0] = cpu_to_le64(t.ent[1]);
+    ents[1] = cpu_to_le64(t.ent[2]);
+    qtest_memwrite(t.qts, own_list, ents, sizeof(ents));
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, len3, t.ent[0],
+                                 own_list, NULL), ==, NVME_SUCCESS);
+    for (i = 0; i < 3; i++) {
+        femu_dpt_mem_is(&t, t.ent[i], FEMU_DPT_PAGE, FEMU_DPT_NS_SEED,
+                        i * FEMU_DPT_PAGE);
+    }
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_COMPARE, 0, len3, t.ent[0],
+                                 own_list, NULL), ==, NVME_SUCCESS);
+
+    /* three pages: the list is in RAM and its last entry in the own CMB */
+    ents[1] = cpu_to_le64(own);
+    qtest_memwrite(t.qts, t.list, ents, sizeof(ents));
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, len3, t.ent[0],
+                                 t.list, NULL), ==, NVME_SUCCESS);
+    femu_dpt_mem_is(&t, own, FEMU_DPT_PAGE, FEMU_DPT_NS_SEED,
+                    2 * FEMU_DPT_PAGE);
+
+    /* the list page is not memory: nothing moves */
+    for (i = 0; i < 3; i++) {
+        femu_dpt_target_prep(&t, &tg[i]);
+        femu_dpt_refused(&t, c, len3, t.ent[0], tg[i].addr, NULL,
+                         NVME_DATA_TRAS_ERROR);
+        femu_dpt_target_intact(&t, &tg[i]);
+    }
+
+    /* the last entry is not memory: the first two pages have moved */
+    for (i = 0; i < 3; i++) {
+        femu_dpt_target_prep(&t, &tg[i]);
+        ents[1] = cpu_to_le64(tg[i].addr);
+        qtest_memwrite(t.qts, t.list, ents, sizeof(ents));
+
+        femu_dpt_mem_put(&t, t.ent[0], FEMU_DPT_PAGE, FEMU_DPT_GUARD_SEED, 0);
+        femu_dpt_mem_put(&t, t.ent[1], FEMU_DPT_PAGE, FEMU_DPT_GUARD_SEED, 0);
+        g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, len3, t.ent[0],
+                                     t.list, NULL), ==, NVME_DATA_TRAS_ERROR);
+        femu_dpt_mem_is(&t, t.ent[0], FEMU_DPT_PAGE, FEMU_DPT_NS_SEED, 0);
+        femu_dpt_mem_is(&t, t.ent[1], FEMU_DPT_PAGE, FEMU_DPT_NS_SEED,
+                        FEMU_DPT_PAGE);
+        /* equal data up to the refused entry */
+        g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_COMPARE, 0, len3,
+                                     t.ent[0], t.list, NULL), ==,
+                        NVME_DATA_TRAS_ERROR);
+
+        femu_dpt_mem_put(&t, t.ent[0], FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED, 0);
+        femu_dpt_mem_put(&t, t.ent[1], FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED,
+                         FEMU_DPT_PAGE);
+        g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_WRITE, 0, len3, t.ent[0],
+                                     t.list, NULL), ==, NVME_DATA_TRAS_ERROR);
+        femu_dpt_ns_is(&t, c, 0, 2 * FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED);
+        femu_dpt_ns_is(&t, c, 2 * FEMU_DPT_PAGE, 2 * FEMU_DPT_PAGE,
+                       FEMU_DPT_NS_SEED);
+        femu_dpt_target_intact(&t, &tg[i]);
+        femu_dpt_ns_put(&t, c, FEMU_DPT_NS_SEED);
+    }
+
+    /* two pages: the last page of RAM, then the first address after it */
+    femu_dpt_mem_put(&t, low, FEMU_DPT_PAGE, FEMU_DPT_GUARD_SEED, 0);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, 2 * FEMU_DPT_PAGE, low,
+                                 FEMU_DPT_RAM_TOP, NULL), ==,
+                    NVME_DATA_TRAS_ERROR);
+    femu_dpt_mem_is(&t, low, FEMU_DPT_PAGE, FEMU_DPT_NS_SEED, 0);
+    femu_dpt_mem_put(&t, low, FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED, 0);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_WRITE, 0, 2 * FEMU_DPT_PAGE, low,
+                                 FEMU_DPT_RAM_TOP, NULL), ==,
+                    NVME_DATA_TRAS_ERROR);
+    femu_dpt_ns_is(&t, c, 0, FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED);
+    femu_dpt_ns_is(&t, c, FEMU_DPT_PAGE, 3 * FEMU_DPT_PAGE,
+                   FEMU_DPT_NS_SEED);
+
+    femu_dpt_stop(&t);
+}
+
+/*
+ * One SGL data block. RAM and the CMB of the same device both work, and
+ * a ROM is a source only. A block that is not memory, or that runs past
+ * the end of a region, moves nothing: each part of a block is checked
+ * before any part is copied.
+ */
+static void femu_test_dma_target_sgl(void *obj, void *data,
+                                     QGuestAllocator *unused)
+{
+    NvmeSglDescriptor blk;
+    FemuDptTarget tg[3];
+    FemuDpt t;
+    FemuCtrlState *c;
+    uint64_t end;
+    int i;
+
+    femu_dpt_start(&t);
+    c = &t.a;
+    femu_dpt_targets(&t, tg);
+
+    blk = femu_dpt_blk(t.ent[0], FEMU_DPT_PAGE);
+    femu_dpt_page_ok(&t, c, t.ent[0], &blk);
+    blk = femu_dpt_blk(t.own_cmb.addr + FEMU_DPT_PAGE, FEMU_DPT_PAGE);
+    femu_dpt_page_ok(&t, c, t.own_cmb.addr + FEMU_DPT_PAGE, &blk);
+
+    for (i = 0; i < 3; i++) {
+        femu_dpt_target_prep(&t, &tg[i]);
+        blk = femu_dpt_blk(tg[i].addr, FEMU_DPT_PAGE);
+        femu_dpt_refused(&t, c, FEMU_DPT_PAGE, 0, 0, &blk,
+                         NVME_DATA_TRAS_ERROR);
+        femu_dpt_target_intact(&t, &tg[i]);
+    }
+
+    blk = femu_dpt_blk(FEMU_DPT_ROM, FEMU_DPT_PAGE);
+    femu_dpt_rom(&t, c, &blk);
+
+    /* half a page at the end of the own CMB, then past its end */
+    end = t.own_cmb.addr + FEMU_DPT_CMB_SIZE;
+    femu_dpt_mem_put(&t, end - FEMU_DPT_PAGE, FEMU_DPT_PAGE,
+                     FEMU_DPT_GUARD_SEED, 0);
+    blk = femu_dpt_blk(end - FEMU_DPT_PAGE / 2, FEMU_DPT_PAGE);
+    femu_dpt_refused(&t, c, FEMU_DPT_PAGE, 0, 0, &blk, NVME_DATA_TRAS_ERROR);
+    femu_dpt_mem_is(&t, end - FEMU_DPT_PAGE, FEMU_DPT_PAGE,
+                    FEMU_DPT_GUARD_SEED, 0);
+
+    /* half a page at the end of RAM, then the hole after it */
+    end = FEMU_DPT_RAM_TOP;
+    femu_dpt_mem_put(&t, end - FEMU_DPT_PAGE, FEMU_DPT_PAGE,
+                     FEMU_DPT_GUARD_SEED, 0);
+    blk = femu_dpt_blk(end - FEMU_DPT_PAGE / 2, FEMU_DPT_PAGE);
+    femu_dpt_refused(&t, c, FEMU_DPT_PAGE, 0, 0, &blk, NVME_DATA_TRAS_ERROR);
+    femu_dpt_mem_is(&t, end - FEMU_DPT_PAGE, FEMU_DPT_PAGE,
+                    FEMU_DPT_GUARD_SEED, 0);
+
+    femu_dpt_stop(&t);
+}
+
+/*
+ * SGL segments. A list may lie in the CMB of the same device. A list that
+ * is not memory fails the command before any data moves, also when a
+ * Segment chains to it. A data block that is not memory, after a block
+ * in RAM, fails the command, and the block before it has moved.
+ */
+static void femu_test_dma_target_sgl_chain(void *obj, void *data,
+                                           QGuestAllocator *unused)
+{
+    const uint32_t half = FEMU_DPT_PAGE / 2;
+    NvmeSglDescriptor d[2];
+    NvmeSglDescriptor seg;
+    FemuDptTarget tg[3];
+    FemuDpt t;
+    FemuCtrlState *c;
+    uint64_t own;
+    uint64_t own_list;
+    int i;
+
+    femu_dpt_start(&t);
+    c = &t.a;
+    femu_dpt_targets(&t, tg);
+    own = t.own_cmb.addr + FEMU_DPT_PAGE;
+    own_list = t.own_cmb.addr + 2 * FEMU_DPT_PAGE;
+
+    /* a last segment in RAM: half a page in RAM, half in the own CMB */
+    d[0] = femu_dpt_blk(t.ent[0], half);
+    d[1] = femu_dpt_blk(own, half);
+    seg = femu_dpt_seg(&t, t.list, d, 2, NVME_SGL_DESCR_TYPE_LAST_SEGMENT);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, FEMU_DPT_PAGE, 0, 0,
+                                 &seg), ==, NVME_SUCCESS);
+    femu_dpt_mem_is(&t, t.ent[0], half, FEMU_DPT_NS_SEED, 0);
+    femu_dpt_mem_is(&t, own, half, FEMU_DPT_NS_SEED, half);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_COMPARE, 0, FEMU_DPT_PAGE, 0, 0,
+                                 &seg), ==, NVME_SUCCESS);
+    femu_dpt_mem_put(&t, t.ent[0], half, FEMU_DPT_NEW_SEED, 0);
+    femu_dpt_mem_put(&t, own, half, FEMU_DPT_NEW_SEED, half);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_WRITE, 0, FEMU_DPT_PAGE, 0, 0,
+                                 &seg), ==, NVME_SUCCESS);
+    femu_dpt_ns_is(&t, c, 0, FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED);
+    femu_dpt_ns_put(&t, c, FEMU_DPT_NS_SEED);
+
+    /* a Segment in RAM chains to a last segment in the own CMB */
+    d[0] = femu_dpt_blk(t.ent[1], half);
+    seg = femu_dpt_seg(&t, own_list, d, 1, NVME_SGL_DESCR_TYPE_LAST_SEGMENT);
+    d[0] = femu_dpt_blk(t.ent[0], half);
+    d[1] = seg;
+    seg = femu_dpt_seg(&t, t.list, d, 2, NVME_SGL_DESCR_TYPE_SEGMENT);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, FEMU_DPT_PAGE, 0, 0,
+                                 &seg), ==, NVME_SUCCESS);
+    femu_dpt_mem_is(&t, t.ent[0], half, FEMU_DPT_NS_SEED, 0);
+    femu_dpt_mem_is(&t, t.ent[1], half, FEMU_DPT_NS_SEED, half);
+
+    for (i = 0; i < 3; i++) {
+        /* the only list is not memory */
+        femu_dpt_target_prep(&t, &tg[i]);
+        seg = femu_dpt_blk(tg[i].addr, sizeof(d[0]));
+        seg.type = NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4;
+        femu_dpt_refused(&t, c, FEMU_DPT_PAGE, 0, 0, &seg,
+                         NVME_DATA_TRAS_ERROR);
+        femu_dpt_target_intact(&t, &tg[i]);
+
+        /* a Segment in RAM chains to a list that is not memory */
+        femu_dpt_mem_put(&t, t.ent[0], half, FEMU_DPT_GUARD_SEED, 0);
+        d[0] = femu_dpt_blk(t.ent[0], half);
+        d[1] = femu_dpt_blk(tg[i].addr, sizeof(d[0]));
+        d[1].type = NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4;
+        seg = femu_dpt_seg(&t, t.list, d, 2, NVME_SGL_DESCR_TYPE_SEGMENT);
+        femu_dpt_refused(&t, c, FEMU_DPT_PAGE, 0, 0, &seg,
+                         NVME_DATA_TRAS_ERROR);
+        femu_dpt_mem_is(&t, t.ent[0], half, FEMU_DPT_GUARD_SEED, 0);
+        femu_dpt_target_intact(&t, &tg[i]);
+
+        /* the second data block is not memory: the first has moved */
+        femu_dpt_mem_put(&t, t.ent[0], half, FEMU_DPT_GUARD_SEED, 0);
+        d[1] = femu_dpt_blk(tg[i].addr, half);
+        seg = femu_dpt_seg(&t, t.list, d, 2,
+                           NVME_SGL_DESCR_TYPE_LAST_SEGMENT);
+        g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, FEMU_DPT_PAGE, 0,
+                                     0, &seg), ==, NVME_DATA_TRAS_ERROR);
+        femu_dpt_mem_is(&t, t.ent[0], half, FEMU_DPT_NS_SEED, 0);
+        g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_COMPARE, 0, FEMU_DPT_PAGE,
+                                     0, 0, &seg), ==, NVME_DATA_TRAS_ERROR);
+        femu_dpt_mem_put(&t, t.ent[0], half, FEMU_DPT_NEW_SEED, 0);
+        g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_WRITE, 0, FEMU_DPT_PAGE, 0,
+                                     0, &seg), ==, NVME_DATA_TRAS_ERROR);
+        femu_dpt_ns_half(&t, c, half);
+        femu_dpt_target_intact(&t, &tg[i]);
+        femu_dpt_ns_put(&t, c, FEMU_DPT_NS_SEED);
+    }
+
+    femu_dpt_stop(&t);
+}
+
+/*
+ * Device C has no CMB, so a Read or Write of one or two pages takes the
+ * short PRP path, which copies each page itself. The CMBs of A and B are
+ * both foreign memory here. A refused first page moves nothing, and a
+ * refused second page leaves the first one moved.
+ */
+static void femu_test_dma_target_single_prp(void *obj, void *data,
+                                            QGuestAllocator *unused)
+{
+    static const uint8_t ops[] = { NVME_CMD_READ, NVME_CMD_WRITE };
+    FemuCtrlState cs = { 0 };
+    FemuCtrlState *c = &cs;
+    FemuDptTarget tg[4];
+    FemuDpt t;
+    int op;
+    int i;
+
+    femu_dpt_start(&t);
+    femu_dpt_targets(&t, tg);
+    tg[3] = (FemuDptTarget) { "CMB of device A",
+                              t.own_cmb.addr + FEMU_DPT_PAGE, true };
+    femu_enable(c, t.dev_c, &t.qs->alloc);
+    femu_create_io_queues(c);
+    femu_dpt_ns_put(&t, c, FEMU_DPT_NS_SEED);
+
+    /* control: RAM, one page and two pages */
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, 2 * FEMU_DPT_PAGE,
+                                 t.ent[0], t.ent[1], NULL), ==,
+                    NVME_SUCCESS);
+    femu_dpt_mem_is(&t, t.ent[0], FEMU_DPT_PAGE, FEMU_DPT_NS_SEED, 0);
+    femu_dpt_mem_is(&t, t.ent[1], FEMU_DPT_PAGE, FEMU_DPT_NS_SEED,
+                    FEMU_DPT_PAGE);
+    femu_dpt_mem_put(&t, t.ent[0], FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED, 0);
+    g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_WRITE, 0, FEMU_DPT_PAGE,
+                                 t.ent[0], 0, NULL), ==, NVME_SUCCESS);
+    femu_dpt_ns_is(&t, c, 0, FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED);
+    femu_dpt_ns_put(&t, c, FEMU_DPT_NS_SEED);
+
+    for (i = 0; i < 4; i++) {
+        femu_dpt_target_prep(&t, &tg[i]);
+        for (op = 0; op < ARRAY_SIZE(ops); op++) {
+            g_assert_cmphex(femu_dpt_cmd(c, ops[op], 0, FEMU_DPT_PAGE,
+                                         tg[i].addr, 0, NULL), ==,
+                            NVME_DATA_TRAS_ERROR);
+        }
+        femu_dpt_ns_is(&t, c, 0, FEMU_DPT_NS_BYTES, FEMU_DPT_NS_SEED);
+        femu_dpt_target_intact(&t, &tg[i]);
+
+        /* the second page is refused, after the first has moved */
+        femu_dpt_mem_put(&t, t.ent[0], FEMU_DPT_PAGE, FEMU_DPT_GUARD_SEED, 0);
+        g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_READ, 0, 2 * FEMU_DPT_PAGE,
+                                     t.ent[0], tg[i].addr, NULL), ==,
+                        NVME_DATA_TRAS_ERROR);
+        femu_dpt_mem_is(&t, t.ent[0], FEMU_DPT_PAGE, FEMU_DPT_NS_SEED, 0);
+        femu_dpt_mem_put(&t, t.ent[0], FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED, 0);
+        g_assert_cmphex(femu_dpt_cmd(c, NVME_CMD_WRITE, 0, 2 * FEMU_DPT_PAGE,
+                                     t.ent[0], tg[i].addr, NULL), ==,
+                        NVME_DATA_TRAS_ERROR);
+        femu_dpt_ns_is(&t, c, 0, FEMU_DPT_PAGE, FEMU_DPT_NEW_SEED);
+        femu_dpt_ns_is(&t, c, FEMU_DPT_PAGE, 3 * FEMU_DPT_PAGE,
+                       FEMU_DPT_NS_SEED);
+        femu_dpt_target_intact(&t, &tg[i]);
+        femu_dpt_ns_put(&t, c, FEMU_DPT_NS_SEED);
+    }
+
+    femu_dpt_rom(&t, c, NULL);
+
+    femu_queue_free(c, &c->io);
+    femu_disable(c);
+    femu_dpt_stop(&t);
+}
+
+/*
+ * Commands that name foreign memory are in flight while a Format pauses
+ * the pollers with the BQL held. A copy that waited for a handler would
+ * stop the VM, so each round has to end within the deadline, and every
+ * command fails with Data Transfer Error.
+ */
+static void femu_test_dma_target_pause(void *obj, void *data,
+                                       QGuestAllocator *unused)
+{
+    FemuPauseDeadline d = { 0 };
+    FemuDptTarget tg[3];
+    GThread *watchdog;
+    FemuDpt t;
+    FemuCtrlState *c;
+    NvmeRwCmd rw;
+    int round;
+    int j;
+
+    femu_dpt_start(&t);
+    c = &t.a;
+    femu_dpt_targets(&t, tg);
+    femu_dpt_guard_put(&t, tg[0].addr, FEMU_DPT_PAGE);
+
+    g_mutex_init(&d.lock);
+    g_cond_init(&d.cond);
+    watchdog = g_thread_new("dpt-pause-timeout", femu_pause_deadline, &d);
+    for (round = 0; round < 16; round++) {
+        for (j = 0; j < 14; j++) {
+            memset(&rw, 0, sizeof(rw));
+            rw.opcode = j & 1 ? NVME_CMD_READ : NVME_CMD_WRITE;
+            rw.nsid = cpu_to_le32(1);
+            rw.nlb = cpu_to_le16(FEMU_DPT_PAGE / c->lba_size - 1);
+            rw.dptr.prp1 = cpu_to_le64(tg[(round + j) % 3].addr);
+            femu_submit(c, &c->io, (NvmeCmd *)&rw);
+        }
+        g_assert_cmphex(femu_format(c, 1, 0, 0), ==, NVME_SUCCESS);
+        for (j = 0; j < 14; j++) {
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)),
+                            ==, NVME_DATA_TRAS_ERROR);
+        }
+    }
+    g_mutex_lock(&d.lock);
+    d.done = true;
+    g_cond_signal(&d.cond);
+    g_mutex_unlock(&d.lock);
+    g_thread_join(watchdog);
+    g_cond_clear(&d.cond);
+    g_mutex_clear(&d.lock);
+
+    femu_dpt_target_intact(&t, &tg[0]);
+    /* control: the controller still moves data */
+    femu_dpt_ns_put(&t, c, FEMU_DPT_NS_SEED);
+    femu_dpt_ns_is(&t, c, 0, FEMU_DPT_NS_BYTES, FEMU_DPT_NS_SEED);
     femu_dpt_stop(&t);
 }
 
@@ -73586,6 +74152,16 @@ static void femu_register_nodes(void)
     }
     qos_add_test("dma-target-compare-status", "femu",
                  femu_test_dma_target_compare_status, NULL);
+    qos_add_test("dma-target-prp1", "femu", femu_test_dma_target_prp1, NULL);
+    qos_add_test("dma-target-prp-list", "femu",
+                 femu_test_dma_target_prp_list, NULL);
+    qos_add_test("dma-target-sgl", "femu", femu_test_dma_target_sgl, NULL);
+    qos_add_test("dma-target-sgl-chain", "femu",
+                 femu_test_dma_target_sgl_chain, NULL);
+    qos_add_test("dma-target-single-prp", "femu",
+                 femu_test_dma_target_single_prp, NULL);
+    qos_add_test("dma-target-pause", "femu", femu_test_dma_target_pause,
+                 NULL);
 }
 
 libqos_init(femu_register_nodes);
