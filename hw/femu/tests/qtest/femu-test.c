@@ -36913,6 +36913,108 @@ static uint64_t femu_ckpt_hold(const char *file, int *fd)
  * A reader in a second QEMU loads C, writes it, and quits. B keeps its
  * bytes and inode until the writer, and C keeps them to the end.
  */
+/*
+ * zns_slc_zones=2 on QLC: 64 pages a block, 2 planes, one die. Zones 0 and
+ * 1 run in SLC mode: 16 pages a block, so 32 x 16 KiB = 1024 LBAs, a
+ * quarter of the 4096 of a native zone. A native read takes 100 ms
+ * (zns_pg_rd_lat), an SLC read its built-in 4 us. Zone 0 fills at 1024
+ * LBAs with no page overrun, and a write past it fails. Realize refuses SLC
+ * zones on an SLC device, more SLC zones than sequential zones, and SLC
+ * zones without a zoned namespace. @data "types" adds zns_page_types: an
+ * SLC page past page 0 still reads in SLC time, and a native read takes
+ * one of the page type times around 100 ms.
+ * The checks are wall clock, so they tell SLC from native time; they cannot
+ * tell the 4 us SLC read from no NAND time at all.
+ */
+static void femu_test_zns_slc_zones(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    bool types = data && !strcmp(data, "types");
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lpb;
+    uint64_t zsze;
+    QList *zones;
+    QDict *rsp;
+    QDict *ns;
+    int64_t ms;
+    char *err;
+
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    lpb = FEMU_DATA_SIZE / c.lba_size;
+    qtest_memset(qts, buf, 0x5a, FEMU_DATA_SIZE);
+
+    ns = femu_query_ns(qts, "'kind':'zones','limit':3", &rsp);
+    zsze = qdict_get_int(ns, "zone-size");
+    g_assert_cmpuint(zsze, ==, 4096);
+    g_assert_cmpuint(qdict_get_int(ns, "zone-capacity"), ==, 4096);
+    zones = qdict_get_qlist(ns, "zones");
+    for (int i = 0; i < 3; i++) {
+        QDict *z = qobject_to(QDict, qlist_pop(zones));
+
+        g_assert_cmpuint(qdict_get_int(z, "capacity"), ==,
+                         i < 2 ? 1024 : 4096);
+        g_assert_cmpint(qdict_get_bool(z, "slc"), ==, i < 2);
+        qobject_unref(z);
+    }
+    qobject_unref(rsp);
+
+    /* fill zone 0: 128 writes of 4 KiB, then the zone is Full */
+    for (uint64_t lba = 0; lba < 1024; lba += lpb) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lba, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 1024, buf)), !=,
+                    NVME_SUCCESS);
+    ns = femu_query_ns(qts, "'kind':'zones','limit':1", &rsp);
+    g_assert_cmpint(qdict_get_int(ns, "page-overruns"), ==, 0);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "zone-counts"),
+                                   "full"), ==, 1);
+    qobject_unref(rsp);
+
+    /* zone 2: one QLC stripe (32 LPNs) and one more programs the stripe */
+    for (uint64_t i = 0; i < 33; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        2 * zsze + i * lpb, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    ms = femu_zns_ms(&c, NVME_CMD_READ, 2 * zsze, buf);
+    g_test_message("native read %" PRId64 " ms", ms);
+    g_assert_cmpint(ms, >=, types ? 20 : 95);
+    /* LBA 0 is on page 0; LBA 520 is in the 9th flush, on page 8 */
+    for (int k = 0; k < 2; k++) {
+        ms = femu_zns_ms(&c, NVME_CMD_READ, k ? 520 : 0, buf);
+        g_test_message("SLC read %" PRId64 " ms", ms);
+        g_assert_cmpint(ms, <, 15);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, 0x5a);
+    }
+
+    err = femu_ckpt_try_add(qts, "s1", 7, ",'femu_mode':3,'zns_flash_type':1,"
+                            "'zns_slc_zones':1,'zns_num_ch':1,'zns_num_lun':1,"
+                            "'zns_num_blk':32");
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "SLC already"));
+    g_free(err);
+    err = femu_ckpt_try_add(qts, "s3", 7, ",'femu_mode':1,'zns_slc_zones':1");
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "needs a zoned namespace"));
+    g_free(err);
+    err = femu_ckpt_try_add(qts, "s2", 7, ",'femu_mode':3,"
+                            "'zns_slc_zones':100000,'zns_num_ch':1,"
+                            "'zns_num_lun':1,'zns_num_blk':32");
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "sequential zones"));
+    g_free(err);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 static void femu_test_checkpoint_reuse(void *obj, void *data,
                                        QGuestAllocator *alloc)
 {
@@ -68287,6 +68389,21 @@ static void femu_register_nodes(void)
     qos_add_test("checkpoint", "femu", femu_test_checkpoint, NULL);
     qos_add_test("checkpoint-reuse", "femu", femu_test_checkpoint_reuse,
                  NULL);
+    qos_add_test("zns-slc-zones", "femu", femu_test_zns_slc_zones,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=4,"
+            "zns_slc_zones=2,zns_pg_rd_lat=100000000"
+    });
+    qos_add_test("zns-slc-zones-types", "femu", femu_test_zns_slc_zones,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"types",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=4,"
+            "zns_slc_zones=2,zns_pg_rd_lat=100000000,zns_page_types=1"
+    });
     qos_add_test("checkpoint-reuse-ftl", "femu",
                  femu_test_checkpoint_reuse_ftl, NULL);
     qos_add_test("persist-nossd", "femu", femu_test_persist,

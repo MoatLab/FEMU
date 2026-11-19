@@ -481,6 +481,7 @@ Reference: [ZNS](properties.md#zns). Design: [ZNS](../design/zns.md).
 | `zns_zasl_bs` | bytes | power-of-two multiple of 4 KiB; 0 follows `mdts` | Zone Append size limit |
 | `zns_zd_ext_size` | bytes | multiple of 64, up to 16320 | zone descriptor extension size |
 | `zns_num_conv_zones` | zones | capped at the zone count | leading conventional zones; Linux rejects them |
+| `zns_slc_zones` | zones | at most the sequential zones; needs a zoned namespace; not with `zns_flash_type=1` | leading sequential zones in SLC mode, with a smaller capacity |
 | `zns_zrwa_size`, `zns_zrwafg_size`, `zns_zrwa_num` | blocks, blocks, zones | all three set or all 0 | Zone Random Write Area window, flush granularity and resources |
 | `zns_cross_zone_read` | bool | | allow reads across zone boundaries |
 

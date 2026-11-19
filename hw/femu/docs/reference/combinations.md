@@ -308,6 +308,7 @@ own description allows. A message keeps its format directives (`%s`,
 - mode=%s and femu_mode=%u name different modes
 - ocssd is a controller mode: femu_mode and namespace_modes must both select it, or neither
 - persist_ftl needs femu_mode=1 (bbssd)
+- zns_slc_zones needs a zoned namespace (femu_mode=3 or znssd in namespace_modes)
 
 ## `flash_type`
 
@@ -592,6 +593,7 @@ own description allows. A message keeps its format directives (`%s`,
 - shared namespace mode and capabilities must match
 - shared_ftl needs every namespace in bbssd mode; namespace %d is not
 - test-storm is threads,pages,iters,mode,seed with at most one thread per vCPU
+- zns_slc_zones: zone %u holds no logical block in SLC mode
 
 ## `mp_program`
 
@@ -635,6 +637,7 @@ own description allows. A message keeps its format directives (`%s`,
 - namespace_modes count must equal namespaces=%u
 - namespace_modes: unknown mode '%s'
 - ocssd is a controller mode: femu_mode and namespace_modes must both select it, or neither
+- zns_slc_zones needs a zoned namespace (femu_mode=3 or znssd in namespace_modes)
 
 ## `namespace_phls`
 
@@ -1312,6 +1315,7 @@ own description allows. A message keeps its format directives (`%s`,
 - zns_flash_type %d has no built-in timing; set zns_pg_rd_lat, zns_pg_wr_lat and zns_blk_er_lat
 - zns_flash_type must be in [%d, %d]
 - zns_page_types needs zns_flash_type %d to %d; type %d has no page type table
+- zns_slc_zones needs zns_flash_type above 1: the blocks are SLC already
 
 ## `zns_frl_sec`
 
@@ -1369,6 +1373,14 @@ own description allows. A message keeps its format directives (`%s`,
 ## `zns_rzr_sec`
 
 - zns_rrl_sec needs zns_rzr_sec: the limit follows Reset Zone Recommended
+
+## `zns_slc_zones`
+
+- zns_slc_zones %u exceeds the %u sequential zones
+- zns_slc_zones needs a zoned namespace (femu_mode=3 or znssd in namespace_modes)
+- zns_slc_zones needs zns_flash_type above 1: the blocks are SLC already
+- zns_slc_zones: the SLC zone capacity of %
+- zns_slc_zones: zone %u holds no logical block in SLC mode
 
 ## `zns_zasl_bs`
 

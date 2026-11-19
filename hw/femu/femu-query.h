@@ -195,6 +195,7 @@ typedef struct FemuQueryZone {
     FemuZoneType type;
     bool wp_valid;
     bool zrwa;
+    bool slc;
 } FemuQueryZone;
 
 /*

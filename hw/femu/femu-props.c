@@ -1244,6 +1244,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "zns_num_wc",
       "ZNS: number of zone write caches; 0 uses zns_max_open, or 3 when "
       "that is 0" },
+    { "zns_slc_zones",
+      "ZNS: the first N sequential zones of each zoned namespace run their "
+      "blocks in SLC mode: one bit per storage element, the SLC read, "
+      "program and erase times and the SLC P/E rating. Their Zone Capacity "
+      "is what the blocks hold in SLC mode (num_page / zns_flash_type pages "
+      "a block), at most zns_zone_cap. Needs a zoned namespace, not with "
+      "zns_flash_type 1; 0 (default) is off" },
     { "zns_zd_ext_size",
       "ZNS: zone descriptor extension size in bytes, a multiple of 64 up to "
       "16320; 0 means none" },

@@ -76,6 +76,7 @@ bool zns_query_collect(NvmeNamespace *ns, FemuQueryZoned *q)
         z->wp_valid = zns_wp_is_valid(zone);
         z->wp = zone->d.wp;
         z->zrwa = zone->d.za & NVME_ZA_ZRWA_VALID;
+        z->slc = zns_ftl_zone_slc(ns->zns, i);
     }
 
     qemu_mutex_unlock(&ns->zns->zone_lock);

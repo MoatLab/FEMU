@@ -1581,6 +1581,11 @@
     "kind": "static",
     "type": "uint32"
    },
+   "zns_slc_zones": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
    "zns_status_lat": {
     "default": 0,
     "kind": "static",

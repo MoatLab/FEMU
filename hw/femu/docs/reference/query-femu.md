@@ -199,14 +199,16 @@ blocks.
 | `zone-counts` | zones that are `empty`, `implicitly-open`, `explicitly-open`, `closed`, `read-only`, `full` and `offline`, and the `total` |
 | `page-overruns` | NAND pages a write cache flush could not take, because no block of the zone had a free page. A partial flush (an eviction) pads its page, and a rewrite takes a new page, so these can use up a zone's blocks before the zone is full. The data of such a page reads back, but takes no NAND time. 0 for writes that fill each stripe |
 | `media` | the NAND bus timing: see [Media timing](#media-timing) |
-| `zones` | with `kind` `zones`: `index`, `type`, `state`, `start-lba`, `capacity`, `write-pointer` and `zrwa` of each zone |
+| `zones` | with `kind` `zones`: `index`, `type`, `state`, `start-lba`, `capacity`, `write-pointer`, `zrwa` and `slc` of each zone |
 | `offset`, `next-offset` | with `kind` `zones`: the first zone in `zones`, and the offset of the next call; `next-offset` is absent after the last zone |
 
 The `state` and `write-pointer` of a zone are the values Report Zones
 gives. `write-pointer` is absent where Report Zones has no valid write
 pointer: in a `conventional` zone, and in a `full`, `read-only` or
 `offline` zone. `type` is `sequential` or `conventional`. `zrwa` is true
-when the zone holds a zone random write area.
+when the zone holds a zone random write area. `slc` is true when the
+blocks of the zone run in SLC mode (`zns_slc_zones`). `zone-capacity` is
+the capacity of a native zone; `capacity` gives each zone its own.
 
 ### Media timing
 
@@ -512,10 +514,10 @@ A zoned namespace with one zone written and one zone finished:
             "cache-select-ns": 0, "onfi-order": false,
             "page-register-hold": false, "status-per-plane": false},
   "zones": [{"index": 0, "type": "sequential", "state": "full",
-             "start-lba": 0, "capacity": 131072, "zrwa": false},
+             "start-lba": 0, "capacity": 131072, "zrwa": false, "slc": false},
             {"index": 1, "type": "sequential", "state": "implicitly-open",
              "start-lba": 131072, "capacity": 131072,
-             "write-pointer": 131080, "zrwa": false}],
+             "write-pointer": 131080, "zrwa": false, "slc": false}],
   "offset": 0, "next-offset": 2}]}}
 ```
 

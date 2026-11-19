@@ -483,6 +483,23 @@ uint8_t zns_percentage_used(NvmeNamespace *ns)
     if (!denom) {
         return 0;
     }
+    if (zns->slc_blocks) {
+        /*
+         * The mean used life of all blocks, each block against the rating of
+         * its own mode: native erases / native rating + SLC erases / SLC
+         * rating, over the block count.
+         */
+        uint64_t slc = qatomic_read(&zns->slc_erases);
+        uint64_t native = qatomic_read(&zns->total_erases) - slc;
+        uint64_t blocks = zns->num_ch * zns->num_lun * zns->num_plane *
+                          zns->num_blk;
+        /* in double: erases times a 32-bit rating can pass 2^64 */
+        double used = ((double)native / zns->rated_pe_cycles +
+                       (double)slc / zns->slc_rated_pe_cycles) * 100 /
+                      blocks;
+
+        return used >= 255 ? 255 : (uint8_t)used;
+    }
     pct = qatomic_read(&zns->total_erases) * 100 / denom;
     return pct > 255 ? 255 : (uint8_t)pct;
 }
@@ -2649,6 +2666,55 @@ static void zns_mem_charge(NvmeNamespace *ns)
     nvme_ns_mem_mode(ns, now);
 }
 
+/*
+ * zns_slc_zones: the first N sequential zones run their blocks in SLC mode.
+ * Each keeps the zone size; its Zone Capacity is what its blocks hold in that
+ * mode (ZNS 1.1, Figure 37: ZCAP is per zone). Their erases count against
+ * the SLC rating.
+ */
+static bool zns_init_slc_zones(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
+{
+    struct zns_ssd *zns = ns->zns;
+    uint32_t nslc = n->zns_params.zns_slc_zones;
+    uint32_t conv = ns->num_conv_zones;
+    uint64_t lbasz = 1ULL << zns_ns_lbads(ns);
+
+    if (!nslc) {
+        return true;
+    }
+    if (zns->flash_type == SLC) {
+        error_setg(errp, "zns_slc_zones needs zns_flash_type above 1: the "
+                   "blocks are SLC already");
+        return false;
+    }
+    if (nslc > ns->num_zones - conv) {
+        error_setg(errp, "zns_slc_zones %u exceeds the %u sequential zones",
+                   nslc, ns->num_zones - conv);
+        return false;
+    }
+    for (uint32_t i = conv; i < conv + nslc; i++) {
+        NvmeZone *zone = &ns->zone_array[i];
+        uint64_t cap = MIN(zns_ftl_set_slc(zns, i) / lbasz, zone->d.zcap);
+
+        if (!cap) {
+            error_setg(errp, "zns_slc_zones: zone %u holds no logical block "
+                       "in SLC mode", i);
+            return false;
+        }
+        if (ns->zrwa_size && cap % ns->zrwafg_size) {
+            error_setg(errp, "zns_slc_zones: the SLC zone capacity of %" PRIu64
+                       " blocks must be a multiple of zns_zrwafg_size %"
+                       PRIu64, cap, ns->zrwafg_size);
+            return false;
+        }
+        zone->d.zcap = cap;
+    }
+    zns->slc_blocks = (uint64_t)nslc * zns->chnls_per_zone *
+                      zns->luns_per_zone * zns->num_plane;
+    zns->slc_rated_pe_cycles = get_rated_pe_cycles(SLC);
+    return true;
+}
+
 static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     if (!zns_check_params(n, ns, errp)) {
@@ -2699,6 +2765,9 @@ static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      * namespace outright.
      */
     zns_init_zone_identify(n, ns, NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas));
+    if (!zns_init_slc_zones(n, ns, errp)) {
+        return;
+    }
     zns_mem_charge(ns);
 
     if (ns->zns->fzr_sec || ns->zns->rzr_sec) {

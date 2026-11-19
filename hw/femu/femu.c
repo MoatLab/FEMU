@@ -3125,6 +3125,22 @@ static int nvme_init_namespaces(FemuCtrl *n, Error **errp)
         }
     }
 
+    /* SLC zones exist only in a zoned namespace; elsewhere it does nothing */
+    if (n->zns_params.zns_slc_zones) {
+        bool any_zns = false;
+
+        for (i = 0; i < n->num_namespaces; i++) {
+            any_zns |= ns_modes[i] == FEMU_ZNSSD_MODE;
+        }
+        if (!any_zns) {
+            error_setg(errp, "zns_slc_zones needs a zoned namespace "
+                       "(femu_mode=3 or znssd in namespace_modes)");
+            g_free(ns_sizes);
+            g_free(ns_modes);
+            return 1;
+        }
+    }
+
     /* the key limit sizes a KV index only; elsewhere it does nothing */
     if (n->kv_max_keys) {
         bool any_kv = false;
@@ -6163,6 +6179,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("zns_max_active", FemuCtrl, zns_params.zns_max_active, 0),
     DEFINE_PROP_UINT32("zns_max_open", FemuCtrl, zns_params.zns_max_open, 0),
     DEFINE_PROP_UINT32("zns_num_wc", FemuCtrl, zns_params.zns_num_wc, 0),
+    DEFINE_PROP_UINT32("zns_slc_zones", FemuCtrl, zns_params.zns_slc_zones, 0),
     DEFINE_PROP_UINT32("zns_zd_ext_size", FemuCtrl, zns_params.zns_zd_ext_size, 0),
     DEFINE_PROP_UINT32("zns_num_conv_zones", FemuCtrl,
                        zns_params.zns_num_conv_zones, 0),

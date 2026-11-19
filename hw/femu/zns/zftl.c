@@ -319,6 +319,35 @@ static uint64_t zns_blk_pages(struct zns_ssd *zns, struct zns_blk *blk)
     return zns->num_page / zns->flash_type * blk->nand_type;
 }
 
+/*
+ * Put the blocks of zone @zone_idx, on every die and plane it owns, in SLC
+ * mode. Returns the bytes the zone holds in that mode.
+ */
+uint64_t zns_ftl_set_slc(struct zns_ssd *zns, uint32_t zone_idx)
+{
+    uint32_t ch_lo, lun_lo, blk;
+    uint64_t pages = 0;
+
+    zns_zone_span(zns, zone_idx, &ch_lo, &lun_lo, &blk);
+    for (uint64_t ch = ch_lo; ch < ch_lo + zns->chnls_per_zone; ch++) {
+        for (uint64_t lun = lun_lo; lun < lun_lo + zns->luns_per_zone; lun++) {
+            for (uint64_t pl = 0; pl < zns->num_plane; pl++) {
+                struct zns_blk *b = &zns->ch[ch].fc[lun].plane[pl].blk[blk];
+
+                b->nand_type = SLC;
+                pages += zns_blk_pages(zns, b);
+            }
+        }
+    }
+    return pages * ZNS_PAGE_SIZE;
+}
+
+/* the zone's blocks run in SLC mode; set at init, so no lock is needed */
+bool zns_ftl_zone_slc(struct zns_ssd *zns, uint32_t zone_idx)
+{
+    return zns_zone_width(zns, zone_idx) == SLC && zns->flash_type != SLC;
+}
+
 /* write cache entries that fill one stripe of the zone */
 static uint64_t zns_zone_wc_cap(struct zns_ssd *zns, uint32_t zone_idx)
 {
@@ -554,6 +583,9 @@ uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
     }
 
     qatomic_add(&zns->total_erases, total_blocks_erased);
+    if (zns_zone_width(zns, zone_idx) != zns->flash_type) {
+        qatomic_add(&zns->slc_erases, total_blocks_erased);
+    }
 
     /* Step 4: Reset block state (instant) */
     zns_reset_block_state(zns, zone_idx);

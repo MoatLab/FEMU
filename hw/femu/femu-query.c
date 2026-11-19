@@ -970,6 +970,7 @@ static FemuNamespaceInfo *femu_query_zoned_info(FemuQueryZoned *q)
             zi->has_write_pointer = q->zones[i].wp_valid;
             zi->write_pointer = q->zones[i].wp;
             zi->zrwa = q->zones[i].zrwa;
+            zi->slc = q->zones[i].slc;
             QAPI_LIST_APPEND(tail, zi);
         }
         info->has_offset = true;

@@ -237,6 +237,10 @@ struct zns_ssd {
      */
     uint64_t total_erases;
     uint32_t rated_pe_cycles;   /* 0: no rating, no life estimate */
+    /* erases of blocks in SLC mode (zns_slc_zones), part of total_erases */
+    uint64_t slc_erases;
+    uint32_t slc_rated_pe_cycles;
+    uint64_t slc_blocks;
     int flash_type;
     uint64_t program_unit;
     uint64_t stripe_unit;

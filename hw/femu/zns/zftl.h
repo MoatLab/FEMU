@@ -13,6 +13,8 @@
 void zns_nand_media_init(struct zns_ssd *zns);
 uint64_t zns_zone_reset(struct zns_ssd *zns, uint32_t zone_idx,
                         uint64_t zone_size_lbas, uint64_t lbasz, uint64_t stime);
+uint64_t zns_ftl_set_slc(struct zns_ssd *zns, uint32_t zone_idx);
+bool zns_ftl_zone_slc(struct zns_ssd *zns, uint32_t zone_idx);
 
 #ifdef FEMU_DEBUG_ZFTL
 #define ftl_debug(fmt, ...) \

@@ -422,13 +422,15 @@
 #
 # @zrwa: the zone holds a zone random write area
 #
+# @slc: the blocks of the zone run in SLC mode (zns_slc_zones)
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuZoneInfo',
   'data': { 'index': 'uint32', 'type': 'FemuZoneType',
             'state': 'FemuZoneState', 'start-lba': 'uint64',
             'capacity': 'uint64', '*write-pointer': 'uint64',
-            'zrwa': 'bool' } }
+            'zrwa': 'bool', 'slc': 'bool' } }
 
 ##
 # @FemuReclaimUnitState:
@@ -1342,11 +1344,13 @@
 #                         "status-per-plane": false },
 #              "zones": [ { "index": 0, "type": "sequential",
 #                           "state": "full", "start-lba": 0,
-#                           "capacity": 131072, "zrwa": false },
+#                           "capacity": 131072, "zrwa": false,
+#                           "slc": false },
 #                         { "index": 1, "type": "sequential",
 #                           "state": "implicitly-open",
 #                           "start-lba": 131072, "capacity": 131072,
-#                           "write-pointer": 131080, "zrwa": false }
+#                           "write-pointer": 131080, "zrwa": false,
+#                           "slc": false }
 #     ],
 #              "offset": 0, "next-offset": 2 } ] } }
 #
