@@ -2792,6 +2792,8 @@ typedef struct FemuCtrl {
     QemuThread      ftl_thread; /* one FTL thread serving every namespace */
     bool            ftl_thread_running;
     bool            ftl_stopping;   /* asks the FTL thread to leave its loop */
+    /* times the ring to a poller had no room; 0 on a correct device */
+    uint32_t        ftl_ring_full;
     /*
      * Fixed at realize from the namespace modes, not the controller mode,
      * since namespaces may run different modes: completions then arrive

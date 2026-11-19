@@ -66572,6 +66572,8 @@ static void femu_g1_cqe_wait(QTestState *qts, FemuQueue *q, uint32_t slot,
  * at 65535, and those commands never complete. After the release each
  * queue shows 4095 entries, one for each command, and takes a new command.
  * NoSSD fills the ring to the FTL, and bbssd the ring from the FTL thread.
+ * The FTL thread takes no request while its ring is full and counts each
+ * such pass (x-ftl-ring-full), so a ring that is too small also shows there.
  */
 static void femu_test_g1_ring_capacity(void *obj, void *data,
                                        QGuestAllocator *alloc)
@@ -66588,6 +66590,7 @@ static void femu_test_g1_ring_capacity(void *obj, void *data,
     g_autofree NvmeCqe *cqes = g_new0(NvmeCqe, FEMU_G1_DEPTH);
     g_autofree bool *seen = g_new0(bool, depth);
     NvmeCqe cqe;
+    QDict *rsp;
     uint16_t cid;
     uint32_t k;
     int i;
@@ -66624,6 +66627,13 @@ static void femu_test_g1_ring_capacity(void *obj, void *data,
     }
     /* the ring holds every request: none was refused */
     femu_cancel_wait_cpl(qts, "g1-ring", FEMU_G1_RING_QUEUES * depth);
+    /* and the FTL thread, where one runs, never found its ring full */
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/g1-ring',"
+                    "'property':'x-ftl-ring-full'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(qdict_get_int(rsp, "return"), ==, 0);
+    qobject_unref(rsp);
     for (i = 0; i < FEMU_G1_RING_QUEUES; i++) {
         qtest_memread(qts, q[i].cq_addr, &cqe, sizeof(cqe));
         g_assert_cmpuint(le16_to_cpu(cqe.status), ==, 0);

@@ -3564,6 +3564,23 @@ static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
 }
 
 /*
+ * The ring from the FTL thread to poller @i had no room. The size of the
+ * ring excludes that (nvme_ring_slots()), so the count stays 0 on a
+ * correct device; x-ftl-ring-full reads it. The first event is logged.
+ */
+static void femu_ftl_ring_full(FemuCtrl *n, int i)
+{
+    uint32_t seen = qatomic_read(&n->ftl_ring_full);
+
+    if (!seen) {
+        femu_err("FEMU: to_poller[%d] is full, the FTL thread waits\n", i);
+    }
+    if (seen != UINT32_MAX) {
+        qatomic_set(&n->ftl_ring_full, seen + 1);
+    }
+}
+
+/*
  * The controller's FTL thread. It drains the rings the pollers feed and routes
  * each request to its namespace's backend. There is one of these per controller
  * rather than one per mode, so that a controller whose namespaces do not share a
@@ -3660,6 +3677,18 @@ static void *femu_ftl_thread(void *arg)
                 break;
             }
 
+            /*
+             * The ring to the poller holds every request of its queues
+             * (nvme_ring_slots()), so it has room. If it has none, take
+             * nothing: the request stays on to_ftl[i], which the queue
+             * drain, the cancel walk and a pause all read.
+             */
+            if (unlikely(rte_ring_full(n->to_poller[i]))) {
+                femu_ftl_ring_full(n, i);
+                n->ftl_in_sweep = false;
+                continue;
+            }
+
             rc = femu_ring_dequeue(n->to_ftl[i], (void *)&req, 1);
             if (rc != 1) {
                 femu_err("FEMU: FTL to_ftl dequeue failed\n");
@@ -3710,18 +3739,24 @@ static void *femu_ftl_thread(void *arg)
             }
 
             /*
-             * The ring holds every request of its poller's queues
-             * (nvme_init_poller()), so it takes this one. If it does not,
-             * keep the request: the poller empties the ring each sweep.
-             * A pause waits for this pass, so it waits for the ring too.
+             * The ring had room above. Only a CSD worker can take the
+             * last slot since then, and the poller empties the ring
+             * while the data plane runs, so wait for it. A pause stops
+             * the poller and waits for this pass: the wait ends there,
+             * and the command gets no completion.
              */
             rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
-            if (unlikely(rc != 1)) {
-                femu_err("FEMU: to_poller[%d] is full, the FTL waits\n", i);
-                do {
-                    usleep(100);
-                    rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
-                } while (rc != 1 && !n->ftl_stopping);
+            while (unlikely(rc != 1)) {
+                femu_ftl_ring_full(n, i);
+                if (!n->dataplane_started || n->ftl_stopping) {
+                    femu_err("FEMU: to_poller[%d] is full, command %u of "
+                             "queue %u is lost\n", i,
+                             (unsigned)le16_to_cpu(req->cqe.cid),
+                             (unsigned)req->sq->sqid);
+                    break;
+                }
+                usleep(100);
+                rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
             }
 
             n->ftl_in_sweep = false;
@@ -7689,6 +7724,8 @@ static void femu_instance_init(Object *obj)
                                        OBJ_PROP_FLAG_READWRITE);
         object_property_add(obj, "x-cpl-count", "uint32",
                             femu_test_cpl_count_get, NULL, NULL, NULL);
+        femu_test_add_u32(obj, "x-ftl-ring-full",
+                          &FEMU(obj)->ftl_ring_full, false);
         femu_test_add_u32(obj, "x-ocp-lat-skew-ms",
                           &FEMU(obj)->test_ocp_lat_skew_ms, true);
         object_property_add_bool(obj, "x-telemetry-trigger", NULL,
