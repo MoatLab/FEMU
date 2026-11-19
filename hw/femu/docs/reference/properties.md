@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 315 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 314 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -31,6 +31,7 @@ Devices:
 | `femu_mode` | `uint8` | `2` | Emulated SSD type: 0 OCSSD (Open-Channel), 1 bbssd (black-box FTL), 2 NoSSD (no media timing), 3 ZNS, 4 CSD (computational), 5 KV; other values fail realize |
 | `mode` | `str` | unset | the emulated SSD type by name: ocssd, bbssd, nossd, zns (or znssd), csd or kv (or kvssd); it sets femu_mode, and a femu_mode other than 2 must name the same type; unset (default) leaves femu_mode |
 | `devsz_mb` | `uint32` | `1024` | Size of the host memory backend in MiB, split across namespaces unless namespace_sizes is set; bbssd with op_pcent sizes from the NAND geometry instead |
+| `mem_limit` | `size` | `0` | Startup memory limit in bytes (QEMU size syntax): realize refuses the device before an allocation that passes it; counts the retained bytes query-femu-memory reports, not memory that I/O adds later; not with ZNS, ocssd or cxl_ssd; 0 (default) sets no limit |
 | `namespaces` | `uint32` | `1` | Number of namespaces created at boot, 1 to 256; OCSSD supports only 1, and FDP more than 1 only when all are bbssd or all nossd |
 | `namespace_sizes` | `str` | unset | Comma-separated size in bytes of each namespace (QEMU size syntax such as 4G,2G), one non-empty entry per namespace, summing to at most the backend; unset splits the backend evenly |
 | `namespace_modes` | `str` | unset | Comma-separated mode of each namespace from nossd, bbssd, znssd (or zns), ocssd, csd and kvssd (or kv), one entry per namespace; unset gives every namespace femu_mode |
@@ -425,7 +426,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 ## `femu-subsys`: NVMe subsystem
 
-`-device femu-subsys` has 9 properties of its own.
+`-device femu-subsys` has 10 properties of its own.
 
 ### Shared namespaces
 
@@ -444,6 +445,7 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 | `fdp.nruh` | `uint16` | `0` | Number of FDP reclaim unit handles (placement handles), from 1 to fdp.nru and at most 16366; must be set when fdp=on |
 | `fdp.nru` | `uint64` | `128` | Number of reclaim units in each reclaim group, from fdp.nruh to 65536; bbssd uses at most one per superblock and needs at least 2 * fdp.nruh + 1 of them, and the namespace must fit in the units left once each handle has one open, each Persistently Isolated handle one to collect into, and forced collection its free ones |
 | `fdp.isolation_mode` | `uint32` | `0` | 0 makes every reclaim unit handle Persistently Isolated; any other value makes the last handle Initially Isolated |
+| `mem_limit` | `size` | `0` | Startup memory limit in bytes (QEMU size syntax); realize refuses the subsystem when its FDP reclaim units and handles need more; 0 (default) sets no limit |
 
 ### Rotational media
 
@@ -531,8 +533,8 @@ QEMU's internal compatibility properties (`x-max-bounce-buffer-size`, `x-pcie-ar
 
 These exist only when QEMU runs under qtest (`-accel qtest`) and serve FEMU's own tests. They are not part of the user interface.
 
-- `femu`: `x-backend-size`, `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-cpl-count`, `x-cpl-hold`, `x-csd-pause-stats`, `x-durable-check`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-fail-at`, `x-ftl-hold`, `x-ftl-probe`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-lsi`, `x-lsi-state`, `x-maint-idle`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-opal-gkey`, `x-opal-power-cycle`, `x-persist-schema`, `x-place-fail`, `x-place-skip`, `x-query-delay-ms`, `x-rain-check`, `x-rain-fail`, `x-range-waits`, `x-rber-u`, `x-sdc`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
-- `femu-subsys`: `x-fdp-state`
+- `femu`: `x-backend-size`, `x-cmt-slots`, `x-copy-held`, `x-copy-hold`, `x-cpl-count`, `x-cpl-hold`, `x-csd-pause-stats`, `x-durable-check`, `x-eol-enter`, `x-events-now`, `x-fdp-check`, `x-fdp-ns-mapped`, `x-fdp-slc`, `x-fetch-hold`, `x-ftl-check`, `x-ftl-fail-at`, `x-ftl-hold`, `x-ftl-probe`, `x-ftl-trace`, `x-gc-frontier`, `x-gc-idle`, `x-gc-idle-hold`, `x-gc-idle-kick`, `x-gc-idle-latch`, `x-gc-idle-order`, `x-idle-mw`, `x-lsi`, `x-lsi-state`, `x-maint-idle`, `x-mem-taken`, `x-ns-test`, `x-oc12-clock`, `x-oc12-trace`, `x-ocp-lat-skew-ms`, `x-opal-gkey`, `x-opal-power-cycle`, `x-persist-schema`, `x-place-fail`, `x-place-skip`, `x-query-delay-ms`, `x-rain-check`, `x-rain-fail`, `x-range-waits`, `x-rber-u`, `x-sdc`, `x-stage-hold-ms`, `x-stream-test`, `x-telemetry-trigger`, `x-tier-check`, `x-tier-fold-stop`, `x-tp-hold`, `x-zone-draining`, `x-zone-held`, `x-zone-lock-hold-ms`, `x-zone-log-changes`, `x-zone-log-hold-ms`, `x-zone-report-hold-ms`, `x-zone-write-hold-ms`
+- `femu-subsys`: `x-fdp-state`, `x-mem-taken`
 - `femu-cxl-ssd`: `test-change-dpa`, `test-fault`, `test-fault-decode`, `test-fault-delivery`, `test-fault-fill`, `test-fault-repeats`, `test-fault-version`, `test-fault-walk`, `test-fill`, `test-fill-race`, `test-ftl-delay`, `test-ftl-fail-at`, `test-ftl-hold`, `test-ftl-holding`, `test-guarded-write`, `test-lock-mutex`, `test-lock-wanted`, `test-map`, `test-media-disabled`, `test-nvme-after-posted`, `test-owner`, `test-posted-done`, `test-prefetch-race`, `test-prefetch-race-end`, `test-protect`, `test-protect-window`, `test-revoke-ahead`, `test-revoke-ahead-keep`, `test-rip`, `test-slot-reservation`, `test-storm`, `test-storm-ns`, `test-storm-served`, `test-storm-stops`, `test-storm-wait`, `test-thread-read`, `test-unprotect`
 
 ## Environment variables

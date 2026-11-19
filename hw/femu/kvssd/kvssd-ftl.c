@@ -2698,6 +2698,10 @@ static void kvssd_free_ssd(FemuKvssdState *s)
             s->ns->ssd = NULL;
         }
     }
+    /* a rebuild inside realize takes the FTL again */
+    if (ssd->n) {
+        femu_mem_give(&ssd->n->budget, ssd->budget_taken);
+    }
     ssd_free(ssd);
     g_free(ssd);
     s->ssd = NULL;
@@ -2818,6 +2822,10 @@ static bool kv_index_size(FemuKvssdState *s, FemuCtrl *n, uint64_t cap)
     }
     s->kv_max_keys = keys;
     s->hash_slots = (uint32_t)slots;
+    if (!femu_mem_take(&n->budget, slots * sizeof(FemuKvssdMappingEntry),
+                       "KV index table")) {
+        return false;
+    }
     s->table = g_try_new0(FemuKvssdMappingEntry, slots);
     s->table_cap = s->table ? (uint32_t)slots : 0;
     return s->table != NULL;
@@ -2915,17 +2923,29 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     if (!kv_index_size(s, n, cap)) {
         bool lsm = n->kv_index && !strcmp(n->kv_index, "lsm");
 
-        error_setg(errp, "FEMU kvssd: no host memory for an index table of "
-                   "%u slots (%" PRIu64 " MiB)%s", s->hash_slots,
-                   (uint64_t)s->hash_slots *
-                   sizeof(FemuKvssdMappingEntry) / (1024 * 1024),
-                   lsm ? "" : "; set a smaller kv_max_keys");
+        if (femu_mem_over(&n->budget)) {
+            femu_mem_budget_error(&n->budget, errp);
+        } else {
+            error_setg(errp, "FEMU kvssd: no host memory for an index table "
+                       "of %u slots (%" PRIu64 " MiB)%s", s->hash_slots,
+                       (uint64_t)s->hash_slots *
+                       sizeof(FemuKvssdMappingEntry) / (1024 * 1024),
+                       lsm ? "" : "; set a smaller kv_max_keys");
+        }
         kvssd_free_ssd(s);
         g_free(s);
         return NULL;
     }
     s->index = &kv_index_hash;
     s->packed = g_hash_table_new(g_int64_hash, g_int64_equal);
+    /* each take matches a part that kv_mem_sync() charges */
+    if (!femu_mem_take(&n->budget,
+                       (uint64_t)s->ssd->lm.tt_lines * sizeof(uint64_t),
+                       "KV line byte counts") ||
+        !femu_mem_take(&n->budget, s->value_capacity, "KV value arena")) {
+        femu_mem_budget_error(&n->budget, errp);
+        goto fail;
+    }
     s->line_live = g_try_new0(uint64_t, s->ssd->lm.tt_lines);
 
     s->values = g_try_malloc0(s->value_capacity);
@@ -2936,6 +2956,14 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
             error_setg(errp, "FEMU kvssd: kv_index=lsm needs a page of at "
                        "least %d bytes; the page is %d", KV_LSM_REC_BYTES,
                        s->pgsz);
+            goto fail;
+        }
+        if (!femu_mem_take(&n->budget,
+                           (uint64_t)s->hash_slots * sizeof(uint32_t),
+                           "KV free slots") ||
+            !femu_mem_take(&n->budget, (uint64_t)n->kv_lsm_memtable_keys *
+                           sizeof(KvLsmRec), "KV LSM memtable")) {
+            femu_mem_budget_error(&n->budget, errp);
             goto fail;
         }
         s->lsm = g_try_new0(KvLsm, 1);

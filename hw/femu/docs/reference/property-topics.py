@@ -21,6 +21,7 @@ DEVICES = [
                       "x-fdp-check",
                       "x-fdp-ns-mapped", "x-fdp-slc", "x-fetch-hold",
                       "x-ftl-check", "x-ftl-fail-at", "x-ftl-hold",
+                      "x-mem-taken",
                       "x-ftl-probe",
                       "x-ftl-trace",
                       "x-lsi", "x-lsi-state",
@@ -49,7 +50,8 @@ DEVICES = [
                 "title": "Mode, capacity and namespaces",
                 "kind": "static",
                 "props": [
-                    "femu_mode", "mode", "devsz_mb", "namespaces",
+                    "femu_mode", "mode", "devsz_mb", "mem_limit",
+                    "namespaces",
                     "namespace_sizes",
                     "namespace_modes", "namespace_phls", "op_pcent", "subsys",
                     "cxl_ssd",
@@ -272,7 +274,7 @@ DEVICES = [
         "type": "femu-subsys",
         "title": "NVMe subsystem",
         "parent": "device",
-        "test_only": ["x-fdp-state"],
+        "test_only": ["x-fdp-state", "x-mem-taken"],
         "topics": [
             {
                 "title": "Shared namespaces",
@@ -286,7 +288,7 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "fdp", "fdp.runs", "fdp.nrg", "fdp.nruh", "fdp.nru",
-                    "fdp.isolation_mode",
+                    "fdp.isolation_mode", "mem_limit",
                 ],
             },
             {

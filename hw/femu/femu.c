@@ -290,6 +290,24 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
         return false;
     }
 
+    /*
+     * The whole sum first: the build below aborts on no memory, so
+     * mem_limit must refuse before its first allocation.
+     */
+    subsys->fdp_mem = endgrp->fdp.nrg * sizeof(NvmeReclaimUnit *) +
+                      endgrp->fdp.nrg * tt_nru * sizeof(NvmeReclaimUnit) +
+                      endgrp->fdp.nruh * (sizeof(NvmeRuHandle) +
+                                          endgrp->fdp.nrg *
+                                          sizeof(NvmeReclaimUnit *));
+    if (subsys->mem_limit && subsys->fdp_mem > subsys->mem_limit) {
+        error_setg(errp, "femu-subsys: memory limit: the FDP reclaim units "
+                   "and handles need %" PRIu64 " bytes; the mem_limit is %"
+                   PRIu64, subsys->fdp_mem, subsys->mem_limit);
+        subsys->fdp_mem = 0;
+        return false;
+    }
+    subsys->mem_taken = subsys->fdp_mem;
+
     endgrp->fdp.rus = g_new(NvmeReclaimUnit *, endgrp->fdp.nrg);
     for (int i = 0; i < endgrp->fdp.nrg; i++) {
         endgrp->fdp.rus[i] = g_new0(NvmeReclaimUnit, tt_nru);
@@ -323,11 +341,6 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
         }
     }
 
-    subsys->fdp_mem = endgrp->fdp.nrg * sizeof(NvmeReclaimUnit *) +
-                      endgrp->fdp.nrg * tt_nru * sizeof(NvmeReclaimUnit) +
-                      endgrp->fdp.nruh * (sizeof(NvmeRuHandle) +
-                                          endgrp->fdp.nrg *
-                                          sizeof(NvmeReclaimUnit *));
     femu_mem_charge(&subsys->mem, FEMU_MEM_MEDIA, subsys->fdp_mem);
     qemu_mutex_init(&endgrp->fdp.events_lock);
     qemu_mutex_init(&endgrp->fdp.stats_lock);
@@ -374,7 +387,11 @@ static void nvme_subsys_realize(DeviceState *dev, Error **errp)
     subsys->ns_lock_init = true;
     subsys->ns_release_pending = false;
     qbus_init(&subsys->bus, sizeof(NvmeBus), TYPE_NVME_BUS, dev, dev->id);
-    nvme_subsys_setup(subsys, errp);
+    /* qdev runs no unrealize after a refused realize */
+    if (!nvme_subsys_setup(subsys, errp)) {
+        qemu_mutex_destroy(&subsys->ns_lock);
+        subsys->ns_lock_init = false;
+    }
 }
 
 /*
@@ -446,6 +463,7 @@ static const Property nvme_subsystem_props[] = {
     DEFINE_PROP_BOOL("rotational", NvmeSubsystem, params.rotational, false),
     DEFINE_PROP_BOOL("fdp", NvmeSubsystem, params.fdp.enabled, false),
     DEFINE_PROP_SIZE("fdp.runs", NvmeSubsystem, params.fdp.runs, 0),
+    DEFINE_PROP_SIZE("mem_limit", NvmeSubsystem, mem_limit, 0),
     DEFINE_PROP_UINT32("fdp.nrg", NvmeSubsystem, params.fdp.nrg, 1),
     DEFINE_PROP_UINT16("fdp.nruh", NvmeSubsystem, params.fdp.nruh, 0),
     DEFINE_PROP_UINT64("fdp.nru", NvmeSubsystem, params.fdp.nru, 128),
@@ -509,6 +527,9 @@ static void nvme_subsys_instance_init(Object *obj)
     if (qtest_enabled()) {
         object_property_add_str(obj, "x-fdp-state",
                                 nvme_subsys_test_fdp_state, NULL);
+        object_property_add_uint64_ptr(obj, "x-mem-taken",
+                                       &NVME_SUBSYS(obj)->mem_taken,
+                                       OBJ_PROP_FLAG_READ);
     }
 }
 
@@ -709,6 +730,12 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
         error_setg(errp, "fdp.runs (%" PRIu64 ") is smaller than a logical "
                    "block of namespace %u (%u bytes)", runs,
                    ns->id, 1u << ns->lbaf.lbads);
+        return false;
+    }
+    if (!femu_mem_take(&ns->ctrl->budget,
+                       sizeof(uint16_t) * endgrp->fdp.nruh,
+                       "FDP placement handles")) {
+        femu_mem_budget_error(&ns->ctrl->budget, errp);
         return false;
     }
     ns->fdp.phs = g_new(uint16_t, endgrp->fdp.nruh);
@@ -2178,6 +2205,15 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
          num_blks > SIZE_MAX /
              MAX(1, le16_to_cpu(id_ns->lbaf[lba_index].ms)))) {
         error_setg(errp, "namespace allocation size is not representable");
+        return -1;
+    }
+    /* the same sum that nvme_ns_mem_maps() charges */
+    if (!femu_mem_take(&n->budget,
+                       BITS_TO_LONGS(num_blks) * sizeof(unsigned long) *
+                       (2 + !!n->bb_params.rain_loss + !!n->sdc) +
+                       num_blks * le16_to_cpu(id_ns->lbaf[lba_index].ms),
+                       "namespace bitmaps and metadata")) {
+        femu_mem_budget_error(&n->budget, errp);
         return -1;
     }
     ns->util = g_try_new0(unsigned long, BITS_TO_LONGS(num_blks));
@@ -3986,6 +4022,7 @@ static void femu_realize_undo(FemuCtrl *n)
     femu_events_exit(n);
     femu_lsi_exit(n);
     g_clear_pointer(&n->die_slow_pct, g_free);
+    g_clear_pointer(&n->fw_core_avail, g_free);
     /* the AER log, if nvme_init_pci() got that far; exit frees it again */
     pcie_aer_exit(&n->parent_obj);
     n->parent_obj.exp.aer_log.log = NULL;
@@ -5074,13 +5111,60 @@ static int femu_all_ns_kv(FemuCtrl *n, bool *all_kv, Error **errp)
     return 0;
 }
 
+/*
+ * mem_limit covers the modes whose build can refuse an allocation. ZNS
+ * and open-channel still abort on one, so a limit refuses them at once.
+ */
+static bool femu_mem_limit_check(FemuCtrl *n, Error **errp)
+{
+    g_autofree uint8_t *modes = NULL;
+
+    if (!n->mem_limit) {
+        return true;
+    }
+    if (n->cxl_dev) {
+        error_setg(errp, "mem_limit is not available with cxl_ssd");
+        return false;
+    }
+    modes = g_new0(uint8_t, MAX(1, n->num_namespaces));
+    if (nvme_resolve_ns_modes(n, modes, errp)) {
+        return false;
+    }
+    /* namespaces at boot, or the mode Namespace Management creates */
+    for (uint32_t i = 0; i < MAX(1, n->num_namespaces); i++) {
+        uint8_t m = n->num_namespaces ? modes[i] : n->femu_mode;
+
+        if (m == FEMU_ZNSSD_MODE || m == FEMU_OCSSD_MODE) {
+            error_setg(errp, "mem_limit is not available in %s mode",
+                       m == FEMU_ZNSSD_MODE ? "ZNS" : "open-channel");
+            return false;
+        }
+    }
+    return true;
+}
+
+static void femu_realize_steps(PCIDevice *pci_dev, Error **errp);
+
+/*
+ * The takes of mem_limit count only while realize runs. A namespace that
+ * Namespace Management creates later takes nothing.
+ */
 static void femu_realize(PCIDevice *pci_dev, Error **errp)
+{
+    FemuCtrl *n = FEMU(pci_dev);
+
+    n->budget = (FemuMemBudget) { .limit = n->mem_limit, .active = true };
+    femu_realize_steps(pci_dev, errp);
+    n->budget.active = false;
+}
+
+static void femu_realize_steps(PCIDevice *pci_dev, Error **errp)
 {
     FemuCtrl *n = FEMU(pci_dev);
     int64_t bs_size;
     uint64_t nand_cap = 0;
 
-    if (!femu_mode_resolve(n, errp)) {
+    if (!femu_mode_resolve(n, errp) || !femu_mem_limit_check(n, errp)) {
         return;
     }
     /*
@@ -5312,6 +5396,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         }
         if (all_kv) {
             n->mbe = NULL;
+        } else if (!femu_mem_take(&n->budget, bs_size, "memory backend")) {
+            femu_mem_budget_error(&n->budget, errp);
+            return;
         } else if (init_dram_backend(&n->mbe, bs_size)) {
             error_setg(errp, "femu: cannot allocate the %" PRId64 " MiB "
                        "memory backend; lower devsz_mb", bs_size / MiB);
@@ -5902,6 +5989,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("persist_ftl", FemuCtrl, persist_ftl, false),
     DEFINE_PROP_BOOL("rrl", FemuCtrl, rrl, false),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */
+    DEFINE_PROP_SIZE("mem_limit", FemuCtrl, mem_limit, 0),
     DEFINE_PROP_UINT32("namespaces", FemuCtrl, num_namespaces, 1),
     DEFINE_PROP_UINT32("queues", FemuCtrl, nr_io_queues, 8),
     DEFINE_PROP_UINT32("entries", FemuCtrl, max_q_ents, 0x7ff),
@@ -7500,6 +7588,9 @@ static void femu_instance_init(Object *obj)
         femu_sdc_add_props(obj);
         femu_lsi_add_props(obj);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
+        object_property_add_uint64_ptr(obj, "x-mem-taken",
+                                       &FEMU(obj)->budget.taken,
+                                       OBJ_PROP_FLAG_READ);
         object_property_add_uint32_ptr(obj, "x-ftl-fail-at",
                                        &FEMU(obj)->test_ftl_fail_at,
                                        OBJ_PROP_FLAG_READWRITE);

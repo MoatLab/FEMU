@@ -47,6 +47,10 @@ static const FemuPropDesc femu_subsys_descs[] = {
       "Reclaim unit size in bytes; 0 means 96 MiB, and a bbssd controller "
       "accepts only 0 or the size of one superblock of the dies of a "
       "reclaim group, which it then uses" },
+    { "mem_limit",
+      "Startup memory limit in bytes (QEMU size syntax); realize refuses "
+      "the subsystem when its FDP reclaim units and handles need more; 0 "
+      "(default) sets no limit" },
     { "fdp.nrg",
       "Number of FDP reclaim groups, from 1 to 128; with bbssd a group is "
       "a set of dies (whole channels, or LUNs of one channel), nrg must "
@@ -82,6 +86,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Size of the host memory backend in MiB, split across namespaces "
       "unless namespace_sizes is set; bbssd with op_pcent sizes from the "
       "NAND geometry instead" },
+    { "mem_limit",
+      "Startup memory limit in bytes (QEMU size syntax): realize refuses "
+      "the device before an allocation that passes it; counts the retained "
+      "bytes query-femu-memory reports, not memory that I/O adds later; "
+      "not with ZNS, ocssd or cxl_ssd; 0 (default) sets no limit" },
     { "namespaces",
       "Number of namespaces created at boot, 1 to 256; OCSSD supports only "
       "1, and FDP more than 1 only when all are bbssd or all nossd" },

@@ -369,6 +369,7 @@ void nand_media_test_fail(uint32_t at);
 void nand_media_destroy(NandMedia *m);
 /* the bytes the media holds now: bus window lists and suspend state */
 uint64_t nand_media_bytes(const NandMedia *m);
+uint64_t nand_media_cfg_bytes(const NandMediaConfig *cfg);
 
 /* single-chip op; returns completion (done_ns absolute, latency_ns = done - stime) */
 /*

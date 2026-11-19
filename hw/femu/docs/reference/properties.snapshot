@@ -651,6 +651,11 @@
     "kind": "static",
     "type": "uint8"
    },
+   "mem_limit": {
+    "default": 0,
+    "kind": "static",
+    "type": "size"
+   },
    "meta": {
     "default": 0,
     "kind": "static",
@@ -2246,6 +2251,11 @@
     "type": "uint16"
    },
    "fdp.runs": {
+    "default": 0,
+    "kind": "static",
+    "type": "size"
+   },
+   "mem_limit": {
     "default": 0,
     "kind": "static",
     "type": "size"

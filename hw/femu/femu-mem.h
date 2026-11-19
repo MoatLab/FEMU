@@ -4,6 +4,7 @@
 
 #include "qemu/atomic.h"
 #include "qemu/error-report.h"
+#include "qapi/error.h"
 
 /*
  * Host memory accounting of a FEMU device.
@@ -56,6 +57,60 @@ static inline void femu_mem_release(FemuMemAcct *a, FemuMemCat cat,
     }
 #endif
     qatomic_sub(&a->bytes[cat], n);
+}
+
+/*
+ * The startup memory limit of one realize (mem_limit). Each site that
+ * makes a retained array takes its bytes before it allocates, so a
+ * refusal comes before the array that passes the limit. Scratch arrays
+ * freed before realize ends take nothing. Realize runs under the BQL, so
+ * the fields need no lock.
+ */
+typedef struct FemuMemBudget {
+    uint64_t limit;         /* 0: no limit */
+    uint64_t taken;         /* retained bytes taken by this realize */
+    bool active;            /* true only while realize runs */
+    const char *what;       /* the take that passed the limit */
+    uint64_t what_bytes;
+} FemuMemBudget;
+
+/* false, with @what recorded, when @bytes more pass the limit of @b */
+static inline bool femu_mem_take(FemuMemBudget *b, uint64_t bytes,
+                                 const char *what)
+{
+    if (!b || !b->active) {
+        return true;
+    }
+    if (b->limit && (bytes > b->limit || b->taken > b->limit - bytes)) {
+        b->what = what;
+        b->what_bytes = bytes;
+        return false;
+    }
+    b->taken += bytes;
+    return true;
+}
+
+/* the refusal of @b: what passed the limit, and by how much */
+static inline void femu_mem_budget_error(const FemuMemBudget *b,
+                                         Error **errp)
+{
+    error_setg(errp, "femu: memory limit: %" PRIu64 " more bytes for %s "
+               "pass the %" PRIu64 " byte mem_limit, of which %" PRIu64
+               " are taken", b->what_bytes, b->what, b->limit, b->taken);
+}
+
+/* a taken array went away before realize ended */
+static inline void femu_mem_give(FemuMemBudget *b, uint64_t bytes)
+{
+    if (b && b->active) {
+        b->taken -= MIN(bytes, b->taken);
+    }
+}
+
+/* true when the last refusal of @b came from its limit */
+static inline bool femu_mem_over(const FemuMemBudget *b)
+{
+    return b && b->what;
 }
 
 /* a number for an owner that has no name of its own, unique per process */

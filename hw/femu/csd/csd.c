@@ -169,6 +169,12 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
 
     if (CSD_SLM(n)) {
+        if (!femu_mem_take(&n->budget,
+                           (uint64_t)n->csd_params.slm_size_mb * MiB,
+                           "CSD subsystem local memory")) {
+            femu_mem_budget_error(&n->budget, errp);
+            return;
+        }
         slm = g_try_malloc0((uint64_t)n->csd_params.slm_size_mb * MiB);
         if (!slm) {
             error_setg(errp, "CSD: cannot allocate csd_slm_size");

@@ -2771,8 +2771,8 @@ bool femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
      * group gets a line of its own for each id.
      */
     if (rgs > 1) {
-        ids = ssd_try_alloc(ssd, tt_nru * spp->lines_per_ru, sizeof(int),
-                            "FDP block ids");
+        ids = ssd_try_scratch(ssd, tt_nru * spp->lines_per_ru, sizeof(int),
+                              "FDP block ids");
         if (!ids) {
             return false;
         }

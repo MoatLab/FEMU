@@ -327,6 +327,8 @@ typedef struct NvmeSubsystem {
     NvmeEnduranceGroup endgrp;
     FemuMemAcct        mem;     /* the FDP reclaim units and handles */
     uint64_t           fdp_mem; /* the part of @mem setup_fdp charged */
+    uint64_t           mem_limit;   /* startup limit in bytes; 0 is off */
+    uint64_t           mem_taken;   /* bytes realize took */
     bool ns_mgmt;
     FemuCtrl *storage;
     NvmeSanitizeState sanitize;
@@ -2819,6 +2821,8 @@ typedef struct FemuCtrl {
     bool        ns_mgmt;
     bool        shared_storage;
     FemuMemAcct mem;            /* host memory the controller owns */
+    uint64_t    mem_limit;      /* startup limit in bytes; 0 is off */
+    FemuMemBudget budget;       /* takes of the running realize */
     DECLARE_BITMAP(attached_ns, NVME_MAX_NAMESPACES);
     bool        streams;
     uint16_t    streams_max;

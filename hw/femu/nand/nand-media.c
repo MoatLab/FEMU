@@ -191,6 +191,32 @@ static uint64_t bus_lists_bytes(const NandBusResList *l, uint32_t nchs)
     return bytes;
 }
 
+/*
+ * The bytes nand_media_try_init() allocates for @cfg, before it runs.
+ * nand_media_bytes() gives the same number after it.
+ */
+uint64_t nand_media_cfg_bytes(const NandMediaConfig *cfg)
+{
+    uint64_t list = (uint64_t)cfg->nchs * sizeof(NandBusResList);
+    uint64_t grown = (uint64_t)cfg->nchs * NAND_BUS_RES_MAX *
+                     sizeof(NandBusRes);
+    uint64_t bytes = 0;
+
+    if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs) {
+        if (cfg->policy.ca_separate) {
+            bytes += 2 * (list + grown);
+        } else {
+            bytes += list + (cfg->policy.bus_res_unbounded ? grown : 0);
+        }
+    }
+    if ((cfg->policy.pe_suspend || cfg->policy.read_prio) &&
+        cfg->nchs && cfg->luns_per_ch && cfg->planes_per_lun) {
+        bytes += (uint64_t)cfg->nchs * cfg->luns_per_ch *
+                 cfg->planes_per_lun * sizeof(*((NandMedia *)NULL)->susp);
+    }
+    return bytes;
+}
+
 uint64_t nand_media_bytes(const NandMedia *m)
 {
     uint64_t bytes = 0;

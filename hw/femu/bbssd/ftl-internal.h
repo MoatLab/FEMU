@@ -350,8 +350,12 @@ static inline void ssd_mem_hold(struct ssd *ssd, uint64_t *held,
 }
 
 bool ssd_alloc_refused(struct ssd *ssd, const char *what, uint64_t bytes);
+bool ssd_take(struct ssd *ssd, uint64_t bytes, const char *what);
+void ssd_give(struct ssd *ssd, uint64_t bytes);
 void *ssd_try_alloc(struct ssd *ssd, uint64_t nmemb, size_t size,
                     const char *what);
+void *ssd_try_scratch(struct ssd *ssd, uint64_t nmemb, size_t size,
+                      const char *what);
 void *ssd_alloc(struct ssd *ssd, FemuMemCat cat, uint64_t nmemb, size_t size,
                 const char *what);
 void ssd_release(struct ssd *ssd, FemuMemCat cat, void *p, uint64_t nmemb,

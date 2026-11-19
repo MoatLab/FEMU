@@ -719,6 +719,8 @@ struct ssd {
     const char *alloc_fail;
     uint64_t alloc_fail_bytes;
     bool alloc_injected;    /* x-ftl-fail-at, not the host, refused it */
+    bool alloc_limited;     /* mem_limit, not the host, refused it */
+    uint64_t budget_taken;  /* bytes this FTL took from the realize */
     struct ppa *maptbl; /* page level mapping table */
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;

@@ -169,6 +169,7 @@ own description allows. A message keeps its format directives (`%s`,
 - femu: onfi_mode is not supported with cxl_ssd
 - femu: the pd_* properties are not supported with cxl_ssd
 - hmb_mb is not supported with cxl_ssd
+- mem_limit is not available with cxl_ssd
 
 ## `devsz_mb`
 
@@ -557,6 +558,11 @@ own description allows. A message keeps its format directives (`%s`,
 
 - femu: %s needs mdts 1 to %d
 
+## `mem_limit`
+
+- mem_limit is not available in %s mode
+- mem_limit is not available with cxl_ssd
+
 ## `meta`
 
 - meta/extended need a matching metadata capability (mc)
@@ -573,6 +579,7 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU kvssd: gc_policy=%s is not supported; KV mode always reclaims the emptiest line
 - csd_pause: namespace %d runs a mode other than bbssd or CSD
 - der=cylon requires cylon-kernel-ack=on after reviewing the host dual-mode leaf lifetime fix
+- mem_limit is not available in %s mode
 - meta: namespace %d runs a mode without metadata support (block or no-SSD only)
 - mode '%s' is not one of ocssd, bbssd, nossd, zns, csd or kv
 - mode=%s and femu_mode=%u name different modes
@@ -1164,6 +1171,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 - ana must be the same on every controller of a femu-subsys
 - femu-subsys with fdp=on takes a single controller
+- femu-subsys: memory limit: the FDP reclaim units and handles need %
 - fw_slots above 1%s does not work with a femu-subsys or a CXL device yet
 - lockdown does not work with a femu-subsys yet
 - ns_mgmt=on does not support subsys; use a standalone controller

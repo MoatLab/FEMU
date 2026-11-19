@@ -208,6 +208,36 @@ bool ssd_alloc_refused(struct ssd *ssd, const char *what, uint64_t bytes)
 }
 
 /*
+ * Take @bytes for @what from the mem_limit of the realize that builds this
+ * FTL. False, with @what recorded for ssd_init(), when they pass it.
+ */
+bool ssd_take(struct ssd *ssd, uint64_t bytes, const char *what)
+{
+    FemuMemBudget *b = ssd->n ? &ssd->n->budget : NULL;
+
+    if (!femu_mem_take(b, bytes, what)) {
+        ssd->alloc_fail = what;
+        ssd->alloc_fail_bytes = bytes;
+        ssd->alloc_limited = true;
+        return false;
+    }
+    if (b && b->active) {
+        ssd->budget_taken += bytes;
+    }
+    return true;
+}
+
+/* an array that ssd_take() counted went away before realize ended */
+void ssd_give(struct ssd *ssd, uint64_t bytes)
+{
+    if (ssd->n && ssd->n->budget.active) {
+        bytes = MIN(bytes, ssd->budget_taken);
+        femu_mem_give(&ssd->n->budget, bytes);
+        ssd->budget_taken -= bytes;
+    }
+}
+
+/*
  * ssd_try_alloc - a zeroed array of @nmemb entries of @size bytes
  *
  * Returns NULL, with @what recorded for ssd_init(), when the size
@@ -228,6 +258,35 @@ void *ssd_try_alloc(struct ssd *ssd, uint64_t nmemb, size_t size,
         return NULL;
     }
     bytes = nmemb * size;
+    if (ssd_alloc_refused(ssd, what, bytes) || !ssd_take(ssd, bytes, what)) {
+        return NULL;
+    }
+    p = g_try_malloc0(bytes);
+    if (!p && bytes) {
+        ssd_give(ssd, bytes);
+        ssd->alloc_fail = what;
+        ssd->alloc_fail_bytes = bytes;
+        return NULL;
+    }
+    return p;
+}
+
+/*
+ * ssd_try_scratch - ssd_try_alloc() for an array freed before realize
+ * ends. x-ftl-fail-at counts it, and mem_limit does not.
+ */
+void *ssd_try_scratch(struct ssd *ssd, uint64_t nmemb, size_t size,
+                      const char *what)
+{
+    uint64_t bytes;
+    void *p;
+
+    if (size && nmemb > SIZE_MAX / size) {
+        ssd->alloc_fail = what;
+        ssd->alloc_fail_bytes = UINT64_MAX;
+        return NULL;
+    }
+    bytes = nmemb * size;
     if (ssd_alloc_refused(ssd, what, bytes)) {
         return NULL;
     }
@@ -235,7 +294,6 @@ void *ssd_try_alloc(struct ssd *ssd, uint64_t nmemb, size_t size,
     if (!p && bytes) {
         ssd->alloc_fail = what;
         ssd->alloc_fail_bytes = bytes;
-        return NULL;
     }
     return p;
 }
@@ -274,11 +332,14 @@ pqueue_t *ssd_pqueue_new(struct ssd *ssd, size_t n, pqueue_cmp_pri_f cmppri,
     uint64_t bytes = (uint64_t)(n + 1) * sizeof(void *);
     pqueue_t *q;
 
-    if (ssd_alloc_refused(ssd, what, bytes)) {
+    /* the charge of a heap, pqueue_bytes(), counts its header too */
+    if (ssd_alloc_refused(ssd, what, bytes) ||
+        !ssd_take(ssd, sizeof(pqueue_t) + bytes, what)) {
         return NULL;
     }
     q = pqueue_init(n, cmppri, getpri, setpri, getpos, setpos);
     if (!q) {
+        ssd_give(ssd, sizeof(pqueue_t) + bytes);
         ssd->alloc_fail = what;
         ssd->alloc_fail_bytes = bytes;
     }
@@ -287,7 +348,9 @@ pqueue_t *ssd_pqueue_new(struct ssd *ssd, size_t n, pqueue_cmp_pri_f cmppri,
 
 static bool ssd_init_fail(struct ssd *ssd, Error **errp)
 {
-    if (ssd->alloc_injected) {
+    if (ssd->alloc_limited) {
+        femu_mem_budget_error(&ssd->n->budget, errp);
+    } else if (ssd->alloc_injected) {
         error_setg(errp, "FEMU: injected failure of FTL allocation %u (%s)",
                    ssd->n->test_ftl_allocs, ssd->alloc_fail);
     } else if (ssd->alloc_fail_bytes == UINT64_MAX) {

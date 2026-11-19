@@ -334,7 +334,11 @@ bool bb_nand_media_init(struct ssd *ssd)
         ssd_alloc_refused(ssd, "NAND media lists", 0)) {
         return false;
     }
+    if (!ssd_take(ssd, nand_media_cfg_bytes(&cfg), "NAND media lists")) {
+        return false;
+    }
     if (nand_media_try_init(&ssd->media, &cfg)) {
+        ssd_give(ssd, nand_media_cfg_bytes(&cfg));
         ssd->alloc_fail = "NAND media lists";
         ssd->alloc_fail_bytes = 0;
         return false;

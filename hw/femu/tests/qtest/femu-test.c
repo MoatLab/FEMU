@@ -44627,6 +44627,256 @@ static void femu_test_fdp_refused_restores(void *obj, void *data,
     qtest_quit(qts);
 }
 
+/* x-mem-taken of the device at /machine/peripheral/@id */
+static uint64_t femu_mem_taken(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-mem-taken'}}", path);
+    uint64_t v;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * The bytes query-femu-memory reports for controller @id: every owner
+ * but the subsystem, whose bytes subsystem realize took. With @sub, the
+ * subsystem bytes go there.
+ */
+static uint64_t femu_mem_total(QTestState *qts, const char *id,
+                               uint64_t *sub)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-memory',"
+                           "'arguments':{'path':%s}}", id);
+    const QListEntry *e;
+    uint64_t total = 0;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(qdict_get_qdict(rsp, "return"),
+                                        "owners"), e) {
+        QDict *o = qobject_to(QDict, qlist_entry_obj(e));
+        uint64_t b = qdict_get_int(o, "backend") +
+                     qdict_get_int(o, "mapping") +
+                     qdict_get_int(o, "media") +
+                     qdict_get_int(o, "values") +
+                     qdict_get_int(o, "index") +
+                     qdict_get_int(o, "other");
+
+        if (!strcmp(qdict_get_str(o, "kind"), "subsystem")) {
+            if (sub) {
+                *sub = b;
+            }
+        } else {
+            total += b;
+        }
+    }
+    qobject_unref(rsp);
+    return total;
+}
+
+/*
+ * mem_limit: each take of a realize must match a charge, so x-mem-taken
+ * equals the reply. The limit at that total starts the device; one byte
+ * less refuses it, and the same QEMU then starts it at the total.
+ */
+static void femu_test_mem_limit(void *obj, void *data,
+                                QGuestAllocator *unused)
+{
+    static const struct {
+        const char *opts;
+        bool selftest;
+        const char *pre;
+    } cases[] = {
+        { "femu_mode=2,devsz_mb=64" },
+        { "femu_mode=2,devsz_mb=64,meta=8,mc=3" },
+        { "femu_mode=2,devsz_mb=64,namespaces=2" },
+        { "femu_mode=1," FEMU_FAIL_GEO },
+        { "femu_mode=1,namespaces=2," FEMU_FAIL_GEO },
+        { "femu_mode=1,namespaces=2,shared_ftl=on," FEMU_FAIL_GEO },
+        { "femu_mode=1,read_cache_mb=1," FEMU_FAIL_GEO },
+        { "femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,luns_per_ch=2,"
+          "nchs=2,pls_per_lun=1,rain_parity=1,mdts=4,devsz_mb=1,"
+          "blks_per_pl=64,gc_thres_pcent_high=78,rain_read_only=on,"
+          "rain_loss=on" },
+        { "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,sdc=on,"
+          FEMU_FAIL_GEO },
+        { "femu_mode=1,buffer_size=16,power_loss=on,durable_at_done=on,"
+          FEMU_FAIL_GEO },
+        { "femu_mode=1,mapping=hybrid," FEMU_FAIL_GEO },
+        { "femu_mode=1,mapping=fast," FEMU_FAIL_GEO },
+        { "femu_mode=1,die_stats=on," FEMU_FAIL_GEO },
+        { "femu_mode=1,pg_xfer_lat=1000," FEMU_FAIL_GEO },
+        { FEMU_MEM_FTL13 ",mapping=dftl,mapping_cache_mb=1" },
+        { "femu_mode=1,devsz_mb=16,secsz=512,secs_per_pg=8,pgs_per_blk=48,"
+          "blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+          "nand_cell_type=3,tier_mode=static,tier_static_mb=1" },
+        { "femu_mode=4,fdm_size=16,csd_slm_size=4," FEMU_FAIL_GEO },
+        { "femu_mode=5," FEMU_FAIL_GEO },
+        { "femu_mode=5," FEMU_FAIL_GEO, true },
+        { "femu_mode=5,devsz_mb=64,kv_index=lsm,kv_lsm_memtable_keys=1024" },
+        /* FDP with one group and with two */
+        { FEMU_FDP_REFUSE ",secs_per_pg=8,lba_index=3,subsys=s1", false,
+          "-device femu-subsys,id=s1,nqn=s1,fdp=on,fdp.nruh=4" },
+        { FEMU_FDP_REFUSE ",secs_per_pg=8,lba_index=3,subsys=s2", false,
+          "-device femu-subsys,id=s2,nqn=s2,fdp=on,fdp.nruh=4,fdp.nrg=2,"
+          "fdp.isolation_mode=1" },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        const char *opts = cases[i].opts;
+        g_autofree char *out = NULL;
+        QTestState *qts;
+        uint64_t total;
+        uint64_t taken;
+
+        if (cases[i].selftest) {
+            g_setenv("FEMU_KV_SELFTEST", "1", true);
+        }
+        qts = qtest_initf("-machine pc -nodefaults %s", cases[i].pre ?: "");
+        g_unsetenv("FEMU_KV_SELFTEST");
+
+        out = qtest_hmp(qts, "device_add femu,addr=5,id=ml,%s", opts);
+        if (*out) {
+            g_test_message("%s: %s", opts, out);
+            g_assert_not_reached();
+        }
+        total = femu_mem_total(qts, "ml", NULL);
+        taken = femu_mem_taken(qts, "ml");
+        g_test_message("%s: %" PRIu64 " bytes", opts, total);
+        g_assert_cmpuint(taken, ==, total);
+        qpci_unplug_acpi_device_test(qts, "ml", 5);
+
+        g_free(out);
+        out = qtest_hmp(qts, "device_add femu,addr=5,id=ml,%s,"
+                        "mem_limit=%" PRIu64, opts, total - 1);
+        if (!strstr(out, "femu: memory limit: ")) {
+            g_test_message("%s, limit %" PRIu64 ": %s", opts, total - 1, out);
+            g_assert_not_reached();
+        }
+        g_free(out);
+        out = qtest_hmp(qts, "device_add femu,addr=5,id=ml,%s,"
+                        "mem_limit=%" PRIu64, opts, total);
+        if (*out) {
+            g_test_message("%s, limit %" PRIu64 ": %s", opts, total, out);
+            g_assert_not_reached();
+        }
+        g_assert_cmpuint(femu_mem_taken(qts, "ml"), ==, total);
+        qpci_unplug_acpi_device_test(qts, "ml", 5);
+        qtest_quit(qts);
+    }
+}
+
+/*
+ * The subsystem takes its FDP units and handles in one sum before it
+ * allocates. A joining controller of shared storage allocates nothing.
+ */
+static void femu_test_mem_limit_subsys(void *obj, void *data,
+                                       QGuestAllocator *unused)
+{
+    QTestState *qts = qtest_init("-machine pc -nodefaults "
+        "-device femu-subsys,id=sh,nqn=sh,ns_mgmt=on "
+        "-device femu,addr=5,id=a,femu_mode=2,devsz_mb=16,subsys=sh "
+        "-device femu,addr=6,id=b,femu_mode=2,devsz_mb=16,subsys=sh");
+    const char *qemu = g_getenv("QTEST_QEMU_BINARY");
+    g_autofree char *line = NULL;
+    g_autofree char *err = NULL;
+    g_auto(GStrv) argv = NULL;
+    uint64_t sub = 0;
+    int status = -1;
+
+    g_assert_cmpuint(femu_mem_taken(qts, "a"), >=, 16 * MiB);
+    g_assert_cmpuint(femu_mem_taken(qts, "b"), ==, 0);
+    qtest_quit(qts);
+
+    /* 4 handles of 2 groups of 128 units: read the sum, then one less */
+    qts = qtest_init("-machine pc -nodefaults "
+        "-device femu-subsys,id=s1,nqn=s1,fdp=on,fdp.nruh=4,fdp.nrg=2 "
+        "-device femu,addr=5,id=f," FEMU_FDP_REFUSE ",secs_per_pg=8,"
+        "lba_index=3,subsys=s1");
+    femu_mem_total(qts, "f", &sub);
+    g_assert_cmpuint(sub, >, 0);
+    g_assert_cmpuint(femu_mem_taken(qts, "s1"), ==, sub);
+    qtest_quit(qts);
+
+    line = g_strdup_printf("%s -machine pc -accel qtest -nodefaults "
+                           "-display none -device femu-subsys,id=s1,nqn=s1,"
+                           "fdp=on,fdp.nruh=4,fdp.nrg=2,mem_limit=%" PRIu64,
+                           qemu, sub - 1);
+    g_assert_true(g_shell_parse_argv(line, NULL, &argv, NULL));
+    g_assert_true(g_spawn_sync(NULL, argv, NULL,
+                               G_SPAWN_STDOUT_TO_DEV_NULL, NULL, NULL,
+                               NULL, &err, &status, NULL));
+    g_assert_false(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    if (!strstr(err, "femu-subsys: memory limit")) {
+        g_test_message("%s", err);
+        g_assert_not_reached();
+    }
+}
+
+/* ZNS and open-channel builds abort on no memory, so a limit refuses them */
+static void femu_test_mem_limit_modes(void *obj, void *data,
+                                      QGuestAllocator *unused)
+{
+    static const struct {
+        const char *opts;
+        const char *want;
+    } cases[] = {
+        { "femu_mode=3,devsz_mb=64", "not available in ZNS mode" },
+        { "femu_mode=0,devsz_mb=64", "not available in open-channel mode" },
+        { "femu_mode=0,lver=1,devsz_mb=64",
+          "not available in open-channel mode" },
+        { "femu_mode=1,namespaces=2,namespace_modes=bbssd,,znssd,"
+          FEMU_FAIL_GEO, "not available in ZNS mode" },
+    };
+    QTestState *qts = qtest_init("-machine pc -nodefaults");
+
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *out = qtest_hmp(qts, "device_add femu,addr=5,id=ml,"
+                                         "%s,mem_limit=1G", cases[i].opts);
+
+        if (!strstr(out, cases[i].want)) {
+            g_test_message("%s: %s", cases[i].opts, out);
+            g_assert_not_reached();
+        }
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * The limit applies to realize only. A Format and a namespace Create
+ * after realize allocate with no take, so x-mem-taken keeps its value.
+ */
+static void femu_test_mem_limit_commands(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t taken = femu_mem_taken(qts, "mlc");
+    uint32_t nsid;
+    uint16_t cntlid;
+
+    g_assert_cmpuint(taken, >, 0);
+    g_assert_cmpuint(taken, ==, femu_mem_total(qts, "mlc", NULL));
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    cntlid = qtest_readw(qts, buf + 78);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_mem_taken(qts, "mlc"), ==, taken);
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_attach(&c, buf, nsid, cntlid, true), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, nsid, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_mem_taken(qts, "mlc"), ==, taken);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* the bytes of one FTL owner in each category */
 static void femu_mem_ftl_bytes(const char *opts, uint64_t out[3])
 {
@@ -65565,6 +65815,16 @@ static void femu_register_nodes(void)
                  femu_test_cxl_slot_reservation, NULL);
     qos_add_test("cxl-ftl-fail-sweep", "femu", femu_test_cxl_ftl_fail_sweep,
                  NULL);
+    qos_add_test("mem-limit", "femu", femu_test_mem_limit, NULL);
+    qos_add_test("mem-limit-subsys", "femu", femu_test_mem_limit_subsys, NULL);
+    qos_add_test("mem-limit-modes", "femu", femu_test_mem_limit_modes, NULL);
+    qos_add_test("mem-limit-commands", "femu", femu_test_mem_limit_commands,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=mlc,mem_limit=1G,ns_mgmt=on,femu_mode=1,secsz=512,"
+            "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,"
+            "luns_per_ch=4,nchs=4",
+    });
     qos_add_test("cxl-realize-retry", "femu", femu_test_cxl_realize_retry,
                  NULL);
     qos_add_test("cxl-bg-reset-unplug", "femu", femu_test_cxl_bg_unplug,
