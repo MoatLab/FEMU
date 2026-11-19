@@ -2509,7 +2509,8 @@ static void femu_test_zns_ecc(void *obj, void *data, QGuestAllocator *alloc)
 /*
  * LUN contention on ZNS. One LUN has two planes, and a program or an erase
  * takes ZNS_LUN_OP_MS. An SLC page is 16 KiB, so the write cache holds
- * ZNS_LUN_FILL 4 KiB pages, and the next write programs both planes. Each plane runs on its own by default, so that write takes one
+ * ZNS_LUN_FILL 4 KiB pages, and the next write programs both planes. Each
+ * plane runs on its own by default, so that write takes one
  * program time. With zns_lun_contention the planes take turns and the write
  * takes two. A zone reset erases both planes in one multi-plane operation,
  * so it takes one erase time either way. @data is "on" when the device has
@@ -7480,7 +7481,7 @@ static void femu_test_pd_refused(void *obj, void *data,
     const struct {
         const char *opts;
         const char *msg;
-    } cases[] = {
+    } tc[] = {
         { "'femu_mode':1,'pd_open_tiers':-1", "must not be negative" },
         { "'femu_mode':1,'pd_open_tiers':5", "the ECC tier cap" },
         { "'femu_mode':1,'pd_edge_wls':1,'pd_edge_tiers':5",
@@ -7553,12 +7554,12 @@ static void femu_test_pd_refused(void *obj, void *data,
     };
     QDict *rsp;
 
-    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+    for (int i = 0; i < ARRAY_SIZE(tc); i++) {
         /* a case may set its own channel count (rain_parity needs two) */
         const char *nchs = "'nchs':1,";
         g_autofree char *cmd = NULL;
 
-        if (strstr(cases[i].opts, "nchs")) {
+        if (strstr(tc[i].opts, "nchs")) {
             nchs = "";
         }
         cmd = g_strdup_printf(
@@ -7566,15 +7567,15 @@ static void femu_test_pd_refused(void *obj, void *data,
             "'driver':'femu','id':'pd-bad','addr':'5','devsz_mb':4,"
             "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
             "'pls_per_lun':1,'luns_per_ch':1,%s%s%s}}", nchs,
-            strstr(cases[i].opts, "ecc_step_ns") ? "" :
-            "'ecc_step_ns':1000000,", cases[i].opts);
+            strstr(tc[i].opts, "ecc_step_ns") ? "" :
+            "'ecc_step_ns':1000000,", tc[i].opts);
 
         rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
         g_assert_true(qdict_haskey(rsp, "error"));
-        g_test_message("pd refused %s: %s", cases[i].opts,
+        g_test_message("pd refused %s: %s", tc[i].opts,
                        qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
         g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
-                                              "desc"), cases[i].msg));
+                                              "desc"), tc[i].msg));
         qobject_unref(rsp);
     }
     rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
@@ -11456,8 +11457,9 @@ static void femu_crypto_submit(FemuCtrlState *c, uint8_t opcode,
  * crypto_mbps=1 an 8 KiB write, read or Write Zeroes holds the engine for
  * 8.192 ms. Two writes in one ring share the one engine and take 16.384 ms.
  * A rejected read moves no data and pays nothing, and a reset drops the
- * time of the commands it discards (eight writes, 65.5 ms). Off, each command takes well under 4 ms. An untimed first write pays the start cost of the first
- * I/O.
+ * time of the commands it discards (eight writes, 65.5 ms). Off, each command
+ * takes well under 4 ms. An untimed first write pays the start cost of the
+ * first I/O.
  */
 static void femu_test_crypto(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -12806,7 +12808,8 @@ static void femu_read_posted(FemuCtrlState *c, FemuQueue *q, uint64_t buf)
  * Two completion queues on MSI-X vector 1 with THR 3 and TIME 25.5 ms. Queue
  * 1 holds one entry, then queue 2 posts one. @data "delete": queue 2 is
  * deleted before the time runs out; the delete signals the vector at once,
- * so queue 1's entry is not lost. @data "ien": queue 2 has interrupts off, so it must not take the
+ * so queue 1's entry is not lost. @data "ien": queue 2 has interrupts off, so
+ * it must not take the
  * vector's interrupt away from queue 1.
  */
 static void femu_test_intc_shared(void *obj, void *data,
@@ -14636,7 +14639,8 @@ static void femu_test_zns_finish_flush(void *obj, void *data,
 /*
  * ZNS 1.4, 5.5 and 5.6, with zns_fzr_sec=2 and zns_frl_sec=3. Zone 0 is
  * written and left open: at the first check 2 s or more after its write
- * (checks run once a second) it gets Finish Zone Recommended, with FZRTL 00b, a Zone Descriptor Changed notice and an
+ * (checks run once a second) it gets Finish Zone Recommended, with FZRTL 00b,
+ * a Zone Descriptor Changed notice and an
  * entry in the Changed Zone List. 3 s later the controller finishes it
  * (a Zone Active Excursion) and sets ZFC. Zone 1, which the host finishes
  * at once, gets neither. Identify reports ZAE and FRL 3.
@@ -17534,7 +17538,7 @@ static void femu_test_wear_fdp_props(void *obj, void *data,
     const struct {
         const char *opts;
         const char *msg;        /* NULL: realize succeeds */
-    } cases[] = {
+    } tc[] = {
         { "'blk_pe_limit':8", "the eol_read_only reserve (lower mdts)" },
         { "'blk_pe_limit':8,'eol_read_only':true,'mdts':0",
           "eol_read_only needs mdts" },
@@ -17555,19 +17559,19 @@ static void femu_test_wear_fdp_props(void *obj, void *data,
     };
     QDict *rsp;
 
-    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+    for (int i = 0; i < ARRAY_SIZE(tc); i++) {
         /* a device that realizes keeps its slot: each case has its own */
         g_autofree char *cmd = g_strdup_printf(
             "{'execute':'device_add','arguments':{"
             "'driver':'femu','id':'wear%d','addr':'%d','devsz_mb':1,"
             "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':4,"
             "'blks_per_pl':40,'luns_per_ch':2,'nchs':2,%s%s}}", i, 8 + i,
-            cases[i].opts, cases[i].msg ? ",'subsys':'fdpsub'" : "");
+            tc[i].opts, tc[i].msg ? ",'subsys':'fdpsub'" : "");
 
         rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
-        if (!cases[i].msg) {
+        if (!tc[i].msg) {
             if (qdict_haskey(rsp, "error")) {
-                g_test_message("%s: %s", cases[i].opts,
+                g_test_message("%s: %s", tc[i].opts,
                                qdict_get_str(qdict_get_qdict(rsp, "error"),
                                              "desc"));
             }
@@ -17576,10 +17580,10 @@ static void femu_test_wear_fdp_props(void *obj, void *data,
             continue;
         }
         g_assert_true(qdict_haskey(rsp, "error"));
-        g_test_message("%s: %s", cases[i].opts,
+        g_test_message("%s: %s", tc[i].opts,
                        qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
         g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
-                                             "desc"), cases[i].msg));
+                                             "desc"), tc[i].msg));
         qobject_unref(rsp);
     }
     qos_invalidate_command_line();
@@ -31111,7 +31115,7 @@ static uint16_t femu_lsm_check(FemuCtrlState *c, uint64_t i, uint64_t buf,
         qtest_memread(c->pdev->bus->qts, buf, got, len);
         for (uint32_t k = 0; k < len; k++) {
             if (got[k] != femu_lsm_byte(i, ver)) {
-                g_test_message("key %" PRIu64 " byte %u: %#x, want %#x", i, k,
+                g_test_message("key %" PRIu64 " byte %u: 0x%x, want 0x%x", i, k,
                                got[k], femu_lsm_byte(i, ver));
                 g_assert_not_reached();
             }
@@ -32113,7 +32117,8 @@ static void femu_test_kv_pack_gc(void *obj, void *data,
 /*
  * Stale packed versions with the LSM tree. 1400 keys of 990 bytes take
  * 350 pages, then two rewrites of every key need more than the 1024
- * pages of the device. The index of this namespace takes 1537 keys. A rewrite leaves the old version on flash until a
+ * pages of the device. The index of this namespace takes 1537 keys. A rewrite
+ * leaves the old version on flash until a
  * merge drops its record, so GC checks each packed value against the
  * tree (PinK, section 4.5) and releases the stale ones in place, with no
  * move. Every key reads back as its last version.
@@ -32412,7 +32417,7 @@ static void femu_test_kv_lsm_full_delete(void *obj, void *data,
     for (i = 0; i < 4096 && st == NVME_SUCCESS; i++) {
         st = femu_lsm_store(&c, i, buf, 0, 0);
     }
-    g_test_message("first refused Store: key %d, status %#x", i - 1, st);
+    g_test_message("first refused Store: key %d, status 0x%x", i - 1, st);
     g_assert_cmphex(st, ==, NVME_CAP_EXCEEDED);
     n = i - 1;
     for (int k = 0; k < n; k++) {
@@ -40399,7 +40404,8 @@ static void femu_test_cxl_nand_reserve(void *obj, void *data,
 /*
  * 290 lines of 4 x 4 LUNs x 16 pages, the least realize accepts for 256 MiB.
  * With 16-page blocks, scattered rewrites still find the free lines at the
- * forced threshold, so write-backs must wait for forced collection. None may find NAND full or go
+ * forced threshold, so write-backs must wait for forced collection. None may
+ * find NAND full or go
  * uncached, and the FTL must never run out of lines.
  */
 static void femu_test_cxl_gc_stall(void *obj, void *data,
@@ -47772,7 +47778,7 @@ static void femu_test_rotational_refused(void *obj, void *data,
         const char *sub;
         const char *control;
         const char *msg;
-    } cases[] = {
+    } tc[] = {
         { "'femu_mode':3", "rotsub", "rotsub-off", "znssd" },
         { "'femu_mode':5", "rotsub", "rotsub-off", "kvssd" },
         { "'femu_mode':0", "rotsub", "rotsub-off", "ocssd" },
@@ -47784,12 +47790,12 @@ static void femu_test_rotational_refused(void *obj, void *data,
         { "'femu_mode':2", "rotsub-fdp", "rotsub-fdp-off", "FDP" },
     };
 
-    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+    for (int i = 0; i < ARRAY_SIZE(tc); i++) {
         for (int on = 1; on >= 0; on--) {
             g_autofree char *cmd = g_strdup_printf(
                 "{'execute':'device_add','arguments':{'driver':'femu',"
                 "'id':'rot','addr':'5','devsz_mb':64,'subsys':'%s',%s}}",
-                on ? cases[i].sub : cases[i].control, cases[i].opts);
+                on ? tc[i].sub : tc[i].control, tc[i].opts);
             QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
 
             if (on) {
@@ -47797,12 +47803,12 @@ static void femu_test_rotational_refused(void *obj, void *data,
 
                 g_assert_true(qdict_haskey(rsp, "error"));
                 desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
-                g_test_message("%s: %s", cases[i].opts, desc);
+                g_test_message("%s: %s", tc[i].opts, desc);
                 g_assert_nonnull(strstr(desc, "rotational"));
-                g_assert_nonnull(strstr(desc, cases[i].msg));
+                g_assert_nonnull(strstr(desc, tc[i].msg));
             } else {
                 if (!qdict_haskey(rsp, "return")) {
-                    g_test_message("control %s refused: %s", cases[i].opts,
+                    g_test_message("control %s refused: %s", tc[i].opts,
                                    qdict_get_str(qdict_get_qdict(rsp,
                                                  "error"), "desc"));
                     g_assert_not_reached();
@@ -55512,7 +55518,7 @@ static void femu_test_gc_idle_refused(void *obj, void *data,
     static const struct {
         const char *opts;
         const char *msg;
-    } cases[] = {
+    } tc[] = {
         { "'blks_per_pl':80,'gc_pace':true", "gc_pace" },
         { "'blks_per_pl':80,'streams':true", "Streams" },
         { "'blks_per_pl':80,'power_loss':true,'buffer_size':16",
@@ -55527,20 +55533,20 @@ static void femu_test_gc_idle_refused(void *obj, void *data,
           "'nand_cell_type':3", "the pSLC tier" },
     };
 
-    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+    for (int i = 0; i < ARRAY_SIZE(tc); i++) {
         g_autofree char *cmd = g_strdup_printf(
             "{'execute':'device_add','arguments':{'driver':'femu',"
             "'id':'gcir','addr':'5','devsz_mb':4,'secsz':512,"
             "'secs_per_pg':8,'pgs_per_blk':16,'pls_per_lun':1,"
-            "'luns_per_ch':1,'nchs':1,'gc_idle_ms':5,%s%s}}", cases[i].opts,
-            strstr(cases[i].opts, "femu_mode") ? "" : ",'femu_mode':1");
+            "'luns_per_ch':1,'nchs':1,'gc_idle_ms':5,%s%s}}", tc[i].opts,
+            strstr(tc[i].opts, "femu_mode") ? "" : ",'femu_mode':1");
         QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
         const char *desc;
 
         g_assert_true(qdict_haskey(rsp, "error"));
         desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
-        g_test_message("%s: %s", cases[i].opts, desc);
-        g_assert_nonnull(strstr(desc, cases[i].msg));
+        g_test_message("%s: %s", tc[i].opts, desc);
+        g_assert_nonnull(strstr(desc, tc[i].msg));
         g_assert_nonnull(strstr(desc, "gc_idle_ms"));
         qobject_unref(rsp);
     }
@@ -55549,18 +55555,18 @@ static void femu_test_gc_idle_refused(void *obj, void *data,
      * each refused line with gc_idle_ms=0, so each refusal comes from
      * gc_idle_ms and not from the rest of its line.
      */
-    for (int i = -1; i < (int)ARRAY_SIZE(cases); i++) {
+    for (int i = -1; i < (int)ARRAY_SIZE(tc); i++) {
         g_autofree char *cmd = g_strdup_printf(
             "{'execute':'device_add','arguments':{'driver':'femu',"
             "'id':'gcir','addr':'5','devsz_mb':4,'secsz':512,"
             "'secs_per_pg':8,'pgs_per_blk':16,'pls_per_lun':1,"
             "'luns_per_ch':1,'nchs':1,'gc_idle_ms':%d,%s%s}}",
-            i < 0 ? 5 : 0, i < 0 ? "'blks_per_pl':80" : cases[i].opts,
-            i >= 0 && strstr(cases[i].opts, "femu_mode") ? "" :
+            i < 0 ? 5 : 0, i < 0 ? "'blks_per_pl':80" : tc[i].opts,
+            i >= 0 && strstr(tc[i].opts, "femu_mode") ? "" :
             ",'femu_mode':1");
         QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
 
-        if (i >= 0 && strstr(cases[i].msg, "gc_idle_pcent")) {
+        if (i >= 0 && strstr(tc[i].msg, "gc_idle_pcent")) {
             /* the percent alone only warns; drop the device it made */
             g_assert_true(qdict_haskey(rsp, "return"));
         } else if (!qdict_haskey(rsp, "return")) {
@@ -56926,7 +56932,7 @@ static void femu_test_nand_profile_refused(void *obj, void *data,
         const char *text;
         const char *opts;
         const char *msg;
-    } cases[] = {
+    } tc[] = {
         { FEMU_NP_DEFAULT "speed = 1\n", NULL, "unknown key 'speed'" },
         { FEMU_NP_DEFAULT "read_ns = 1\n", NULL, "given twice" },
         { "femu_nand_profile = 1\nname = x\n", NULL, "missing key" },
@@ -56945,20 +56951,20 @@ static void femu_test_nand_profile_refused(void *obj, void *data,
     static const char *const modes[] = { "'femu_mode':2", "'femu_mode':0" };
     g_autofree char *good = femu_np_file(FEMU_NP_DEFAULT);
 
-    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
-        g_autofree char *f = femu_np_file(cases[i].text);
+    for (int i = 0; i < ARRAY_SIZE(tc); i++) {
+        g_autofree char *f = femu_np_file(tc[i].text);
         g_autofree char *cmd = g_strdup_printf(
             "{'execute':'device_add','arguments':{'driver':'femu','id':'npr',"
             "'addr':'5','femu_mode':1,%s,'nand_profile':'%s'%s%s}}",
-            FEMU_NP_BB, f, cases[i].opts ? "," : "",
-            cases[i].opts ? cases[i].opts : "");
+            FEMU_NP_BB, f, tc[i].opts ? "," : "",
+            tc[i].opts ? tc[i].opts : "");
         QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
         const char *desc;
 
         g_assert_true(qdict_haskey(rsp, "error"));
         desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
         g_test_message("case %d: %s", i, desc);
-        g_assert_nonnull(strstr(desc, cases[i].msg));
+        g_assert_nonnull(strstr(desc, tc[i].msg));
         qobject_unref(rsp);
         unlink(f);
     }
@@ -59584,7 +59590,8 @@ static void femu_fdp_bytes(FemuCtrlState *c, uint64_t log, uint64_t *hbmw,
 /*
  * A handle whose units ran out shows the host a stand-in unit with no room,
  * which the FTL owns. With collection held off, handle updates through
- * placement 0 use up every free unit, and a write fills the last one. The controller is then replaced by a NoSSD one on
+ * placement 0 use up every free unit, and a write fills the last one. The
+ * controller is then replaced by a NoSSD one on
  * the same subsystem, whose RUH Status reads that handle's unit: it must be
  * one of the subsystem's, not the freed stand-in. An ASan build reports the
  * use after free that a plain build reads past.
@@ -61071,8 +61078,9 @@ static void femu_test_cps_slm_rw(void *obj, void *data,
 
     /* dword alignment, the end of the namespace, and the high address half */
     for (i = 0; i < 3; i++) {
-        uint8_t opc = (uint8_t[]){ FEMU_SLM_READ, FEMU_SLM_WRITE,
-                                   FEMU_SLM_FILL }[i];
+        static const uint8_t opcs[] = { FEMU_SLM_READ, FEMU_SLM_WRITE,
+                                        FEMU_SLM_FILL };
+        uint8_t opc = opcs[i];
 
         g_assert_cmphex(femu_cps_mem(&c, FEMU_CPS_SLM, opc, 2, 4, buf), ==,
                         FEMU_SC_INVALID_FIELD);
@@ -63474,7 +63482,8 @@ static void femu_test_eol_fdp_drain(void *obj, void *data,
 /*
  * RUH Update at the end of life under FDP. An update of placement handle 0,
  * whose unit holds a page, and a write behind it are held before the FTL,
- * then the media goes read-only. The write finishes; the update fails with Capacity Exceeded,
+ * then the media goes read-only. The write finishes; the update fails with
+ * Capacity Exceeded,
  * as one with no empty unit to give, and the handle keeps its written
  * unit. An update sent after the transition fails the same way, and RUH
  * Status still answers.
