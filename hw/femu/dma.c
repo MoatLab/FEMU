@@ -463,9 +463,14 @@ uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
  * CMB-resident SGLs are not special-cased (rare); the descriptors are read
  * from guest memory via nvme_addr_read. Builds the same qsg the backend_rw
  * path consumes, so no other code path changes.
+ *
+ * @exact: @len is the whole transfer of the command, so a data block after
+ * it makes the SGL longer than the data. The controller does not report
+ * NVME_CTRL_SGLS_EXCESS_LENGTH, and refuses such a list.
  */
 uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
-                      NvmeSglDescriptor sgl, uint32_t len, FemuCtrl *n)
+                      NvmeSglDescriptor sgl, uint32_t len, bool exact,
+                      FemuCtrl *n)
 {
     const int max_descrs = 4096; /* guard against a runaway/looping SGL */
     int nsegs = 0;
@@ -561,6 +566,15 @@ uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
                               dt == NVME_SGL_DESCR_TYPE_LAST_SEGMENT) ?
                              NVME_INVALID_SGL_SEG_DESCR :
                              NVME_SGL_DESCR_TYPE_INVALID;
+                    g_free(descs);
+                    goto inval;
+                }
+            }
+            for (; exact && !len && i < ndesc; i++) {
+                if (NVME_SGL_TYPE(descs[i].type) ==
+                    NVME_SGL_DESCR_TYPE_DATA_BLOCK &&
+                    le32_to_cpu(descs[i].len)) {
+                    status = NVME_DATA_SGL_LEN_INVALID;
                     g_free(descs);
                     goto inval;
                 }
@@ -774,7 +788,8 @@ uint16_t femu_map_dptr(FemuCtrl *n, NvmeCmd *cmd, QEMUSGList *qsg,
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
-    return nvme_map_sgl(qsg, iov, cmd->dptr.sgl, len, n);
+    /* some callers map less than the host buffer, so more may follow */
+    return nvme_map_sgl(qsg, iov, cmd->dptr.sgl, len, false, n);
 }
 
 /* host to controller, through an I/O command's data pointer */

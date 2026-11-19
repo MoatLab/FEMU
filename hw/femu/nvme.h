@@ -4206,7 +4206,8 @@ static inline void nvme_req_release_ranges(NvmeRequest *req)
 uint16_t nvme_map_prp(QEMUSGList *qsg, QEMUIOVector *iov, uint64_t prp1,
                       uint64_t prp2, uint32_t len, FemuCtrl *n);
 uint16_t nvme_map_sgl(QEMUSGList *qsg, QEMUIOVector *iov,
-                      NvmeSglDescriptor sgl, uint32_t len, FemuCtrl *n);
+                      NvmeSglDescriptor sgl, uint32_t len, bool exact,
+                      FemuCtrl *n);
 void femu_sglist_split(FemuCtrl *n, QEMUSGList *qsg, uint32_t unit);
 uint16_t dma_write_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t
                             prp1, uint64_t prp2);

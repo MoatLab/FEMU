@@ -1469,7 +1469,7 @@ static uint16_t nvme_rw_map_sgl(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 
     if (n->sgl && cmd->psdt <= NVME_PSDT_SGL_MPTR_SGL) {
         status = nvme_map_sgl(&req->qsg, &req->iov, cmd->dptr.sgl, data_size,
-                              n);
+                              true, n);
     }
     if (status) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, status & ~NVME_DNR,

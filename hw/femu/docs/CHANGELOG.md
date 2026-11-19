@@ -524,7 +524,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 #### Spec conformance and host compatibility
 
-- Compare with a PRP data pointer returns the status that Read and Write return. A PRP list that the controller cannot read gives Data Transfer Error. An offset in PRP2 or in a list pointer gives PRP Offset Invalid. Each case gave Invalid Field.
+- Read, Write and Compare refuse an SGL that holds a data block after the last byte of the transfer, with Data SGL Length Invalid. The controller does not report support for such a list, and it used to ignore the extra block.
 - With a `femu-subsys`, SMART byte 6 (Endurance Group Critical Warning Summary) repeats bits 0, 2 and 3 of the endurance group's warning. It read 0.
 - A KV namespace runs its I/O commands only when the host enables the controller with CC.CSS 110b. Under 000b, which selects only the NVM command set, they fail with Invalid Command Opcode (Base 2.3, Figure 41). Linux selects 110b. Set Features I/O Command Set Profile (19h) now succeeds with no effect when CC.CSS is not 110b (Base 2.3, 5.2.26.1.17).
 - Write Zeroes reads its directive type from CDW12 bits 22:20 (NVM Command Set 1.2, Figure 82). Bit 23 is NSZ: with it set, a Write Zeroes failed with Invalid Field once the Data Placement Directive was enabled, or lost its placement.

@@ -66905,6 +66905,7 @@ static void femu_g1_layout_round(FemuCtrlState *c, uint64_t slba,
  * its page takes a list whose two entries end a list page, and a PRP1 in
  * the middle of a page takes a PRP2 page. Compare reads the scattered
  * buffer, and Dataset Management reads a range list that crosses a page.
+ * A list that describes one byte more than the command moves is refused.
  */
 static void femu_test_g1_dptr_layouts(void *obj, void *data,
                                       QGuestAllocator *alloc)
@@ -66917,6 +66918,7 @@ static void femu_test_g1_dptr_layouts(void *obj, void *data,
     uint64_t list = guest_alloc(alloc, FEMU_G1_PAGE);
     uint64_t seg = guest_alloc(alloc, 2 * FEMU_G1_PAGE);
     NvmeSglDescriptor d[3];
+    NvmeSglDescriptor next;
     uint8_t range[16];
     uint64_t ents[2];
     NvmeCmd dptr;
@@ -66979,6 +66981,35 @@ static void femu_test_g1_dptr_layouts(void *obj, void *data,
     g_assert_cmphex(femu_g1_dptr_io(&c, NVME_CMD_WRITE, 64, 16, &dptr), ==,
                     NVME_DATA_SGL_LEN_INVALID);
     g_assert_cmphex(femu_io_status & NVME_DNR, ==, NVME_DNR);
+
+    /*
+     * A third data block of one byte after the 8192 bytes of the command.
+     * The controller does not report support for a list longer than the
+     * data, so it refuses the command and moves nothing.
+     */
+    d[1].len = cpu_to_le32(femu_g1_sgl_pieces[3].len);
+    d[2].addr = cpu_to_le64(area + 3 * FEMU_G1_PAGE + 1);
+    d[2].len = cpu_to_le32(1);
+    qtest_memwrite(qts, seg + FEMU_G1_PAGE, d, 3 * sizeof(d[0]));
+    memset(&next, 0, sizeof(next));
+    next.addr = cpu_to_le64(seg + FEMU_G1_PAGE);
+    next.len = cpu_to_le32(3 * sizeof(d[0]));
+    next.type = NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4;
+    qtest_memwrite(qts, seg + 2 * sizeof(d[0]), &next, sizeof(next));
+    qtest_memset(qts, area, 0xee, 4 * FEMU_G1_PAGE);
+    g_assert_cmphex(femu_g1_dptr_io(&c, NVME_CMD_WRITE, 64, 16, &dptr), ==,
+                    NVME_DATA_SGL_LEN_INVALID);
+    g_assert_cmphex(femu_io_status & NVME_DNR, ==, NVME_DNR);
+    g_assert_cmphex(femu_g1_dptr_io(&c, NVME_CMD_READ, 64, 16, &dptr), ==,
+                    NVME_DATA_SGL_LEN_INVALID);
+    g_assert_cmphex(femu_io_status & NVME_DNR, ==, NVME_DNR);
+    g_assert_cmphex(femu_g1_dptr_io(&c, NVME_CMD_COMPARE, 64, 16, &dptr), ==,
+                    NVME_DATA_SGL_LEN_INVALID);
+    femu_g1_all(qts, area, 4 * FEMU_G1_PAGE, 0xee);
+    /* the refused Write of 0xee bytes changed no block */
+    g_assert_cmphex(femu_g1_rw(&c, NVME_CMD_READ, 64, 16, plain, list), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, plain), !=, 0xeeeeeeee);
 
     /* PRP1 at 0xffc; the list is the last two entries of its page */
     ents[0] = cpu_to_le64(area + femu_g1_prp_pieces[1].off);
