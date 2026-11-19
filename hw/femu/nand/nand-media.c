@@ -224,6 +224,37 @@ void nand_media_destroy(NandMedia *m)
     m->susp = NULL;
 }
 
+/* empty every window list of @l, keeping its memory */
+static void bus_lists_idle(NandBusResList *l, uint32_t nchs)
+{
+    for (uint32_t ch = 0; l && ch < nchs; ch++) {
+        l[ch].n = 0;
+        l[ch].high = 0;
+        l[ch].low = 0;
+    }
+}
+
+/*
+ * Forget all booked work, as on a new media: no bus or CA window, no
+ * suspend or read priority state, and die_stats at zero. The caller
+ * resets the busy-until timelines it owns. Preconditioning calls this
+ * after its writes, so the guest finds idle dies.
+ */
+void nand_media_idle(NandMedia *m)
+{
+    const NandMediaConfig *cfg = &m->cfg;
+    size_t luns = (size_t)cfg->nchs * cfg->luns_per_ch;
+
+    bus_lists_idle(m->bus_res, cfg->nchs);
+    bus_lists_idle(m->ca_res, cfg->nchs);
+    if (m->susp) {
+        memset(m->susp, 0, luns * cfg->planes_per_lun * sizeof(*m->susp));
+    }
+    if (m->die_stat) {
+        memset(m->die_stat, 0, luns * sizeof(*m->die_stat));
+    }
+}
+
 static uint64_t bus_lists_bytes(const NandBusResList *l, uint32_t nchs)
 {
     uint64_t bytes = (uint64_t)nchs * sizeof(*l);

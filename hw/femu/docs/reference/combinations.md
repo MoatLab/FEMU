@@ -590,6 +590,7 @@ own description allows. A message keeps its format directives (`%s`,
 - ocp needs bbssd or CSD namespaces; namespace %d is mode %u
 - ocssd is a controller mode: femu_mode and namespace_modes must both select it, or neither
 - persist_file '%s' does not match this device: the mode, the backend size (%
+- persist_load_only: no '%s', and '%s' is not on a local file system; make an empty '%s' with mode 0644
 - shared namespace mode and capabilities must match
 - shared_ftl needs every namespace in bbssd mode; namespace %d is not
 - test-storm is threads,pages,iters,mode,seed with at most one thread per vCPU
@@ -920,6 +921,7 @@ own description allows. A message keeps its format directives (`%s`,
 - femu-save-data: '%s' is this device's persist_load_only checkpoint
 - persist_load_only needs an existing persist_file; '%s' does not exist
 - persist_load_only needs persist_file
+- persist_load_only: no '%s', and '%s' is not on a local file system; make an empty '%s' with mode 0644
 
 ## `pg_xfer_lat`
 

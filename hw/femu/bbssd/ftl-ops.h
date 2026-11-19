@@ -101,7 +101,8 @@ struct map_write_plan {
  *                  by one line and Streams are refused
  * @reclaim_per_page: run @reclaim after each page instead of once per
  *                    request; needs @needs_reclaim and @reclaim
- * @init: allocate ssd->map_priv; optional
+ * @init: allocate ssd->map_priv; false when memory runs out, and
+ *        ssd_init() then fails the device. Optional.
  * @exit: free ssd->map_priv; optional
  * @translate: the physical page of @lpn, or an unmapped ppa. Required.
  * @prepare_write: choose the class for a new page of @lpn. Required.
@@ -121,7 +122,7 @@ struct femu_mapping_ops {
     bool uses_log_class;
     bool reclaim_per_page;
 
-    void (*init)(struct ssd *ssd);
+    bool (*init)(struct ssd *ssd);
     void (*exit)(struct ssd *ssd);
 
     struct ppa (*translate)(struct ssd *ssd, uint64_t lpn);

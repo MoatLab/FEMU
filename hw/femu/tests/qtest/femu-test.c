@@ -37215,9 +37215,10 @@ static void femu_test_checkpoint_reuse(void *obj, void *data,
  * B holds page 2 = 0x21. Two readers load B, make no lock file and leave
  * the bytes and the inode of B. While a reader holds B, a writer of B and
  * a save to B fail in the directory made writable again. After the readers
- * leave, the writer starts. A new lock file has mode 0644, and the empty
- * lock file of the writer stays after unplug. Root ignores the directory
- * mode, so root skips the test.
+ * leave, a save that cannot read B refuses, and the writer starts. The
+ * readers need a local file system. A new lock file has mode 0644, and
+ * the empty lock file of the writer stays after unplug. Root ignores the
+ * directory mode, so root skips the test.
  */
 static void femu_test_checkpoint_ro_dir(void *obj, void *data,
                                         QGuestAllocator *alloc)
@@ -37311,6 +37312,17 @@ static void femu_test_checkpoint_ro_dir(void *obj, void *data,
     femu_queue_free(&c2, &c2.io);
     qpci_unplug_acpi_device_test(qts, "r2", 6);
     g_free(p2);
+    femu_ckpt_same(b, sum_b, ino_b);
+
+    /* a save that cannot test B for a reader refuses, and keeps B */
+    g_assert_cmpint(chmod(b, 0), ==, 0);
+    femu_ckpt_add(qts, "x", 7, ",'femu_mode':1");
+    err = femu_save_data(qts, "x", b);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "cannot test"));
+    g_free(err);
+    qpci_unplug_acpi_device_test(qts, "x", 7);
+    g_assert_cmpint(chmod(b, 0644), ==, 0);
     femu_ckpt_same(b, sum_b, ino_b);
     femu_ckpt_add(qts, "w", 7, wb);
     qpci_unplug_acpi_device_test(qts, "w", 7);

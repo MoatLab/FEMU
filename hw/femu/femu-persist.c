@@ -29,6 +29,7 @@
 
 #include "qemu/osdep.h"
 #include <sys/file.h>
+#include <sys/vfs.h>
 #include "qom/qom-qobject.h"
 #include "qobject/qbool.h"
 #include "qobject/qjson.h"
@@ -589,24 +590,58 @@ static int persist_open_lock(const char *lock, int acc, bool *absent)
 }
 
 /*
- * Whether a persist_load_only device holds @path itself, which it does
- * where it could not make FILE.lock. The caller holds FILE.lock, so no
- * such device can start after this test.
+ * Whether @fd is on a local file system, by the f_type values of
+ * statfs(2). A network file system can cache a missing FILE.lock, so a
+ * reader there cannot hold the checkpoint file in its place.
  */
-static bool persist_file_held(const char *path)
+static bool persist_local_fs(int fd)
+{
+    static const uint32_t local[] = {
+        0xef53,         /* ext2, ext3, ext4 */
+        0x58465342,     /* xfs */
+        0x9123683e,     /* btrfs */
+        0xf2f52010,     /* f2fs */
+        0x01021994,     /* tmpfs */
+        0x794c7630,     /* overlayfs */
+        0x73717368,     /* squashfs */
+        0x9660,         /* iso9660 */
+    };
+    struct statfs fs;
+
+    if (fstatfs(fd, &fs) < 0) {
+        return false;
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(local); i++) {
+        if ((uint32_t)fs.f_type == local[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*
+ * Whether a persist_load_only device holds @path itself, which it does
+ * only on a local file system where it could not make FILE.lock. The
+ * caller holds FILE.lock, so no such device can start after this test.
+ * Returns 0 when @path is absent or not held, 1 when held, and -errno
+ * when the test fails: the caller must then refuse to write @path.
+ */
+static int persist_file_held(const char *path)
 {
     int fd = open(path, O_RDWR | O_CLOEXEC);
-    bool held;
+    int ret = 0;
 
-    if (fd < 0) {
+    if (fd < 0 && (errno == EACCES || errno == EROFS)) {
         fd = open(path, O_RDONLY | O_CLOEXEC);
     }
     if (fd < 0) {
-        return false;
+        return errno == ENOENT ? 0 : -errno;
     }
-    held = flock(fd, LOCK_EX | LOCK_NB) < 0 && errno == EWOULDBLOCK;
+    if (persist_local_fs(fd) && flock(fd, LOCK_EX | LOCK_NB) < 0) {
+        ret = errno == EWOULDBLOCK ? 1 : -errno;
+    }
     close(fd);
-    return held;
+    return ret;
 }
 
 /*
@@ -621,6 +656,7 @@ static bool persist_lock(FemuCtrl *n, Error **errp)
     bool reader = n->persist_load_only;
     bool on_file = false;
     bool absent;
+    int held;
     int fd = persist_open_lock(lock, reader ? O_RDONLY : O_RDWR, &absent);
 
     if (fd < 0 && reader && absent) {
@@ -633,6 +669,13 @@ static bool persist_lock(FemuCtrl *n, Error **errp)
         if (fd < 0) {
             error_setg_errno(errp, errno, "persist_file: cannot open '%s'",
                              n->persist_path);
+            return false;
+        }
+        if (!persist_local_fs(fd)) {
+            error_setg(errp, "persist_load_only: no '%s', and '%s' is not on "
+                       "a local file system; make an empty '%s' with mode "
+                       "0644", lock, n->persist_path, lock);
+            close(fd);
             return false;
         }
         on_file = true;
@@ -651,10 +694,22 @@ static bool persist_lock(FemuCtrl *n, Error **errp)
      * file second. A reader that holds the file looks for FILE.lock again,
      * so one of the two sees the other.
      */
-    if (on_file ? access(lock, F_OK) == 0 :
-        !reader && persist_file_held(n->persist_path)) {
-        error_setg(errp, "persist_file '%s' is in use by another device",
-                   n->persist_path);
+    held = 0;
+    if (!reader) {
+        held = persist_file_held(n->persist_path);
+    } else if (on_file && access(lock, F_OK) == 0) {
+        held = 1;
+    } else if (on_file && errno != ENOENT) {
+        held = -errno;
+    }
+    if (held) {
+        if (held < 0) {
+            error_setg_errno(errp, -held, "persist_file: cannot test '%s' "
+                             "for another device", n->persist_path);
+        } else {
+            error_setg(errp, "persist_file '%s' is in use by another device",
+                       n->persist_path);
+        }
         close(fd);
         return false;
     }
@@ -1054,6 +1109,7 @@ bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp)
     g_autofree char *path = NULL;
     g_autofree char *lock = NULL;
     int fd = -1;
+    int held;
     bool absent;
     bool resume;
     bool ok;
@@ -1098,10 +1154,16 @@ bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp)
     if (!n->persist_path || strcmp(path, n->persist_path)) {
         lock = g_strconcat(path, ".lock", NULL);
         fd = persist_open_lock(lock, O_RDWR, &absent);
-        if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) < 0 ||
-            persist_file_held(path)) {
-            error_setg(errp, "femu-save-data: '%s' is in use by a device",
-                       path);
+        held = fd < 0 || flock(fd, LOCK_EX | LOCK_NB) < 0 ? 1 :
+               persist_file_held(path);
+        if (held) {
+            if (held < 0) {
+                error_setg_errno(errp, -held, "femu-save-data: cannot test "
+                                 "'%s' for a device", path);
+            } else {
+                error_setg(errp, "femu-save-data: '%s' is in use by a device",
+                           path);
+            }
             if (fd >= 0) {
                 close(fd);
             }

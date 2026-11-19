@@ -81,7 +81,7 @@ A `bbssd` entry has these members:
 | Member | Content |
 | --- | --- |
 | `geometry` | `channels`, `luns-per-channel`, `planes-per-lun`, `blocks-per-plane`, `pages-per-block`, `page-size` (bytes), `pages-per-line`, and the totals `total-sectors`, `total-pages` and `total-blocks` |
-| `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, `pad-write-pages` (only after a pad), `map-write-pages` and `map-read-pages` (only with `mapping=dftl` and no FDP), `parity-write-pages` and `degraded-reads` (only with `die_parity` or `rain_parity`), `failed-dies`, `rebuild-lines-left`, `rebuild-pages`, `lost-pages` and `lost-blocks` (only with `rain_parity`), and `waf` |
+| `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, `pad-write-pages` (only after a pad), `map-write-pages` and `map-read-pages` (only with `mapping=dftl` and no FDP), `parity-write-pages` and `degraded-reads` (only with `die_parity` or `rain_parity`), `failed-dies`, `rebuild-lines-left`, `rebuild-pages`, `lost-pages` and `lost-blocks` (only with `rain_parity`), `gc-fw-pages` and `gc-fw-ns` (only with `fw_gc_page_ns` above 0, bbssd only), and `waf` |
 | `media` | the NAND bus timing: see [Media timing](#media-timing) |
 | `line-counts` | lines that are `free`, `victim`, `full`, `retired` and `spare`, and the `total`; absent with FDP |
 | `precondition` | only on a namespace that `precon_fill_pct` filled at this realize: `fill-pages`, `overwrite-pages`, `nand-write-pages`, `gc-write-pages`, `map-write-pages`, `pad-write-pages`, `parity-write-pages`, `block-erases`, `waf` and `elapsed-ms` of that run; the `counters` start at zero after it. See [preconditioning](../design/ftl.md#preconditioning-at-realize-precon_fill_pct) |
@@ -746,16 +746,26 @@ that saves the file, or a `femu-save-data` to it.
  reader realize
    open FILE.lock (make it with mode 0644 if missing)
      |-- opened ----------------------------> shared lock on FILE.lock
-     |-- missing, read-only directory ------> shared lock on FILE, warning
+     |-- missing, read-only directory, local file system
+     |                          ------------> shared lock on FILE, warning
+     |-- missing, read-only directory, network file system
+     |                          ------------> realize fails: make FILE.lock
      `-- other error (no read permission) --> realize fails
 
  writer realize or save
    exclusive lock on FILE.lock
      |-- held by a device -----------------> fails
-     `-- taken --> reader lock on FILE? ---> yes: fails, no: starts
+     `-- taken --> reader lock on FILE?
+                     |-- yes ------------------> fails
+                     |-- test fails (EACCES) --> fails
+                     `-- no -------------------> starts
 ```
 
-- A checkpoint in a read-only directory needs no lock file.
+- On a local file system, a checkpoint in a read-only directory needs no
+  lock file. The local types are ext2, ext3, ext4, xfs, btrfs, f2fs,
+  tmpfs, overlayfs, squashfs and iso9660 (`statfs(2)`).
+- A network file system can cache a missing FILE.lock, so a reader there
+  could miss a writer. Make an empty FILE.lock with mode 0644 first.
 - FEMU makes a lock file with mode 0644, so a second user can share it.
 - A lock file that the reader cannot read fails realize. Give it mode 0644.
 - A writer needs write access to the directory. It refuses to start while

@@ -369,6 +369,7 @@ uint32_t nand_media_cap_row(NandMediaTiming *t, int fast, int slow,
 /* unit tests only: allocation @at of the next media builds fails */
 void nand_media_test_fail(uint32_t at);
 void nand_media_destroy(NandMedia *m);
+void nand_media_idle(NandMedia *m);
 /* the bytes the media holds now: bus window lists and suspend state */
 uint64_t nand_media_bytes(const NandMedia *m);
 uint64_t nand_media_cfg_bytes(const NandMediaConfig *cfg);

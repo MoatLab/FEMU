@@ -174,14 +174,18 @@ static bool ssd_init_ns_slices(FemuCtrl *n, struct ssd *ssd)
                   ssd_try_alloc(ssd, n->num_namespaces,
                                 sizeof(struct ssd_ns_ctr),
                                 "namespace counters") : NULL;
-    if (!ssd->ns_ctr) {
+    ssd->stats_ns_pub = ssd->ns_ctr ?
+                        ssd_try_alloc(ssd, 3 * (uint64_t)n->num_namespaces,
+                                      sizeof(uint64_t),
+                                      "namespace stats copies") : NULL;
+    if (!ssd->stats_ns_pub) {
         return false;
     }
     for (uint32_t i = 0; i < n->num_namespaces; i++) {
         ssd->ns_slice_lo[i] = n->namespaces[i].backend_offset / pg;
     }
     ssd_mem_hold(ssd, &ssd->mem_held.ns_slices, FEMU_MEM_OTHER,
-                 (sizeof(uint64_t) + sizeof(struct ssd_ns_ctr)) *
+                 (4 * sizeof(uint64_t) + sizeof(struct ssd_ns_ctr)) *
                  n->num_namespaces);
     ssd->nr_ns_slices = n->num_namespaces;
     return true;
@@ -550,6 +554,7 @@ bool ssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     ssd->host_write_pages = 0;
     ssd->nand_write_pages = 0;
     ssd->gc_write_pages = 0;
+    seqlock_init(&ssd->stats_seq);
     if (!ssd_init_ns_slices(n, ssd) || !ssd_durable_init(ssd)) {
         return ssd_init_fail(ssd, errp);
     }
@@ -689,6 +694,8 @@ bool ssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         /* non-FDP: use single write pointer */
         ssd_init_write_pointer(ssd);
     }
+    /* no FTL thread runs this FTL yet: the first copy is the empty one */
+    ssd_stats_publish(ssd);
 
     /* the controller flags wait for a whole FTL */
     ftl_tier_publish(ssd, n);

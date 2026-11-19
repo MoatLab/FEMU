@@ -1913,10 +1913,6 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
     NvmeDsmRange *ranges = req->dsm_ranges;
     int nr_ranges = req->dsm_nr_ranges;
 
-    uint64_t total_trimmed_pages = 0;
-    uint64_t total_already_invalid = 0;
-    int total_out_of_bounds = 0;
-
     if (!ranges || nr_ranges <= 0) {
         printf("TRIM: Invalid ranges or count\n");
         return 0;
@@ -1924,7 +1920,6 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
 
     for (int range_idx = 0; range_idx < nr_ranges; range_idx++) {
         uint64_t start_lpn, end_lpn;
-        uint64_t trimmed_pages;
         uint64_t already_invalid = 0;
 
         /* only the pages the range covers in full lose their mapping */

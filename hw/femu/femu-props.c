@@ -126,7 +126,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "the end of QEMU saves it (not with persist_load_only). A file of "
       "another mode, size, namespace layout or LBA format fails realize, "
       "and FILE.lock keeps a second user out (readers of persist_load_only "
-      "share it). FILE.lock is empty and stays after unplug. Format NVM keeps the LBA format. The FTL state is kept "
+      "share it). FILE.lock is empty and stays after unplug. Format NVM "
+      "keeps the LBA format. The FTL state is kept "
       "only with persist_ftl. Not with namespace_modes, ns_mgmt, shared "
       "namespaces, cxl_ssd, metadata or sanitize_ms" },
     { "rrl",
@@ -162,8 +163,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "FILE.lock is made if missing and held shared, so other devices "
       "and QEMU processes can "
       "load the same file, and a device that saves it cannot start. With "
-      "no FILE.lock in a read-only directory the device holds the file "
-      "itself, shared, and warns. The "
+      "no FILE.lock in a read-only directory of a local file system the "
+      "device holds the file itself, shared, and warns. The "
       "guest still writes the device; femu-save-data can write another "
       "file. off (default)" },
     { "persist_ftl",
