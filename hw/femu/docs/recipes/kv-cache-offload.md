@@ -217,8 +217,8 @@ No run has confirmed these predictions.
 
 | Prediction | Reason |
 | --- | --- |
-| The control run has a WAF above 1. | The prefill makes the whole namespace valid, which is 75% of the NAND. The stores then write 5 times the namespace size in 240 s. GC starts when free lines are few, and its victim lines still hold valid pages. |
-| The FDP run has a lower WAF than the control run. | With no placement, short and long entries share lines, so a victim line holds long entries that GC must copy. With placement, the reclaim units of the short tenant hold its entries only. |
+| The control run has a WAF above 1. | The prefill makes the whole namespace valid, which is 75% of the NAND. The stores then write 5 times the namespace size in 240 s. Background GC starts at 32 free lines or fewer, which is the state after the prefill. Its victim lines still hold valid pages. |
+| The FDP run has a lower WAF than the control run, when GC waits for free space to run low. | With no placement, short and long entries share lines, so a victim line holds long entries that GC must copy. With placement, the reclaim units of the short tenant hold its entries only. On the device lines of section 1, GC does not wait (see "When GC starts"). |
 | With FDP, the short tenant handle has a lower WAF than the long tenant handle. | The short tenant writes the size of its region about each 8 s. Its pages thus become invalid sooner on average. |
 | The host bytes of handle 0 grow about 3 times as fast as the host bytes of handle 1 during the run. | The store rates are 24 MiB/s and 8 MiB/s. The prefill is not in this ratio. |
 | The 99th percentile latency of a load is above its median in both runs. | A load waits when GC or a store keeps its die busy. |
@@ -226,6 +226,140 @@ No run has confirmed these predictions.
 The size of the WAF difference is not predicted. It depends on the fill
 level, the region sizes and the GC options. A run at another fill level
 can show no difference.
+
+### When GC starts
+
+The FTL has two thresholds and one rule for a background victim. The
+thresholds are counts of free lines. With FDP, the same rules count free
+reclaim units.
+
+```
+ lines            = blks_per_pl                              = 128
+ valid data       = 1536 MiB / 16 MiB for each line          = 96 lines
+ background GC    = (1 - gc_thres_pcent / 100) x 128         = 32 free lines
+ forced GC        = (1 - gc_thres_pcent_high / 100) x 128    = 6 free lines
+ free lines after the prefill = 128 - 96                     = 32 at most
+
+ free lines   128 ........ 32 ................. 6 ...... 0
+                           |<-- background GC -->|<- forced GC ->|
+                           ^
+                           the device of section 1 starts the run here
+```
+
+| Rule | What the FTL does | Source |
+| --- | --- | --- |
+| background rule | After each command, the FTL thread makes one GC attempt when the free lines are at or below the background threshold. | `bbssd/ftl.c`, with the threshold from `bbssd/ftl-geom.c` |
+| 1/8 rule | A background attempt takes the line with the fewest valid pages. It takes that line only when 1/8 or more of its pages are invalid. | `bbssd/ftl-line-gc.c`, and `bbssd/ftl-fdp.c` for reclaim units |
+| forced rule | A write collects, with no 1/8 test, while the free lines are at or below the forced threshold. | `bbssd/ftl-datapath.c` |
+
+The fill of the namespace is 75% of the lines, and `gc_thres_pcent` is
+75 by default. The device of section 1 is thus at the background
+threshold from the end of the prefill. It stays there, because the valid
+data alone needs 96 lines. A background attempt then follows each
+command.
+
+Under the 1/8 rule, a background victim can hold up to 7/8 valid pages.
+Collection of such a victim copies 7 pages for each page that it frees.
+The background rule can thus set the WAF in both runs, and placement has
+little room to change it. This statement comes from the source. No run
+on a host has confirmed it.
+
+### Device variants
+
+> **Status: not yet validated on a host.** The four device lines below
+> have not run on FEMU. They pass the lint of the documentation check,
+> which starts no device.
+
+The variants make GC wait for free space to run low. Each one keeps the
+1.5 GiB namespace, so the guest script and the fio job do not change.
+
+```
+ variant  change                         background GC   forced GC      free after prefill
+ -------  -----------------------------  --------------  -------------  ------------------
+ none     (section 1)                    32 free lines   6 free lines   32 of 128 at most
+ thres    gc_thres_pcent=95              6 free lines    6 free lines   32 of 128 at most
+ spare    blks_per_pl=192, fdp.nru=192   48 free lines   9 free lines   96 of 192 at most
+```
+
+Variant `thres` moves the background threshold to the forced threshold.
+`gc_thres_pcent` must not be above `gc_thres_pcent_high`, which is 95 by
+default.
+
+With FDP:
+
+<!-- femu-example: recipe-kv-fdp-thres-boot -->
+```bash
+./qemu-system-x86_64 -name femu-recipe-kv,debug-threads=on \
+    -enable-kvm -cpu host -smp 4 -m 4G \
+    -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
+    -drive file=$OSIMGF,if=none,cache=none,format=qcow2,id=hd0 \
+    -net user,hostfwd=tcp::$SSH_PORT-:22 -net nic,model=virtio \
+    -device femu-subsys,id=fdp0,fdp=on,fdp.nruh=4 \
+    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=128,gc_thres_pcent=95,subsys=fdp0,io_stages=on \
+    -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off \
+    -nographic
+```
+
+The control:
+
+<!-- femu-example: recipe-kv-control-thres-boot -->
+```bash
+./qemu-system-x86_64 -name femu-recipe-kv,debug-threads=on \
+    -enable-kvm -cpu host -smp 4 -m 4G \
+    -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
+    -drive file=$OSIMGF,if=none,cache=none,format=qcow2,id=hd0 \
+    -net user,hostfwd=tcp::$SSH_PORT-:22 -net nic,model=virtio \
+    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=128,gc_thres_pcent=95,io_stages=on \
+    -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off \
+    -nographic
+```
+
+Variant `spare` keeps the default thresholds and gives the device 3 GiB
+of NAND in 192 lines. The namespace is then 50% of the NAND. An FDP
+subsystem has `fdp.nru` reclaim units, and the default is 128. The FTL
+uses the smaller of that count and the line count, as `bbssd/bb.c`
+shows. Set `fdp.nru=192`, so that FDP uses each line.
+
+With FDP:
+
+<!-- femu-example: recipe-kv-fdp-spare-boot -->
+```bash
+./qemu-system-x86_64 -name femu-recipe-kv,debug-threads=on \
+    -enable-kvm -cpu host -smp 4 -m 4G \
+    -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
+    -drive file=$OSIMGF,if=none,cache=none,format=qcow2,id=hd0 \
+    -net user,hostfwd=tcp::$SSH_PORT-:22 -net nic,model=virtio \
+    -device femu-subsys,id=fdp0,fdp=on,fdp.nruh=4,fdp.nru=192 \
+    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=192,subsys=fdp0,io_stages=on \
+    -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off \
+    -nographic
+```
+
+The control:
+
+<!-- femu-example: recipe-kv-control-spare-boot -->
+```bash
+./qemu-system-x86_64 -name femu-recipe-kv,debug-threads=on \
+    -enable-kvm -cpu host -smp 4 -m 4G \
+    -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
+    -drive file=$OSIMGF,if=none,cache=none,format=qcow2,id=hd0 \
+    -net user,hostfwd=tcp::$SSH_PORT-:22 -net nic,model=virtio \
+    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=192,io_stages=on \
+    -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off \
+    -nographic
+```
+
+Run the guest script of section 3 on each variant. Read two more
+counters of log page C0h before and after the run. They tell whether
+forced GC ran.
+
+| Offset | Counter | Meaning of a change of 0 |
+| --- | --- | --- |
+| 192 | host writes that waited for forced GC | no write waited |
+| 200 | forced GC passes in those writes | the forced rule did not run |
+
+[Log pages and counters](../reference/log-pages-and-counters.md) lists
+each field of the page.
 
 The lifetimes are statistical. fio picks the start of each entry at
 random, on a 128 KiB boundary and with replacement. An entry can thus
