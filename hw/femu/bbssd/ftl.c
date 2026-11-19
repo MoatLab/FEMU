@@ -326,7 +326,9 @@ void ssd_release(struct ssd *ssd, FemuMemCat cat, void *p, uint64_t nmemb,
 /*
  * A table this large or larger gets its own anonymous mapping. The kernel
  * then backs a host page only when a store touches it, whatever the state
- * of the heap. A smaller table comes from the heap.
+ * of the heap. A smaller table comes from the heap. Under mlockall() with
+ * MCL_FUTURE and no MCL_ONFAULT (-overcommit mem-lock=on) the kernel fills
+ * the whole mapping at mmap() time, so the saving is lost there.
  */
 #define SSD_LAZY_MIN (1 * MiB)
 

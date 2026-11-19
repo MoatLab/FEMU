@@ -90,6 +90,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Startup memory limit in bytes (QEMU size syntax): realize refuses "
       "the device before an allocation that passes it; counts the retained "
       "bytes query-femu-memory reports, not memory that I/O adds later; "
+      "a lazy FTL table counts in full, which is what is resident under "
+      "-overcommit mem-lock=on; "
       "not with ZNS, ocssd or cxl_ssd; 0 (default) sets no limit" },
     { "namespaces",
       "Number of namespaces created at boot, 1 to 256; OCSSD supports only "

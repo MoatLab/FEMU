@@ -673,6 +673,38 @@ A number is the bytes FEMU asked for, so a lazy allocation counts in
 full before the guest touches it. Compare it with the
 resident size of the QEMU process to see what the guest touched.
 
+### Lazy tables and locked memory
+
+The bbssd, KV and CXL FTLs map each table of 1 MiB or more on its
+own (`mmap(2)`, anonymous). A host page of such a table becomes resident
+at the first store. A QEMU that locks its memory changes this:
+
+```
+ QEMU option                    lazy FTL table at realize
+ -----------------------------  ---------------------------------------
+ none (default)                 resident only where the guest wrote
+ -overcommit mem-lock=on        resident in full, and locked
+ -overcommit mem-lock=on-fault  resident only where the guest wrote,
+                                locked after the first touch
+```
+
+- `mem-lock=on` calls `mlockall(MCL_CURRENT | MCL_FUTURE)`. With
+  `MCL_FUTURE`, Linux locks each later mapping, and a locked page is
+  resident in RAM (`mlockall(2)`).
+- `mem-lock=on-fault` adds `MCL_ONFAULT`. Linux locks a page at its
+  first fault and does not fill the map (`mlockall(2)`).
+- Use `mem-lock=on-fault` to keep the lazy tables with locked memory.
+- `MAP_NORESERVE` does not help. It only skips the swap reservation
+  (`mmap(2)`).
+- Under `mem-lock=on`, a table map can fail past `RLIMIT_MEMLOCK`
+  (`mlockall(2)`). Realize then names the table.
+- FEMU's own `mlock()` of the data backend covers only the backend range
+  (`mlock(2)`). It does not change the FTL tables.
+
+The counters and `mem_limit` count the full table bytes in each case. So
+they stay an upper bound, and with `mem-lock=on` they equal what is
+resident.
+
 - `backend-pinned` is true when `mlock()` took the whole backend.
 - The numbers exclude allocator overhead, GLib internal storage and
   thread stacks.

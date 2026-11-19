@@ -219,6 +219,10 @@ plus spare space) may hold at most 64 PiB. One line (one block of every
 plane) may hold at most 2^31 - 1 sectors, the geometry at most 2^31 - 1
 blocks, and a page at most 16 MiB. Host memory is the real bound: the
 FTL tables cost about 20 bytes per NAND page.
+The large FTL tables become resident only where the guest writes. QEMU
+with `-overcommit mem-lock=on` makes them resident in full at start, and
+`mem-lock=on-fault` keeps them lazy. See
+[lazy tables and locked memory](../reference/query-femu.md#lazy-tables-and-locked-memory).
 
 ### Hugepages
 
