@@ -467,6 +467,33 @@ bool ssd_out_of_lines(struct ssd *ssd);
 bool ssd_pass2_staged(struct ssd *ssd, struct ppa *ppa);
 bool ssd_host_out_of_lines(struct ssd *ssd);
 
+/*
+ * Whether a background pass may take a victim with @inv invalid pages of
+ * @total. The rule as first built is an eighth, in whole pages.
+ * gc_bg_invalid_pcent sets another share, compared with no division.
+ */
+static inline bool ssd_bg_share_ok(struct ssd *ssd, int inv, int total)
+{
+    uint8_t pcent = ssd->sp.gc_bg_invalid_pcent;
+
+    if (!pcent) {
+        return inv >= total / 8;
+    }
+    return (int64_t)inv * 100 >= (int64_t)total * pcent;
+}
+
+/*
+ * The same for a line. With gc_bg_invalid_pcent a line with no valid page
+ * always passes: its erase costs no copy.
+ */
+static inline bool ssd_bg_line_ok(struct ssd *ssd, struct line *line)
+{
+    if (ssd->sp.gc_bg_invalid_pcent && !line->vpc) {
+        return true;
+    }
+    return ssd_bg_share_ok(ssd, line->ipc, ssd_line_data_pgs(ssd, line));
+}
+
 /* GC trigger predicates (used by the datapath and GC) */
 static inline bool should_gc(struct ssd *ssd)
 {

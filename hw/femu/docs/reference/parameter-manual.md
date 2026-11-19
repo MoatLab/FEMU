@@ -381,6 +381,7 @@ Design: [garbage collection](../design/ftl.md#garbage-collection).
 | --- | --- | --- | --- |
 | `gc_thres_pcent` | percent of lines in use | 1 to 100 | background GC starts; KV: share of the NAND usable for values |
 | `gc_thres_pcent_high` | percent of lines in use | `gc_thres_pcent` to 100 | forced GC inside writes; also sizes the reserve |
+| `gc_bg_invalid_pcent` | percent of the pages of a victim | 0 to 100; 0 keeps the 1/8 rule | least invalid share of a background victim; FDP uses it for reclaim units |
 | `gc_policy` | name | `greedy`, `random`, `cost-benefit`, `fifo`, `d-choice`; under FDP a name other than `greedy` needs `gc_strategy=0` | victim line policy; under FDP the reclaim unit policy |
 | `gc_strategy` | number | 0 greedy, 1 cost-benefit, 2 random, 4 per-handle; FDP only | victim reclaim unit policy |
 | `fdp_trim_erase_all` | flag | FDP only | a deallocate resets every reclaim unit instead of the given ranges |
@@ -389,6 +390,8 @@ Interactions:
 
 - Background GC takes only a line with at least 1/8 of its pages invalid;
   forced GC takes the best line whatever it holds.
+- `gc_bg_invalid_pcent` sets another share than 1/8. A value of 50 holds
+  the WAF of background GC at 2 or less.
 - Set `gc_thres_pcent` above the share of the NAND the namespace fills.
   Below it, background GC never stops and the WAF settles near 8
   ([tutorial 02](../tutorials/02-gc-and-waf.md#3-the-gc-threshold)).

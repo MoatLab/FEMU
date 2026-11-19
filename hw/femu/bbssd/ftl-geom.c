@@ -764,6 +764,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->gc_idle_lines = n->bb_params.gc_idle_pcent ?
         (int)((1 - n->bb_params.gc_idle_pcent / 100.0) * spp->tt_lines) :
         spp->gc_thres_lines;
+    spp->gc_bg_invalid_pcent = n->bb_params.gc_bg_invalid_pcent;
     spp->gc_thres_pcent_high = n->bb_params.gc_thres_pcent_high/100.0;
     spp->gc_thres_lines_high = bb_gc_forced_lines(n);
     spp->enable_gc_delay = true;

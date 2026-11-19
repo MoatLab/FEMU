@@ -165,7 +165,8 @@ DEVICES = [
                 "title": "Garbage collection, mapping and caches",
                 "kind": "static",
                 "props": [
-                    "gc_thres_pcent", "gc_thres_pcent_high", "gc_policy",
+                    "gc_thres_pcent", "gc_thres_pcent_high",
+                    "gc_bg_invalid_pcent", "gc_policy",
                     "gc_seed", "gc_strategy", "wl_spread", "gc_pace",
                     "precon_fill_pct", "precon_overwrite_pct",
                     "precon_pattern", "precon_seed",

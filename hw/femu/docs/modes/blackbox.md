@@ -148,6 +148,29 @@ To prevent this, keep the namespace below that share of the lines. A higher
 `gc_thres_pcent` has the same effect. Only the forced rule stays when the
 two properties are equal.
 
+`gc_bg_invalid_pcent` replaces the 1/8 test of the background rule. It is
+the least percent of invalid pages in a background victim, from 1 to 100.
+A victim with no valid page always passes. The default 0 keeps the 1/8
+test, and the forced rule does not use the property.
+
+```
+ gc_bg_invalid_pcent   background victim must have    copies for each
+                                                      freed page, at most
+ 0 (default)           invalid pages >= pages / 8     7
+ 25                    invalid x 100 >= pages x 25    3
+ 50                    invalid x 100 >= pages x 50    1
+ 100                   no valid page                  0
+```
+
+<!-- femu-example: blackbox-gc-bg-invalid -->
+```
+-device femu,devsz_mb=1024,femu_mode=1,gc_bg_invalid_pcent=50
+```
+
+With a high value the background rule takes fewer victims. The free lines
+then fall to the forced threshold sooner, and the forced rule collects
+inside writes.
+
 `gc_policy` picks the victim line:
 
 - `greedy` (the default): the line with the fewest valid pages.

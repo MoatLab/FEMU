@@ -411,7 +411,8 @@ whose RUAMW differs from the room they leave.
   puts its victim back, whatever the policy, unless the victim is empty or
   an erase would give back at least 1/8 of its pages. Those pages are the
   invalid ones plus, for a unit that RUH Update retired part written, the
-  ones it never wrote. Cost-benefit skips units that fail this check and
+  ones it never wrote. `gc_bg_invalid_pcent` sets another share than 1/8
+  for this check. Cost-benefit skips units that fail this check and
   takes the best-scoring unit that passes, so an old unit with little to
   free does not stall the pass.
 - Foreground: before a placed write and before each of its pages, it

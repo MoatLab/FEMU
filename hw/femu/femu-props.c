@@ -1056,6 +1056,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd with gc_idle_ms: idle collection runs while the line fill is "
       "above this percent, as gc_thres_pcent counts it; 0 (default) takes "
       "gc_thres_pcent, else 1 to 99" },
+    { "gc_bg_invalid_pcent",
+      "bbssd, CSD, FDP: least percent of invalid pages in the victim of a "
+      "background garbage collection pass, 1 to 100; a victim with no valid "
+      "page always passes; 0 (default) keeps the 1/8 rule; forced "
+      "collection does not use it" },
     { "buffer_size",
       "bbssd, CSD: DRAM write buffer capacity in NAND pages, not bytes; 0 "
       "programs every write directly" },

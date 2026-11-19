@@ -726,14 +726,16 @@ static FemuReclaimUnit *fdp_gc_frontier(struct ssd *ssd, FemuRuHandle *ruh,
 
 /*
  * Whether a background pass may take @ru: its erase must give back at least
- * an eighth of the unit. Count every page the erase gives back. A unit that a
+ * an eighth of the unit, or the share that gc_bg_invalid_pcent sets. Count
+ * every page the erase gives back. A unit that a
  * handle update retired part written also frees the pages it never wrote;
  * judged by ipc alone it is refused on every pass, while its low vpc keeps
  * it at the heap top.
  */
-static bool fdp_bg_worth_collecting(FemuReclaimUnit *ru)
+static bool fdp_bg_worth_collecting(struct ssd *ssd, FemuReclaimUnit *ru)
 {
-    return ru->vpc == 0 || ru->npages - ru->vpc >= ru->npages / 8;
+    return ru->vpc == 0 ||
+           ssd_bg_share_ok(ssd, ru->npages - ru->vpc, ru->npages);
 }
 
 /* units the d-choice policy samples, as FEMU_DCHOICE_D does for lines */
@@ -783,7 +785,7 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
                     best = score;
                     victim_ru = ru;
                 }
-                if (score > best_bg && fdp_bg_worth_collecting(ru)) {
+                if (score > best_bg && fdp_bg_worth_collecting(ssd, ru)) {
                     best_bg = score;
                     bg_ru = ru;
                 }
@@ -831,7 +833,7 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
             if (!victim_ru || ru->close_seq < victim_ru->close_seq) {
                 victim_ru = ru;
             }
-            if (fdp_bg_worth_collecting(ru) &&
+            if (fdp_bg_worth_collecting(ssd, ru) &&
                 (!bg_ru || ru->close_seq < bg_ru->close_seq)) {
                 bg_ru = ru;
             }
@@ -921,7 +923,7 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
      */
     fdp_victim_dequeue(ssd, victim_ru);
 
-    if (!force && !fdp_bg_worth_collecting(victim_ru)) {
+    if (!force && !fdp_bg_worth_collecting(ssd, victim_ru)) {
         FDP_TRACE(ssd, "GC_BACK_RESERT triggered but delay GC "
                   "(ru %d ipc %d threshold %d full %d)\n",
                   victim_ru->ruidx, victim_ru->ipc, victim_ru->npages / 8,

@@ -577,6 +577,29 @@ For FDP, `fdp_bg_worth_collecting()` applies the same filter to a reclaim
 unit. That filter counts each page that the erase gives back. A unit with
 unwritten pages can thus pass.
 
+`gc_bg_invalid_pcent` sets another share for the filter. The default 0
+keeps the code path of the 1/8 filter. A value from 1 to 100 is a percent,
+compared with no division:
+
+```
+  ssd_bg_share_ok(inv, total)
+    pcent == 0:   inv >= total / 8                   (the 1/8 filter)
+    pcent >= 1:   inv x 100 >= total x pcent
+
+  line:   pass = ssd_bg_share_ok(ipc, data pages), or no valid page
+          when pcent >= 1
+  unit:   pass = no valid page, or
+          ssd_bg_share_ok(npages - vpc, npages)
+
+  users:  each background pass (after a command, gc_pace victim choice,
+          gc_idle_ms steps, FDP groups); forced GC does not call it
+```
+
+A victim with no valid page always passes when the property is set. Its
+erase costs no copy. The WAF bound of background GC is then 100 divided by
+the property value. A high value moves work to forced GC, because the
+background pass frees fewer lines.
+
 A GC step returns -1 when there is no victim, when the background filter
 rejects it, or when the victim's valid pages cannot all be moved; the forced
 loop then stops. With Streams on, a step also fails
@@ -1863,6 +1886,7 @@ does inside the FTL and what it interacts with.
 | --- | --- | --- |
 | `gc_thres_pcent` | background GC watermark: one attempt after each command, for a victim with 1/8 or more of its pages invalid ([triggers](#triggers-and-watermarks)) | must not exceed `gc_thres_pcent_high` |
 | `gc_thres_pcent_high` | forced GC watermark, with no 1/8 filter; sizes the reserve | lower values cost exposed capacity |
+| `gc_bg_invalid_pcent` | least invalid share of a background victim, in place of 1/8 ([triggers](#triggers-and-watermarks)) | lines and FDP reclaim units; also the victim choice of `gc_pace` and `gc_idle_ms`; forced GC does not use it |
 | `gc_policy` | line victim selection | under FDP, the reclaim unit strategy; needs `gc_strategy=0` |
 | `gc_seed` | seed for the `random` and `d-choice` policies and FDP random reclaim | no effect on the other policies |
 | `gc_pace` | paced collection: copies the victim in step with host writes ([paced collection](#paced-collection-gc_pace)) | replaces the background pass; refused where `blk_pe_limit` is, and under FDP |

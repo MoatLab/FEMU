@@ -1789,6 +1789,12 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         error_setg(errp, "maint_idle needs gc_idle_ms");
         return false;
     }
+    /* a share of the pages of a victim, in percent */
+    if (n->bb_params.gc_bg_invalid_pcent > 100) {
+        error_setg(errp, "gc_bg_invalid_pcent must be 0 to 100, got %u",
+                   n->bb_params.gc_bg_invalid_pcent);
+        return false;
+    }
     /* bb_init() refuses the media timing settings it cannot count yet */
     if (n->die_stats && (n->femu_mode != FEMU_BBSSD_MODE ||
                          n->namespace_modes || n->subsys || n->cxl_dev)) {
@@ -6383,6 +6389,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("gc_idle_ms", FemuCtrl, bb_params.gc_idle_ms, 0),
     DEFINE_PROP_BOOL("maint_idle", FemuCtrl, bb_params.maint_idle, false),
     DEFINE_PROP_UINT8("gc_idle_pcent", FemuCtrl, bb_params.gc_idle_pcent, 0),
+    DEFINE_PROP_UINT8("gc_bg_invalid_pcent", FemuCtrl,
+                      bb_params.gc_bg_invalid_pcent, 0),
     DEFINE_PROP_UINT32("tier_lazy_pct", FemuCtrl, bb_params.tier_lazy_pct, 0),
     DEFINE_PROP_UINT32("tier_shrink_pct", FemuCtrl, bb_params.tier_shrink_pct,
                        FTL_TIER_SHRINK_PCT),

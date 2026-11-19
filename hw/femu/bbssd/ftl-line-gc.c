@@ -1636,7 +1636,7 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
         return NULL;
     }
 
-    if (!gc_line_worth(ssd, victim_line, force)) {
+    if (!force && !ssd_bg_line_ok(ssd, victim_line)) {
         return NULL;
     }
 
@@ -1657,7 +1657,7 @@ static struct line *select_victim_line_random(struct ssd *ssd, bool force)
     if (!victim_line) {
         return NULL;
     }
-    if (!gc_line_worth(ssd, victim_line, force)) {
+    if (!force && !ssd_bg_line_ok(ssd, victim_line)) {
         pqueue_insert(lm->victim_line_pq, victim_line);
         return NULL;
     }
@@ -1709,7 +1709,7 @@ static struct line *select_victim_line_cb(struct ssd *ssd, bool force)
     if (!best) {
         return NULL;
     }
-    if (!gc_line_worth(ssd, best, force)) {
+    if (!force && !ssd_bg_line_ok(ssd, best)) {
         return NULL;
     }
     pqueue_remove(pq, best);
@@ -1730,7 +1730,7 @@ static struct line *select_victim_line_fifo(struct ssd *ssd, bool force)
     if (!best) {
         return NULL;
     }
-    if (!gc_line_worth(ssd, best, force)) {
+    if (!force && !ssd_bg_line_ok(ssd, best)) {
         return NULL;
     }
     pqueue_pop(lm->victim_line_pq);
@@ -1765,7 +1765,7 @@ static struct line *select_victim_line_dchoice(struct ssd *ssd, bool force)
     if (!best) {
         return NULL;
     }
-    if (!gc_line_worth(ssd, best, force)) {
+    if (!force && !ssd_bg_line_ok(ssd, best)) {
         return NULL;
     }
     pqueue_remove(pq, best);

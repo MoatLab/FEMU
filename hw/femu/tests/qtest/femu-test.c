@@ -55497,6 +55497,155 @@ static void femu_test_gc_idle_refused(void *obj, void *data,
 }
 
 /*
+ * gc_bg_invalid_pcent: the least share of invalid pages in the victim of a
+ * background pass. One channel, one LUN, 16 pages a line, 60 lines. The
+ * fill writes the 768 pages of the namespace once: 48 full lines, and at
+ * most 12 free lines, under the background threshold of 15 and above the
+ * forced one of 3. Each overwrite of LPN k < 16 then makes one page of the
+ * first line invalid, and a background attempt follows each command.
+ *
+ *   pcent   attempt takes the line at    copies    erases
+ *   0       2 invalid (16 / 8)           14        1
+ *   50      8 invalid (8 x 100 >= 800)   8         1
+ *   100     16 invalid, no valid page    0         1
+ *
+ * Before that overwrite no page moves and no block is erased. With the
+ * property at its default the runs for 50 and 100 fail at the second
+ * overwrite: the 1/8 rule copies 14 pages where they expect none.
+ */
+static void femu_test_gc_bg_invalid(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    int pcent = atoi(data);
+    int take = pcent ? 16 * pcent / 100 : 2;
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 768; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==, 0);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 0);
+
+    for (int k = 0; k < take; k++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, k * 8, buf)), ==,
+                        NVME_SUCCESS);
+        g_test_message("gc-bg-invalid %d: %d invalid, %" PRIu64 " copies, %"
+                       PRIu64 " erases", pcent, k + 1,
+                       femu_ftl_trace_field(qts, 4),
+                       femu_ftl_trace_field(qts, 5));
+        g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==,
+                         k + 1 < take ? 0 : 16 - take);
+        g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==,
+                         k + 1 < take ? 0 : 1);
+    }
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 2), ==, 768 + take);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The same property under FDP. A reclaim unit is four blocks of four pages.
+ * Unit A holds pages 0 to 15 of placement 0, and the fill through placement
+ * 3 takes the free units to the background threshold with no victim.
+ * Each one-page overwrite through placement 2 makes one page of A invalid.
+ *
+ *   pcent   pass takes A at              copies    block erases
+ *   0       2 invalid (16 / 8)           14        4
+ *   50      8 invalid (8 x 100 >= 800)   8         4
+ *
+ * With the property at its default the run for 50 fails at the second
+ * overwrite: 14 pages copied where it expects none.
+ */
+static void femu_test_fdp_gc_bg_invalid(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    int pcent = atoi(data);
+    int take = pcent ? 16 * pcent / 100 : 2;
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 16, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 16, 16, buf, list,
+                                                    1)), ==, NVME_SUCCESS);
+    /* past the background threshold, with no victim yet */
+    femu_fdp_cb_fill(&c, qts, buf, list, false);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==, 0);
+
+    for (int k = 0; k < take; k++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, k, 1, buf, list,
+                                                        2)), ==,
+                        NVME_SUCCESS);
+        g_test_message("fdp-gc-bg-invalid %d: %d invalid, %" PRIu64
+                       " copies, %" PRIu64 " erases", pcent, k + 1,
+                       femu_ftl_trace_field(qts, 4),
+                       femu_ftl_trace_field(qts, 5));
+        g_assert_cmpuint(femu_ftl_trace_field(qts, 4), ==,
+                         k + 1 < take ? 0 : 16 - take);
+        g_assert_cmpuint(femu_ftl_trace_field(qts, 5), ==,
+                         k + 1 < take ? 0 : 4);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* gc_bg_invalid_pcent is a percent: 101 is refused, 100 is accepted */
+static void femu_test_gc_bg_invalid_refused(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const int values[] = { 101, 255, 100 };
+
+    for (size_t i = 0; i < ARRAY_SIZE(values); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'gbir','addr':'5','devsz_mb':3,'secsz':512,"
+            "'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':60,"
+            "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,'femu_mode':1,"
+            "'gc_bg_invalid_pcent':%d}}", values[i]);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        if (values[i] > 100) {
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("gc_bg_invalid_pcent=%d: %s", values[i], desc);
+            g_assert_nonnull(strstr(desc, "gc_bg_invalid_pcent must be 0 "
+                                    "to 100"));
+            qobject_unref(rsp);
+            continue;
+        }
+        /* the control: the line itself is accepted at the largest value */
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        qpci_unplug_acpi_device_test(qts, "gbir", 5);
+    }
+}
+
+/*
  * The host-link order of a write. With a 1 MB/s link, a 64 KiB write takes
  * 65.5 ms on the link and a 512 B read 0.5 ms; a program takes 0.2 ms on
  * the one LUN. Both go in under one doorbell, the write first. The write's data
@@ -68050,6 +68199,40 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95" });
     qos_add_test("gc-idle-refused", "femu", femu_test_gc_idle_refused, NULL);
+    {
+        static const char *const gbi[] = { "0", "50", "100" };
+
+        for (size_t i = 0; i < ARRAY_SIZE(gbi); i++) {
+            g_autofree char *name = g_strdup_printf("gc-bg-invalid/%s",
+                                                    gbi[i]);
+            g_autofree char *dev_opts = g_strdup_printf(
+                "id=trace,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=16,blks_per_pl=60,pls_per_lun=1,luns_per_ch=1,"
+                "nchs=1,gc_bg_invalid_pcent=%s", gbi[i]);
+
+            qos_add_test(name, "femu", femu_test_gc_bg_invalid,
+                         &(QOSGraphTestOptions) {
+                .edge.extra_device_opts = dev_opts,
+                .arg = (void *)gbi[i],
+            });
+        }
+        for (size_t i = 0; i < 2; i++) {
+            g_autofree char *name = g_strdup_printf("fdp-gc-bg-invalid/%s",
+                                                    gbi[i]);
+            g_autofree char *dev_opts = g_strdup_printf(
+                "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,"
+                "nchs=2,gc_bg_invalid_pcent=%s,subsys=fdpsub", gbi[i]);
+
+            qos_add_test(name, "femu", femu_test_fdp_gc_bg_invalid,
+                         &(QOSGraphTestOptions) {
+                .edge.extra_device_opts = dev_opts,
+                .arg = (void *)gbi[i],
+            });
+        }
+    }
+    qos_add_test("gc-bg-invalid-refused", "femu",
+                 femu_test_gc_bg_invalid_refused, NULL);
     qos_add_test("rber-retry", "femu", femu_test_rber_scripted,
                  &(QOSGraphTestOptions) { .arg = (void *)"retry",
         .edge.extra_device_opts =

@@ -329,6 +329,10 @@ own description allows. A message keeps its format directives (`%s`,
 - fw_slots must be 0 (auto) to 7
 - ocp needs fw_slots of 3 or more (FWUP-6)
 
+## `gc_bg_invalid_pcent`
+
+- gc_bg_invalid_pcent must be 0 to 100, got %u
+
 ## `gc_copyback`
 
 - FEMU bbssd: die_parity and rain_parity need two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity

@@ -265,6 +265,7 @@ struct ssdparams {
     double gc_thres_pcent;
     int gc_thres_lines;
     int gc_idle_lines;  /* idle collection runs while fewer lines are free */
+    uint8_t gc_bg_invalid_pcent; /* background victim floor; 0: 1/8 */
     double gc_thres_pcent_high;
     int gc_thres_lines_high;
     bool enable_gc_delay;

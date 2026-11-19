@@ -386,6 +386,11 @@
     "kind": "static",
     "type": "uint64"
    },
+   "gc_bg_invalid_pcent": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
    "gc_copyback": {
     "default": false,
     "kind": "static",
