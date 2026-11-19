@@ -1626,7 +1626,9 @@ static uint64_t ftl_tier_check_live(struct ssd *ssd)
         }
     }
     for (uint64_t lpn = 0; lpn < (uint64_t)ssd->sp.tt_pgs; lpn++) {
-        mapped += mapped_ppa(&ssd->maptbl[lpn]);
+        struct ppa ppa = get_maptbl_ent(ssd, lpn);
+
+        mapped += mapped_ppa(&ppa);
     }
     return (dense != t->dense_valid) + (tp != t->dense_tp) +
            (mapped != ftl_tier_live(t));
@@ -1741,7 +1743,9 @@ static uint64_t ftl_tier_check_reserve(struct ssd *ssd)
     uint64_t mapped = 0;
 
     for (uint64_t lpn = 0; lpn < (uint64_t)spp->tt_pgs; lpn++) {
-        mapped += mapped_ppa(&ssd->maptbl[lpn]);
+        struct ppa ppa = get_maptbl_ent(ssd, lpn);
+
+        mapped += mapped_ppa(&ppa);
     }
     return mapped > ftl_tier_cap(ssd, ssd->tier->dyn_cnt);
 }

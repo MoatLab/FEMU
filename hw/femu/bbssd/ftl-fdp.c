@@ -3051,9 +3051,14 @@ static void ssd_reset_maptbl(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
 
+    /* 0 is the stored empty value; skip an entry that is empty already */
     for (uint64_t i = 0; i < spp->tt_pgs; i++) {
-        ssd->maptbl[i].ppa = UNMAPPED_PPA;
-        ssd->rmap[i] = INVALID_LPN;
+        if (ssd->maptbl[i].ppa) {
+            ssd->maptbl[i].ppa = 0;
+        }
+        if (ssd->rmap[i]) {
+            ssd->rmap[i] = 0;
+        }
     }
     if (ssd->fdp_written) {
         bitmap_zero(ssd->fdp_written, ssd->fdp_written_bits);

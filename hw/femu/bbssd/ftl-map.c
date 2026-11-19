@@ -13,30 +13,18 @@ bool ssd_init_maptbl(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
 
-    ssd->maptbl = ssd_alloc(ssd, FEMU_MEM_MAPPING, spp->tt_pgs,
-                            sizeof(struct ppa), "L2P table");
-    if (!ssd->maptbl) {
-        return false;
-    }
-    for (uint64_t i = 0; i < spp->tt_pgs; i++) {
-        ssd->maptbl[i].ppa = UNMAPPED_PPA;
-    }
-    return true;
+    ssd->maptbl = ssd_alloc_lazy(ssd, FEMU_MEM_MAPPING, spp->tt_pgs,
+                                 sizeof(struct ppa), "L2P table");
+    return ssd->maptbl != NULL;
 }
 
 bool ssd_init_rmap(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
 
-    ssd->rmap = ssd_alloc(ssd, FEMU_MEM_MAPPING, spp->tt_pgs,
-                          sizeof(uint64_t), "reverse map");
-    if (!ssd->rmap) {
-        return false;
-    }
-    for (uint64_t i = 0; i < spp->tt_pgs; i++) {
-        ssd->rmap[i] = INVALID_LPN;
-    }
-    return true;
+    ssd->rmap = ssd_alloc_lazy(ssd, FEMU_MEM_MAPPING, spp->tt_pgs,
+                               sizeof(uint64_t), "reverse map");
+    return ssd->rmap != NULL;
 }
 
 /*

@@ -420,7 +420,7 @@ static uint16_t csd_check_nvm_ftl_range(NvmeNamespace *ns, uint64_t slba,
 
     *mapped_pages = 0;
     for (uint64_t lpn = start_lpn; lpn <= end_lpn; lpn++) {
-        if (ssd->maptbl[lpn].ppa != UNMAPPED_PPA) {
+        if (ssd_lpn_mapped(ssd, lpn)) {
             (*mapped_pages)++;
         }
     }

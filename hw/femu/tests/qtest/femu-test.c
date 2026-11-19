@@ -37850,8 +37850,8 @@ static void femu_test_cxl_realize_retry(void *obj, void *data,
 /*
  * A femu-cxl-ssd whose FTL does not fit is refused, and QEMU runs on. Each
  * FTL allocation fails in turn, then the device starts on the same memory
- * backend. 4 x 4 dies of 21 blocks: the NAND tree is 1 + 4 + 16 + 16 +
- * 336 arrays, then the two maps, the lines and the line heap.
+ * backend. 4 x 4 dies of 21 blocks: the NAND tree is 1 + 1 + 4 + 16 +
+ * 16 arrays, then the two maps, the lines and the line heap.
  */
 static void femu_test_cxl_ftl_fail_sweep(void *obj, void *data,
                                          QGuestAllocator *alloc)
@@ -37883,7 +37883,7 @@ static void femu_test_cxl_ftl_fail_sweep(void *obj, void *data,
         }
         qobject_unref(rsp);
     }
-    g_assert_cmpuint(k - 1, ==, 1 + 4 + 16 + 16 + 336 + 4);
+    g_assert_cmpuint(k - 1, ==, 1 + 1 + 4 + 16 + 16 + 4);
     qtest_quit(qts);
 }
 
@@ -44444,8 +44444,9 @@ static void femu_test_ftl_fail_sweep(void *obj, void *data,
                                      QGuestAllocator *alloc)
 {
     /*
-     * One FTL has 63 allocations: the 59 NAND tree arrays, the L2P, the
-     * reverse map, the lines and the victim heap. KV has no L2P.
+     * One FTL has 16 allocations: the 12 NAND tree arrays (with one
+     * array of page states), the L2P, the reverse map, the lines and the
+     * victim heap. KV has no L2P.
      */
     static const struct {
         const char *opts;
@@ -44453,40 +44454,46 @@ static void femu_test_ftl_fail_sweep(void *obj, void *data,
         bool selftest;  /* FEMU_KV_SELFTEST builds the KV FTL twice */
         const char *pre;        /* more of the QEMU command line */
     } cases[] = {
-        { "femu_mode=1," FEMU_FAIL_GEO, 63 },
+        { "femu_mode=1," FEMU_FAIL_GEO, 16 },
         /* the second FTL fails after the first one is whole */
-        { "femu_mode=1,namespaces=2," FEMU_FAIL_GEO, 2 * 63 },
-        { "femu_mode=4,fdm_size=16,csd_slm_size=4," FEMU_FAIL_GEO, 63 },
-        { "femu_mode=5," FEMU_FAIL_GEO, 62 },
-        { "femu_mode=5," FEMU_FAIL_GEO, 2 * 62, true },
-        /* the optional parts, each on top of the 63 */
-        { "femu_mode=1,read_cache_mb=1," FEMU_FAIL_GEO, 63 + 2 },
-        { "femu_mode=1,rain_parity=1," FEMU_FAIL_GEO, 2 + 63 },
+        { "femu_mode=1,namespaces=2," FEMU_FAIL_GEO, 2 * 16 },
+        { "femu_mode=4,fdm_size=16,csd_slm_size=4," FEMU_FAIL_GEO, 16 },
+        { "femu_mode=5," FEMU_FAIL_GEO, 15 },
+        { "femu_mode=5," FEMU_FAIL_GEO, 2 * 15, true },
+        /* the optional parts, each on top of the 16 */
+        { "femu_mode=1,read_cache_mb=1," FEMU_FAIL_GEO, 16 + 2 },
+        { "femu_mode=1,rain_parity=1," FEMU_FAIL_GEO, 2 + 16 },
         { "femu_mode=1,buffer_size=16,power_loss=on,durable_at_done=on,"
-          FEMU_FAIL_GEO, 63 + 1 },
-        { "femu_mode=1,mapping=hybrid," FEMU_FAIL_GEO, 63 + 4 },
-        { "femu_mode=1,mapping=fast," FEMU_FAIL_GEO, 63 + 3 },
-        { "femu_mode=1,die_stats=on," FEMU_FAIL_GEO, 63 + 1 },
-        { "femu_mode=1,pg_xfer_lat=1000," FEMU_FAIL_GEO, 63 + 1 },
+          FEMU_FAIL_GEO, 16 + 1 },
+        { "femu_mode=1,mapping=hybrid," FEMU_FAIL_GEO, 16 + 4 },
+        { "femu_mode=1,mapping=fast," FEMU_FAIL_GEO, 16 + 3 },
+        { "femu_mode=1,die_stats=on," FEMU_FAIL_GEO, 16 + 1 },
+        { "femu_mode=1,pg_xfer_lat=1000," FEMU_FAIL_GEO, 16 + 1 },
         /* one FTL with two slices */
-        { "femu_mode=1,namespaces=2,shared_ftl=on," FEMU_FAIL_GEO, 63 + 2 },
+        { "femu_mode=1,namespaces=2,shared_ftl=on," FEMU_FAIL_GEO, 16 + 2 },
         /*
-         * 13 lines: a NAND tree of 63 arrays, 4 more of its own, the mapping
+         * 2^20 pages: the page states, the L2P and the reverse map each
+         * reach 1 MiB and get their own mapping
+         */
+        { "femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8,pgs_per_blk=256,"
+          "blks_per_pl=1024,pls_per_lun=1,luns_per_ch=2,nchs=2", 16 },
+        /*
+         * 13 lines: a NAND tree of 12 arrays, 4 more of its own, the mapping
          * cache slots and hash, and 7 translation page arrays
          */
-        { FEMU_MEM_FTL13 ",mapping=dftl,mapping_cache_mb=1", 63 + 4 + 2 + 7 },
+        { FEMU_MEM_FTL13 ",mapping=dftl,mapping_cache_mb=1", 12 + 4 + 2 + 7 },
         /*
          * The static pSLC tier on 32 blocks of TLC: a NAND tree of
-         * 1 + 2 + 4 + 4 + 128 arrays, the tier header and its 4 arrays,
+         * 1 + 1 + 2 + 4 + 4 arrays, the tier header and its 4 arrays,
          * then the maps, the lines and the heap
          */
         { "femu_mode=1,devsz_mb=16,secsz=512,secs_per_pg=8,pgs_per_blk=48,"
           "blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2,"
           "nand_cell_type=3,tier_mode=static,tier_static_mb=1",
-          139 + 5 + 4 },
+          12 + 5 + 4 },
         /*
          * FDP, 2 groups of 80 units and 4 handles. After the NAND tree of
-         * 331 arrays and the 4 of the maps and lines: the group and unit
+         * 12 arrays and the 4 of the maps and lines: the group and unit
          * arrays (2), per group the units, a manager and 2 heaps (8), the
          * block ids and group lines (2), a write pointer and line list per
          * unit (320), the handles and the written bitmap (2), and per
@@ -44498,7 +44505,7 @@ static void femu_test_ftl_fail_sweep(void *obj, void *data,
         { "femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
           "pls_per_lun=1,luns_per_ch=2,nchs=2,blks_per_pl=80,lba_index=3,"
           "subsys=failsub",
-          331 + 4 + 2 + 8 + 2 + 320 + 2 + 8 + 12, false,
+          12 + 4 + 2 + 8 + 2 + 320 + 2 + 8 + 12, false,
           "-device femu-subsys,id=failsub,nqn=failsub,fdp=on,fdp.nruh=4,"
           "fdp.nrg=2" },
     };
@@ -44588,8 +44595,8 @@ static void femu_test_fdp_refused_restores(void *obj, void *data,
     g_assert_cmpstr(fresh, ==, control);
     out = qtest_hmp(qts, "device_add femu,addr=5,id=ff,subsys=sub,"
                     FEMU_FDP_REFUSE ",secs_per_pg=8,lba_index=3,"
-                    "x-ftl-fail-at=336");
-    g_assert_nonnull(strstr(out, "injected failure of FTL allocation 336"));
+                    "x-ftl-fail-at=17");
+    g_assert_nonnull(strstr(out, "injected failure of FTL allocation 17"));
     now = femu_fdp_state(qts, "sub");
     g_assert_cmpstr(now, ==, fresh);
     g_free(out);
@@ -44956,6 +44963,25 @@ static void femu_test_memory_parts(void *obj, void *data,
             g_assert_cmpuint(with[c] - without[c], ==, cases[i].add[c]);
         }
     }
+}
+
+/*
+ * The tables per NAND page: 8 bytes of L2P, 8 of reverse map and 1 of
+ * page state. Twice the pages per block adds 384 pages to the geometry.
+ */
+static void femu_test_memory_page_tables(void *obj, void *data,
+                                         QGuestAllocator *unused)
+{
+    uint64_t small[3];
+    uint64_t big[3];
+
+    femu_mem_ftl_bytes(FEMU_MEM_FTL, small);
+    femu_mem_ftl_bytes("femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8,"
+                       "pgs_per_blk=16,blks_per_pl=12,pls_per_lun=1,"
+                       "luns_per_ch=2,nchs=2", big);
+    g_assert_cmpuint(big[0] - small[0], ==, (8 + 8) * 384);
+    g_assert_cmpuint(big[1] - small[1], ==, 1 * 384);
+    g_assert_cmpuint(big[2], ==, small[2]);
 }
 
 static void femu_test_memory_ftl(void *obj, void *data,
@@ -65733,6 +65759,8 @@ static void femu_register_nodes(void)
     qos_add_test("kv-no-backend", "femu", femu_test_kv_no_backend, NULL);
     qos_add_test("memory", "femu", femu_test_memory, NULL);
     qos_add_test("memory-ftl", "femu", femu_test_memory_ftl, NULL);
+    qos_add_test("memory-page-tables", "femu", femu_test_memory_page_tables,
+                 NULL);
     qos_add_test("memory-parts", "femu", femu_test_memory_parts, NULL);
     qos_add_test("memory-kv-lsm", "femu", femu_test_memory_kv_lsm, NULL);
     qos_add_test("ftl-fail-sweep", "femu", femu_test_ftl_fail_sweep, NULL);

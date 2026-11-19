@@ -311,11 +311,14 @@ GByteArray *ssd_persist_save(struct ssd *ssd, uint64_t digest, int schema)
     ftlp_put64(g, FTLP_NSCALARS);
 
     for (uint64_t i = 0; i < spp->tt_pgs; i++) {
-        ftlp_put64(g, mapped_ppa(&ssd->maptbl[i]) ?
-                   ppa2pgidx(ssd, &ssd->maptbl[i]) : FTLP_NONE);
+        struct ppa ppa = get_maptbl_ent(ssd, i);
+
+        ftlp_put64(g, mapped_ppa(&ppa) ? ppa2pgidx(ssd, &ppa) : FTLP_NONE);
     }
     for (uint64_t i = 0; i < spp->tt_pgs; i++) {
-        ftlp_put64(g, ssd->rmap[i]);
+        struct ppa ppa = ftlp_idx_ppa(ssd, i);
+
+        ftlp_put64(g, get_rmap_ent(ssd, &ppa));
     }
     for (uint64_t b = 0; b < (uint64_t)spp->tt_blks; b++) {
         struct nand_block *blk = ftlp_blk(ssd, b);
@@ -917,19 +920,34 @@ static void ftlp_commit(struct ssd *ssd, FtlpState *s)
     ssd->age_off = max_age >= now ? max_age - now + 1 : 0;
     now += ssd->age_off;
 
+    /*
+     * Store only an entry that changes. An empty entry of a fresh table
+     * then stays untouched and costs no memory.
+     */
     for (uint64_t l = 0; l < (uint64_t)spp->tt_pgs; l++) {
-        if (s->map[l] == FTLP_NONE) {
-            ssd->maptbl[l].ppa = UNMAPPED_PPA;
-        } else {
-            ssd->maptbl[l] = ftlp_idx_ppa(ssd, s->map[l]);
+        struct ppa want = { .ppa = UNMAPPED_PPA };
+        struct ppa have = get_maptbl_ent(ssd, l);
+        struct ppa at = ftlp_idx_ppa(ssd, l);
+
+        if (s->map[l] != FTLP_NONE) {
+            want = ftlp_idx_ppa(ssd, s->map[l]);
         }
-        ssd->rmap[l] = s->rmap[l];
+        if (have.ppa != want.ppa) {
+            set_maptbl_ent(ssd, l, &want);
+        }
+        if (get_rmap_ent(ssd, &at) != s->rmap[l]) {
+            set_rmap_ent(ssd, s->rmap[l], &at);
+        }
     }
     for (uint64_t b = 0; b < (uint64_t)spp->tt_blks; b++) {
         struct nand_block *blk = ftlp_blk(ssd, b);
 
         for (int pg = 0; pg < spp->pgs_per_blk; pg++) {
-            blk->pg[pg].status = s->st[b * spp->pgs_per_blk + pg];
+            uint8_t st = s->st[b * spp->pgs_per_blk + pg];
+
+            if (blk->pg[pg].status != st) {
+                blk->pg[pg].status = st;
+            }
         }
         blk->erase_cnt = s->blk[b].erase_cnt;
         blk->ipc = s->blk[b].ipc;

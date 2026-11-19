@@ -110,8 +110,9 @@ struct ppa {
     };
 };
 
+/* one byte per page; PG_FREE is 0, so an untouched page reads free */
 struct nand_page {
-    int status;
+    uint8_t status;
 };
 
 #define FTL_RBER_SCRIPT_MAX 64
@@ -721,8 +722,16 @@ struct ssd {
     bool alloc_injected;    /* x-ftl-fail-at, not the host, refused it */
     bool alloc_limited;     /* mem_limit, not the host, refused it */
     uint64_t budget_taken;  /* bytes this FTL took from the realize */
+    /*
+     * The L2P table and the reverse map hold the bitwise inverse of each
+     * entry, so the empty value (all ones) is stored as 0 and an untouched
+     * host page costs no memory. Use the accessors in ftl-internal.h.
+     */
     struct ppa *maptbl; /* page level mapping table */
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
+    /* the page states of all blocks; each blk->pg is a slice of it */
+    struct nand_page *pg_states;
+    uint64_t pg_states_used;    /* pages given to blocks at init */
     struct write_pointer wp;
     struct write_pointer stream_wp[32];
     struct write_pointer stream_gc_wp;
@@ -1286,6 +1295,12 @@ uint64_t ssd_advance_copyback(struct ssd *ssd, struct ppa *src,
 static inline int ssd_offline_die(struct ssd *ssd)
 {
     return qatomic_read(&ssd->fail_die) - 1;
+}
+
+/* true when @lpn has a page; maptbl stores UNMAPPED_PPA as 0 */
+static inline bool ssd_lpn_mapped(const struct ssd *ssd, uint64_t lpn)
+{
+    return ssd->maptbl[lpn].ppa != 0;
 }
 
 #endif

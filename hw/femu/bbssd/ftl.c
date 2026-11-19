@@ -323,6 +323,64 @@ void ssd_release(struct ssd *ssd, FemuMemCat cat, void *p, uint64_t nmemb,
     }
 }
 
+/*
+ * A table this large or larger gets its own anonymous mapping. The kernel
+ * then backs a host page only when a store touches it, whatever the state
+ * of the heap. A smaller table comes from the heap.
+ */
+#define SSD_LAZY_MIN (1 * MiB)
+
+/*
+ * ssd_alloc_lazy - ssd_alloc() for a large table of zero bytes that the
+ * FTL fills as the guest writes. Free it with ssd_release_lazy() and the
+ * same @cat, @nmemb and @size.
+ */
+void *ssd_alloc_lazy(struct ssd *ssd, FemuMemCat cat, uint64_t nmemb,
+                     size_t size, const char *what)
+{
+    uint64_t bytes;
+    void *p;
+
+    if (size && nmemb > SIZE_MAX / size) {
+        ssd->alloc_fail = what;
+        ssd->alloc_fail_bytes = UINT64_MAX;
+        return NULL;
+    }
+    bytes = nmemb * size;
+    if (bytes < SSD_LAZY_MIN) {
+        return ssd_alloc(ssd, cat, nmemb, size, what);
+    }
+    if (ssd_alloc_refused(ssd, what, bytes) || !ssd_take(ssd, bytes, what)) {
+        return NULL;
+    }
+    p = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (p == MAP_FAILED) {
+        ssd_give(ssd, bytes);
+        ssd->alloc_fail = what;
+        ssd->alloc_fail_bytes = bytes;
+        return NULL;
+    }
+    femu_mem_charge(&ssd->mem, cat, bytes);
+    return p;
+}
+
+void ssd_release_lazy(struct ssd *ssd, FemuMemCat cat, void *p,
+                      uint64_t nmemb, size_t size)
+{
+    uint64_t bytes = nmemb * size;
+
+    if (!p) {
+        return;
+    }
+    if (bytes < SSD_LAZY_MIN) {
+        ssd_release(ssd, cat, p, nmemb, size);
+        return;
+    }
+    femu_mem_release(&ssd->mem, cat, bytes);
+    munmap(p, bytes);
+}
+
 /* pqueue_init() of @n entries, refused as ssd_try_alloc() refuses */
 pqueue_t *ssd_pqueue_new(struct ssd *ssd, size_t n, pqueue_cmp_pri_f cmppri,
                          pqueue_get_pri_f getpri, pqueue_set_pri_f setpri,
@@ -426,6 +484,13 @@ bool ssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     if (!ssd->ch) {
         return ssd_init_fail(ssd, errp);
     }
+    ssd->pg_states = ssd_alloc_lazy(ssd, FEMU_MEM_MEDIA, spp->tt_pgs,
+                                    sizeof(struct nand_page),
+                                    "NAND page states");
+    if (!ssd->pg_states) {
+        return ssd_init_fail(ssd, errp);
+    }
+    ssd->pg_states_used = 0;
     for (int i = 0; i < spp->nchs; i++) {
         if (!ssd_init_ch(ssd, &ssd->ch[i])) {
             return ssd_init_fail(ssd, errp);
@@ -1696,17 +1761,11 @@ void ssd_free(struct ssd *ssd)
     ssd_free_lines(ssd);
     ssd_free_write_buffer(ssd);
 
-    if (ssd->rmap) {
-        femu_mem_release(&ssd->mem, FEMU_MEM_MAPPING,
-                         sizeof(uint64_t) * spp->tt_pgs);
-    }
-    g_free(ssd->rmap);
+    ssd_release_lazy(ssd, FEMU_MEM_MAPPING, ssd->rmap, spp->tt_pgs,
+                     sizeof(uint64_t));
     ssd->rmap = NULL;
-    if (ssd->maptbl) {
-        femu_mem_release(&ssd->mem, FEMU_MEM_MAPPING,
-                         sizeof(struct ppa) * spp->tt_pgs);
-    }
-    g_free(ssd->maptbl);
+    ssd_release_lazy(ssd, FEMU_MEM_MAPPING, ssd->maptbl, spp->tt_pgs,
+                     sizeof(struct ppa));
     ssd->maptbl = NULL;
     ssd_durable_free(ssd);
     ssd_rain_free(ssd);
@@ -1735,5 +1794,8 @@ void ssd_free(struct ssd *ssd)
         g_free(ssd->ch);
         ssd->ch = NULL;
     }
+    ssd_release_lazy(ssd, FEMU_MEM_MEDIA, ssd->pg_states, spp->tt_pgs,
+                     sizeof(struct nand_page));
+    ssd->pg_states = NULL;
     femu_mem_check_empty(&ssd->mem, "an FTL");
 }

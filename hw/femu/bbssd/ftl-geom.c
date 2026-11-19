@@ -772,17 +772,19 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     check_params(spp);
 }
 
+/* the page states are one byte per page (ssd->pg_states) */
+QEMU_BUILD_BUG_ON(sizeof(struct nand_page) != 1);
+
 static bool ssd_init_nand_blk(struct ssd *ssd, struct nand_block *blk)
 {
     blk->npgs = ssd->sp.pgs_per_blk;
-    blk->pg = ssd_alloc(ssd, FEMU_MEM_MEDIA, blk->npgs,
-                        sizeof(struct nand_page), "NAND page states");
-    if (!blk->pg) {
-        return false;
-    }
-    for (int i = 0; i < blk->npgs; i++) {
-        blk->pg[i].status = PG_FREE;
-    }
+    /*
+     * A slice of ssd->pg_states, which owns it. A spare swap moves the
+     * slice with the block, so nothing may compute it from the slot.
+     */
+    ftl_assert(ssd->pg_states_used + blk->npgs <= ssd->sp.tt_pgs);
+    blk->pg = &ssd->pg_states[ssd->pg_states_used];
+    ssd->pg_states_used += blk->npgs;
     blk->ipc = 0;
     blk->vpc = 0;
     blk->erase_cnt = 0;
@@ -863,18 +865,9 @@ void ssd_free_ch(struct ssd_channel *ch, struct ssdparams *spp,
         }
         for (pl = 0; pl < l->npls; pl++) {
             struct nand_plane *p = &l->pl[pl];
-            int blk;
 
             if (!p->blk) {
                 continue;
-            }
-            for (blk = 0; blk < p->nblks; blk++) {
-                if (p->blk[blk].pg) {
-                    femu_mem_release(mem, FEMU_MEM_MEDIA,
-                                     sizeof(struct nand_page) *
-                                     p->blk[blk].npgs);
-                }
-                g_free(p->blk[blk].pg);
             }
             femu_mem_release(mem, FEMU_MEM_MEDIA,
                              sizeof(struct nand_block) * p->nblks);

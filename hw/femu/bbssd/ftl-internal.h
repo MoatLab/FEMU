@@ -315,16 +315,23 @@ static inline struct nand_page *get_pg(struct ssd *ssd, struct ppa *ppa)
     return &(blk->pg[ppa->g.pg]);
 }
 
-/* mapping accessors (maptbl / rmap) -- hot-path inlines */
+/*
+ * mapping accessors (maptbl / rmap) -- hot-path inlines. The tables hold
+ * the inverse of each entry, so the all-ones empty values are stored as 0.
+ */
+QEMU_BUILD_BUG_ON(UNMAPPED_PPA != ~0ULL || INVALID_LPN != ~0ULL);
+
 static inline struct ppa get_maptbl_ent(struct ssd *ssd, uint64_t lpn)
 {
-    return ssd->maptbl[lpn];
+    struct ppa ppa = { .ppa = ~ssd->maptbl[lpn].ppa };
+
+    return ppa;
 }
 
 static inline void set_maptbl_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 {
     ftl_assert(lpn < ssd->sp.tt_pgs);
-    ssd->maptbl[lpn] = *ppa;
+    ssd->maptbl[lpn].ppa = ~ppa->ppa;
     /*
      * Every change of a mapping counts here, so a path that changes one
      * without telling the translation pages leaves a version x-ftl-check
@@ -360,6 +367,10 @@ void *ssd_alloc(struct ssd *ssd, FemuMemCat cat, uint64_t nmemb, size_t size,
                 const char *what);
 void ssd_release(struct ssd *ssd, FemuMemCat cat, void *p, uint64_t nmemb,
                  size_t size);
+void *ssd_alloc_lazy(struct ssd *ssd, FemuMemCat cat, uint64_t nmemb,
+                     size_t size, const char *what);
+void ssd_release_lazy(struct ssd *ssd, FemuMemCat cat, void *p,
+                      uint64_t nmemb, size_t size);
 pqueue_t *ssd_pqueue_new(struct ssd *ssd, size_t n, pqueue_cmp_pri_f cmppri,
                          pqueue_get_pri_f getpri, pqueue_set_pri_f setpri,
                          pqueue_get_pos_f getpos, pqueue_set_pos_f setpos,
@@ -383,7 +394,7 @@ static inline uint64_t get_rmap_ent(struct ssd *ssd, struct ppa *ppa)
 {
     uint64_t pgidx = ppa2pgidx(ssd, ppa);
 
-    return ssd->rmap[pgidx];
+    return ~ssd->rmap[pgidx];
 }
 
 /* set rmap[page_no(ppa)] -> lpn */
@@ -391,7 +402,7 @@ static inline void set_rmap_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 {
     uint64_t pgidx = ppa2pgidx(ssd, ppa);
 
-    ssd->rmap[pgidx] = lpn;
+    ssd->rmap[pgidx] = ~lpn;
 }
 
 /* geometry setup (hw/femu/bbssd/ftl-geom.c) */

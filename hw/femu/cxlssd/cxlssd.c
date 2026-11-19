@@ -637,7 +637,7 @@ static void *cxl_worker(void *opaque)
         }
         if (s->first_touch_program &&
             work->req.cmd.opcode == NVME_CMD_READ &&
-            ssd->maptbl[work->req.slba / 8].ppa == UNMAPPED_PPA) {
+            !ssd_lpn_mapped(ssd, work->req.slba / 8)) {
             work->req.cmd.opcode = NVME_CMD_WRITE;
         }
         cxl_test_hold(s, work);
