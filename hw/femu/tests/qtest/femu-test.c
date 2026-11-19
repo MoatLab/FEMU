@@ -21302,6 +21302,84 @@ static void femu_test_admin_fuzz(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, raw);
 }
 
+/*
+ * x-fuzz, the mode of QEMU's generic fuzzer: admin commands complete, no
+ * poller thread serves the I/O queues, and a system reset disables the
+ * controller. Without x-fuzz the same Read completes, so the check fails
+ * when the property no longer stops the dataplane.
+ */
+static void femu_test_fuzz_mode(void *obj, void *data, QGuestAllocator *alloc)
+{
+    bool fuzz = GPOINTER_TO_INT(data);
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=fm,addr=5,devsz_mb=16,"
+        "femu_mode=2,queues=2%s", fuzz ? ",x-fuzz=on" : "");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    NvmeRwCmd rw;
+    NvmeCqe cqe;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    femu_create_io_queues(&c);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    if (!fuzz) {
+        g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==,
+                        NVME_SUCCESS);
+    } else {
+        /* a poller completes a Read in microseconds */
+        g_usleep(200 * 1000);
+        qtest_memread(qts, c.io.cq_addr, &cqe, sizeof(cqe));
+        g_assert_cmpint(le16_to_cpu(cqe.status) & 1, ==, 0);
+
+        qtest_qmp_assert_success(qts, "{'execute':'system_reset'}");
+        qtest_qmp_eventwait(qts, "RESET");
+        qpci_device_enable(pdev);
+        c.bar = qpci_iomap(pdev, 0, NULL);
+        g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x14), ==, 0);
+        g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x1c), ==, 0);
+        g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x24), ==, 0);
+
+        /* the next input starts the controller again from nothing */
+        femu_queue_free(&c, &c.admin);
+        femu_enable(&c, pdev, &qs->alloc);
+        g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                        NVME_SUCCESS);
+    }
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(&qs->alloc, buf);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+/* the planted bug of the fuzzer control is refused outside x-fuzz */
+static void femu_test_fuzz_control_refused(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':"
+                           "{'driver':'femu','id':'fc-refused','addr':'5',"
+                           "'devsz_mb':16,'x-fuzz-control':true}}");
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"),
+                            "x-fuzz-control needs x-fuzz"));
+    qobject_unref(rsp);
+    qos_invalidate_command_line();
+}
+
 #define FEMU_IO_FUZZ_ROUNDS 1000
 #define FEMU_FUZZ_PAGES     32
 #define FEMU_FUZZ_LISTS     8
@@ -71151,6 +71229,16 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "namespaces=2,oacs=0x2,oncs=0x19f"
     });
+    /*
+     * gf: QEMU's generic fuzzer. These are plain tests, so their names leave
+     * out "fuzz", which CI reads as a fuzz case.
+     */
+    qos_add_test("gf-mode", "femu", femu_test_fuzz_mode,
+                 &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(1) });
+    qos_add_test("gf-mode-off", "femu", femu_test_fuzz_mode,
+                 &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(0) });
+    qos_add_test("gf-control-refused", "femu",
+                 femu_test_fuzz_control_refused, NULL);
     qos_add_test("self-test", "femu", femu_test_self_test, NULL);
     qos_add_test("verify", "femu", femu_test_verify,
                  &(QOSGraphTestOptions) {

@@ -715,6 +715,14 @@ static void nvme_init_poller(FemuCtrl *n)
         }
     }
 
+    /*
+     * x-fuzz: the rings and queues above exist, but no thread serves them,
+     * so every path the generic fuzzer reaches runs on its own thread.
+     */
+    if (n->test_fuzz) {
+        return;
+    }
+
     n->poller = g_malloc0(sizeof(QemuThread) * (n->nr_pollers + 1));
     /*
      * The threads read this for as long as they run, so it is released with
@@ -753,10 +761,10 @@ void nvme_start_dataplane(FemuCtrl *n)
         nvme_init_poller(n);
         n->poller_on = true;
     }
-    /* the FTL thread publishes the query-stats copies again */
-    qatomic_inc(&n->stats_epoch);
-    smp_mb();   /* the epoch lands before the flag */
-    n->dataplane_started = true;
+    /* x-fuzz: no poller runs, so the I/O path stays stopped */
+    if (!n->test_fuzz) {
+        n->dataplane_started = true;
+    }
 }
 
 static uint16_t nvme_set_db_memory(FemuCtrl *n, const NvmeCmd *cmd)
@@ -1738,6 +1746,12 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
     NvmeIdentify *c = (NvmeIdentify *)cmd;
     /* CNS is bits 7:0; the controller identifier sits above it */
     uint32_t cns  = le32_to_cpu(c->cns) & 0xff;
+
+    /* x-fuzz-control: a heap overflow that the generic fuzzer must find */
+    if (unlikely(n->fuzz_control_buf) && cns == NVME_ID_CNS_CTRL &&
+        le32_to_cpu(cmd->cdw15) == FEMU_FUZZ_CONTROL_KEY) {
+        n->fuzz_control_buf[FEMU_FUZZ_CONTROL_LEN] = 1;
+    }
 
     switch (cns) {
     case NVME_ID_CNS_NS_CTRL_LIST:

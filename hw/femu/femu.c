@@ -1356,6 +1356,11 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
                    "5 (key-value)");
         return false;
     }
+    /* the planted bug is for the fuzzer control, which runs with x-fuzz */
+    if (n->fuzz_control_buf && !n->test_fuzz) {
+        error_setg(errp, "x-fuzz-control needs x-fuzz");
+        return false;
+    }
     /* each core keeps its own busy-until time */
     if (n->fw_cores < 1 || n->fw_cores > 64) {
         error_setg(errp, "fw_cores must be 1 to 64, got %u", n->fw_cores);
@@ -6977,6 +6982,45 @@ static void femu_test_opal_power_cycle_set(Object *obj, bool value,
     }
 }
 
+/*
+ * x-fuzz: the mode for QEMU's generic fuzzer. CC.EN starts no poller thread,
+ * so the fuzzer's thread runs every path it reaches, and a system reset is a
+ * Controller Level Reset, so each input starts from a disabled controller.
+ */
+static bool femu_test_fuzz_get(Object *obj, Error **errp)
+{
+    return FEMU(obj)->test_fuzz;
+}
+
+static void femu_test_fuzz_set(Object *obj, bool value, Error **errp)
+{
+    if (DEVICE(obj)->realized) {
+        error_setg(errp, "x-fuzz can only be set before realize");
+        return;
+    }
+    FEMU(obj)->test_fuzz = value;
+}
+
+/* x-fuzz-control: plant the heap overflow that the fuzzer control finds */
+static bool femu_test_fuzz_control_get(Object *obj, Error **errp)
+{
+    return FEMU(obj)->fuzz_control_buf != NULL;
+}
+
+static void femu_test_fuzz_control_set(Object *obj, bool value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+
+    if (DEVICE(obj)->realized) {
+        error_setg(errp, "x-fuzz-control can only be set before realize");
+        return;
+    }
+    g_clear_pointer(&n->fuzz_control_buf, g_free);
+    if (value) {
+        n->fuzz_control_buf = g_malloc0(FEMU_FUZZ_CONTROL_LEN);
+    }
+}
+
 /* x-tp-hold: keep pending translation pages pending, as at the reserve */
 static bool femu_test_tp_hold_get(Object *obj, Error **errp)
 {
@@ -7031,6 +7075,7 @@ static void femu_instance_finalize(Object *obj)
 
     g_free(n->nand_profile_name);
     n->nand_profile_name = NULL;
+    g_clear_pointer(&n->fuzz_control_buf, g_free);
     qemu_mutex_destroy(&n->ocp_lat.lock);
     qemu_mutex_destroy(&n->ocp_inj_lock);
     qemu_mutex_destroy(&n->iotrace_lock);
@@ -7167,6 +7212,11 @@ static void femu_instance_init(Object *obj)
                                  femu_test_opal_power_cycle_set);
         object_property_add_str(obj, "x-oc12-trace", femu_test_oc12_trace,
                                 NULL);
+        object_property_add_bool(obj, "x-fuzz", femu_test_fuzz_get,
+                                 femu_test_fuzz_set);
+        object_property_add_bool(obj, "x-fuzz-control",
+                                 femu_test_fuzz_control_get,
+                                 femu_test_fuzz_control_set);
     }
 }
 
@@ -7183,11 +7233,12 @@ static void femu_pci_write_config(PCIDevice *dev, uint32_t addr,
 }
 
 /*
- * A Function Level Reset (OCP 2.7 PCI-6) or a system reset, with ocp or
- * power_limit: a Controller Level Reset, then the registers the host
- * programs back to their reset values. A saveable feature such as Power
- * Limit (23h) takes its saved value then. Otherwise the controller keeps
- * its state, as it always has.
+ * A Function Level Reset (OCP 2.7 PCI-6) or a system reset, with ocp,
+ * power_limit or x-fuzz: a Controller Level Reset, then the registers the
+ * host programs back to their reset values. A saveable feature such as
+ * Power Limit (23h) takes its saved value then. Otherwise the controller
+ * keeps its state, as it always has. x-fuzz also clears the CMB, so each
+ * input of the generic fuzzer starts from the same controller state.
  */
 static void femu_pci_reset(DeviceState *dev)
 {
@@ -7197,7 +7248,7 @@ static void femu_pci_reset(DeviceState *dev)
     femu_hmb_off(n);
     /* a device reset ends a shutdown, whatever EN and ocp are */
     femu_shut_clear(n);
-    if (!n->ocp && !n->power_limit) {
+    if (!n->ocp && !n->power_limit && !n->test_fuzz) {
         /*
          * The controller keeps its state, but a start under way ends: its
          * queued admin commands would post into memory the host took back.
@@ -7217,6 +7268,9 @@ static void femu_pci_reset(DeviceState *dev)
     n->bar.acq = 0;
     n->bar.intms = 0;
     n->bar.intmc = 0;
+    if (n->test_fuzz && n->cmbuf) {
+        memset(n->cmbuf, 0, NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
+    }
 }
 
 static void femu_class_init(ObjectClass *oc, const void *data)

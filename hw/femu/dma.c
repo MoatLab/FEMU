@@ -73,6 +73,14 @@ static MemTxResult femu_dma_direct(FemuCtrl *n, dma_addr_t addr, uint8_t *buf,
             ret = MEMTX_ACCESS_ERROR;
             goto out;
         }
+        /*
+         * x-fuzz: the generic fuzzer fills what the controller reads, as it
+         * does for dma_memory_read(). No poller runs then, so this is the
+         * fuzzer's own thread. Without --enable-fuzzing it does nothing.
+         */
+        if (unlikely(n->test_fuzz) && !to_host) {
+            fuzz_dma_read_cb(addr, l, mr);
+        }
         if (nr == cap) {
             FemuDmaSpan *more = g_new(FemuDmaSpan, cap * 2);
 

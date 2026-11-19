@@ -43,6 +43,13 @@ typedef struct NvmeBus {
 #define NVME_MAX_CONTROLLERS 256
 #define NVME_MAX_NAMESPACES  256
 
+/*
+ * x-fuzz-control: Identify Controller with this CDW15 writes one byte past
+ * a buffer of FEMU_FUZZ_CONTROL_LEN bytes, for the generic fuzzer control.
+ */
+#define FEMU_FUZZ_CONTROL_KEY 0x3cc3a55a
+#define FEMU_FUZZ_CONTROL_LEN 16
+
 #define NVME_FDP_MAX_EVENTS 63
 #define NVME_FDP_MAXPIDS    128
 /* entries in one placement handle list (NVM Command Set 1.2, Figure 125) */
@@ -2815,6 +2822,10 @@ typedef struct FemuCtrl {
     bool        test_oc12_clock;
     FemuOc12Trace *oc12_trace;
     bool        test_ns_fail;
+    /* x-fuzz: no poller thread, and a system reset is a CLR */
+    bool        test_fuzz;
+    /* x-fuzz-control: the buffer Identify writes past */
+    uint8_t     *fuzz_control_buf;
     uint32_t    changed_nsids[1024];
     uint16_t    changed_ns_count;
     bool        ns_notice_pending;
