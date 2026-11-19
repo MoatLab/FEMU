@@ -86,6 +86,54 @@ PRP-list queues, that fall inside it are served from that buffer
 (`nvme_addr_is_cmb()` in `hw/femu/dma.c`). A physically contiguous queue is
 mapped directly and has no CMB case.
 
+### Data pointer targets
+
+A data pointer can name memory that is not guest RAM. FEMU copies command
+data only to and from RAM that the host can reach directly, and the CMB of
+the same controller. The table below is for a Read, Write or Compare with
+no metadata and with `power_loss` off. `femu_dma_rw()` in `hw/femu/dma.c` makes this choice
+for each entry of the transfer.
+
+```text
+ entry of a PRP or SGL transfer
+   |
+   +-- inside the CMB of this controller --> copy with the CMB buffer
+   |
+   +-- else: translate each part of the entry
+         every part is RAM that takes this direction --> copy
+         a part is a register, a hole or a CMB of
+         another device, or a ROM as the destination --> refuse the entry
+```
+
+| Target | Read fills it | Write or Compare reads it |
+| --- | --- | --- |
+| guest RAM | yes | yes |
+| CMB of this controller, PRP1 | Invalid Field | Invalid Field |
+| CMB of this controller, PRP2, PRP list, SGL | yes | yes |
+| ROM | Data Transfer Error | yes |
+| CMB or registers of another device | Data Transfer Error | Data Transfer Error |
+| an address with no region | Data Transfer Error | Data Transfer Error |
+
+A pointer to the CMB in PRP1 takes a separate path, which the media commands
+do not accept. A PRP list or an SGL segment list that FEMU cannot read also
+gives Data Transfer Error, and no data moves.
+
+A refused entry moves no byte, also when only its end leaves RAM. FEMU
+copies the entries of a transfer in order. So a refusal of a later entry
+fails the command after the earlier entries moved. After a failed Read or
+Write, the content of the host buffer or of the logical blocks is not
+defined, as for a real drive. The qtests `dma-target-*` pin each case.
+
+Some paths copy the data through a buffer of their own:
+
+- extended LBAs and protection information;
+- a Write with separate metadata;
+- each command when `power_loss` is on.
+
+These paths take PRP1 in the CMB. On them, a failed Write with extended
+LBAs, separate metadata or `power_loss` on leaves the logical blocks as
+they were. With `power_loss` on, a ROM is refused also as a source.
+
 ## Controller states
 
 ```text
