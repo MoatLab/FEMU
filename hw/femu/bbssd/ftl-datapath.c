@@ -986,13 +986,7 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
 
     /* under FDP each page goes to the unit of its own placement handle */
     if (ssd->fdp_enabled) {
-        int held = ssd->write_buffer_cnt;
-
-        maxlat = fdp_buffer_destage(ssd, budget, stime);
-        if (ssd->write_buffer_cnt < held) {
-            ssd->buffer_unsealed = true;
-        }
-        return maxlat;
+        return fdp_buffer_destage(ssd, budget, stime);
     }
 
     while (budget <= 0 || done < budget) {

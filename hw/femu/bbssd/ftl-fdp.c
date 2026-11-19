@@ -2149,6 +2149,10 @@ static uint64_t fdp_buffer_destage_some(struct ssd *ssd, int budget,
         ssd_buffer_discard(ssd, e->lpn);
         done++;
     }
+    /* pe_suspend: a read can move these programs until a Flush seals them */
+    if (done) {
+        ssd->buffer_unsealed = true;
+    }
     return maxlat;
 }
 

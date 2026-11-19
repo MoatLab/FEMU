@@ -17456,6 +17456,10 @@ static uint64_t femu_fdp_wb_mapped(QTestState *qts)
  *                them with no later write.
  *   "update":    8 pages held for handle 0; RUH Update of placement 0
  *                programs them into the unit the handle had, not its new one.
+ *   "update-suspend": "update" with pe_suspend. A read can move the
+ *                programs of the RUH Update, so the next Flush, with an
+ *                empty buffer, still seals the LUNs: one seal, and no
+ *                program ends after the Flush (x-flush-check).
  *   "full":      64 pages in one command into a 16-page buffer: the write
  *                writes back on its own, and at most 16 pages stay held.
  *   "copy":      4 pages held for handle 1; a Copy of them, unplaced, reads
@@ -17585,6 +17589,24 @@ static void femu_test_fdp_buffer(void *obj, void *data, QGuestAllocator *alloc)
                         NVME_SUCCESS);
         g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, 9);
         g_assert_cmpuint(femu_fdp_wb_mapped(qts), ==, 9);
+    } else if (!strcmp(mode, "update-suspend")) {
+        uint16_t pid0 = cpu_to_le16(0);
+        uint64_t v[FLUSH_FIELDS];
+
+        g_assert_cmphex(femu_fdp_wb_write(&c, 0, 8, buf, list, 0, false), ==,
+                        NVME_SUCCESS);
+        qtest_memwrite(qts, log, &pid0, sizeof(pid0));
+        g_assert_cmpint(femu_ruh_update(&c, log, 1), ==, NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, 8);
+        femu_flush_check(qts, v);
+        g_assert_cmpuint(v[FLUSH_SEALS], ==, 0);
+        g_assert_cmpuint(v[FLUSH_PE_END], >, 0);
+        g_assert_cmphex(femu_fdp_wb_flush(&c), ==, NVME_SUCCESS);
+        femu_flush_check(qts, v);
+        /* the buffer was empty, but the RUH Update programs were not sealed */
+        g_assert_cmpuint(v[FLUSH_SEALS], ==, 1);
+        g_assert_cmpuint(v[FLUSH_PE_END], <=, v[FLUSH_DONE]);
+        g_assert_cmpuint(femu_fdp_wb_mapped(qts), ==, 8);
     } else if (!strcmp(mode, "update")) {
         uint16_t pid0 = cpu_to_le16(0);
 
@@ -67414,6 +67436,14 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=11,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
             "nchs=2,subsys=fdpsub,femu_mode=1,buffer_size=128"
+    });
+    qos_add_test("fdp-buffer-update-suspend", "femu", femu_test_fdp_buffer,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"update-suspend",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=11,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,subsys=fdpsub,femu_mode=1,buffer_size=128,pe_suspend=1"
     });
     qos_add_test("fdp-buffer-full", "femu", femu_test_fdp_buffer,
                  &(QOSGraphTestOptions) {
