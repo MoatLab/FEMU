@@ -58,6 +58,52 @@ static NandBusResList *bus_lists_grown(uint32_t nchs)
     return l;
 }
 
+/* the least nonzero entry of @row[0..@n), or 0 when all are 0 */
+static int64_t nand_row_min(const int64_t *row, int n)
+{
+    int64_t min = 0;
+    int p;
+
+    for (p = 0; p < n; p++) {
+        if (row[p] > 0 && (!min || row[p] < min)) {
+            min = row[p];
+        }
+    }
+    return min;
+}
+
+/*
+ * nand_media_cap_row - hold the page type 0 times of flash row @fast at or
+ * below the fastest of the first @npt page types of row @slow, and the
+ * erase time of @fast at or below that of @slow. A block run in a mode of
+ * fewer bits per storage element (SLC mode of TLC NAND) is never slower
+ * than the native mode of the same NAND. Returns how many times it lowered.
+ */
+uint32_t nand_media_cap_row(NandMediaTiming *t, int fast, int slow, int npt)
+{
+    int64_t rd = nand_row_min(t->rd_table_ns[slow], npt);
+    int64_t wr = nand_row_min(t->wr_table_ns[slow], npt);
+    int64_t er = t->er_table_ns[slow];
+    uint32_t n = 0;
+
+    if (fast == slow) {
+        return 0;
+    }
+    if (rd > 0 && t->rd_table_ns[fast][0] > rd) {
+        t->rd_table_ns[fast][0] = rd;
+        n++;
+    }
+    if (wr > 0 && t->wr_table_ns[fast][0] > wr) {
+        t->wr_table_ns[fast][0] = wr;
+        n++;
+    }
+    if (er > 0 && t->er_table_ns[fast] > er) {
+        t->er_table_ns[fast] = er;
+        n++;
+    }
+    return n;
+}
+
 /* true when nand_media_try_init() allocates for @cfg */
 bool nand_media_needs_memory(const NandMediaConfig *cfg)
 {

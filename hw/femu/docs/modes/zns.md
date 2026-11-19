@@ -208,7 +208,17 @@ All of these are off by default.
   `num_page / zns_flash_type` pages. A `zns_zone_cap` below that sets
   the ceiling for SLC zones too. Reads, programs and erases take the SLC
   times, and SMART Percentage Used rates their erases against the SLC
-  P/E rating. The `zns_pg_*_lat` knobs set the native times only.
+  P/E rating.
+
+  The `zns_pg_*_lat` knobs set the native times. An SLC time
+  is capped at the native time, because an SLC-mode block is never slower
+  than the native mode of the same NAND.
+
+```
+ SLC time used = min(built-in SLC time, native time)
+   read:    native time = the fastest page type with zns_page_types
+   example: zns_flash_type=3, zns_pg_rd_lat=1000 --> SLC read 1000 ns
+```
 
   `slc` in `query-femu` marks the SLC zones. Report Zones shows their
   capacity, which tells them apart unless `zns_zone_cap` is lower.

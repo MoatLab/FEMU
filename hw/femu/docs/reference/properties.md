@@ -360,7 +360,7 @@ Devices:
 | `zns_max_active` | `uint32` | `0` | ZNS: Maximum Active Resources (zones), at most the zone count; 0 means no limit |
 | `zns_max_open` | `uint32` | `0` | ZNS: Maximum Open Resources (zones), at most the zone count and zns_max_active; 0 means no limit |
 | `zns_num_wc` | `uint32` | `0` | ZNS: number of zone write caches; 0 uses zns_max_open, or 3 when that is 0 |
-| `zns_slc_zones` | `uint32` | `0` | ZNS: the first N sequential zones of each zoned namespace run their blocks in SLC mode: one bit per storage element, the SLC read, program and erase times and the SLC P/E rating. Their Zone Capacity is what the blocks hold in SLC mode (num_page / zns_flash_type pages a block), at most zns_zone_cap. Needs a zoned namespace, not with zns_flash_type 1; 0 (default) is off |
+| `zns_slc_zones` | `uint32` | `0` | ZNS: the first N sequential zones of each zoned namespace run their blocks in SLC mode: one bit per storage element, the SLC read, program and erase times and the SLC P/E rating. Their Zone Capacity is what the blocks hold in SLC mode (num_page / zns_flash_type pages a block), at most zns_zone_cap. An SLC time is never above the native time that zns_pg_rd_lat, zns_pg_wr_lat or zns_blk_er_lat sets. Needs a zoned namespace, not with zns_flash_type 1; 0 (default) is off |
 | `zns_zd_ext_size` | `uint32` | `0` | ZNS: zone descriptor extension size in bytes, a multiple of 64 up to 16320; 0 means none |
 | `zns_num_conv_zones` | `uint32` | `0` | ZNS: number of leading conventional zones, which take random writes; capped at the zone count |
 | `zns_zone_cap` | `size` | `0` | ZNS: zone capacity in bytes, at least one logical block and at most the zone size; 0 means the zone size |

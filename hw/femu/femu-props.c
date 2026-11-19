@@ -1252,7 +1252,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "blocks in SLC mode: one bit per storage element, the SLC read, "
       "program and erase times and the SLC P/E rating. Their Zone Capacity "
       "is what the blocks hold in SLC mode (num_page / zns_flash_type pages "
-      "a block), at most zns_zone_cap. Needs a zoned namespace, not with "
+      "a block), at most zns_zone_cap. An SLC time is never above the "
+      "native time that zns_pg_rd_lat, zns_pg_wr_lat or zns_blk_er_lat "
+      "sets. Needs a zoned namespace, not with "
       "zns_flash_type 1; 0 (default) is off" },
     { "zns_zd_ext_size",
       "ZNS: zone descriptor extension size in bytes, a multiple of 64 up to "

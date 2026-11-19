@@ -364,6 +364,8 @@ typedef struct NandOpCompletion {
 void nand_media_init(NandMedia *m, const NandMediaConfig *cfg);
 int nand_media_try_init(NandMedia *m, const NandMediaConfig *cfg);
 bool nand_media_needs_memory(const NandMediaConfig *cfg);
+uint32_t nand_media_cap_row(NandMediaTiming *t, int fast, int slow,
+                            int npt);
 /* unit tests only: allocation @at of the next media builds fails */
 void nand_media_test_fail(uint32_t at);
 void nand_media_destroy(NandMedia *m);

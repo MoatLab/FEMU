@@ -2000,6 +2000,71 @@ static void test_media_fail(void)
     nand_media_destroy(&m);
 }
 
+/* flash rows of nand.h: SLC = 1, TLC = 3 */
+#define T_SLC 1
+#define T_TLC 3
+
+static void cap_rows(NandMediaTiming *t, int64_t rd, int64_t wr, int64_t er)
+{
+    memset(t, 0, sizeof(*t));
+    t->rd_table_ns[T_SLC][0] = 4000;
+    t->wr_table_ns[T_SLC][0] = 75000;
+    t->er_table_ns[T_SLC] = 2000000;
+    t->rd_table_ns[T_TLC][0] = rd;
+    t->wr_table_ns[T_TLC][0] = wr;
+    t->er_table_ns[T_TLC] = er;
+}
+
+/*
+ * zns_slc_zones: an SLC row is capped at the native row of the same NAND,
+ * so a user who lowers the native times never gets slower SLC zones.
+ */
+static void test_cap_row(void)
+{
+    NandMediaTiming t;
+
+    /* the built-in figures: SLC is faster already, nothing changes */
+    cap_rows(&t, 32000, 937500, 3000000);
+    check("cap: built-in rows lower nothing",
+          nand_media_cap_row(&t, T_SLC, T_TLC, 1), 0);
+    check("cap: built-in SLC read", t.rd_table_ns[T_SLC][0], 4000);
+    check("cap: built-in SLC program", t.wr_table_ns[T_SLC][0], 75000);
+    check("cap: built-in SLC erase", t.er_table_ns[T_SLC], 2000000);
+
+    /* all three native times below SLC: SLC takes the native times */
+    cap_rows(&t, 1000, 50000, 1500000);
+    check("cap: three lowered", nand_media_cap_row(&t, T_SLC, T_TLC, 1), 3);
+    check("cap: SLC read = native", t.rd_table_ns[T_SLC][0], 1000);
+    check("cap: SLC program = native", t.wr_table_ns[T_SLC][0], 50000);
+    check("cap: SLC erase = native", t.er_table_ns[T_SLC], 1500000);
+
+    /* only the read is lower: the program and erase stay */
+    cap_rows(&t, 2000, 937500, 3000000);
+    check("cap: one lowered", nand_media_cap_row(&t, T_SLC, T_TLC, 1), 1);
+    check("cap: SLC read = 2000", t.rd_table_ns[T_SLC][0], 2000);
+    check("cap: SLC program kept", t.wr_table_ns[T_SLC][0], 75000);
+
+    /* page types: the fastest native page type is the bound */
+    cap_rows(&t, 3000, 937500, 3000000);
+    t.rd_table_ns[T_TLC][1] = 1500;
+    t.rd_table_ns[T_TLC][2] = 6000;
+    check("cap: page types", nand_media_cap_row(&t, T_SLC, T_TLC, 3), 1);
+    check("cap: SLC read = fastest page type", t.rd_table_ns[T_SLC][0], 1500);
+    cap_rows(&t, 5000, 937500, 3000000);
+    t.rd_table_ns[T_TLC][1] = 1500;
+    check("cap: one page type reads only page type 0",
+          nand_media_cap_row(&t, T_SLC, T_TLC, 1), 0);
+    check("cap: SLC read kept", t.rd_table_ns[T_SLC][0], 4000);
+
+    /* a row without times, and the row itself, lower nothing */
+    cap_rows(&t, 0, 0, 0);
+    check("cap: empty native row", nand_media_cap_row(&t, T_SLC, T_TLC, 3), 0);
+    check("cap: SLC read kept with an empty row", t.rd_table_ns[T_SLC][0],
+          4000);
+    cap_rows(&t, 1000, 50000, 1500000);
+    check("cap: SLC device", nand_media_cap_row(&t, T_SLC, T_SLC, 1), 0);
+}
+
 int main(void)
 {
     /*
@@ -2030,6 +2095,7 @@ int main(void)
     test_die_stats();
     test_media_bytes();
     test_media_fail();
+    test_cap_row();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

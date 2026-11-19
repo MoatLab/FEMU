@@ -133,6 +133,12 @@ void zns_nand_media_init(struct zns_ssd *zns)
     if (zns->timing.page_types) {
         zns_read_page_types(zns, &cfg);
     }
+    /*
+     * SLC zones take the SLC row. A user who lowers the native times below
+     * the built-in SLC ones gets SLC times capped at the native ones.
+     */
+    nand_media_cap_row(&cfg.timing, SLC, zns->flash_type,
+                       zns->timing.page_types ? zns->flash_type : 1);
     /* the same wear tiers as bbssd; inert while ecc_step_ns is 0 */
     cfg.timing.ecc_step_ns = zns->timing.ecc_step_ns;
     cfg.timing.ecc_pe_per_tier = NAND_ECC_PE_PER_TIER;
