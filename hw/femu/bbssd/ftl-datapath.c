@@ -192,23 +192,24 @@ struct buffer_entry *ssd_buffer_lookup(struct ssd *ssd, uint64_t lpn)
 /*
  * Drop a page from the buffer without programming it. A page the host has
  * deallocated must be removed: otherwise the pending program runs later and
- * data the host discarded reappears.
+ * data the host discarded reappears. Returns whether the page was held.
  */
-void ssd_buffer_discard(struct ssd *ssd, uint64_t lpn)
+bool ssd_buffer_discard(struct ssd *ssd, uint64_t lpn)
 {
     struct buffer_entry target = { .lpn = lpn };
     struct buffer_entry *held;
 
     if (!ssd->wb_tree) {
-        return;
+        return false;
     }
 
     held = g_tree_lookup(ssd->wb_tree, &target);
     if (!held) {
-        return;
+        return false;
     }
 
     buffer_remove(ssd, held);
+    return true;
 }
 
 /* a read served from the buffer does not reach the media */
@@ -1583,8 +1584,12 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             ssd_durable_slot_used(ssd, ssd->last_prog_done);
             ssd_durable_direct(ssd, req->ns, lpn, &snap, &snap_state);
         }
-        if (ssd->write_buffer_cnt) {
-            ssd_buffer_discard(ssd, lpn);
+        /*
+         * pe_suspend: the program holds the bytes of a buffered write the
+         * host saw complete, so the next Flush must seal it.
+         */
+        if (ssd->write_buffer_cnt && ssd_buffer_discard(ssd, lpn)) {
+            ssd->buffer_unsealed = true;
         }
 
         /*
@@ -1796,8 +1801,8 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
              * goes once the page is placed, as on the direct write path:
              * left there, it programs the superseded version afterwards.
              */
-            if (ssd->write_buffer_cnt) {
-                ssd_buffer_discard(ssd, lpn);
+            if (ssd->write_buffer_cnt && ssd_buffer_discard(ssd, lpn)) {
+                ssd->buffer_unsealed = true;
             }
             /* the pages are programmed, so wear levelling sees them too */
             if (spp->wl_spread) {

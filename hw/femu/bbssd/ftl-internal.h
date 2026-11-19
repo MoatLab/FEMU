@@ -636,7 +636,7 @@ int ssd_buffer_batch(struct ssd *ssd);
 struct buffer_entry *ssd_buffer_insert(struct ssd *ssd, uint64_t lpn,
                                        bool *held);
 struct buffer_entry *ssd_buffer_lookup(struct ssd *ssd, uint64_t lpn);
-void ssd_buffer_discard(struct ssd *ssd, uint64_t lpn);
+bool ssd_buffer_discard(struct ssd *ssd, uint64_t lpn);
 bool ssd_buffer_hit(struct ssd *ssd, uint64_t lpn);
 uint64_t ssd_buffer_hit_lat(struct ssd *ssd);
 

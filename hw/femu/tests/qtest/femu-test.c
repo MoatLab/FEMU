@@ -9955,6 +9955,67 @@ static void femu_test_pe_suspend_flush(void *obj, void *data,
 }
 
 /*
+ * A direct program that takes a buffered page. One LBA of page 0 waits in
+ * the buffer. An FUA write of the next LBA programs page 0 at once, with
+ * both LBAs, and drops the buffered entry. The next Flush finds an empty
+ * buffer. A read can still move that program, so the Flush must seal it:
+ * one seal, and no program ends after the Flush. Without the mark on the
+ * direct program the Flush seals nothing.
+ */
+static void femu_test_pe_suspend_flush_fua(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    NvmeCmd flush;
+    NvmeRwCmd rw;
+    uint64_t v[FLUSH_FIELDS];
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpuint(c.lba_size, <, FEMU_DATA_SIZE);
+    femu_zap_create_queue(&c, &q, 1);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    femu_zap_queue(&c, &q, (NvmeCmd *)&rw);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_PE_END], ==, 0);
+
+    rw.slba = cpu_to_le64(1);
+    rw.control = cpu_to_le16(NVME_RW_FUA);
+    femu_zap_queue(&c, &q, (NvmeCmd *)&rw);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_SEALS], ==, 0);
+    g_assert_cmpuint(v[FLUSH_PE_END], >, 0);
+
+    memset(&flush, 0, sizeof(flush));
+    flush.opcode = NVME_CMD_FLUSH;
+    flush.nsid = cpu_to_le32(1);
+    femu_zap_queue(&c, &q, &flush);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_SEALS], ==, 1);
+    g_assert_cmpuint(v[FLUSH_PE_END], <=, v[FLUSH_DONE]);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * Read priority, end to end. On one LUN, two writes that each program NAND
  * and a read of a page written before go in one doorbell ring. Off, the
  * read waits for both programs and completes last; on, it waits only for
@@ -63588,6 +63649,15 @@ static void femu_register_nodes(void)
     qos_add_test("pe-suspend-flush-on", "femu", femu_test_pe_suspend_flush,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=200000000,pg_rd_lat=20000000,tsusp_ns=10000,"
+            "pe_suspend=1,buffer_size=16"
+    });
+    qos_add_test("pe-suspend-flush-fua", "femu",
+                 femu_test_pe_suspend_flush_fua,
+                 &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"

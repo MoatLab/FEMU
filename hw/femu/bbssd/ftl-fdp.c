@@ -2069,8 +2069,10 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
         curlat = fdp_program_page(ssd, rg, ruh, lpn, req->stime, req, slba,
                                   nlb, held ? held->written : NULL);
         maxlat = MAX(maxlat, curlat);
+        /* pe_suspend: the program holds a buffered write; a Flush seals it */
         if (held) {
             ssd_buffer_discard(ssd, lpn);
+            ssd->buffer_unsealed = true;
         }
         /*
          * Counted here rather than for the whole command before the loop: the
