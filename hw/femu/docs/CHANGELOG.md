@@ -12,8 +12,7 @@ listed one by one.
 
 ### QEMU base
 
-- The guest boot test also boots an FDP device. A write placed on handle 1 must reach only that handle. On ZNS it writes zone 1 to its capacity and checks that the zone is Full.
-- FEMU now builds on QEMU 11.1.3. FEMU changes 24 QEMU files; [QEMU base](development/qemu-base.md) lists each one. QEMU 11.1 maps CXL decoders directly into the window, which skips the femu-cxl-ssd model, so FEMU turns that mapping off. An old checkout needs `python/qemu/qmp/` removed and a new build directory.
+- FEMU now builds on QEMU 11.1.3. FEMU changes 25 QEMU files; [QEMU base](development/qemu-base.md) lists each one. QEMU 11.1 maps CXL decoders directly into the window, which skips the femu-cxl-ssd model, so FEMU turns that mapping off. An old checkout needs `python/qemu/qmp/` removed and a new build directory.
 - FEMU now builds on QEMU 10.1.0 instead of 9.0.1, with device registration moved to the current QEMU APIs (eafddfdd0).
 - Two QEMU TCG fixes are carried from upstream QEMU. Without them a vCPU could resolve a stale memory section after a device was unplugged and stop QEMU with an assertion (ef516ed58, c66409e3b).
 - Two QEMU CXL fixes are carried: the background command timer is freed with its CCI, and a CXL Type 3 device releases its mapped backends when realize fails (43040a04c, 6153becf8).
@@ -599,6 +598,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - qtests and unit tests for FEMU now live under `hw/femu/tests/`, including a NAND media unit test run by meson and FTL checks turned on in CI (d72e30a34, 6549d6094, cc926e1e9, 8241ccc7f).
 - CI boots a Linux guest on NoSSD, bbssd, ZNS and KV and checks data, queues, zones, KV commands and GC through the real NVMe driver. The kernel and initramfs build from pinned sources with `build-guest-kernel.sh` and `build-guest-initramfs.sh`.
 - Seeded fuzzers for admin, I/O, zoned, FDP, KV, Open-Channel 2.0 and CSD commands, run on sanitizer builds in CI (8a57a3e27, 6d6d927d0, 9798a6574, dff3d9f72, 28eaf2afa, 2dbb18a82, 243fc0b66, 2f1208402, 692d9a106).
+- Five FEMU targets for QEMU's coverage-guided generic fuzzer, with a seed generator and a control target that holds a planted bug ([testing](guides/testing.md#generic-fuzzer-targets)). Their qtest-only `x-fuzz` mode runs no poller thread and makes each reset a controller reset.
 
 ### Removed or legacy
 

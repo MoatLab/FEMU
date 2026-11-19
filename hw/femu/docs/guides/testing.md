@@ -119,6 +119,73 @@ QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \
     -p /x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests/io-fuzz
 ```
 
+### Generic fuzzer targets
+
+QEMU's generic fuzzer (`tests/qtest/fuzz/generic_fuzz.c`) drives a
+device with libFuzzer and follows code coverage. It reads each input as
+register writes, PCI config writes and DMA patterns. FEMU has five
+targets for it in `tests/qtest/fuzz/generic_fuzz_configs.h`:
+
+| Target | Device |
+| --- | --- |
+| `generic-fuzz-femu-nossd` | NoSSD, 16 MiB |
+| `generic-fuzz-femu-bbssd` | bbssd, 1 MiB, one channel and LUN |
+| `generic-fuzz-femu-zns` | ZNS, 32 MiB, one channel and LUN |
+| `generic-fuzz-femu-cmb` | NoSSD with a 4 MiB controller memory buffer |
+| `generic-fuzz-femu-control` | NoSSD with a planted bug, which a run must find |
+
+Each target sets the qtest-only property `x-fuzz`. FEMU completes I/O
+on poller threads, which libFuzzer cannot replay. So with `x-fuzz`, the
+controller starts no poller thread, and each input runs on the
+fuzzer's own thread. A system reset after each input is then a
+Controller Level Reset.
+
+```
+ input --> registers, CC.EN, admin queue --> admin command handlers
+       --> DMA patterns fill the admin queues and command data
+ reset --> CC.EN=0, queues freed, registers 0 --> next input
+ I/O queues: created, but no thread serves them (the io-fuzz qtests cover I/O)
+```
+
+Build with clang, in its own build directory:
+
+```sh
+mkdir build-fuzz && cd build-fuzz
+CC=clang CXX=clang++ ../configure --target-list=x86_64-softmmu \
+    --enable-fuzzing --enable-asan --enable-ubsan --disable-werror
+make -j"$(nproc)" qemu-fuzz-x86_64
+```
+
+Write the seeds, then run one target. The seeds program the admin
+queue and send the commands of the admin-fuzz qtest:
+
+```sh
+python3 ../hw/femu/tests/fuzz/gen-generic-seeds.py --target nossd --out corpus
+export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1
+export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+./qemu-fuzz-x86_64 --fuzz-target=generic-fuzz-femu-nossd \
+    -max_total_time=1800 -timeout=25 -rss_limit_mb=4096 corpus
+```
+
+A crash writes a `crash-<sha1>` file. To check it and make a qtest
+reproducer:
+
+1. Run `./qemu-fuzz-x86_64 --fuzz-target=TARGET crash-<sha1>` alone.
+2. Set `QTEST_LOG=1 FUZZ_SERIALIZE_QTEST=1` and run it again into a file.
+3. Reorder that file with `scripts/oss-fuzz/reorder_fuzzer_qtest_trace.py`.
+4. Feed the result to `qemu-system-x86_64` with the logged arguments and
+   `-qtest stdio`.
+
+Some state stays across inputs, as on a real drive: the namespace
+format, firmware slots and logs. A crash that does not come back in
+step 1 needs an earlier input.
+
+The control target has `x-fuzz-control=on`. Identify Controller with
+CDW15 set to 0x3cc3a55a then writes one byte past a 16-byte buffer.
+`gen-generic-seeds.py --control DIR` writes a seed that hits it and a
+seed one dword away. A run from the second seed must find the crash in
+`nvme_identify`. If it does not, the fuzzer setup reaches nothing.
+
 ## Documentation checks
 
 From the source tree, with the build above in `build/`:

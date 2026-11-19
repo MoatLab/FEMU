@@ -9,7 +9,7 @@ mode changes, and files that FEMU removes.
  QEMU v11.1.3 tree
    + hw/femu/            FEMU devices, tests, docs, scripts (FEMU only)
    + roms/               firmware sources (kept as FEMU ships them)
-   + 27 QEMU files       content changes, listed below
+   + 25 QEMU files       content changes, listed below
 ```
 
 ## Files that FEMU changes
@@ -24,6 +24,7 @@ mode changes, and files that FEMU removes.
 | `tests/qtest/meson.build` | Build the FEMU qtests into `qos-test` |
 | `tests/qtest/libqos/qgraph.h` | Longer qgraph path elements for the FEMU test names |
 | `tests/qtest/qmp-cmd-test.c` | `query-femu` fails without a FEMU device |
+| `tests/qtest/fuzz/generic_fuzz_configs.h` | Five `generic-fuzz-femu-*` targets for the generic fuzzer |
 | `scripts/checkpatch.pl` | Allow the test file layout of `hw/femu/tests/` |
 | `.gitignore` | FEMU build products |
 

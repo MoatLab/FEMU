@@ -247,6 +247,39 @@ const generic_fuzz_config predefined_configs[] = {
         .args = "-machine q35 -nodefaults "
         "-parallel file:/dev/null",
         .objects = "parallel*",
+    },{
+        /*
+         * FEMU (hw/femu). x-fuzz runs no poller thread, so every path the
+         * fuzzer reaches runs on its own thread, and makes each reset a
+         * Controller Level Reset. hw/femu/docs/guides/testing.md has more.
+         */
+        .name = "femu-nossd",
+        .args = "-machine pc -nodefaults -device femu,femu_mode=2,"
+        "devsz_mb=16,queues=2,x-fuzz=on",
+        .objects = "femu",
+    },{
+        .name = "femu-bbssd",
+        .args = "-machine pc -nodefaults -device femu,femu_mode=1,"
+        "devsz_mb=1,queues=2,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+        "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,x-fuzz=on",
+        .objects = "femu",
+    },{
+        .name = "femu-zns",
+        .args = "-machine pc -nodefaults -device femu,femu_mode=3,"
+        "devsz_mb=32,queues=2,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+        "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,x-fuzz=on",
+        .objects = "femu",
+    },{
+        .name = "femu-cmb",
+        .args = "-machine pc -nodefaults -device femu,femu_mode=2,"
+        "devsz_mb=16,queues=2,cmbsz=0x400000,cmbloc=2,x-fuzz=on",
+        .objects = "femu",
+    },{
+        /* the control: a planted overflow the fuzzer must find */
+        .name = "femu-control",
+        .args = "-machine pc -nodefaults -device femu,femu_mode=2,"
+        "devsz_mb=16,queues=2,x-fuzz=on,x-fuzz-control=on",
+        .objects = "femu",
     }
 };
 
