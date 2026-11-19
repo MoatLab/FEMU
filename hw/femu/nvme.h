@@ -2824,6 +2824,8 @@ typedef struct FemuCtrl {
     bool        test_ns_fail;
     /* x-fuzz: no poller thread, and a system reset is a CLR */
     bool        test_fuzz;
+    /* x-fuzz: the guest ranges the controller touched since the reset */
+    GArray      *fuzz_touched;
     /* x-fuzz-control: the buffer Identify writes past */
     uint8_t     *fuzz_control_buf;
     uint32_t    changed_nsids[1024];
@@ -4120,6 +4122,8 @@ int nvme_clear_virq(FemuCtrl *n);
 /* Controller DMA reaches memory only; see femu_dma_rw(). */
 #define FEMU_DMA_ATTRS ((MemTxAttrs) { .memory = 1 })
 
+void femu_fuzz_touch(FemuCtrl *n, uint64_t addr, uint64_t len);
+void femu_fuzz_clear(FemuCtrl *n);
 MemTxResult femu_dma_rw(FemuCtrl *n, dma_addr_t addr, void *buf,
                         dma_addr_t len, bool to_host);
 MemTxResult femu_dma_set(FemuCtrl *n, dma_addr_t addr, uint8_t c,

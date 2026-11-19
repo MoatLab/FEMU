@@ -982,6 +982,9 @@ uint16_t nvme_init_sq(NvmeSQueue *sq, FemuCtrl *n, uint64_t dma_addr, uint16_t
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         sq->dma_addr = dma_addr;
+        if (unlikely(n->test_fuzz)) {
+            femu_fuzz_touch(n, dma_addr, want);
+        }
         sq->dma_addr_hva = (uint64_t)hva;
         sq->dma_map_len = want;
     } else {
@@ -1056,6 +1059,9 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
             return NVME_INVALID_FIELD | NVME_DNR;
         }
         cq->dma_addr = dma_addr;
+        if (unlikely(n->test_fuzz)) {
+            femu_fuzz_touch(n, dma_addr, want);
+        }
         cq->dma_addr_hva = (uint64_t)hva;
         cq->dma_map_len = want;
     } else {

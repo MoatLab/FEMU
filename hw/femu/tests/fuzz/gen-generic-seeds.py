@@ -5,15 +5,19 @@ Write seed inputs for the FEMU targets of QEMU's generic fuzzer.
 
 The generic fuzzer reads an input as records split by the 4 bytes "FUZZ".
 The first byte of a record picks the operation and the rest are its
-arguments (tests/qtest/fuzz/generic_fuzz.c). Each seed here programs the
-admin queue, puts the commands in place with DMA patterns, enables the
-controller and rings the doorbells:
+arguments (tests/qtest/fuzz/generic_fuzz.c). A DMA pattern fills guest
+memory when the controller reads it. With x-fuzz the controller reads each
+submission queue entry when the doorbell rings, so each command gets its
+own patterns just before its doorbell write:
 
     write AQA, ASQ, ACQ          register region 0, 32-bit writes
-    pattern 0: zeros             the admin CQ, mapped first at CC.EN
-    pattern 1: the SQ image      the admin SQ, mapped next
-    pattern 2: data              what a command reads from the host
-    write CC, SQ0 tail, CQ0 head, read CSTS
+    pattern: zeros               the admin CQ and SQ, mapped at CC.EN
+    write CC, read CSTS
+    per command:
+      clear patterns
+      pattern 0: the 64-byte SQE  read at the SQ0 tail doorbell write
+      pattern 1: data             what the command reads from the host
+      write SQ0 tail, CQ0 head
 
 The admin commands follow the opcode list and the valid defaults of the
 admin-fuzz qtest (femu_test_admin_fuzz in hw/femu/tests/qtest/femu-test.c).
@@ -38,6 +42,7 @@ OP_WRITE = 3
 OP_PCI_READ = 4
 OP_PCI_WRITE = 5
 OP_ADD_DMA_PATTERN = 7
+OP_CLEAR_DMA_PATTERNS = 8
 OP_CLOCK_STEP = 9
 OP_COUNT = 10
 
@@ -122,17 +127,18 @@ def admin_queue():
 
 
 def admin_seed(cmds, after=()):
-    """Records that run up to QENTRIES - 1 admin commands."""
-    assert 0 < len(cmds) < QENTRIES
-    sq = b"".join(c if isinstance(c, bytes) else cmd(**c) for c in cmds)
-    sq += bytes(64 * QENTRIES - len(sq))
+    """Records that enable the controller and run the admin commands."""
+    assert cmds
     out = admin_queue()
-    out += [pattern(bytes(16)), pattern(sq), pattern(data_pattern())]
-    out += [mmio_write(0x14, CC_ENABLE),
-            mmio_write(0x1000, len(cmds)),
-            mmio_write(0x1004, len(cmds)),
-            mmio_read(0x1c)]
-    out += list(after)
+    out += [pattern(bytes(16)), mmio_write(0x14, CC_ENABLE), mmio_read(0x1c)]
+    for i, c in enumerate(cmds, 1):
+        sqe = c if isinstance(c, bytes) else cmd(**c)
+        assert len(sqe) == 64
+        out += [rec(OP_CLEAR_DMA_PATTERNS), pattern(sqe),
+                pattern(data_pattern()),
+                mmio_write(0x1000, i % QENTRIES),
+                mmio_write(0x1004, i % QENTRIES)]
+    out += [mmio_read(0x1c)] + list(after)
     return out
 
 

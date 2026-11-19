@@ -5256,7 +5256,8 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     femu_fw_init(n);
 
     n->use_ftl_thread = femu_needs_ftl_thread(n);
-    if (n->use_ftl_thread) {
+    /* x-fuzz: no FEMU thread runs beside the fuzzer's own */
+    if (n->use_ftl_thread && !n->test_fuzz) {
         qemu_thread_create(&n->ftl_thread, "FEMU-FTL-Thread", femu_ftl_thread,
                            n, QEMU_THREAD_JOINABLE);
         n->ftl_thread_running = true;
@@ -7076,6 +7077,10 @@ static void femu_instance_finalize(Object *obj)
     g_free(n->nand_profile_name);
     n->nand_profile_name = NULL;
     g_clear_pointer(&n->fuzz_control_buf, g_free);
+    if (n->fuzz_touched) {
+        g_array_free(n->fuzz_touched, true);
+        n->fuzz_touched = NULL;
+    }
     qemu_mutex_destroy(&n->ocp_lat.lock);
     qemu_mutex_destroy(&n->ocp_inj_lock);
     qemu_mutex_destroy(&n->iotrace_lock);
@@ -7237,8 +7242,9 @@ static void femu_pci_write_config(PCIDevice *dev, uint32_t addr,
  * power_limit or x-fuzz: a Controller Level Reset, then the registers the
  * host programs back to their reset values. A saveable feature such as
  * Power Limit (23h) takes its saved value then. Otherwise the controller
- * keeps its state, as it always has. x-fuzz also clears the CMB, so each
- * input of the generic fuzzer starts from the same controller state.
+ * keeps its state, as it always has. x-fuzz also clears the CMB and the
+ * guest memory the controller touched, so each input of the generic fuzzer
+ * starts from the same controller and queue memory.
  */
 static void femu_pci_reset(DeviceState *dev)
 {
@@ -7268,8 +7274,11 @@ static void femu_pci_reset(DeviceState *dev)
     n->bar.acq = 0;
     n->bar.intms = 0;
     n->bar.intmc = 0;
-    if (n->test_fuzz && n->cmbuf) {
-        memset(n->cmbuf, 0, NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
+    if (n->test_fuzz) {
+        if (n->cmbuf) {
+            memset(n->cmbuf, 0, NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
+        }
+        femu_fuzz_clear(n);
     }
 }
 

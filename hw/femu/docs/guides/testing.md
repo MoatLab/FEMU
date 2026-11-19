@@ -136,14 +136,16 @@ targets for it in `tests/qtest/fuzz/generic_fuzz_configs.h`:
 
 Each target sets the qtest-only property `x-fuzz`. FEMU completes I/O
 on poller threads, which libFuzzer cannot replay. So with `x-fuzz`, the
-controller starts no poller thread, and each input runs on the
+controller starts no poller or FTL thread, and each input runs on the
 fuzzer's own thread. A system reset after each input is then a
-Controller Level Reset.
+Controller Level Reset. It also zeroes the guest memory that the
+controller used, so the next input finds no queue entries of this one.
 
 ```
  input --> registers, CC.EN, admin queue --> admin command handlers
-       --> DMA patterns fill the admin queues and command data
- reset --> CC.EN=0, queues freed, registers 0 --> next input
+       --> DMA patterns fill each SQE at its doorbell, and command data
+ reset --> CC.EN=0, queues freed, registers 0, used guest memory 0
+       --> next input
  I/O queues: created, but no thread serves them (the io-fuzz qtests cover I/O)
 ```
 
@@ -157,7 +159,9 @@ make -j"$(nproc)" qemu-fuzz-x86_64
 ```
 
 Write the seeds, then run one target. The seeds program the admin
-queue and send the commands of the admin-fuzz qtest:
+queue and send the commands of the admin-fuzz qtest. The fuzzer drops
+its DMA patterns after each operation. So each seed adds the SQE of a
+command as a pattern just before that command's doorbell write:
 
 ```sh
 python3 ../hw/femu/tests/fuzz/gen-generic-seeds.py --target nossd --out corpus

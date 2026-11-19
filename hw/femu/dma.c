@@ -78,8 +78,11 @@ static MemTxResult femu_dma_direct(FemuCtrl *n, dma_addr_t addr, uint8_t *buf,
          * does for dma_memory_read(). No poller runs then, so this is the
          * fuzzer's own thread. Without --enable-fuzzing it does nothing.
          */
-        if (unlikely(n->test_fuzz) && !to_host) {
-            fuzz_dma_read_cb(addr, l, mr);
+        if (unlikely(n->test_fuzz)) {
+            if (!to_host) {
+                fuzz_dma_read_cb(addr, l, mr);
+            }
+            femu_fuzz_touch(n, addr, l);
         }
         if (nr == cap) {
             FemuDmaSpan *more = g_new(FemuDmaSpan, cap * 2);
@@ -125,6 +128,37 @@ out:
         g_free(span);
     }
     return ret;
+}
+
+/*
+ * x-fuzz: note a guest range the controller read or wrote. The reset clears
+ * each one, so the next fuzz input finds none of this input's bytes there.
+ */
+void femu_fuzz_touch(FemuCtrl *n, uint64_t addr, uint64_t len)
+{
+    uint64_t r[2] = { addr, len };
+
+    if (!n->fuzz_touched) {
+        n->fuzz_touched = g_array_new(false, false, sizeof(r));
+    }
+    g_array_append_val(n->fuzz_touched, r);
+}
+
+/* x-fuzz: zero every range noted since the last reset */
+void femu_fuzz_clear(FemuCtrl *n)
+{
+    AddressSpace *as = pci_get_address_space(&n->parent_obj);
+    guint i;
+
+    if (!n->fuzz_touched) {
+        return;
+    }
+    for (i = 0; i < n->fuzz_touched->len; i++) {
+        uint64_t *r = &g_array_index(n->fuzz_touched, uint64_t, 2 * i);
+
+        address_space_set(as, r[0], 0, r[1], MEMTXATTRS_UNSPECIFIED);
+    }
+    g_array_set_size(n->fuzz_touched, 0);
 }
 
 /* The CMB belongs to this device, so it is copied without dispatch. */

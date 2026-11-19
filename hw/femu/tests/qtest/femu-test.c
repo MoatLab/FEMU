@@ -21305,20 +21305,25 @@ static void femu_test_admin_fuzz(void *obj, void *data, QGuestAllocator *alloc)
 /*
  * x-fuzz, the mode of QEMU's generic fuzzer: admin commands complete, no
  * poller thread serves the I/O queues, and a system reset disables the
- * controller. Without x-fuzz the same Read completes, so the check fails
- * when the property no longer stops the dataplane.
+ * controller and zeroes the queue memory it used. Without x-fuzz the same
+ * Read completes, so the check fails when the property no longer stops the
+ * dataplane. data: 0 x-fuzz off, 1 NoSSD, 2 BBSSD.
  */
 static void femu_test_fuzz_mode(void *obj, void *data, QGuestAllocator *alloc)
 {
-    bool fuzz = GPOINTER_TO_INT(data);
+    int kind = GPOINTER_TO_INT(data);
+    bool fuzz = kind != 0;
     QOSState *qs = qtest_pc_boot(
-        "-machine pc -nodefaults -device femu,id=fm,addr=5,devsz_mb=16,"
-        "femu_mode=2,queues=2%s", fuzz ? ",x-fuzz=on" : "");
+        "-machine pc -nodefaults -device femu,id=fm,addr=5,queues=2%s%s",
+        kind == 2 ? ",femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8,"
+        "pgs_per_blk=4,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1" :
+        ",femu_mode=2,devsz_mb=16", fuzz ? ",x-fuzz=on" : "");
     QTestState *qts = qs->qts;
     QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(&qs->alloc, 4096);
     NvmeRwCmd rw;
+    NvmeCmd sqe;
     NvmeCqe cqe;
 
     femu_enable(&c, pdev, &qs->alloc);
@@ -21348,11 +21353,18 @@ static void femu_test_fuzz_mode(void *obj, void *data, QGuestAllocator *alloc)
         g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x1c), ==, 0);
         g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x24), ==, 0);
 
+        /* the queued Read is gone, so no later input runs this one's bytes */
+        qtest_memread(qts, c.io.sq_addr, &sqe, sizeof(sqe));
+        g_assert_cmpint(sqe.opcode, ==, 0);
+        g_assert_cmpint(le16_to_cpu(sqe.cid), ==, 0);
+
         /* the next input starts the controller again from nothing */
         femu_queue_free(&c, &c.admin);
+        femu_queue_free(&c, &c.io);
         femu_enable(&c, pdev, &qs->alloc);
         g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
                         NVME_SUCCESS);
+        femu_create_io_queues(&c);
     }
 
     femu_queue_free(&c, &c.io);
@@ -71235,6 +71247,8 @@ static void femu_register_nodes(void)
      */
     qos_add_test("gf-mode", "femu", femu_test_fuzz_mode,
                  &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(1) });
+    qos_add_test("gf-mode-bbssd", "femu", femu_test_fuzz_mode,
+                 &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(2) });
     qos_add_test("gf-mode-off", "femu", femu_test_fuzz_mode,
                  &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(0) });
     qos_add_test("gf-control-refused", "femu",

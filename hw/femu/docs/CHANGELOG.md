@@ -598,7 +598,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - qtests and unit tests for FEMU now live under `hw/femu/tests/`, including a NAND media unit test run by meson and FTL checks turned on in CI (d72e30a34, 6549d6094, cc926e1e9, 8241ccc7f).
 - CI boots a Linux guest on NoSSD, bbssd, ZNS and KV and checks data, queues, zones, KV commands and GC through the real NVMe driver. The kernel and initramfs build from pinned sources with `build-guest-kernel.sh` and `build-guest-initramfs.sh`.
 - Seeded fuzzers for admin, I/O, zoned, FDP, KV, Open-Channel 2.0 and CSD commands, run on sanitizer builds in CI (8a57a3e27, 6d6d927d0, 9798a6574, dff3d9f72, 28eaf2afa, 2dbb18a82, 243fc0b66, 2f1208402, 692d9a106).
-- Five FEMU targets for QEMU's coverage-guided generic fuzzer, with a seed generator and a control target that holds a planted bug ([testing](guides/testing.md#generic-fuzzer-targets)). Their qtest-only `x-fuzz` mode runs no poller thread and makes each reset a controller reset.
+- Five FEMU targets for QEMU's coverage-guided generic fuzzer, with a seed generator and a control target that holds a planted bug ([testing](guides/testing.md#generic-fuzzer-targets)). Their qtest-only `x-fuzz` mode runs no poller or FTL thread. Each reset is a controller reset that also zeroes the guest memory the controller used.
 
 ### Removed or legacy
 
