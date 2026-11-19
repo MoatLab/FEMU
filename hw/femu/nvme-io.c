@@ -2534,11 +2534,17 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         if (sc) {
             return sc;
         }
-    } else if (nvme_map_prp(&req->qsg, &req->iov, prp1, prp2, data_size, n)) {
-        nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
-                            offsetof(NvmeRwCmd, prp1), 0, ns->id,
-                            cmd->opcode, ns->csi);
-        return NVME_INVALID_FIELD | NVME_DNR;
+    } else {
+        /* the mapper names the fault, as it does for a Read */
+        uint16_t sc = nvme_map_prp(&req->qsg, &req->iov, prp1, prp2,
+                                   data_size, n);
+
+        if (sc) {
+            nvme_set_error_page(n, req->sq->sqid, cmd->cid, sc & ~NVME_DNR,
+                                offsetof(NvmeRwCmd, prp1), 0, ns->id,
+                                cmd->opcode, ns->csi);
+            return sc;
+        }
     }
     /*
      * Same as the read and write path: a buffer in the controller memory buffer
