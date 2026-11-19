@@ -271,8 +271,8 @@ Devices:
 
 | Property | Type | Default | Description |
 | --- | --- | --- | --- |
-| `gc_thres_pcent` | `int32` | `75` | bbssd, CSD: percent of lines in use at which background garbage collection starts, 1 to 100; KV uses it only as the fraction of NAND usable for values |
-| `gc_thres_pcent_high` | `int32` | `95` | bbssd, CSD: percent of lines in use at which garbage collection is forced, from gc_thres_pcent to 100; under FDP it keeps at least one reclaim unit free unless it is 100 |
+| `gc_thres_pcent` | `int32` | `75` | bbssd, CSD: percent of lines in use at which background garbage collection starts, 1 to 100; one attempt follows each command and takes a victim with 1/8 or more of its pages invalid; KV uses it only as the fraction of NAND usable for values |
+| `gc_thres_pcent_high` | `int32` | `95` | bbssd, CSD: percent of lines in use at which garbage collection is forced, from gc_thres_pcent to 100; a forced pass has no 1/8 test; under FDP it keeps at least one reclaim unit free unless it is 100 |
 | `gc_policy` | `str` | unset | bbssd, CSD: victim policy, one of greedy, random, cost-benefit, fifo or d-choice; unset is greedy. Under FDP it picks the reclaim unit strategy, and a name other than greedy needs gc_strategy=0 |
 | `gc_seed` | `uint64` | `0` | bbssd, CSD: seed for the victims the random and d-choice gc_policy and the FDP random gc_strategy pick; the same seed and workload pick the same victims, so vary it to vary runs |
 | `gc_strategy` | `int32` | `0` | bbssd with FDP: reclaim unit victim strategy, 0 greedy, 1 cost-benefit, 2 random or 4 per-handle; a gc_policy other than greedy picks it instead |

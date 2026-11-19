@@ -94,7 +94,8 @@ for one namespace. C0h adds them over the namespaces of the controller.
 `waf` is (`nand-write-pages` + `gc-write-pages` + `map-write-pages` +
 `pad-write-pages` + `parity-write-pages`) / `host-write-pages` as a
 real number, and it is absent until the host writes a page. C0h reports the
-same value multiplied by 1000 as an integer.
+same value multiplied by 1000 as an integer. `nand-write-pages` counts host
+pages only. The copies of garbage collection are in `gc-write-pages` only.
 
 `block-erases` is the sum of the erase counts of all blocks. C0h does not
 report it. A line contains the same block index in every plane of every

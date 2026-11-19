@@ -101,9 +101,54 @@ How the time is computed: [timing model](../concepts/timing-model.md#nand-operat
 
 Properties: [garbage collection, mapping and caches](../reference/properties.md#garbage-collection-mapping-and-caches).
 
-Background GC starts when the share of lines in use reaches
-`gc_thres_pcent` (75). Foreground GC runs inside writes from
-`gc_thres_pcent_high` (95). `gc_policy` picks the victim line:
+Two rules start GC. Each rule compares the free lines with a threshold.
+
+```
+ background rule: after each command that reaches the FTL with no error
+        |
+        v
+ free lines <= (1 - gc_thres_pcent / 100) x lines ?  --no-->  no attempt
+        | yes
+        v
+ gc_policy picks one closed line (the victim)
+        |
+        v
+ invalid pages >= 1/8 of its data pages ?  --no-->  no GC in this attempt
+        | yes
+        v
+ copy its valid pages and erase it: one line for each attempt
+
+ forced rule: at the start of a write and before each page it programs
+        |
+        v
+ free lines <= (1 - gc_thres_pcent_high / 100) x lines ?  --no-->  write
+        | yes
+        v
+ collect victims with no 1/8 test, until free lines are above the
+ threshold or no victim is left
+```
+
+- The background rule starts when the share of lines in use reaches
+  `gc_thres_pcent` (75). It makes one attempt after each command, reads
+  included. It does not wait for idle time.
+- The background rule takes a victim only when 1/8 or more of its data
+  pages are invalid. The division is in whole pages.
+- The forced rule runs inside writes from `gc_thres_pcent_high` (95). It
+  has no 1/8 test.
+- With FDP the two rules are the same. They count free reclaim units in
+  each reclaim group.
+
+The 1/8 test permits a victim that is 7/8 valid. Such a victim costs 7
+copies for each page that it frees, so the WAF of background GC can reach 8.
+A namespace that fills `gc_thres_pcent` of the lines keeps the device at
+the background threshold at all times. Each command then starts an attempt,
+and the WAF stays near 8 for random overwrites.
+
+To prevent this, keep the namespace below that share of the lines. A higher
+`gc_thres_pcent` has the same effect. Only the forced rule stays when the
+two properties are equal.
+
+`gc_policy` picks the victim line:
 
 - `greedy` (the default): the line with the fewest valid pages.
 - `random`: a random line among the GC candidates.
@@ -351,7 +396,9 @@ sudo fio --name=age --filename=/dev/nvme0n1 --direct=1 --ioengine=libaio \
 Read the write amplification factor and media counters from the vendor log
 page C0h. The first four bytes are the WAF times 1000, bytes 4 to 7 are
 reserved, and the three 8-byte counters from byte 8 are host pages written,
-pages GC moved, and pages programmed:
+pages GC moved, and host pages programmed. The third counter does not
+include the pages that GC moved. The NAND programs of a run are the total
+of the second and third counters:
 
 ```sh
 sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u4 -N 4

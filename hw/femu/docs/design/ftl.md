@@ -549,6 +549,34 @@ Forced GC runs per page, not once per command: one command can program more
 lines than the watermark keeps free, and a collection that starts after the
 last line is gone has nowhere to move pages to.
 
+The background pass does not wait for idle time. In `hw/femu/bbssd/ftl.c`,
+the FTL thread makes one attempt after each command. In
+`hw/femu/bbssd/ftl-line-gc.c`, each victim policy applies the 1/8 filter
+after it chooses its line. The filter divides in whole pages:
+
+```
+  background attempt (force = false)
+    victim = gc_policy choice
+    if victim.ipc < data pages of the line / 8:  no GC in this attempt
+    else:                                        copy victim.vpc pages, erase
+
+  cost of the filter
+    least invalid share of a background victim = 1/8
+    copies for each freed page                 <= 7
+    WAF of background GC                       <= 8
+```
+
+A device at or below the background watermark makes an attempt for each
+command. With random overwrites, the best victim then passes 1/8 by only a
+few pages, and the WAF stays near 8. This occurs when the namespace fills
+`gc_thres_pcent` of the lines. A namespace below that share, or a higher
+`gc_thres_pcent`, lets victims collect more invalid pages first. Equal
+watermarks leave only forced GC.
+
+For FDP, `fdp_bg_worth_collecting()` applies the same filter to a reclaim
+unit. That filter counts each page that the erase gives back. A unit with
+unwritten pages can thus pass.
+
 A GC step returns -1 when there is no victim, when the background filter
 rejects it, or when the victim's valid pages cannot all be moved; the forced
 loop then stops. With Streams on, a step also fails
@@ -1762,10 +1790,10 @@ lists the offsets.
 
 | C0h field | FTL counter | Moves when |
 | --- | --- | --- |
-| WAF x 1000 | (nand + gc) x 1000 / host | after the first host write |
+| WAF x 1000 | (nand + gc + translation + pad + parity) x 1000 / host: `nand_write_pages`, `gc_write_pages`, `map_write_pages`, `pd_pad_pages` and `parity_pages` over `host_write_pages` | after the first host write |
 | host write pages | `host_write_pages` | Write, the destination of Copy, and Write Zeroes without Deallocate, per page, buffered or not |
 | GC write pages | `gc_write_pages` | GC, read reclaim and log-block merges relocate a page |
-| NAND write pages | `nand_write_pages` | a host page is programmed |
+| NAND write pages | `nand_write_pages` | a host page is programmed; GC copies are not counted here |
 | max block reads | largest `read_cnt` | NAND reads; reset by erase |
 | read reclaims, retention refreshes | `read_reclaims`, `retention_refreshes` | a queued line is rewritten |
 | buffer reads and read hits | `sp.read_cnt`, `sp.read_hit_cnt` | host read pages, and those the buffer held |
@@ -1775,6 +1803,20 @@ lists the offsets.
 
 The buffer read and write counts move with or without a buffer, so their
 ratio is the hit rate. Telemetry log 07h captures the same 512 bytes.
+
+The name `nand_write_pages` does not mean each page programmed to NAND. It
+counts host pages only. The data pages that a run programs are the total of
+two counters:
+
+```
+  counter            host pages  GC copies  translation, pad, parity
+  host_write_pages   yes         no         no    (pages the host sent)
+  nand_write_pages   yes         no         no    (host pages programmed)
+  gc_write_pages     no          yes        no
+  WAF numerator      yes         yes        yes
+
+  data pages programmed = nand_write_pages + gc_write_pages
+```
 
 ### SMART and Endurance Group
 
@@ -1819,8 +1861,8 @@ does inside the FTL and what it interacts with.
 
 | Property | Effect in the FTL | Interacts with |
 | --- | --- | --- |
-| `gc_thres_pcent` | background GC watermark | must not exceed `gc_thres_pcent_high` |
-| `gc_thres_pcent_high` | forced GC watermark; sizes the reserve | lower values cost exposed capacity |
+| `gc_thres_pcent` | background GC watermark: one attempt after each command, for a victim with 1/8 or more of its pages invalid ([triggers](#triggers-and-watermarks)) | must not exceed `gc_thres_pcent_high` |
+| `gc_thres_pcent_high` | forced GC watermark, with no 1/8 filter; sizes the reserve | lower values cost exposed capacity |
 | `gc_policy` | line victim selection | under FDP, the reclaim unit strategy; needs `gc_strategy=0` |
 | `gc_seed` | seed for the `random` and `d-choice` policies and FDP random reclaim | no effect on the other policies |
 | `gc_pace` | paced collection: copies the victim in step with host writes ([paced collection](#paced-collection-gc_pace)) | replaces the background pass; refused where `blk_pe_limit` is, and under FDP |

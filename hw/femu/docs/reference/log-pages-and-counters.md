@@ -12,10 +12,10 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 0 | 4 | Write amplification factor, scaled by 1000: (pages programmed + pages relocated by garbage collection + pad pages at offset 264 + translation pages at offset 280) x 1000 / pages the host asked to program |
+| 0 | 4 | Write amplification factor, scaled by 1000: (host pages programmed + pages relocated by garbage collection + pad pages at offset 264 + translation pages at offset 280 + parity pages) x 1000 / pages the host asked to program |
 | 8 | 8 | Pages the host asked to program |
 | 16 | 8 | Data pages relocated by garbage collection |
-| 24 | 8 | Pages actually programmed |
+| 24 | 8 | Host pages actually programmed; the pages at offset 16 are not included |
 | 32 | 8 | Reads of the most-read block since its erase |
 | 40 | 8 | Lines rewritten because of read stress (reclaim units under FDP) |
 | 48 | 8 | Lines rewritten because of retention age (reclaim units under FDP) |
@@ -63,6 +63,8 @@ largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.
 Bytes 8 and 24 are equal when no write buffer is configured; a buffer that
 absorbs repeated writes to one page makes the factor drop below 1.
+Offset 24 counts host pages only. The data pages programmed to NAND are the
+total of offsets 16 and 24.
 
 A KV namespace with `kv_index=lsm` adds its merge programs to offset 24. It
 adds the meta pages that value GC moves to offset 16. Thus its factor

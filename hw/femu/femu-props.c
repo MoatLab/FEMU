@@ -988,12 +988,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     /* garbage collection, mapping and caches */
     { "gc_thres_pcent",
       "bbssd, CSD: percent of lines in use at which background garbage "
-      "collection starts, 1 to 100; KV uses it only as the fraction of "
-      "NAND usable for values" },
+      "collection starts, 1 to 100; one attempt follows each command and "
+      "takes a victim with 1/8 or more of its pages invalid; KV uses it "
+      "only as the fraction of NAND usable for values" },
     { "gc_thres_pcent_high",
       "bbssd, CSD: percent of lines in use at which garbage collection is "
-      "forced, from gc_thres_pcent to 100; under FDP it keeps at least one "
-      "reclaim unit free unless it is 100" },
+      "forced, from gc_thres_pcent to 100; a forced pass has no 1/8 test; "
+      "under FDP it keeps at least one reclaim unit free unless it is 100" },
     { "gc_policy",
       "bbssd, CSD: victim policy, one of greedy, random, cost-benefit, fifo "
       "or d-choice; unset is greedy. Under FDP it picks the reclaim unit "
