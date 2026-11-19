@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Vector search and graph sampling: many small random reads.
+#
+# Eight jobs use up to eight queues: the guest maps each CPU to a queue,
+# so the count depends on where the threads run. Each job submits a
+# burst of 64 random reads, waits for all of them, then pauses. Four
+# jobs read 512 bytes and four read 4 KiB, so the namespace needs a
+# 512-byte LBA format (lba_index=0). One size per job keeps "rate_iops"
+# exact: with mixed sizes in one job, an old fio counts a 4 KiB read as
+# eight 512-byte reads.
+#
+#   FEMU_DEV=/dev/ng0n1 fio gpu-small-random-read.fio
+#
+# FEMU_DEV is the NVMe generic character device of the namespace. Run
+# FEMU with io_trace=FILE, then give FILE to femu-trace2fio.py to check
+# the burst size, the queue spread and the size mix.
+#
+# Rate limit: each job has a fixed "rate_iops". These jobs study the SSD
+# model (read time, read disturb, tail latency). They do not measure the
+# speed of the emulator, so no job runs unthrottled. Do not remove the
+# limit. check-fio-jobs.py fails a job file that has none.
+#
+# The limit caps the mean rate. The pause keeps the mean rate below the
+# limit, so the bursts stay whole. fio spreads only the first burst,
+# before the first pause. The limit does not show that the host kept up
+# in a burst: check that for each run.
+
+[global]
+ioengine=io_uring_cmd
+cmd_type=nvme
+filename=${FEMU_DEV}
+thread=1
+time_based=1
+runtime=60
+
+[small-random-read-512]
+rw=randread
+bs=512
+norandommap=1
+numjobs=4
+iodepth=64
+iodepth_batch_submit=64
+iodepth_batch_complete_min=64
+thinktime=250ms
+thinktime_blocks=64
+# rate limit, per job: see the header
+rate_iops=300
+
+[small-random-read-4k]
+rw=randread
+bs=4k
+norandommap=1
+numjobs=4
+iodepth=64
+iodepth_batch_submit=64
+iodepth_batch_complete_min=64
+thinktime=250ms
+thinktime_blocks=64
+# rate limit, per job: see the header
+rate_iops=300

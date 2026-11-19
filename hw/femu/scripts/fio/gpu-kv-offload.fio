@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# KV-cache offload: store and load whole cache entries.
+#
+# An inference server moves the key-value cache of a session to the SSD
+# and reads it back when the session resumes. One entry here is 32
+# commands of 128 KiB in a row (4 MiB). "randwrite:32" and "randread:32"
+# make fio jump to a random place after each entry. The store job has
+# the lower half of the namespace and the load job has the upper half.
+#
+#   FEMU_DEV=/dev/ng0n1 fio gpu-kv-offload.fio
+#
+# FEMU_DEV is the NVMe generic character device of the namespace. The
+# store job writes over the lower half. Run FEMU with io_trace=FILE,
+# then give FILE to femu-trace2fio.py: the sequential share of each
+# kind must be near 31 of 32.
+#
+# The fio latency of the load job is the latency of one 128 KiB
+# command. The time to load one entry spans its 32 commands: find it in
+# the trace, from the first fetch to the last CQE of the entry.
+#
+# Rate limit: each job has a fixed "rate". These jobs study the SSD
+# model (GC, WAF, data placement, tail latency). They do not measure the
+# speed of the emulator, so no job runs unthrottled. Do not remove the
+# limit. check-fio-jobs.py fails a job file that has none.
+
+[global]
+ioengine=io_uring_cmd
+cmd_type=nvme
+filename=${FEMU_DEV}
+thread=1
+time_based=1
+runtime=60
+bs=128k
+norandommap=1
+
+[kv-store]
+rw=randwrite:32
+iodepth=4
+size=50%
+# rate limit: see the header
+rate=16m
+
+[kv-load]
+rw=randread:32
+iodepth=4
+offset=50%
+size=50%
+# rate limit: see the header
+rate=32m

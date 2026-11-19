@@ -123,6 +123,9 @@ two differ.
 
 - [Measuring](guides/measuring.md): WAF and counters from log page C0h,
   SMART, CXL counters, fio recipes per mode, repeatable numbers.
+- [Trace replay and I/O shapes](guides/trace-replay.md): replay an
+  `io_trace` capture with fio, a shape report, and rate-limited fio jobs
+  for accelerator workload shapes.
 - [Performance tuning](guides/performance-tuning.md): pollers, CPU pinning,
   hugepages, NUMA, host settings, and what each knob trades.
 

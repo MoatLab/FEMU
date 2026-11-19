@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Model and dataset load: large sequential reads.
+#
+# Four readers each take one quarter of the namespace and read it in
+# order with 1 MiB commands, as a loader does when it copies a model
+# file or a dataset shard to accelerator memory.
+#
+#   FEMU_DEV=/dev/ng0n1 fio gpu-model-load.fio
+#
+# FEMU_DEV is the NVMe generic character device of the namespace. Run
+# FEMU with io_trace=FILE, then give FILE to femu-trace2fio.py to check
+# the shape.
+#
+# Rate limit: each job has a fixed "rate". These jobs study the SSD
+# model (read time, read disturb, tail latency). They do not measure the
+# speed of the emulator, so no job runs unthrottled. Do not remove the
+# limit. check-fio-jobs.py fails a job file that has none.
+
+[global]
+ioengine=io_uring_cmd
+cmd_type=nvme
+filename=${FEMU_DEV}
+thread=1
+time_based=1
+runtime=60
+
+[model-load]
+rw=read
+bs=1m
+iodepth=4
+numjobs=4
+size=25%
+offset_increment=25%
+# rate limit, per job: see the header
+rate=16m

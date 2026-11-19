@@ -205,8 +205,28 @@ Python 3 and no other package.
 | `femu-config-check.py` | Starts QEMU under qtest with the given options and no guest, then reports either FEMU's refusal or the configuration it builds: capacity, geometry, over-provisioning, line or reclaim unit size, zones, mode and NAND timing per namespace, and QEMU's warnings. `--manifest FILE` also writes the host, the build and the source of each property value. See [check a configuration](../guides/debugging.md#check-a-configuration-without-a-guest). | `[--json] [--manifest FILE] [--qemu BINARY] [--timeout SEC] [--] QEMU-OPTIONS`, or the value of one `-device` option; `--self-test` checks the tool. Exits 0 accepted, 1 refused, 2 when the check failed. It loads `femu-stat.py` from its own directory. |
 | `femu-steady-state.py` | Reports the first round where a series of per-round results is at steady state, by the SNIA PTS rule: over the last 5 rounds, the spread is at most 20% and the least-squares trend at most 10% of the average. See [repeatable numbers](../guides/measuring.md#repeatable-numbers). | `[--window W] [--excursion P] [--slope P] [--column N] [--metric iops\|bw\|lat_mean] [--json] [FILE...]`: fio JSON outputs, one per round, or one value per line; `--self-test` checks the tool. Exits 0 steady, 1 not steady, 2 on an input error. |
 | `femu-trace2csv.py` | Turns the `femu_cqe` lines of a QEMU trace log (`-trace femu_cqe -D femu.log`) into a CSV I/O trace: ISO 8601 time (`-msg timestamp=on`), completion queue, command ID, opcode, starting LBA, blocks, status and modelled time. | `[LOG]` (stdin when absent); `--self-test` checks the parser. |
-| `femu-prom.py` | Serves the `query-femu` counters of every `femu` device of a running VM at `/metrics` in the Prometheus text format: page and erase counters, WAF and line counts, labelled by device and namespace. Each scrape reads the device again. It loads `femu-stat.py` from its own directory. | `SOCKET`, `--port PORT` (9813), `--bind ADDR` (127.0.0.1), `--once` prints one exposition; `--source query-stats` reads every device with one [`query-stats`](query-stats.md) call instead, which does not wait for the FTL thread; `--self-test` renders canned replies without QEMU. |
+| `femu-trace2fio.py` | Checks an `io_trace` CSV file line by line, prints a shape report (command mix, request sizes, queues, depth between fetch and CQE, gaps between fetches, bursts, sequential share) and writes an fio version 3 I/O log for `fio --read_iolog`. A wrong line stops it with the line number. It counts each command that it cannot replay. See [trace replay and I/O shapes](../guides/trace-replay.md). | `--block-size BYTES [--nsid N] [--device-size BYTES] [--iolog OUT --filename PATH] [--time-scale F] [--lba-scale F] [--strict] [--buckets N] [--burst-gap NS] TRACE` (`-` is stdin); `--self-test` plants faults and compares the output of a built-in trace. Exit status 1 for a trace that fails a check. |
+| `femu-prom.py` | Serves the `query-femu` counters of every `femu` device of a running VM at `/metrics` in the Prometheus text format: page and erase counters, WAF and line counts, labelled by device and namespace. Each scrape reads the device again. It loads `femu-stat.py` from its own directory. | `SOCKET`, `--port PORT` (9813), `--bind ADDR` (127.0.0.1), `--once` prints one exposition; `--self-test` renders a canned reply without QEMU. |
 | `femu-stat.py` | Shows the FTL counters of each `femu` device of a running VM, like `top`: pages, WAF since start and over the interval, rates, line, reclaim unit and zone counts, and I/O stage times. It polls QMP `query-femu` and `query-femu-stages` and never resets the counts. See [live counters](../guides/measuring.md#live-counters-on-the-host-femu-stat). | `SOCKET` (a Unix socket path or `HOST:PORT`), `--interval SEC`, `--count N`, `--once`, `--json`, `--ns LIST`, `--path QOMPATH`; `--self-test --qemu BINARY` checks the tool under qtest. Exits 2 on a connection error. |
+
+## Workload shapes: `hw/femu/scripts/fio/`
+
+fio job files for the I/O shapes of an accelerator workload. Run them in
+the guest with `FEMU_DEV` set to the NVMe generic character device, for
+example `FEMU_DEV=/dev/ng0n1 fio gpu-model-load.fio`. Each job has a
+fixed rate limit. See
+[trace replay and I/O shapes](../guides/trace-replay.md#io-shapes-of-an-accelerator-workload).
+
+| File | Shape | Limit per job |
+| --- | --- | --- |
+| `fio/gpu-model-load.fio` | model and dataset load: 4 jobs, sequential 1 MiB reads | `rate=16m` |
+| `fio/gpu-small-random-read.fio` | vector search and graph sampling: 8 jobs, random 512 B and 4 KiB reads in bursts of 64 | `rate_iops=300` |
+| `fio/gpu-checkpoint-burst.fio` | checkpoint: 1 MiB sequential writes for 2 s, then a pause of 8 s | `rate=32m` |
+| `fio/gpu-kv-offload.fio` | KV-cache offload: entries of 4 MiB, one store job and one load job | `rate=16m` (store), `rate=32m` (load) |
+
+| Script | What it does | Arguments |
+| --- | --- | --- |
+| `check-fio-jobs.py` | Checks that each job of each file has a `rate` or `rate_iops` value above zero for each direction that its `rw` option uses. It also fails a limit that is not a plain number, `rate` with `rate_iops`, `rate_iops` as the only limit of a job with mixed request sizes, `include` and the replay options. It reads files only, not the fio command line. CI runs it. | `[FILE...]` (default: `fio/*.fio`); `--self-test` plants faults. |
 
 ## Host tuning helpers
 

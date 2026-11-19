@@ -240,6 +240,9 @@ device refuses a trace path that is any device's `persist_file`,
 [scripts](../reference/scripts.md) gives another format from QEMU
 tracing: no NSID and no submit time.
 
+`femu-trace2fio.py` turns the trace into an fio I/O log and a shape
+report. See [trace replay and I/O shapes](trace-replay.md).
+
 ## Timed actions (events_file)
 
 `events_file=PATH` gives the controller a list of actions at fixed times,

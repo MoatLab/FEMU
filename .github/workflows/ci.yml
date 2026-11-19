@@ -626,7 +626,10 @@ jobs:
         python3 hw/femu/scripts/femu-steady-state.py --self-test
         python3 hw/femu/scripts/femu-prom.py --self-test
         python3 hw/femu/scripts/femu-trace2csv.py --self-test
-        python3 hw/femu/scripts/labs/lab-waf-model.py --self-test
+        python3 hw/femu/scripts/femu-trace2fio.py --self-test
+        # each fio job file keeps its rate limit
+        python3 hw/femu/scripts/check-fio-jobs.py --self-test
+        python3 hw/femu/scripts/check-fio-jobs.py
 
     - name: Check build system consistency
       run: |

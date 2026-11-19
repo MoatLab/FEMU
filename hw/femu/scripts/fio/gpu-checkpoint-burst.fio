@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Checkpoint: a periodic burst of large sequential writes.
+#
+# One writer sends 1 MiB writes for 2 seconds, then pauses for 8 seconds,
+# as a trainer does when it saves its state between steps. The burst
+# fills the write buffer and the fast NAND tier, and the pause lets the
+# device drain them.
+#
+#   FEMU_DEV=/dev/ng0n1 fio gpu-checkpoint-burst.fio
+#
+# FEMU_DEV is the NVMe generic character device of the namespace. The
+# job writes over the namespace. Run FEMU with io_trace=FILE, then give
+# FILE to femu-trace2fio.py to check the shape.
+#
+# Rate limit: the job has a fixed "rate". These jobs study the SSD model
+# (write buffer, GC, WAF, tail latency). They do not measure the speed of
+# the emulator, so no job runs unthrottled. Do not remove the limit.
+# check-fio-jobs.py fails a job file that has none.
+#
+# The limit caps the mean rate. The start of a burst can use the share
+# of the pause before it, so it runs with no delay from fio. The limit
+# does not show that the host kept up in a burst: check that for each
+# run.
+#
+# fio 3.34 or newer: an older fio writes for 10 seconds before the first
+# pause.
+
+[global]
+ioengine=io_uring_cmd
+cmd_type=nvme
+filename=${FEMU_DEV}
+thread=1
+time_based=1
+runtime=60
+
+[checkpoint-burst]
+rw=write
+bs=1m
+iodepth=8
+thinktime=8s
+thinktime_iotime=2s
+# rate limit: see the header
+rate=32m
