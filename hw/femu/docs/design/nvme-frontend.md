@@ -339,8 +339,10 @@ controller. Their number depends on two properties:
                                        femu-poller 2: SQ2 SQ5 SQ8
                                        femu-poller 3: SQ3 SQ6
 
- per poller i:  to_ftl[i]    ring, poller i -> FTL thread, holds 65535
-                to_poller[i] ring, FTL thread -> poller i, holds 65535
+ per poller i:  to_ftl[i]    ring, poller i -> FTL thread
+                to_poller[i] ring, FTL thread -> poller i
+                  each ring holds 65535 requests, or more when
+                  ceil(queues / N) x (entries + 1) is larger
                 pq[i]        min-heap on expire_time, starts at 65536, grows
                 cpl_backlog[i]  completions waiting for CQ space
                 should_isr row  which CQs to interrupt after this sweep

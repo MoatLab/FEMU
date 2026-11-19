@@ -66460,6 +66460,136 @@ static void femu_test_g1_deep_queue(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+#define FEMU_G1_RING_QUEUES 17
+
+/* wait for an entry of phase @phase in slot @slot of the queue of @q */
+static void femu_g1_cqe_wait(QTestState *qts, FemuQueue *q, uint32_t slot,
+                             uint8_t phase, NvmeCqe *cqe)
+{
+    uint64_t addr = q->cq_addr + (uint64_t)slot * sizeof(*cqe);
+    NvmeCqe again;
+    int waited = 0;
+
+    for (;;) {
+        qtest_memread(qts, addr, cqe, sizeof(*cqe));
+        if ((le16_to_cpu(cqe->status) & 1) == phase) {
+            qtest_memread(qts, addr, &again, sizeof(again));
+            if (memcmp(cqe, &again, sizeof(again)) == 0) {
+                return;
+            }
+        }
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+        waited++;
+    }
+}
+
+/*
+ * queues=17,entries=4095: 17 full queues hold 69615 commands. A request
+ * ring of 65536 slots takes 65535 of them. x-cpl-hold 1 keeps each request
+ * on the ring that the poller reads, and x-cpl-count must find them all
+ * there. A ring that is too small refuses 4080 requests, the count stops
+ * at 65535, and those commands never complete. After the release each
+ * queue shows 4095 entries, one for each command, and takes a new command.
+ * NoSSD fills the ring to the FTL, and bbssd the ring from the FTL thread.
+ */
+static void femu_test_g1_ring_capacity(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t depth = FEMU_G1_DEPTH - 1;
+    const uint32_t sq_bytes = FEMU_G1_DEPTH * sizeof(NvmeCmd);
+    const uint32_t cq_bytes = FEMU_G1_DEPTH * sizeof(NvmeCqe);
+    FemuQueue q[FEMU_G1_RING_QUEUES];
+    uint64_t buf = guest_alloc(alloc, FEMU_G1_PAGE);
+    g_autofree NvmeRwCmd *sqes = g_new0(NvmeRwCmd, depth);
+    g_autofree NvmeCqe *cqes = g_new0(NvmeCqe, FEMU_G1_DEPTH);
+    g_autofree bool *seen = g_new0(bool, depth);
+    NvmeCqe cqe;
+    uint16_t cid;
+    uint32_t k;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    for (i = 0; i < FEMU_G1_RING_QUEUES; i++) {
+        memset(&q[i], 0, sizeof(q[i]));
+        q[i].qid = i + 1;
+        q[i].sq_addr = guest_alloc(alloc, sq_bytes);
+        q[i].cq_addr = guest_alloc(alloc, cq_bytes);
+        qtest_memset(qts, q[i].cq_addr, 0, cq_bytes);
+        g_assert_cmphex(femu_g1_create(&c, NVME_ADM_CMD_CREATE_CQ, q[i].qid,
+                                       q[i].cq_addr, depth, NVME_CQ_PC), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(femu_g1_create(&c, NVME_ADM_CMD_CREATE_SQ, q[i].qid,
+                                       q[i].sq_addr, depth,
+                                       (q[i].qid << 16) | NVME_SQ_PC), ==,
+                        NVME_SUCCESS);
+    }
+
+    /* an identifier is unique in its queue, so each queue takes one image */
+    for (k = 0; k < depth; k++) {
+        sqes[k].opcode = NVME_CMD_READ;
+        sqes[k].cid = cpu_to_le16(k);
+        sqes[k].nsid = cpu_to_le32(1);
+        sqes[k].dptr.prp1 = cpu_to_le64(buf);
+        sqes[k].slba = cpu_to_le64(k % 8);
+    }
+    femu_cancel_hook(qts, "g1-ring", "x-cpl-hold", 1);
+    for (i = 0; i < FEMU_G1_RING_QUEUES; i++) {
+        femu_g1_put(qts, q[i].sq_addr, (const uint8_t *)sqes,
+                    depth * sizeof(*sqes));
+        qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, q[i].qid), depth);
+    }
+    /* the ring holds every request: none was refused */
+    femu_cancel_wait_cpl(qts, "g1-ring", FEMU_G1_RING_QUEUES * depth);
+    for (i = 0; i < FEMU_G1_RING_QUEUES; i++) {
+        qtest_memread(qts, q[i].cq_addr, &cqe, sizeof(cqe));
+        g_assert_cmpuint(le16_to_cpu(cqe.status), ==, 0);
+    }
+    femu_cancel_hook(qts, "g1-ring", "x-cpl-hold", 0);
+
+    for (i = 0; i < FEMU_G1_RING_QUEUES; i++) {
+        /* the entries go to the slots in order, so this one is the last */
+        femu_g1_cqe_wait(qts, &q[i], depth - 1, 1, &cqe);
+        femu_g1_get(qts, q[i].cq_addr, (uint8_t *)cqes, cq_bytes);
+        memset(seen, 0, depth * sizeof(*seen));
+        for (k = 0; k < depth; k++) {
+            g_assert_cmphex(le16_to_cpu(cqes[k].status), ==, 1);
+            g_assert_cmpuint(le16_to_cpu(cqes[k].sq_id), ==, q[i].qid);
+            cid = le16_to_cpu(cqes[k].cid);
+            g_assert_cmpuint(cid, <, depth);
+            g_assert_false(seen[cid]);
+            seen[cid] = true;
+        }
+        /* a queue of 4096 entries is full with 4095: the last slot is free */
+        g_assert_cmpuint(le16_to_cpu(cqes[depth].status), ==, 0);
+    }
+
+    /*
+     * Each queue takes the head, and then two more commands. A queue has
+     * 4096 request slots and 4095 were in use, so the second command
+     * needs a slot that a completion gave back.
+     */
+    for (i = 0; i < FEMU_G1_RING_QUEUES; i++) {
+        q[i].sq_tail = depth;
+        q[i].cq_head = depth;
+        q[i].phase = 1;
+        qpci_io_writel(c.pdev, c.bar, femu_cq_doorbell(&c, q[i].qid), depth);
+        cid = c.cid;
+        femu_g1_deep_submit(&c, &q[i], buf, 2);
+        femu_g1_deep_reap(&c, &q[i], cid, 2);
+    }
+
+    for (i = 0; i < FEMU_G1_RING_QUEUES; i++) {
+        femu_queue_free(&c, &q[i]);
+    }
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /* host bytes of each of the @nr handles of the only namespace */
 static void femu_g1_handle_bytes(QTestState *qts, uint64_t *host, uint32_t nr)
 {
@@ -74498,6 +74628,18 @@ static void femu_register_nodes(void)
     qos_add_test("queue-depth-4096", "femu", femu_test_g1_deep_queue,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=g1-depth,entries=4095",
+    });
+    qos_add_test("ring-capacity-nossd", "femu", femu_test_g1_ring_capacity,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=g1-ring,queues=17,entries=4095,fw_cpu_ns=1",
+    });
+    qos_add_test("ring-capacity-bbssd", "femu", femu_test_g1_ring_capacity,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=g1-ring,devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,queues=17,entries=4095",
     });
     qos_add_test("fdp-256-handles", "femu", femu_test_g1_fdp_handles,
                  &(QOSGraphTestOptions) {

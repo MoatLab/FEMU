@@ -482,6 +482,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 #### Data correctness
 
+- A command is no longer lost when many queues are full at one time. The two request rings of a poller held 65535 requests, and a request that found a ring full got no completion; `queues=17,entries=4095` was enough. Each ring now holds every request of its poller: `ceil(queues / pollers) x (entries + 1)`. A default device keeps rings of 65536 slots.
 - `io_trace`, `io_stages` and the OCP latency monitor now share one completion time, taken right after the CQE write. Before, each read the clock later, so one could count the bookkeeping of another.
 - `hmb_mb`: when the host turns the Host Memory Buffer off, or a reset does, the translation pages changed while it was on are written again. Before, their flash copies stayed stale with no record of the change.
 - Write buffer: a page leaves the buffer only after it finds a place on the media. Before, a failed placement dropped the page. An FUA write or a Write Zeroes whose page finds no place now fails with Capacity Exceeded.

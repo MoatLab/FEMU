@@ -154,6 +154,9 @@ struct rte_ring *rte_ring_create(const char *name, unsigned count,
 	}
 
     r = (struct rte_ring *)valloc(ring_size);
+    if (r == NULL) {
+        return NULL;
+    }
 
     rte_ring_init(r, name, requested_count, flags);
 

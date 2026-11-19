@@ -455,6 +455,37 @@ static uint32_t nvme_arb_burst(FemuCtrl *n)
     return ab == 7 ? UINT32_MAX : 1u << ab;
 }
 
+/*
+ * The ring to the FTL took no request. The ring holds every request of
+ * the poller's queues (nvme_init_poller()), so this means a broken device
+ * model. The host still gets its completion: the FTL does not run the
+ * command, and it ends with Internal Device Error through the backlog.
+ */
+static void nvme_handoff_failed(FemuCtrl *n, NvmeRequest *req,
+                                int index_poller)
+{
+    int64_t now = femu_io_now(n);
+
+    femu_err("to_ftl[%d] is full: command %u ends with an error\n",
+             index_poller, (unsigned)le16_to_cpu(req->cqe.cid));
+    nvme_req_release_ranges(req);
+    nvme_eol_release(req);
+    g_clear_pointer(&req->write_data, g_free);
+    /* it completes now, as an immediate abort does (femu-cancel.c) */
+    req->reqlat = 0;
+    req->expire_time = MIN(req->expire_time, now);
+    if (n->stage_sets) {
+        req->t_return = now;
+    }
+    if (req->status == NVME_SUCCESS) {
+        req->status = NVME_INTERNAL_DEV_ERROR;
+        req->cqe.res64 = 0;
+        /* a write may have changed data that the FTL does not map */
+        n->persist_torn = true;
+    }
+    QTAILQ_INSERT_TAIL(&n->cpl_backlog[index_poller], req, entry);
+}
+
 /* Take at most @burst commands of one queue; returns how many it took. */
 static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
                                    uint32_t burst)
@@ -774,8 +805,8 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
                 req->t_handoff = femu_io_now(n);
             }
             rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
-            if (rc != 1) {
-                femu_err("enqueue failed, ret=%d\n", rc);
+            if (unlikely(rc != 1)) {
+                nvme_handoff_failed(n, req, index_poller);
             }
         }
 

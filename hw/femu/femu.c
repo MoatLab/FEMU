@@ -3709,9 +3709,19 @@ static void *femu_ftl_thread(void *arg)
                 femu_power_busy(n, req->expire_time);
             }
 
+            /*
+             * The ring holds every request of its poller's queues
+             * (nvme_init_poller()), so it takes this one. If it does not,
+             * keep the request: the poller empties the ring each sweep.
+             * A pause waits for this pass, so it waits for the ring too.
+             */
             rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
-            if (rc != 1) {
-                femu_err("FEMU: FTL to_poller enqueue failed\n");
+            if (unlikely(rc != 1)) {
+                femu_err("FEMU: to_poller[%d] is full, the FTL waits\n", i);
+                do {
+                    usleep(100);
+                    rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
+                } while (rc != 1 && !n->ftl_stopping);
             }
 
             n->ftl_in_sweep = false;

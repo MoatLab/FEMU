@@ -4,6 +4,7 @@
 #include "./ocssd/oc-timing.h"
 #include "./nvme-opal.h"
 #include "system/qtest.h"
+#include "qemu/host-utils.h"
 #include "trace.h"
 
 #define NVME_IDENTIFY_DATA_SIZE 4096
@@ -625,8 +626,28 @@ static void set_pos(void *a, size_t pos)
     ((NvmeRequest *)a)->pos = pos;
 }
 
+/*
+ * The slots of each request ring of a poller. A request is one of the
+ * objects of a submission queue, and it is in one place at a time, so a
+ * ring that holds the objects of all queues of a poller is never full:
+ *
+ *   queues of a poller  <=  ceil(queues / pollers)
+ *   objects of a queue  <=  entries + 1           (QSIZE <= MQES)
+ *   slots  =  pow2ceil(product + 1), a ring keeps one slot empty
+ *
+ * FEMU_MAX_INF_REQS is the least, so a default device keeps its rings.
+ */
+static uint32_t nvme_ring_slots(FemuCtrl *n)
+{
+    uint64_t sqs = 1 + (n->nr_io_queues - 1) / n->nr_pollers;
+    uint64_t reqs = sqs * ((uint64_t)n->max_q_ents + 1);
+
+    return MAX((uint64_t)FEMU_MAX_INF_REQS, pow2ceil(reqs + 1));
+}
+
 static void nvme_init_poller(FemuCtrl *n)
 {
+    uint32_t slots;
     int i;
 
     /*
@@ -685,9 +706,10 @@ static void nvme_init_poller(FemuCtrl *n)
     }
 
     /* Coperd: we put NvmeRequest into these rings */
+    slots = nvme_ring_slots(n);
     n->to_ftl = g_malloc0(sizeof(struct rte_ring *) * (n->nr_pollers + 1));
     for (i = 1; i <= n->nr_pollers; i++) {
-        n->to_ftl[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
+        n->to_ftl[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, slots);
         if (!n->to_ftl[i]) {
             femu_err("Failed to create ring (n->to_ftl) ...\n");
             abort();
@@ -697,7 +719,7 @@ static void nvme_init_poller(FemuCtrl *n)
 
     n->to_poller = g_malloc0(sizeof(struct rte_ring *) * (n->nr_pollers + 1));
     for (i = 1; i <= n->nr_pollers; i++) {
-        n->to_poller[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, FEMU_MAX_INF_REQS);
+        n->to_poller[i] = femu_ring_create(FEMU_RING_TYPE_MP_SC, slots);
         if (!n->to_poller[i]) {
             femu_err("Failed to create ring (n->to_poller) ...\n");
             abort();
