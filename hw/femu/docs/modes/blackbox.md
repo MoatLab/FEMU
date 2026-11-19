@@ -131,22 +131,29 @@ Two rules start GC. Each rule compares the free lines with a threshold.
 - The background rule starts when the share of lines in use reaches
   `gc_thres_pcent` (75). It makes one attempt after each command, reads
   included. It does not wait for idle time.
-- The background rule takes a victim only when 1/8 or more of its data
-  pages are invalid. The division is in whole pages.
+- The background rule takes a victim only when its invalid pages are at
+  least its data pages / 8, rounded down. For 16 data pages the limit is 2.
+  For 15 data pages it is 1, so the share can be below 1/8.
 - The forced rule runs inside writes from `gc_thres_pcent_high` (95). It
   has no 1/8 test.
 - With FDP the two rules are the same. They count free reclaim units in
   each reclaim group.
 
 The 1/8 test permits a victim that is 7/8 valid. Such a victim costs 7
-copies for each page that it frees, so the WAF of background GC can reach 8.
-A namespace that fills `gc_thres_pcent` of the lines keeps the device at
-the background threshold at all times. Each command then starts an attempt,
-and the WAF stays near 8 for random overwrites.
+copies for each page that it frees. Let the data pages of a line be a
+multiple of 8. Background reclaim then programs at most 8 pages for each
+page that it frees.
+
+A namespace that fills `gc_thres_pcent` of
+the lines keeps the device at the background threshold at all times. Each
+command then starts an attempt. One measured random overwrite workload of
+this kind gave a WAF of 7.76.
 
 To prevent this, keep the namespace below that share of the lines. A higher
-`gc_thres_pcent` has the same effect. Only the forced rule stays when the
-two properties are equal.
+`gc_thres_pcent` has the same effect. Equal values of the two properties
+remove the space between the thresholds. They do not turn off the
+background rule. The background attempt comes after the command, and the
+last page of a write can take the free count down to the threshold.
 
 `gc_bg_invalid_pcent` replaces the 1/8 test of the background rule. It is
 the least percent of invalid pages in a background victim, from 1 to 100.
@@ -156,7 +163,8 @@ test, and the forced rule does not use the property.
 ```
  gc_bg_invalid_pcent   background victim must have    copies for each
                                                       freed page, at most
- 0 (default)           invalid pages >= pages / 8     7
+ 0 (default)           invalid pages >= pages / 8     7 (pages a multiple
+                       (rounded down)                 of 8)
  25                    invalid x 100 >= pages x 25    3
  50                    invalid x 100 >= pages x 50    1
  100                   no valid page                  0
@@ -420,8 +428,9 @@ Read the write amplification factor and media counters from the vendor log
 page C0h. The first four bytes are the WAF times 1000, bytes 4 to 7 are
 reserved, and the three 8-byte counters from byte 8 are host pages written,
 pages GC moved, and host pages programmed. The third counter does not
-include the pages that GC moved. The NAND programs of a run are the total
-of the second and third counters:
+include the pages that GC moved. The data-page programs of a run are the
+total of the second and third counters. Translation, pad and parity pages
+are not in either counter:
 
 ```sh
 sudo nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | od -An -t u4 -N 4

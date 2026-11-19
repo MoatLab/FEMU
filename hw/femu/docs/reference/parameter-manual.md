@@ -391,7 +391,7 @@ Interactions:
 - Background GC takes only a line with at least 1/8 of its pages invalid;
   forced GC takes the best line whatever it holds.
 - `gc_bg_invalid_pcent` sets another share than 1/8. A value of 50 holds
-  the WAF of background GC at 2 or less.
+  background reclaim at 2 or fewer pages programmed for each page freed.
 - Set `gc_thres_pcent` above the share of the NAND the namespace fills.
   Below it, background GC never stops and the WAF settles near 8
   ([tutorial 02](../tutorials/02-gc-and-waf.md#3-the-gc-threshold)).

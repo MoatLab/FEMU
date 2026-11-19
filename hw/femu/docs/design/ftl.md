@@ -560,18 +560,30 @@ after it chooses its line. The filter divides in whole pages:
     if victim.ipc < data pages of the line / 8:  no GC in this attempt
     else:                                        copy victim.vpc pages, erase
 
-  cost of the filter
+  cost of the filter, for data pages a multiple of 8
     least invalid share of a background victim = 1/8
     copies for each freed page                 <= 7
-    WAF of background GC                       <= 8
+    pages programmed for each freed page       <= 8
+
+  other sizes: the limit is rounded down
+    15 data pages:  limit 1, up to 14 copies for each freed page
+    < 8 data pages: limit 0
 ```
 
+The bound covers background reclaim only. The C0h WAF also holds forced
+GC, translation, pad and parity pages.
+
 A device at or below the background watermark makes an attempt for each
-command. With random overwrites, the best victim then passes 1/8 by only a
-few pages, and the WAF stays near 8. This occurs when the namespace fills
-`gc_thres_pcent` of the lines. A namespace below that share, or a higher
-`gc_thres_pcent`, lets victims collect more invalid pages first. Equal
-watermarks leave only forced GC.
+command. With random overwrites, the best victim then passes the limit by
+only a few pages. One measured workload of this kind gave a WAF of 7.76.
+This occurs when the namespace fills `gc_thres_pcent` of the lines. A
+namespace below that share, or a higher `gc_thres_pcent`, lets victims
+collect more invalid pages first.
+
+Equal watermarks do not turn off background GC. Forced GC checks before
+each page is programmed, and the background pass runs after the command.
+The last page of a write can open a new line and take the free count down
+to the threshold. A read can also start a background attempt there.
 
 For FDP, `fdp_bg_worth_collecting()` applies the same filter to a reclaim
 unit. That filter counts each page that the erase gives back. A unit with
@@ -592,13 +604,15 @@ compared with no division:
           ssd_bg_share_ok(npages - vpc, npages)
 
   users:  each background pass (after a command, gc_pace victim choice,
-          gc_idle_ms steps, FDP groups); forced GC does not call it
+          gc_idle_ms steps, FDP groups); a forced pass does not use the
+          result (FDP cost-benefit and fifo compute it while they scan)
 ```
 
 A victim with no valid page always passes when the property is set. Its
-erase costs no copy. The WAF bound of background GC is then 100 divided by
-the property value. A high value moves work to forced GC, because the
-background pass frees fewer lines.
+erase costs no copy. The bound on pages programmed for each page that
+background reclaim frees is then 100 divided by the property value. A high
+value moves work to forced GC, because the background pass frees fewer
+lines.
 
 A GC step returns -1 when there is no victim, when the background filter
 rejects it, or when the victim's valid pages cannot all be moved; the forced
@@ -1827,9 +1841,10 @@ lists the offsets.
 The buffer read and write counts move with or without a buffer, so their
 ratio is the hit rate. Telemetry log 07h captures the same 512 bytes.
 
-The name `nand_write_pages` does not mean each page programmed to NAND. It
-counts host pages only. The data pages that a run programs are the total of
-two counters:
+The name `nand_write_pages` does not mean each page programmed to NAND. In
+bbssd, CSD and FDP it counts host pages only. The data pages that a run
+programs are the total of two counters. A KV namespace with
+`kv_index=lsm` also adds its merge programs to `nand_write_pages`.
 
 ```
   counter            host pages  GC copies  translation, pad, parity

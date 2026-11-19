@@ -63,8 +63,8 @@ largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.
 Bytes 8 and 24 are equal when no write buffer is configured; a buffer that
 absorbs repeated writes to one page makes the factor drop below 1.
-Offset 24 counts host pages only. The data pages programmed to NAND are the
-total of offsets 16 and 24.
+For bbssd, CSD and FDP, offset 24 counts host pages only. The data pages
+programmed to NAND are then the total of offsets 16 and 24.
 
 A KV namespace with `kv_index=lsm` adds its merge programs to offset 24. It
 adds the meta pages that value GC moves to offset 16. Thus its factor
