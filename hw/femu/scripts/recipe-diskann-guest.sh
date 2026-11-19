@@ -128,11 +128,10 @@ recipe_workdir=$workdir
 echo "DISKANN_DEVICE=$ns_name workdir=$workdir"
 
 export DEBIAN_FRONTEND=noninteractive
-bounded "$install_limit" apt-get -qq update >/dev/null 2>&1 ||
-    setup_fail apt-update
-bounded "$install_limit" apt-get -qq install -y git make cmake g++ \
-    libaio-dev libgoogle-perftools-dev clang-format libboost-all-dev \
-    libmkl-full-dev e2fsprogs >/dev/null 2>&1 || setup_fail apt-install
+apt_step "$install_limit" update || setup_fail apt-update
+apt_step "$install_limit" install -y git make cmake g++ libaio-dev \
+    libgoogle-perftools-dev clang-format libboost-all-dev libmkl-full-dev \
+    e2fsprogs || setup_fail apt-install
 
 # The build goes to $prefix and is used again when the ref matches.
 stamp=$prefix/femu-diskann-ref

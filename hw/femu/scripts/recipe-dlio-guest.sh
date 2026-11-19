@@ -116,11 +116,10 @@ recipe_workdir=$workdir
 echo "DLIO_DEVICE=$ns_name workdir=$workdir"
 
 export DEBIAN_FRONTEND=noninteractive
-bounded "$install_limit" apt-get -qq update >/dev/null 2>&1 ||
-    setup_fail apt-update
-bounded "$install_limit" apt-get -qq install -y git build-essential \
-    python3-dev python3-venv openmpi-bin libopenmpi-dev e2fsprogs \
-    >/dev/null 2>&1 || setup_fail apt-install
+apt_step "$install_limit" update || setup_fail apt-update
+apt_step "$install_limit" install -y git build-essential python3-dev \
+    python3-venv openmpi-bin libopenmpi-dev e2fsprogs ||
+    setup_fail apt-install
 
 # The install goes to $prefix and is used again when the ref matches.
 stamp=$prefix/femu-dlio-ref

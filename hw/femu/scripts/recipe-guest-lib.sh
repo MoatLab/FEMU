@@ -27,6 +27,20 @@ bounded() {
     timeout -k 30 "$limit" "$@"
 }
 
+# Run apt-get with the arguments $2... and a time limit of $1 seconds.
+# The output goes to apt.log in the scratch directory. A failure prints
+# the last lines, so the cause is in the output of the runner.
+apt_step() {
+    local limit=$1
+    local log=$recipe_workdir/apt.log
+    shift
+
+    if ! bounded "$limit" apt-get -qq "$@" >>"$log" 2>&1; then
+        tail -n 20 "$log"
+        return 1
+    fi
+}
+
 # Clean up, write the completion marker, print the result line and exit.
 # A cleanup or a marker that fails does not stop the result line.
 recipe_end() {
