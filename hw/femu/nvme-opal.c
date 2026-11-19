@@ -220,7 +220,8 @@ bool femu_opal_io(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
     /* a structural error comes before the lock result */
     if ((cmd->opcode == NVME_CMD_READ || cmd->opcode == NVME_CMD_WRITE ||
-         cmd->opcode == NVME_CMD_COMPARE) && nvme_check_mdts(n, size)) {
+         cmd->opcode == NVME_CMD_COMPARE) &&
+        (nvme_check_mdts(n, size) || size > UINT32_MAX)) {
         return false;
     }
     a = femu_opal_access(n->opal_view, op, slba, nlb);

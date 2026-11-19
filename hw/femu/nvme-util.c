@@ -650,7 +650,8 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                             cmd->opcode, ns->csi);
         return NVME_LBA_RANGE | NVME_DNR;
     }
-    if (nvme_check_mdts(n, data_size)) {
+    /* the data pointer is walked with a 32-bit length */
+    if (nvme_check_mdts(n, data_size) || data_size > UINT32_MAX) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                             offsetof(NvmeRwCmd, nlb), nlb, ns->id,
                             cmd->opcode, ns->csi);

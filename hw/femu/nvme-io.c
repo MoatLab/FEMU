@@ -2530,7 +2530,8 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     if (ns->mdata && NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas)) {
         return nvme_compare_extended(n, ns, cmd, slba, nlb, offset);
     }
-    if (nvme_check_mdts(n, data_size)) {
+    /* as for Read and Write, the data pointer takes a 32-bit length */
+    if (nvme_check_mdts(n, data_size) || data_size > UINT32_MAX) {
         nvme_set_error_page(n, req->sq->sqid, cmd->cid, NVME_INVALID_FIELD,
                             offsetof(NvmeRwCmd, nlb), nlb, ns->id,
                             cmd->opcode, ns->csi);
@@ -2608,7 +2609,8 @@ static uint16_t nvme_compare(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
          * the previous code compared against a zeroed buffer, so any non-zero
          * device data spuriously failed the compare.
          */
-        if (nvme_addr_read(n, req->qsg.sg[i].base, host, len)) {
+        /* not nvme_addr_read(): its int size is negative from 2 GiB */
+        if (femu_dma_read(n, req->qsg.sg[i].base, host, len)) {
             g_free(host);
             qemu_sglist_destroy(&req->qsg);
             backend_unlock_range(n->mbe, lock_off, data_size);

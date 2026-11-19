@@ -1624,6 +1624,10 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     req->is_write = ((rw->opcode == NVME_CMD_WRITE) || (rw->opcode == NVME_CMD_ZONE_APPEND)) ? 1 : 0;
 
     status = nvme_check_mdts(n, data_size);
+    /* the data pointer is walked with a 32-bit length */
+    if (!status && data_size > UINT32_MAX) {
+        status = NVME_INVALID_FIELD | NVME_DNR;
+    }
     if (status) {
         goto err;
     }

@@ -482,6 +482,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 #### Data correctness
 
+- Read, Write, Compare, and ZNS Read, Write and Zone Append refuse a transfer of 4 GiB or more with Invalid Field. This needs blocks of 64 KiB or more, and `mdts=0` or an `mdts` of 20 or more. The data pointer walk takes a 32-bit length, so such a transfer moved only a part of the data, or none: a Compare of 4 GiB reported a match without a compare, and an SGL transfer of 4 GiB left one list allocated. A Compare through one SGL data block of 2 GiB or more no longer writes past its buffer.
 - A command is no longer lost when many queues are full at one time. The two request rings of a poller held 65535 requests, and a request that found a ring full got no completion; `queues=17,entries=4095` was enough. Each ring now holds every request of its poller: `ceil(queues / pollers) x (entries + 1)`. A default device keeps rings of 65536 slots.
 - `io_trace`, `io_stages` and the OCP latency monitor now share one completion time, taken right after the CQE write. Before, each read the clock later, so one could count the bookkeeping of another.
 - `hmb_mb`: when the host turns the Host Memory Buffer off, or a reset does, the translation pages changed while it was on are written again. Before, their flash copies stayed stale with no record of the change.
