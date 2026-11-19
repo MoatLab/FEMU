@@ -49,6 +49,7 @@ bool zns_query_collect(NvmeNamespace *ns, FemuQueryZoned *q)
     q->max_open = ns->max_open_zones;
     q->max_active = ns->max_active_zones;
     q->num_zones = ns->num_zones;
+    q->page_overruns = qatomic_read(&ns->zns->page_overruns);
     q->counts[FEMU_ZONE_STATE_EMPTY] = st[NVME_ZONE_STATE_EMPTY];
     q->counts[FEMU_ZONE_STATE_IMPLICITLY_OPEN] =
         st[NVME_ZONE_STATE_IMPLICITLY_OPEN];

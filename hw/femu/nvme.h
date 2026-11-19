@@ -2108,6 +2108,8 @@ typedef struct NvmeRequest {
     uint32_t        *zone_finishes;
     uint32_t        *zone_finish_gens;
     uint32_t        nr_zone_finishes;
+    /* a zoned write: the generation of its zone when it was placed */
+    uint32_t        zone_gen;
 
     /*
      * Placement identifiers a Reclaim Unit Handle Update named, in host order,

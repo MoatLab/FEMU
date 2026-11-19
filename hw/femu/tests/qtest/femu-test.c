@@ -14143,6 +14143,27 @@ static void femu_zns_ftl_hold(QTestState *qts, bool hold)
  * - "lateread": as "latefive", with a read between each two writes.
  * - "twogen": the FTL thread waits while Reset, write, Finish arrive twice
  *   for zone 0. The first Finish still waits for its own program.
+ * - "fill": zone 0 holds one stripe (zns_zone_cap=32K, 8 pages). The write
+ *   that fills it programs the stripe, so it takes the program, and a
+ *   read then pays the NAND read. The 7 writes before it stay cached.
+ * - "fillfin": as "fill", but a Finish follows the filling write at once.
+ *   The zone is Full already, and the Finish waits for the program.
+ * - "zrwaend": as "fill", with a ZRWA of the whole zone. A write that ends
+ *   at the capacity leaves the zone open, so it programs nothing. Then 20
+ *   rewrites alternate between two LPNs: the 8-entry cache holds both, so
+ *   it never fills and programs nothing.
+ * - "overrun": one write cache, and one-page writes that alternate
+ *   between zones 0 and 1. Each eviction pads a whole NAND page for 4 KiB,
+ *   so the 128 pages of a zone's blocks run out at 512 KiB written. The
+ *   flushes after that count page-overruns: (160 - 128) for zone 0 and
+ *   (159 - 128) for zone 1, whose last page stays cached until a Finish
+ *   adds one more. Every write still reads back. The sequential "fill"
+ *   ends with page-overruns 0.
+ * - "tlcfill": TLC, so a block of 64 pages ends inside a wordline of 3. A
+ *   sequential fill of zone 0 still places every page: page-overruns 0.
+ * - "lostfill": as "fill", 7 pages, then a controller reset drops a Reset
+ *   before the FTL thread runs it. The first write of the new generation
+ *   fills nothing, so it programs nothing.
  */
 static void femu_test_zns_finish_flush(void *obj, void *data,
                                        QGuestAllocator *alloc)
@@ -14159,6 +14180,12 @@ static void femu_test_zns_finish_flush(void *obj, void *data,
     bool two = !strcmp(data, "twogen");
     bool refin = !strcmp(data, "refinish");
     bool held = !strcmp(data, "heldreset");
+    bool fillfin = !strcmp(data, "fillfin");
+    bool zrwaend = !strcmp(data, "zrwaend");
+    bool lostfill = !strcmp(data, "lostfill");
+    bool overrun = !strcmp(data, "overrun");
+    bool tlcfill = !strcmp(data, "tlcfill");
+    bool fill = !strcmp(data, "fill") || fillfin;
     uint8_t report[192];
     uint64_t buf, page, zone1;
     int64_t ms;
@@ -14242,6 +14269,190 @@ static void femu_test_zns_finish_flush(void *obj, void *data,
         femu_queue_free(&c, &c.io);
         femu_disable(&c);
         /* zone 0 is Full now: the next test needs a new device */
+        qos_invalidate_command_line();
+        return;
+    }
+    if (tlcfill) {
+        uint64_t lpb = FEMU_DATA_SIZE / c.lba_size;
+        uint64_t zsze = ldq_le_p(report + 128 + 16);
+        QDict *rsp;
+        QDict *ns;
+
+        for (uint64_t lba = 0; lba < zsze; lba += lpb) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lba, buf)),
+                            ==, NVME_SUCCESS);
+        }
+        femu_zone_report(&c, page, report);
+        g_assert_cmpint(femu_zr_state(report, 0), ==, NVME_ZONE_STATE_FULL);
+        ns = femu_query_ns(qts, "'kind':'zones','limit':1", &rsp);
+        g_assert_cmpint(qdict_get_int(ns, "page-overruns"), ==, 0);
+        qobject_unref(rsp);
+        guest_free(alloc, page);
+        guest_free(alloc, buf);
+        femu_queue_free(&c, &c.io);
+        femu_disable(&c);
+        qos_invalidate_command_line();
+        return;
+    }
+    if (overrun) {
+        uint64_t lpb = FEMU_DATA_SIZE / c.lba_size;
+        uint64_t zsze = ldq_le_p(report + 128 + 16);
+        QDict *rsp;
+        QDict *ns;
+
+        for (int i = 0; i < 160; i++) {
+            qtest_memset(qts, buf, i & 0xff, FEMU_DATA_SIZE);
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * lpb,
+                                            buf)), ==, NVME_SUCCESS);
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                            zsze + i * lpb, buf)), ==,
+                            NVME_SUCCESS);
+        }
+        ns = femu_query_ns(qts, "'kind':'zones','limit':1", &rsp);
+        g_test_message("page-overruns %" PRId64,
+                       qdict_get_int(ns, "page-overruns"));
+        g_assert_cmpint(qdict_get_int(ns, "page-overruns"), ==, 63);
+        qobject_unref(rsp);
+        g_assert_cmpint(femu_zone_action(&c, zsze, NVME_ZONE_ACTION_FINISH),
+                        ==, NVME_SUCCESS);
+        ns = femu_query_ns(qts, "'kind':'zones','limit':1", &rsp);
+        g_assert_cmpint(qdict_get_int(ns, "page-overruns"), ==, 64);
+        qobject_unref(rsp);
+        for (int i = 0; i < 160; i += 31) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, i * lpb,
+                                            buf)), ==, NVME_SUCCESS);
+            g_assert_cmphex(qtest_readb(qts, buf), ==, i & 0xff);
+        }
+        guest_free(alloc, page);
+        guest_free(alloc, buf);
+        femu_queue_free(&c, &c.io);
+        femu_disable(&c);
+        qos_invalidate_command_line();
+        return;
+    }
+    if (lostfill) {
+        for (int i = 0; i < 7; i++) {
+            femu_zns_ms(&c, NVME_CMD_WRITE,
+                        i * (FEMU_DATA_SIZE / c.lba_size), buf);
+        }
+        femu_zns_ftl_hold(qts, true);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_ZONE_MGMT_SEND;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.cdw13 = cpu_to_le32(NVME_ZONE_ACTION_RESET);
+        femu_submit(&c, &c.io, &cmd);
+        g_usleep(300 * 1000);
+        femu_disable(&c);
+        femu_zns_ftl_hold(qts, false);
+        memset(&c, 0, sizeof(c));
+        femu_enable_csi(&c, &femu->dev, alloc);
+        femu_create_io_queues(&c);
+        ms = femu_zns_ms(&c, NVME_CMD_WRITE, 0, buf);
+        g_test_message("write %" PRId64 " ms", ms);
+        g_assert_cmpint(ms, <, 100);
+        guest_free(alloc, page);
+        guest_free(alloc, buf);
+        femu_queue_free(&c, &c.io);
+        femu_disable(&c);
+        qos_invalidate_command_line();
+        return;
+    }
+    if (zrwaend) {
+        uint32_t open = NVME_ZONE_ACTION_OPEN | (NVME_ZSFLAG_ZRWA_ALLOC << 8);
+
+        g_assert_cmpint(femu_zone_action(&c, 0, open), ==, NVME_SUCCESS);
+        for (int i = 0; i < 3; i++) {
+            ms = femu_zns_ms(&c, NVME_CMD_WRITE,
+                             56, buf);
+            g_test_message("overwrite %d: %" PRId64 " ms", i, ms);
+            g_assert_cmpint(ms, <, 100);
+        }
+        for (int i = 0; i < 20; i++) {
+            ms = femu_zns_ms(&c, NVME_CMD_WRITE, i % 2 ? 56 : 48, buf);
+            g_assert_cmpint(ms, <, 100);
+        }
+        femu_zone_report(&c, page, report);
+        g_assert_cmpint(femu_zr_state(report, 0), ==,
+                        NVME_ZONE_STATE_EXPLICITLY_OPEN);
+        g_assert_cmpuint(ldq_le_p(report + 64 + 24), ==, 0);
+        guest_free(alloc, page);
+        guest_free(alloc, buf);
+        femu_queue_free(&c, &c.io);
+        femu_disable(&c);
+        qos_invalidate_command_line();
+        return;
+    }
+    if (fillfin) {
+        NvmeRwCmd rw = { 0 };
+        uint16_t fin_cid;
+        int64_t start;
+
+        for (int i = 0; i < 7; i++) {
+            femu_zns_ms(&c, NVME_CMD_WRITE,
+                        i * (FEMU_DATA_SIZE / c.lba_size), buf);
+        }
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(7 * (FEMU_DATA_SIZE / c.lba_size));
+        rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+        start = g_get_monotonic_time();
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        /* the poller makes the zone Full before it takes the Finish */
+        g_usleep(20 * 1000);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_ZONE_MGMT_SEND;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.cdw13 = cpu_to_le32(NVME_ZONE_ACTION_FINISH);
+        fin_cid = c.cid;
+        femu_submit(&c, &c.io, &cmd);
+        ms = -1;
+        for (int i = 0; i < 2; i++) {
+            uint16_t got;
+
+            g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)),
+                            ==, NVME_SUCCESS);
+            if (got == fin_cid) {
+                ms = (g_get_monotonic_time() - start) / 1000;
+            }
+        }
+        g_test_message("finish %" PRId64 " ms", ms);
+        g_assert_cmpint(ms, >=, 190);
+        guest_free(alloc, page);
+        guest_free(alloc, buf);
+        femu_queue_free(&c, &c.io);
+        femu_disable(&c);
+        qos_invalidate_command_line();
+        return;
+    }
+    if (fill) {
+        for (int i = 0; i < 8; i++) {
+            ms = femu_zns_ms(&c, NVME_CMD_WRITE,
+                             i * (FEMU_DATA_SIZE / c.lba_size), buf);
+            g_test_message("write %d: %" PRId64 " ms", i, ms);
+            if (i < 7) {
+                g_assert_cmpint(ms, <, 100);
+            } else {
+                g_assert_cmpint(ms, >=, 190);
+            }
+        }
+        femu_zone_report(&c, page, report);
+        g_assert_cmpint(femu_zr_state(report, 0), ==, NVME_ZONE_STATE_FULL);
+        ms = femu_zns_ms(&c, NVME_CMD_READ, 0, buf);
+        g_test_message("read %" PRId64 " ms", ms);
+        g_assert_cmpint(ms, >=, 95);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, 0x6b);
+        {
+            QDict *rsp;
+            QDict *ns = femu_query_ns(qts, "'kind':'zones','limit':1", &rsp);
+
+            g_assert_cmpint(qdict_get_int(ns, "page-overruns"), ==, 0);
+            qobject_unref(rsp);
+        }
+        guest_free(alloc, page);
+        guest_free(alloc, buf);
+        femu_queue_free(&c, &c.io);
+        femu_disable(&c);
         qos_invalidate_command_line();
         return;
     }
@@ -45481,9 +45692,9 @@ static void femu_test_memory_ftl(void *obj, void *data,
                 g_assert_cmpuint(qdict_get_int(o, "media"), >, 0);
                 /*
                  * Two bitmaps of 65536 blocks (16384 bytes), and three
-                 * write caches with their LPN arrays (288 bytes).
+                 * write caches with their LPN arrays (312 bytes).
                  */
-                g_assert_cmpuint(qdict_get_int(o, "other"), ==, 16672);
+                g_assert_cmpuint(qdict_get_int(o, "other"), ==, 16696);
             }
         }
         g_assert_cmpuint(nr_ns, ==, 1);
@@ -67241,6 +67452,57 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
             "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
             "zns_pg_wr_lat=200000000,zns_pg_rd_lat=100000000"
+    });
+    qos_add_test("zns-finish-flush-fill", "femu", femu_test_zns_finish_flush,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fill",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "zns_zone_cap=32K,zns_pg_wr_lat=200000000,"
+            "zns_pg_rd_lat=100000000"
+    });
+    qos_add_test("zns-finish-flush-fillfin", "femu",
+                 femu_test_zns_finish_flush, &(QOSGraphTestOptions) {
+        .arg = (void *)"fillfin",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "zns_zone_cap=32K,zns_pg_wr_lat=200000000,"
+            "zns_pg_rd_lat=100000000"
+    });
+    qos_add_test("zns-finish-flush-overrun", "femu",
+                 femu_test_zns_finish_flush, &(QOSGraphTestOptions) {
+        .arg = (void *)"overrun",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,zns_num_wc=1"
+    });
+    qos_add_test("zns-finish-flush-tlcfill", "femu",
+                 femu_test_zns_finish_flush, &(QOSGraphTestOptions) {
+        .arg = (void *)"tlcfill",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=3"
+    });
+    qos_add_test("zns-finish-flush-lostfill", "femu",
+                 femu_test_zns_finish_flush, &(QOSGraphTestOptions) {
+        .arg = (void *)"lostfill",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,"
+            "zns_num_lun=1,zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "zns_zone_cap=32K,zns_pg_wr_lat=200000000,"
+            "zns_pg_rd_lat=100000000"
+    });
+    qos_add_test("zns-finish-flush-zrwaend", "femu",
+                 femu_test_zns_finish_flush, &(QOSGraphTestOptions) {
+        .arg = (void *)"zrwaend",
+        .edge.extra_device_opts =
+            "devsz_mb=32,femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,"
+            "zns_num_plane=2,zns_num_blk=32,zns_flash_type=1,"
+            "zns_zone_cap=32K,zns_pg_wr_lat=200000000,"
+            "zns_pg_rd_lat=100000000,"
+            "zns_zrwa_size=64,zns_zrwafg_size=8,zns_zrwa_num=1"
     });
     qos_add_test("zns-finish-flush-drop", "femu", femu_test_zns_finish_flush,
                  &(QOSGraphTestOptions) {

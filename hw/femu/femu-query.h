@@ -212,6 +212,7 @@ typedef struct FemuQueryZoned {
     uint32_t max_active;
     uint32_t num_zones;
     uint32_t counts[FEMU_ZONE_STATE__MAX];
+    uint64_t page_overruns;
 
     uint32_t offset;
     uint32_t max_zones;

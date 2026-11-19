@@ -226,6 +226,10 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
     ns->zns->ftl_fin_ns = g_new0(uint64_t, ns->num_zones);
     g_free(ns->zns->fin_done);
     ns->zns->fin_done = g_new0(uint64_t, ns->num_zones);
+    g_free(ns->zns->ftl_lbas);
+    ns->zns->ftl_lbas = g_new0(uint64_t, ns->num_zones);
+    g_free(ns->zns->ftl_lbas_gen);
+    ns->zns->ftl_lbas_gen = g_new0(uint32_t, ns->num_zones);
     if (!ns->zns->fin_ev) {
         qemu_mutex_init(&ns->zns->fin_lock);
         ns->zns->fin_ev = g_array_new(false, false, sizeof(ZnsFinEvent));
@@ -437,6 +441,8 @@ static void zns_free_params(NvmeNamespace *ns)
     g_free(zns->ftl_fin);
     g_free(zns->ftl_fin_ns);
     g_free(zns->fin_done);
+    g_free(zns->ftl_lbas);
+    g_free(zns->ftl_lbas_gen);
     if (zns->fin_ev) {
         g_array_free(zns->fin_ev, true);
         g_array_free(zns->fin_wait, true);
@@ -846,6 +852,10 @@ static uint16_t zns_auto_open_zone(NvmeNamespace *ns, NvmeZone *zone)
     return status;
 }
 
+static void zns_finish_note(NvmeNamespace *ns, NvmeZone *zone,
+                            NvmeRequest *req, bool record);
+static void zns_fill_note(NvmeNamespace *ns, NvmeZone *zone);
+
 static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool failed)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
@@ -894,6 +904,8 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
         if (zone->w_ptr >= zns_zone_wr_boundary(zone)) {
             zns_zrwa_release(ns, zone);
             zns_zone_set_full(ns, zone);
+            /* the ZRWA writes sit in the cache: program them, as Finish does */
+            zns_finish_note(ns, zone, NULL, true);
         }
         return;
     }
@@ -906,6 +918,7 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
 
     if (zone->d.wp == zns_zone_wr_boundary(zone)) {
         zns_zone_set_full(ns, zone);
+        zns_fill_note(ns, zone);
     }
 }
 
@@ -1197,6 +1210,30 @@ static void zns_finish_note(NvmeNamespace *ns, NvmeZone *zone,
         req->zone_finish_gens[req->nr_zone_finishes] = ev.gen;
         req->zone_finishes[req->nr_zone_finishes++] = idx;
     }
+}
+
+/*
+ * A write made the zone Full. The FTL thread marks the zone finished, so a
+ * Finish waits for its programs and an earlier write that arrives later is
+ * late. The cache is programmed by the write that ends at the boundary, or
+ * else by the next command for another target. Called with zone_lock held.
+ */
+static void zns_fill_note(NvmeNamespace *ns, NvmeZone *zone)
+{
+    struct zns_ssd *zns = ns->zns;
+    uint32_t idx = zns_zone_idx(ns, zone->d.zslba);
+    ZnsFinEvent ev = {
+        .ns = qemu_clock_get_ns(ns->ctrl->test_oc12_clock ?
+                                QEMU_CLOCK_VIRTUAL : QEMU_CLOCK_REALTIME),
+        .zone = idx,
+        .gen = qatomic_read(&zns->zgen[idx]),
+        .fill = true,
+    };
+
+    WITH_QEMU_LOCK_GUARD(&zns->fin_lock) {
+        g_array_append_val(zns->fin_ev, ev);
+    }
+    qatomic_set(&zns->fin_any, 1);
 }
 
 static uint16_t zns_finish_zone(NvmeNamespace *ns, NvmeZone *zone,
@@ -1616,6 +1653,8 @@ static uint16_t zns_nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                 if (append) {
                     slba = zone->w_ptr;
                 }
+                req->zone_gen = qatomic_read(
+                    &ns->zns->zgen[zns_zone_idx(ns, zone->d.zslba)]);
                 /*
                  * Before the advance, which may fill and finish the zone.
                  * The guest clock starts at 0, and 0 means "not written".
@@ -1897,6 +1936,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
         if (zone->w_ptr >= zns_zone_wr_boundary(zone)) {
             zns_zrwa_release(ns, zone);
             zns_zone_set_full(ns, zone);
+            zns_finish_note(ns, zone, NULL, true);
         }
         status = NVME_SUCCESS;
         break;
@@ -2594,14 +2634,17 @@ static void zns_mem_charge(NvmeNamespace *ns)
         (sizeof(NvmeZone) + sizeof(*zns->zone_wp_slot) +
          sizeof(*zns->zone_wp_plane) + sizeof(*zns->zgen) +
          sizeof(*zns->ftl_gen) + sizeof(*zns->ftl_fin_ns) +
-         sizeof(*zns->fin_done)) +
+         sizeof(*zns->fin_done) + sizeof(*zns->ftl_lbas) +
+         sizeof(*zns->ftl_lbas_gen)) +
         BITS_TO_LONGS(ns->num_zones) * sizeof(unsigned long);
     if (ns->zd_extensions) {
         now[FEMU_MEM_MEDIA] += (size_t)ns->zd_extension_size * ns->num_zones;
     }
     now[FEMU_MEM_OTHER] = zns->cache.num_wc * sizeof(struct zns_write_cache);
     for (int i = 0; i < zns->cache.num_wc; i++) {
-        now[FEMU_MEM_OTHER] += zns->cache.write_cache[i].cap * sizeof(uint64_t);
+        /* the LPN array has the native stripe size; cap follows the zone */
+        now[FEMU_MEM_OTHER] += zns->stripe_unit / LOGICAL_PAGE_SIZE *
+                               sizeof(uint64_t);
     }
     nvme_ns_mem_mode(ns, now);
 }

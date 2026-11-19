@@ -193,7 +193,7 @@ static uint64_t zns_advance_status(struct zns_ssd *zns, struct ppa *ppa,
         .pg = ppa->g.pg,
         .flash_type = get_blk(zns, ppa)->nand_type,
         .page_type = zns->timing.page_types && ncmd->cmd == NAND_READ ?
-                     ppa->g.pg % zns->flash_type : 0,
+                     ppa->g.pg % get_blk(zns, ppa)->nand_type : 0,
         .pe_cycles = get_blk(zns, ppa)->erase_cnt,
     };
 
@@ -292,6 +292,39 @@ static void zns_zone_span(struct zns_ssd *zns, uint32_t zone_idx,
     *ch_lo = (g % ch_groups) * cpz;
     *lun_lo = (g / ch_groups) * lpz;
     *blk = zone_idx / groups;
+}
+
+/*
+ * The media profile of a zone comes from its blocks, which share one NAND
+ * mode. nand_type is the bits of each storage element, so it is also the
+ * pages one wordline program takes.
+ */
+static int zns_zone_width(struct zns_ssd *zns, uint32_t zone_idx)
+{
+    uint32_t ch, lun, blk;
+
+    zns_zone_span(zns, zone_idx, &ch, &lun, &blk);
+    return zns->ch[ch].fc[lun].plane[0].blk[blk].nand_type;
+}
+
+/*
+ * Pages a block can take: num_page in the native mode. A block in a mode of
+ * fewer bits keeps its wordlines, each with fewer pages.
+ */
+static uint64_t zns_blk_pages(struct zns_ssd *zns, struct zns_blk *blk)
+{
+    if (blk->nand_type == zns->flash_type) {
+        return zns->num_page;
+    }
+    return zns->num_page / zns->flash_type * blk->nand_type;
+}
+
+/* write cache entries that fill one stripe of the zone */
+static uint64_t zns_zone_wc_cap(struct zns_ssd *zns, uint32_t zone_idx)
+{
+    return (uint64_t)ZNS_PAGE_SIZE * zns_zone_width(zns, zone_idx) *
+           zns->num_plane * zns->chnls_per_zone * zns->luns_per_zone /
+           LOGICAL_PAGE_SIZE;
 }
 
 /*
@@ -566,13 +599,17 @@ static uint64_t zns_read(struct zns_ssd *zns, NvmeRequest *req)
 
 static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t stime)
 {
-    uint32_t zone_idx = zns->cache.write_cache[wcidx].sblk;
+    struct zns_write_cache *wc = &zns->cache.write_cache[wcidx];
+    uint32_t zone_idx = wc->sblk;
+    const int spp = ZNS_PAGE_SIZE / LOGICAL_PAGE_SIZE;
+    uint64_t dies = zns->chnls_per_zone * zns->luns_per_zone;
+    uint64_t stall = 0;
     int i,j,p,subpage;
     struct ppa ppa;
-    struct ppa oldppa;
     uint64_t lpn;
-    int flash_type = zns->flash_type;
+    int flash_type = zns_zone_width(zns, zone_idx);
     uint64_t sublat = 0, maxlat = 0;
+    bool prog;
 
     /*
      * Resume at the plane where this zone's previous flush stopped: a
@@ -584,48 +621,41 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
     int start_pl = zns->zone_wp_plane ? zns->zone_wp_plane[zone_idx] : 0;
 
     i = 0;
-    while(i < zns->cache.write_cache[wcidx].used)
-    {
+    while (i < wc->used) {
+        int i0 = i;
+
         for (p = start_pl; p < zns->num_plane; p++) {
             /*
              * A partial cache (evicted before its stripe filled) programs
              * only the pages that hold data; the untouched planes and
              * pages of the stripe stay free for the zone's later writes.
              */
-            if (i >= zns->cache.write_cache[wcidx].used) {
+            if (i >= wc->used) {
                 break;
             }
             /* new write */
             ppa = get_new_page(zns, zone_idx);
             ppa.g.pl = p;
-            for(j = 0; j < flash_type ;j++)
-            {
-                if (i >= zns->cache.write_cache[wcidx].used) {
+            prog = false;
+            for (j = 0; j < flash_type && i < wc->used; j++) {
+                /* a block can end inside a wordline: go on to the next plane */
+                if (get_blk(zns, &ppa)->page_wp >=
+                    zns_blk_pages(zns, get_blk(zns, &ppa))) {
                     break;
                 }
+                prog = true;
                 ppa.g.pg = get_blk(zns,&ppa)->page_wp;
                 get_blk(zns,&ppa)->page_wp++;
-                for(subpage = 0;subpage < ZNS_PAGE_SIZE/LOGICAL_PAGE_SIZE;subpage++)
-                {
-                    if(i+subpage >= zns->cache.write_cache[wcidx].used)
-                    {
-                        /* No need to write an invalid page */
-                        break;
-                    }
-                    lpn = zns->cache.write_cache[wcidx].lpns[i+subpage];
-                    oldppa = get_maptbl_ent(zns, lpn);
-                    if (mapped_ppa(&oldppa)) {
-                        /* FIXME: Misao: update old page information*/
-                    }
+                for (subpage = 0; subpage < spp && i + subpage < wc->used;
+                     subpage++) {
+                    lpn = wc->lpns[i + subpage];
                     ppa.g.spg = subpage;
-                    /* update maptbl */
                     set_maptbl_ent(zns, lpn, &ppa);
                 }
-                i+=ZNS_PAGE_SIZE/LOGICAL_PAGE_SIZE;
+                i += spp;
             }
             /* FIXME: identify the padding page */
-            if(ppa.g.V)
-            {
+            if (prog && ppa.g.V) {
                 struct nand_cmd swr;
                 swr.type = type;
                 swr.cmd = NAND_WRITE;
@@ -642,11 +672,30 @@ static uint64_t zns_wc_flush(struct zns_ssd* zns, int wcidx, int type,uint64_t s
         } else {
             start_pl = p;
         }
+        /*
+         * A full pass over the zone's dies placed nothing: every block of the
+         * zone is full, as padded pages of partial flushes or rewrites used
+         * the pages up. The rest gets no NAND page and reads as never
+         * programmed; page_overruns counts its NAND pages.
+         */
+        stall = (i == i0) ? stall + 1 : 0;
+        if (stall > dies) {
+            struct ppa none = { .ppa = UNMAPPED_PPA };
+
+            qatomic_set(&zns->page_overruns,
+                        qatomic_read(&zns->page_overruns) +
+                        DIV_ROUND_UP(wc->used - i, spp));
+            for (; i < wc->used; i++) {
+                set_maptbl_ent(zns, wc->lpns[i], &none);
+            }
+        }
     }
     if (zns->zone_wp_plane) {
         zns->zone_wp_plane[zone_idx] = start_pl;
     }
-    zns->cache.write_cache[wcidx].used = 0;
+    wc->used = 0;
+    /* a Finish of the zone waits for every program it started */
+    zns->fin_done[zone_idx] = MAX(zns->fin_done[zone_idx], stime + maxlat);
     return maxlat;
 }
 
@@ -670,6 +719,46 @@ static void zns_finish_flush(struct zns_ssd *zns, uint32_t zone_idx,
     zns->fin_done[zone_idx] = MAX(zns->fin_done[zone_idx], stime + lat);
 }
 
+/*
+ * Every LBA of sequential zone @zone has reached this thread. ZRWA rewrites
+ * count twice, so a namespace with ZRWA also needs the finish mark that a
+ * Full zone records; a conventional zone never fills.
+ */
+static bool zns_ftl_filled(NvmeNamespace *ns, struct zns_ssd *zns,
+                           uint32_t zone)
+{
+    NvmeZone *z = &ns->zone_array[zone];
+
+    return z->d.zt == NVME_ZONE_TYPE_SEQ_WRITE &&
+           zns->ftl_lbas[zone] >= z->d.zcap &&
+           (!ns->zrwa_size || test_bit(zone, zns->ftl_fin));
+}
+
+static bool zns_wc_holds(struct zns_write_cache *wc, uint64_t lpn)
+{
+    for (uint64_t k = wc->used; k > 0; k--) {
+        if (wc->lpns[k - 1] == lpn) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* program the cache of finished @zone at the next command for another target */
+static void zns_late_add(struct zns_ssd *zns, uint32_t zone, uint64_t ns)
+{
+    ZnsFinEvent ev = { .ns = ns, .zone = zone };
+    guint k;
+
+    for (k = 0; k < zns->ftl_late->len; k++) {
+        if (g_array_index(zns->ftl_late, ZnsFinEvent, k).zone == zone) {
+            g_array_index(zns->ftl_late, ZnsFinEvent, k).ns = ns;
+            return;
+        }
+    }
+    g_array_append_val(zns->ftl_late, ev);
+}
+
 static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
 {
     uint64_t lba = req->slba;
@@ -684,6 +773,7 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
     uint64_t req_zone = ns->zone_size_log2 > 0 ?
         req->slba >> ns->zone_size_log2 : req->slba / ns->zone_size;
     int wcidx = zns_get_wcidx(zns, req_zone);
+    int32_t d;
 
     if(wcidx==-1)
     {
@@ -703,9 +793,21 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
         }
         if(t_used) maxlat = zns_wc_flush(zns,wcidx,USER_IO,req->stime);
         zns->cache.write_cache[wcidx].sblk = req_zone;
+        /* the slot keeps its native size; this zone's stripe sets the flush */
+        zns->cache.write_cache[wcidx].cap = zns_zone_wc_cap(zns, req_zone);
     }
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+        struct zns_write_cache *wc = &zns->cache.write_cache[wcidx];
+
+        /*
+         * The cache holds this LPN already (a write of part of a 4 KiB page,
+         * a ZRWA or conventional rewrite): its entry stands for the new data
+         * too. Writes in order add LPNs above top, so they skip the search.
+         */
+        if (wc->used && lpn <= wc->top && zns_wc_holds(wc, lpn)) {
+            continue;
+        }
         if(zns->cache.write_cache[wcidx].used==zns->cache.write_cache[wcidx].cap)
         {
             ftl_debug("[W] flush wc %d (%u/%u)\n",wcidx,(int)zns->cache.write_cache[wcidx].used,(int)zns->cache.write_cache[wcidx].cap);
@@ -719,10 +821,34 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
             maxlat = (sublat > maxlat) ? sublat : maxlat;
             sublat = 0;
         }
+        if (!wc->used || lpn > wc->top) {
+            wc->top = lpn;
+        }
         zns->cache.write_cache[wcidx].lpns[zns->cache.write_cache[wcidx].used++]=lpn;
         sublat += SRAM_WRITE_LATENCY_NS; /* Simplified timing emulation */
         maxlat = (sublat > maxlat) ? sublat : maxlat;
         ftl_debug("[W] lpn:\t%lu\t-->wc cache:%u, used:%u\n",lpn,(int)wcidx,(int)zns->cache.write_cache[wcidx].used);
+    }
+    /*
+     * The write that brings the zone's last LBA to this thread fills it, in
+     * whatever order the queues deliver the writes: no later write joins its
+     * stripe. Program the cache now, as a device does at Full; else the last
+     * stripe waits for another zone to take the slot.
+     */
+    d = (int32_t)(req->zone_gen - zns->ftl_lbas_gen[req_zone]);
+    if (d > 0) {
+        zns->ftl_lbas_gen[req_zone] = req->zone_gen;
+        zns->ftl_lbas[req_zone] = 0;
+    }
+    if (d >= 0) {
+        zns->ftl_lbas[req_zone] += nlb;
+    }
+    if (zns_ftl_filled(ns, zns, req_zone) &&
+        zns->cache.write_cache[wcidx].used) {
+        sublat = zns_wc_flush(zns, wcidx, USER_IO, req->stime);
+        zns->fin_done[req_zone] = MAX(zns->fin_done[req_zone],
+                                      req->stime + sublat);
+        maxlat = MAX(maxlat, sublat);
     }
     /*
      * The zone finished before this write reached the FTL thread. Writes
@@ -730,19 +856,7 @@ static uint64_t zns_write(struct zns_ssd *zns, NvmeRequest *req)
      * target programs the cache, once, so the pages stay packed.
      */
     if (test_bit(req_zone, zns->ftl_fin)) {
-        ZnsFinEvent ev = { .ns = req->stime, .zone = req_zone };
-        guint k;
-
-        for (k = 0; k < zns->ftl_late->len; k++) {
-            if (g_array_index(zns->ftl_late, ZnsFinEvent, k).zone ==
-                req_zone) {
-                g_array_index(zns->ftl_late, ZnsFinEvent, k).ns = req->stime;
-                break;
-            }
-        }
-        if (k == zns->ftl_late->len) {
-            g_array_append_val(zns->ftl_late, ev);
-        }
+        zns_late_add(zns, req_zone, req->stime);
     }
     return maxlat;
 }
@@ -773,6 +887,8 @@ static uint64_t zns_zone_reset_gen(NvmeNamespace *ns, struct zns_ssd *zns,
     zns->ftl_wait_new = true;
     clear_bit(zone_idx, zns->ftl_fin);
     zns->fin_done[zone_idx] = 0;
+    zns->ftl_lbas[zone_idx] = 0;
+    zns->ftl_lbas_gen[zone_idx] = gen;
 
     /* the allocator restarts this zone from the first channel and LUN */
     if (zns->active_zone == zone_idx) {
@@ -833,7 +949,7 @@ static int zns_fin_zone_cmp(const void *a, const void *b)
  * records waiting for good, so each zone keeps its newest
  * ZNS_FIN_WAIT_MAX of them.
  */
-static void zns_finish_drain(struct zns_ssd *zns)
+static void zns_finish_drain(NvmeNamespace *ns, struct zns_ssd *zns)
 {
     GArray *w = zns->fin_wait;
     guint keep = 0;
@@ -857,7 +973,12 @@ static void zns_finish_drain(struct zns_ssd *zns)
         } else if (d == 0 && !test_bit(ev->zone, zns->ftl_fin)) {
             set_bit(ev->zone, zns->ftl_fin);
             zns->ftl_fin_ns[ev->zone] = ev->ns;
-            zns_finish_flush(zns, ev->zone, ev->ns);
+            if (ev->fill && !zns_ftl_filled(ns, zns, ev->zone)) {
+                /* a write of the zone is still to come: let it pack pages */
+                zns_late_add(zns, ev->zone, ev->ns);
+            } else {
+                zns_finish_flush(zns, ev->zone, ev->ns);
+            }
         }
     }
     g_array_set_size(w, keep);
@@ -926,7 +1047,7 @@ uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req)
         return 0;
     }
 
-    zns_finish_drain(zns);
+    zns_finish_drain(ns, zns);
     zns_late_flush(zns, req);
     if (req->nr_zone_finishes) {
         /* a host Finish completes when the programs of its zones end */
@@ -950,7 +1071,7 @@ uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req)
     if (req->nr_zone_resets) {
         lat = zns_zone_reset_deferred(ns, zns, req);
         /* finishes of the generations these resets start */
-        zns_finish_drain(zns);
+        zns_finish_drain(ns, zns);
         return lat;
     }
 

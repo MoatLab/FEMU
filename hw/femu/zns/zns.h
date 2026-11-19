@@ -145,6 +145,7 @@ struct zns_write_cache{
     uint64_t sblk; /* idx of corresponding superblock */
     uint64_t used;
     uint64_t cap;
+    uint64_t top;   /* the largest LPN in lpns, while used is not 0 */
     uint64_t* lpns; /* identify the cached data */
 };
 
@@ -157,6 +158,8 @@ typedef struct ZnsFinEvent {
     uint64_t ns;        /* when the zone finished */
     uint32_t zone;
     uint32_t gen;
+    /* a write filled the zone: that write programs the cache, not the drain */
+    bool fill;
 } ZnsFinEvent;
 
 struct zns_ssd {
@@ -285,7 +288,11 @@ struct zns_ssd {
      * keeps the newest record of each zone whose reset it has not seen
      * yet; ftl_wait_new tells a reset may have made one current. ftl_late
      * lists finished zones whose cache took a write since: the next
-     * command that is not a read programs them.
+     * command that is not a read programs them. ftl_lbas counts the LBAs
+     * the writes of this generation brought to the thread, so the thread
+     * sees a zone fill whatever order the queues give the writes.
+     * ftl_lbas_gen is the generation it counts: a write of a newer one
+     * means a reset this thread never ran, and the count starts again.
      */
     QemuMutex fin_lock;
     GArray *fin_ev;
@@ -297,6 +304,14 @@ struct zns_ssd {
     unsigned long *ftl_fin;
     uint64_t *ftl_fin_ns;
     uint64_t *fin_done;
+    uint64_t *ftl_lbas;
+    uint32_t *ftl_lbas_gen;
+    /*
+     * NAND pages a flush could not take because no block of the zone had a
+     * free page left. The FTL thread adds, query-femu reads; 0 unless padded
+     * pages of partial flushes, or rewrites, used up the zone's blocks.
+     */
+    uint64_t page_overruns;
     GArray *fin_wait;
 };
 

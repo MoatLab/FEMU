@@ -1157,6 +1157,12 @@
 #
 # @zone-counts: zones in each state
 #
+# @page-overruns: NAND pages a write cache flush could not take, as
+#     no block of the zone had a free page left.  Padded pages of
+#     partial flushes, and rewrites, use up the blocks before the
+#     zone is full.  The data of such a page reads back, but takes no
+#     NAND time.  0 for writes in order that fill each stripe.
+#
 # @media: NAND bus timing
 #
 # @zones: with kind @zones, the zones from @offset, at most limit of
@@ -1173,7 +1179,7 @@
   'data': { 'lba-size': 'uint32', 'zone-size': 'uint64',
             'zone-capacity': 'uint64', 'max-open': 'uint32',
             'max-active': 'uint32', 'zone-counts': 'FemuZoneCounts',
-            'media': 'FemuMediaTiming',
+            'page-overruns': 'uint64', 'media': 'FemuMediaTiming',
             '*zones': [ 'FemuZoneInfo' ], '*offset': 'uint32',
             '*next-offset': 'uint32' } }
 
@@ -1311,6 +1317,7 @@
 #                               "explicitly-open": 0, "closed": 0,
 #                               "read-only": 0, "full": 1,
 #                               "offline": 0, "total": 16 },
+#              "page-overruns": 0,
 #              "media": { "staged-bus": false, "onfi-profile": false,
 #                         "column-cycles": 0, "row-cycles": 0,
 #                         "page-transfer-ns": 0, "read-command-ns": 0,

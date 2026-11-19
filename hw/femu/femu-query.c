@@ -943,6 +943,7 @@ static FemuNamespaceInfo *femu_query_zoned_info(FemuQueryZoned *q)
     info->zone_capacity = q->zone_cap;
     info->max_open = q->max_open;
     info->max_active = q->max_active;
+    info->page_overruns = q->page_overruns;
 
     cnt->empty = q->counts[FEMU_ZONE_STATE_EMPTY];
     cnt->implicitly_open = q->counts[FEMU_ZONE_STATE_IMPLICITLY_OPEN];

@@ -197,6 +197,7 @@ blocks.
 | `zone-size`, `zone-capacity` | logical blocks per zone, and the writable part of a zone |
 | `max-open`, `max-active` | the zone resource limits; 0 means no limit |
 | `zone-counts` | zones that are `empty`, `implicitly-open`, `explicitly-open`, `closed`, `read-only`, `full` and `offline`, and the `total` |
+| `page-overruns` | NAND pages a write cache flush could not take, because no block of the zone had a free page. A partial flush (an eviction) pads its page, and a rewrite takes a new page, so these can use up a zone's blocks before the zone is full. The data of such a page reads back, but takes no NAND time. 0 for writes that fill each stripe |
 | `media` | the NAND bus timing: see [Media timing](#media-timing) |
 | `zones` | with `kind` `zones`: `index`, `type`, `state`, `start-lba`, `capacity`, `write-pointer` and `zrwa` of each zone |
 | `offset`, `next-offset` | with `kind` `zones`: the first zone in `zones`, and the offset of the next call; `next-offset` is absent after the last zone |
@@ -497,6 +498,7 @@ A zoned namespace with one zone written and one zone finished:
   "zone-counts": {"empty": 14, "implicitly-open": 1, "explicitly-open": 0,
                   "closed": 0, "read-only": 0, "full": 1, "offline": 0,
                   "total": 16},
+  "page-overruns": 0,
   "media": {"staged-bus": false, "onfi-profile": false, "column-cycles": 0,
             "row-cycles": 0, "page-transfer-ns": 0,
             "read-command-ns": 0, "program-command-ns": 0, "erase-command-ns": 0,
