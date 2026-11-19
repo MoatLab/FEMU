@@ -642,9 +642,9 @@ static uint32_t nvme_ring_slots(FemuCtrl *n)
     uint64_t sqs = 1 + (n->nr_io_queues - 1) / n->nr_pollers;
     uint64_t reqs = sqs * ((uint64_t)n->max_q_ents + 1);
 
-    /* qtest only: a small ring that the queues can fill */
+    /* qtest only: a small ring that the queues can fill, 4 to 65536 */
     if (n->test_ring_slots) {
-        return pow2ceil(MAX(n->test_ring_slots, 4));
+        return pow2ceil(MIN(MAX(n->test_ring_slots, 4), FEMU_MAX_INF_REQS));
     }
     return MAX((uint64_t)FEMU_MAX_INF_REQS, pow2ceil(reqs + 1));
 }
