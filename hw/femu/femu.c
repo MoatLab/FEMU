@@ -4305,22 +4305,16 @@ uint64_t femu_eol_max_bytes(FemuCtrl *n)
 
 /*
  * Read-only end of life holds back erased space for every write in flight,
- * so one write needs a bound, and the ring to the FTL must take every
- * request: a write the ring drops has changed data already. @who names the
- * property that asks for the end of life.
+ * so one write needs a bound. The rings take every request of the queues
+ * (nvme_ring_slots()), and the admission word counts up to 2^31 requests,
+ * so the queue count and size need no bound. @who names the property that
+ * asks for the end of life.
  */
 static bool femu_check_eol_bounds(FemuCtrl *n, const char *who, Error **errp)
 {
     if (!n->mdts || 12 + n->mpsmin + n->mdts >= 48) {
         error_setg(errp, "femu: %s needs mdts 1 to %d", who,
                    47 - 12 - n->mpsmin);
-        return false;
-    }
-    /* a ring of FEMU_MAX_INF_REQS slots holds one entry less */
-    if ((uint64_t)n->nr_io_queues * (n->max_q_ents + 1) >
-        FEMU_MAX_INF_REQS - 1) {
-        error_setg(errp, "femu: %s needs queues x (entries + 1) of at most %d",
-                   who, FEMU_MAX_INF_REQS - 1);
         return false;
     }
     n->eol_admit = true;

@@ -351,6 +351,7 @@ was not doing anything.
 
 #### Other new refusals
 
+- `eol_read_only` and `rain_read_only` no longer need `queues x (entries + 1)` of at most 65535. That bound kept the request ring from being full. Each ring now holds every request of its queues, so `blk_pe_limit` with `queues=32` realizes.
 - Invalid bbssd and zoned geometries, and a bbssd namespace with no room left for garbage collection; CSD and KV, and every mode a controller serves, now run the same checks (b4bbd93e0, 1ac931d86, ceb2b5bf7, 5ccbe3f24, bf8961b9b, 0b82aa58a).
 - Invalid ZRWA configurations, page sizes ZNS cannot serve, and more write caches than zones (b89cde46d, 154775e62, fcfa0d581).
 - Unknown `mapping` or `gc_policy` names, and a negative suspend overhead (29c397f38, 2ae58aa55).

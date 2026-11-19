@@ -233,7 +233,6 @@ own description allows. A message keeps its format directives (`%s`,
 ## `entries`
 
 - entries must be in [1, 65534]
-- femu: %s needs queues x (entries + 1) of at most %d
 
 ## `eol_read_only`
 
@@ -1020,7 +1019,6 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `queues`
 
-- femu: %s needs queues x (entries + 1) of at most %d
 - multipoller_enabled must be 0 (one poller for all queues) or 1 (each poller owns poller_ratio queues)
 - queues must be in [1, %d]
 - the FTL queues did not drain in 10 s

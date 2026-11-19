@@ -722,7 +722,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "spare (Available Spare 0, or no room for GC) is accepted and the "
       "media goes read-only, as at the end of life; no new die fails after "
       "that. The end-of-life reserve is sized for a line of two dies. Needs "
-      "eol_read_only=on and its mdts and queue bounds; not with "
+      "eol_read_only=on and its mdts bound; not with "
       "buffer_size, iu_pages above 1, nand_bad_blocks, cxl_ssd or more than "
       "one namespace. Off (default): such a failure is refused" },
     { "rain_loss",

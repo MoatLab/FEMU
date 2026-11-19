@@ -62672,7 +62672,6 @@ static void femu_test_eol_refused(void *obj, void *data, QGuestAllocator *alloc)
         const char *msg;
     } cases[] = {
         { "'mdts':0", "eol_read_only needs mdts" },
-        { "'mdts':2,'queues':32,'entries':2047", "queues x (entries + 1)" },
         { "'mdts':10", "eol_read_only reserve" },
     };
     QDict *rsp;
@@ -66388,6 +66387,54 @@ static void femu_test_g1_many_queues(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+#define FEMU_G1_EOL_QUEUES  32
+
+/*
+ * Read-only end of life with 32 queues of 2048 entries: 65536 requests,
+ * which realize refused while the rings held 65535. Number of Queues and
+ * MQES report the configuration, ONCS shows end-of-life admission (Write
+ * Zeroes bit clear, oncs=0x8 asks for it), and the last queue moves data.
+ */
+static void femu_test_g1_eol_queues(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    uint64_t id = guest_alloc(alloc, FEMU_G1_PAGE);
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t nsze;
+    uint32_t result = 0;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FEAT_NUM_QUEUES, 0, 0,
+                                             0, &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, (FEMU_G1_EOL_QUEUES - 1) |
+                    ((FEMU_G1_EOL_QUEUES - 1) << 16));
+    g_assert_cmpuint(qpci_io_readq(c.pdev, c.bar, 0x0) & 0xffff, ==, 2047);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, id), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, id + 520) & 0x8, ==, 0);
+    femu_identify_ns(&c, &nsze, &c.lba_size);
+
+    femu_burst_queue(&c, &q, FEMU_G1_EOL_QUEUES);
+    qtest_memset(qts, buf, 0x6c, FEMU_DATA_SIZE);
+    cid = femu_g1_queue_submit(&c, &q, NVME_CMD_WRITE, 0, buf);
+    g_assert_cmphex(femu_g1_queue_reap(&c, &q, cid), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
+    cid = femu_g1_queue_submit(&c, &q, NVME_CMD_READ, 0, buf);
+    g_assert_cmphex(femu_g1_queue_reap(&c, &q, cid), ==, NVME_SUCCESS);
+    femu_g1_all(qts, buf, FEMU_DATA_SIZE, 0x6c);
+
+    femu_queue_free(&c, &q);
+    guest_free(alloc, buf);
+    guest_free(alloc, id);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /* Create I/O CQ or SQ @qid, 0's based size @qsize; status with DNR */
 static uint16_t femu_g1_create(FemuCtrlState *c, uint8_t opcode, uint16_t qid,
                                uint64_t ring, uint32_t qsize, uint32_t dw11)
@@ -69768,6 +69815,13 @@ static void femu_register_nodes(void)
             "blk_pe_limit=1000,mdts=2,eol_read_only=off"
     });
     qos_add_test("eol-refused", "femu", femu_test_eol_refused, NULL);
+    qos_add_test("eol-many-queues", "femu", femu_test_g1_eol_queues,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=g1-eolq,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=40,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "blk_pe_limit=1000,mdts=2,oncs=0x8,queues=32"
+    });
     qos_add_test("death-early", "femu", femu_test_block_death,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"early",
