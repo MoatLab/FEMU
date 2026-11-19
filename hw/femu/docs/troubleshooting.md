@@ -384,3 +384,18 @@ from one aged state, save a checkpoint once and load it with
 `persist_load_only=on`. In other modes, keep data on the guest's boot disk.
 
 Related issues: #52.
+
+## Why is there a FILE.lock next to my persist_file?
+
+A device with `persist_file=FILE` locks `FILE.lock` while it runs. A
+`femu-save-data` to FILE locks it during the save. The file is empty
+and stays after unplug and after QEMU exits.
+
+```
+ device A: open FILE.lock --> flock --> ... unplug: close (file stays)
+ device B: open FILE.lock --> flock --> same file, so A and B see each other
+ (an unlink at unplug: B could lock a new FILE.lock while C holds the old)
+```
+
+The file is safe to delete only while no QEMU uses FILE. FEMU makes it
+with mode 0644, so other users can share a `persist_load_only` checkpoint.

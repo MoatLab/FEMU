@@ -37215,8 +37215,9 @@ static void femu_test_checkpoint_reuse(void *obj, void *data,
  * B holds page 2 = 0x21. Two readers load B, make no lock file and leave
  * the bytes and the inode of B. While a reader holds B, a writer of B and
  * a save to B fail in the directory made writable again. After the readers
- * leave, the writer starts. A new lock file has mode 0644. Root ignores
- * the directory mode, so root skips the test.
+ * leave, the writer starts. A new lock file has mode 0644, and the empty
+ * lock file of the writer stays after unplug. Root ignores the directory
+ * mode, so root skips the test.
  */
 static void femu_test_checkpoint_ro_dir(void *obj, void *data,
                                         QGuestAllocator *alloc)
@@ -37313,6 +37314,10 @@ static void femu_test_checkpoint_ro_dir(void *obj, void *data,
     femu_ckpt_same(b, sum_b, ino_b);
     femu_ckpt_add(qts, "w", 7, wb);
     qpci_unplug_acpi_device_test(qts, "w", 7);
+    /* the writer made FILE.lock, and it stays after unplug */
+    g_assert_cmpint(stat(lock_b, &st), ==, 0);
+    g_assert_cmpuint(st.st_mode & 0777, ==, 0644);
+    g_assert_cmpint(st.st_size, ==, 0);
 
     close(fd_b);
     guest_free(alloc, buf);
