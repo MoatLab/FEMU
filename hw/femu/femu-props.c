@@ -641,7 +641,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "range, with or without FDP" },
     { "pe_suspend",
       "bbssd, CSD, KV: non-zero lets a read suspend a program or erase on "
-      "its LUN instead of waiting for it to finish" },
+      "its LUN instead of waiting for it to finish; with a tier_mode a "
+      "read waits for the fold work of the pSLC tier" },
     { "tsusp_ns",
       "bbssd, CSD, KV: overhead in ns added to a read that suspends a "
       "program or erase, 0 or more" },

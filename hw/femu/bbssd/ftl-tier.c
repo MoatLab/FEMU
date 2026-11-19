@@ -22,6 +22,14 @@
  * A fold charges each move as a pSLC read, then a dense program that starts
  * when the read data is ready. The erase of the pool line waits for the last
  * program. Folds charge their time with or without enable_gc_delay.
+ *
+ * With pe_suspend a read could move a booked program or erase, and so
+ * break that order. A fold seals each LUN it uses: no read moves the work
+ * booked there so far (ssd_media_seal()).
+ *
+ *   src LUN  ...queued work][seal][fold read]
+ *   dst LUN  ...queued work........][copy program][seal]
+ *   each LUN of the line           ...........[erase][seal]
  */
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
@@ -210,9 +218,24 @@ static const char *bb_tier_refused(FemuCtrl *n)
     if (p->onfi_cache_read) {
         return "onfi_cache_read";
     }
-    /* a suspended program ends later than the fold fence holds */
+    /*
+     * pe_suspend: the line tier seals its fold work. The FDP pool does
+     * not. A Flush, a translation page read and die parity each trust the
+     * booked end of a program that no seal holds.
+     */
     if (p->pe_suspend) {
-        return "pe_suspend";
+        if (n->subsys && n->subsys->params.fdp.enabled) {
+            return "pe_suspend under FDP";
+        }
+        if (p->buffer_size > 0) {
+            return "pe_suspend with a write buffer (buffer_size)";
+        }
+        if (map && !strcmp(map, "dftl")) {
+            return "pe_suspend with mapping=dftl";
+        }
+        if (p->die_parity) {
+            return "pe_suspend with die_parity";
+        }
     }
     if (p->read_prio) {
         return "read_prio";
@@ -606,6 +629,18 @@ take:
     return true;
 }
 
+/*
+ * pe_suspend: from now on no read moves the work booked so far on the LUN
+ * of @ppa. Returns when that work ends; 0 with pe_suspend off.
+ */
+static uint64_t ftl_tier_seal(struct ssd *ssd, struct ppa *ppa)
+{
+    uint64_t end = ssd_media_seal(ssd, ppa);
+
+    ssd->tier->seals += ssd->sp.pe_suspend != 0;
+    return end;
+}
+
 static void ftl_tier_mark_valid(struct ssd *ssd, struct ppa *ppa, void *dest)
 {
     (void)dest;
@@ -620,11 +655,13 @@ static const struct ssd_gc_move_ops ftl_tier_move_ops = {
 /*
  * Move one valid pool page @src to the dense frontier. The read starts at
  * @now, and the program starts when the read data is ready. *@fence becomes
- * the end of the latest program. The destination is secured before the
- * mapping changes. Returns false, with the page not moved, when the dense
- * lines have no page. An @idle move does not run the forced dense GC that
- * a host write would: it returns false at that mark, so an idle step stays
- * bounded.
+ * the end of the latest program. With pe_suspend the source LUN is sealed
+ * before the read, so the read waits for the program of its page, and the
+ * destination LUN after the program, so *@fence holds. The destination is
+ * secured before the mapping changes. Returns false, with the page not
+ * moved, when the dense lines have no page. An @idle move does not run the
+ * forced dense GC that a host write would: it returns false at that mark,
+ * so an idle step stays bounded.
  */
 static bool ftl_tier_fold_page(struct ssd *ssd, struct ppa *src, uint64_t now,
                                uint64_t *fence, bool idle)
@@ -636,6 +673,8 @@ static bool ftl_tier_fold_page(struct ssd *ssd, struct ppa *src, uint64_t now,
     struct nand_lun *lun;
     struct ppa map;
     struct ppa dst;
+    uint64_t ahead;
+    uint64_t sealed;
     uint64_t ready;
     uint64_t lat;
 
@@ -672,12 +711,18 @@ static bool ftl_tier_fold_page(struct ssd *ssd, struct ppa *src, uint64_t now,
     for (int i = 0; i < lun->mp_prog.n; i++) {
         t->fold_held += lun->mp_prog.ppa[i].ppa == src->ppa;
     }
+    /* a sealed LUN: the read starts after the work queued ahead of it */
+    ahead = nand_lun_end(lun);
+    ftl_tier_seal(ssd, src);
     /* each end counts from the start the command got */
     lat = ssd_advance_status(ssd, src, &rd);
     ready = rd.stime + lat;
+    t->fold_susp += ssd->sp.pe_suspend && ready < ahead;
     wr.stime = ready;
     lat = ssd_advance_status(ssd, &dst, &wr);
     *fence = MAX(*fence, wr.stime + lat);
+    sealed = ftl_tier_seal(ssd, &dst);
+    t->seal_short += ssd->sp.pe_suspend && sealed < wr.stime + lat;
 
     ssd_gc_move_page(ssd, lpn, src, &dst, &ftl_tier_move_ops, NULL);
     ssd_advance_write_pointer(ssd);
@@ -727,8 +772,9 @@ static struct line *ftl_tier_oldest_dyn(struct ssd *ssd)
 
 /*
  * Fold the closed pool line @victim, starting at @now: move its valid
- * pages, then erase its blocks once the last program ends. A fold that
- * stopped early takes its line again, whatever @victim is. Returns when
+ * pages, then erase its blocks once the last program ends. With pe_suspend
+ * each erase is sealed, so the time returned holds. A fold that stopped
+ * early takes its line again, whatever @victim is. Returns when
  * the erase ends, or 0 when the line could not be emptied. A line that is
  * not empty stays closed, with the pages moved so far and the end of their
  * latest program kept for the retry. A static line goes back to the tier
@@ -814,7 +860,16 @@ static uint64_t ftl_tier_fold_n(struct ssd *ssd, struct line *victim,
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
             uint64_t lat = ssd_erase_lun_block(ssd, ch, lun, victim->id, true,
                                                start);
+            struct ppa ep = { .ppa = 0 };
+            uint64_t sealed;
 
+            ep.g.ch = ch;
+            ep.g.lun = lun;
+            ep.g.blk = victim->id;
+            sealed = ftl_tier_seal(ssd, &ep);
+            /* the status phase of a staged bus ends after the array time */
+            t->seal_short += ssd->sp.pe_suspend &&
+                             sealed < start + MIN(lat, t->erase_ns);
             done = MAX(done, start + lat);
             first = MIN(first, start + lat - MIN(lat, t->erase_ns));
             for (int pl = 0; pl < spp->pls_per_lun; pl++) {
@@ -1100,15 +1155,19 @@ static bool ftl_tier_idle_wants(struct ssd *ssd)
  * @now: the device time
  *
  * Due when the host and the media were quiet for idle_ns and the work of
- * the last fold ended. It reads only fields that this thread alone writes,
- * so it runs outside ftl_in_sweep. The step checks the rule inside it.
+ * the last fold ended. With pe_suspend a read can move a host program past
+ * the busy time saved at its request, so the step also waits for the live
+ * end of the media work, as upkeep does. It reads only fields that this
+ * thread alone writes, so it runs outside ftl_in_sweep. The step checks
+ * the rule inside it.
  */
 bool ftl_tier_idle_due(struct ssd *ssd, uint64_t now)
 {
     struct ftl_tier *t = ssd->tier;
 
     return t && t->idle_ns && !t->idle_quiet &&
-           now >= t->busy_until + t->idle_ns && now >= t->idle_fence;
+           now >= t->busy_until + t->idle_ns && now >= t->idle_fence &&
+           (!ssd->sp.pe_suspend || ssd_media_last_end(ssd) <= now);
 }
 
 /**
@@ -1676,6 +1735,11 @@ static uint64_t ftl_tier_check_reserve(struct ssd *ssd)
  * not hold, and the folds that rules B and C made. Then the idle steps,
  * the folds and pages they ended and moved, the steps that started before
  * the work of the last fold ended, and 1 while a stopped fold holds a line.
+ * Then the upkeep steps, the idle write-backs that stopped for a fold, and
+ * the fold reads of a page whose program was still held. Last, for
+ * pe_suspend: the seals of fold work, the seals that ended before their
+ * work, the fold reads that suspended other work, both 0 when the state is
+ * right, and the reads that a seal made wait.
  * Returns NULL with the tier off.
  */
 char *ssd_tier_report(struct ssd *ssd)
@@ -1703,6 +1767,7 @@ char *ssd_tier_report(struct ssd *ssd)
                            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
                            " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
                            " %" PRIu64 " %d %" PRIu64 " %" PRIu64
+                           " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
                            " %" PRIu64,
                            t->nlines, t->line_pgs, t->free_cnt, t->closed_cnt,
                            t->wp.curline != NULL, t->valid, t->host_pslc,
@@ -1718,5 +1783,7 @@ char *ssd_tier_report(struct ssd *ssd)
                            t->rule_b_folds, t->rule_c_folds, t->idle_steps,
                            t->idle_folds, t->idle_pages, t->idle_early,
                            t->fold_line != NULL, t->upkeep_steps,
-                           t->bg_defers, t->fold_held);
+                           t->bg_defers, t->fold_held, t->seals,
+                           t->seal_short, t->fold_susp,
+                           ssd->media.seal_waits);
 }

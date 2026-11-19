@@ -780,6 +780,25 @@ busy-until time, from 200 to 330, so operations issued afterwards, such as
 W2, start after 330. A suspended program or erase never makes its own
 command complete afterwards; it delays the commands that follow.
 
+A caller can seal a position with `nand_media_seal(m, loc, t)`. The layer
+then keeps `seal`, the largest such `t`, for the position. A read that
+`nand_media_op()` books reaches the array at `max(t, seal)`, and the rule
+above uses that time. So a suspension moves only work that runs at or after
+the seal time. The seal time never falls, and it is at most the busy-until
+time of the position. Latency still counts from the request time.
+
+```text
+ time ---->          seal
+ LUN  [prog A][prog B] | [prog C]
+ read arrives inside prog A
+   no seal:  the read runs at t + tsusp; A, B and C end that much after
+   seal:     the read arrives at the seal; A and B stay; it suspends C
+```
+
+The bbssd pSLC tier seals the LUNs of a fold, so no read moves a fold
+program or erase ([tiered NAND](../features/tiered-nand.md#program-and-erase-suspend)).
+ZNS does not seal. Without a seal call the rule is unchanged.
+
 `nand_media_multiplane()` does not consult the suspend state, so a read
 issued through it never suspends; this applies to erases and to the batches
 of `mp_program` and `mp_read`. The state is
@@ -1414,7 +1433,7 @@ Give each poller and the FTL thread its own host core while measuring;
 - **Unit tests**: `hw/femu/tests/unit/test-nand-media.c` checks the media
   layer's arithmetic without QEMU: ECC tiers, the staged bus and its booked
   windows, the plane rule with the bus, multi-plane erase against serial
-  erases, copyback, and program/erase suspend. Run it with
+  erases, copyback, program/erase suspend and its seal. Run it with
   `make -C hw/femu/tests check`.
 - **qtests**: `hw/femu/tests/qtest/femu-test.c` covers the OCSSD 1.2 channel
   model (`oc12-channel-timing`, `oc12-channel-gap`, `oc12-channel-default`,
@@ -1426,7 +1445,9 @@ Give each poller and the FTL thread its own host core while measuring;
   (`doc-examples`), and program/erase suspend on a BBSSD, CSD, KV and ZNS
   device (`pe-suspend-<mode>-on` and `pe-suspend-<mode>-off`): a read that
   arrives during a program completes before the program only when suspend
-  is on.
+  is on. With the pSLC tier, `tier-suspend-host` checks that a read still
+  suspends a host program, and `tier-suspend-fold` checks that a read waits
+  for a sealed fold erase.
 - The firmware CPU model per opcode and per core (`fw-cost-read`,
   `fw-cost-other`, `fw-cost-cores1`, `fw-cost-cores2`).
 - **Not covered by automated tests**: other BBSSD and ZNS timing inside QEMU, the

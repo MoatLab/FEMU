@@ -1010,6 +1010,8 @@ typedef enum SsdGcIdleOutcome {
 } SsdGcIdleOutcome;
 
 uint64_t ssd_media_last_end(struct ssd *ssd);
+/* pe_suspend: no read moves the work booked so far on the LUN of @ppa */
+uint64_t ssd_media_seal(struct ssd *ssd, struct ppa *ppa);
 bool ssd_gc_idle_due(struct ssd *ssd, uint64_t now);
 SsdGcIdleOutcome ssd_gc_idle_step(struct ssd *ssd, uint64_t now);
 void ssd_gc_idle_note(struct ssd *ssd, uint64_t req_end);

@@ -44,6 +44,7 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
     m->throttle_pct = NULL;
     m->lun_pct = NULL;
     m->die_stat = NULL;
+    m->seal_waits = 0;
     if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs &&
         cfg->policy.ca_separate) {
         /* a burst must find its gaps on both buses; nothing falls back */
@@ -848,6 +849,37 @@ static bool suspend_read_start(NandMedia *m, const NandLoc *loc, uint64_t t,
     return true;
 }
 
+uint64_t nand_media_seal(NandMedia *m, const NandLoc *loc, uint64_t t)
+{
+    NandSuspendState *st = suspend_state(m, loc);
+
+    if (!m->cfg.policy.pe_suspend || !st) {
+        return 0;
+    }
+    st->seal = mx(st->seal, t);
+    return st->seal;
+}
+
+/*
+ * When a read that reaches the array at @t may start under pe_suspend: at
+ * the seal of its position, if that is after @t. The suspend rule then
+ * sees the read arrive there, so it leaves the sealed work alone.
+ */
+static uint64_t seal_read_time(NandMedia *m, const NandLoc *loc, uint64_t t)
+{
+    NandSuspendState *st;
+
+    if (!m->cfg.policy.pe_suspend) {
+        return t;
+    }
+    st = suspend_state(m, loc);
+    if (!st || st->seal <= t) {
+        return t;
+    }
+    m->seal_waits++;
+    return st->seal;
+}
+
 /*
  * The prune time of an ONFI op, at its start @stime. Op times are not
  * monotonic (a copy's write starts at its read's end), so an older op may
@@ -1333,9 +1365,13 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
             m->cfg.timeline->lock_lun(m->cfg.timeline_opaque, loc);
         }
         {
-            uint64_t s = array_contend_op(m, loc, t, op);
+            uint64_t s;
             uint64_t rs, shift;
 
+            if (op == NAND_MEDIA_READ) {
+                t = seal_read_time(m, loc, t);
+            }
+            s = array_contend_op(m, loc, t, op);
             /* a read never suspends the work that writes its page */
             if (op == NAND_MEDIA_READ && !prio_depends(m, loc, t) &&
                 suspend_read_start(m, loc, t, s, alat, &rs, &shift)) {
@@ -1395,6 +1431,8 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
     }
     if (op == NAND_MEDIA_READ) {
         t = bus_now(m, loc->ch, stime, t, cmd_phase_ns(m, op));
+        /* the command phase is booked; the array sees the read at the seal */
+        t = seal_read_time(m, loc, t);
         /*
          * Program/erase suspend: a read that finds its array mid-program or
          * mid-erase starts after a small suspend overhead instead of waiting

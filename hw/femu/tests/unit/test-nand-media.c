@@ -654,6 +654,196 @@ static void test_pe_suspend_limits(void)
     nand_media_destroy(&m);
 }
 
+/*
+ * The seal of pe_suspend: work booked up to the seal time stays where it
+ * is. A read that reaches the array before the seal starts at the seal, and
+ * may then suspend only the work after it. tR 10 us, tPROG 40 us, tsusp
+ * 5 us.
+ *
+ *   LUN   [prog A][prog C]         seal at the end of A
+ *   read at 1 us: no seal -> runs at 6 us, A and C slide
+ *                 seal    -> arrives at 40 us, suspends C only
+ */
+static void seal_config(NandMediaConfig *cfg)
+{
+    bb_config(cfg);
+    cfg->policy.pe_suspend = true;
+    cfg->timing.tsusp_ns = 5000;
+}
+
+static void test_pe_seal(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a;
+    NandLoc b;
+    NandLoc rd;
+    const uint64_t t0 = 1000000000ULL;
+    uint64_t lat;
+
+    printf("# program/erase suspend: the seal\n");
+    memset(&a, 0, sizeof(a));
+    /* reads of another block: no program here writes their page */
+    rd = a;
+    rd.blk = 7;
+
+    /* a read before the seal waits for the sealed program and pays no tsusp */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    check("seal: returns the seal time",
+          nand_media_seal(&m, &a, t0 + 40000), t0 + 40000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("seal: a read before it starts at the seal",
+          lat, (40000 - 1000) + 10000);
+    check("seal: the read is counted", m.seal_waits, 1);
+    /* the sealed program did not slide: the next one starts at the read end */
+    lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 1000).latency_ns;
+    check("seal: the sealed program kept its end",
+          lat, (40000 + 10000 - 1000) + 40000);
+    nand_media_destroy(&m);
+
+    /* work booked after the seal is still suspended, at the seal time */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_seal(&m, &a, t0 + 40000);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 1000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("seal: an old read suspends the program after the seal",
+          lat, (40000 - 1000) + 5000 + 10000);
+    lat = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 1000).latency_ns;
+    check("seal: only the program after the seal slides",
+          lat, (80000 + 5000 + 10000 - 1000) + 40000);
+    nand_media_destroy(&m);
+
+    /* a read at the seal time is not moved, and suspends as before */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_seal(&m, &a, t0 + 40000);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 1000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 40000).latency_ns;
+    check("seal: a read at the seal time suspends", lat, 5000 + 10000);
+    check("seal: a read at the seal time is not counted", m.seal_waits, 0);
+    nand_media_destroy(&m);
+
+    /* the seal never falls */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_seal(&m, &a, t0 + 40000);
+    check("seal: a lower time keeps the seal",
+          nand_media_seal(&m, &a, t0 + 10000), t0 + 40000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("seal: a lower second seal moves no read",
+          lat, (40000 - 1000) + 10000);
+    nand_media_destroy(&m);
+
+    /*
+     * A suspension is open: the first read ends at 16 us and the program at
+     * 55 us. Sealed there, a second read does not join the suspension.
+     */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000);
+    nand_media_seal(&m, &a, lun_avail[0]);
+    check("seal: the seal takes the slid end", lun_avail[0], t0 + 55000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 2000).latency_ns;
+    check("seal: a read does not join a sealed suspension",
+          lat, (55000 - 2000) + 10000);
+    nand_media_destroy(&m);
+
+    /*
+     * One suspension allowed, tresume 2 us. The first read spends the
+     * budget of program A, which then ends at 57 us. A read clamped to
+     * the seal finds A over, so program C behind it has a new budget.
+     */
+    seal_config(&cfg);
+    cfg.timing.tresume_ns = 2000;
+    cfg.policy.max_suspends = 1;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000);
+    nand_media_seal(&m, &a, lun_avail[0]);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0 + 2000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    check("seal: a clamped read gets the budget of the next program",
+          lat, (57000 - 20000) + 5000 + 10000);
+    nand_media_destroy(&m);
+
+    /* a seal holds its own LUN only */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    b = a;
+    b.lun = 1;
+    nand_media_op(&m, &b, NAND_MEDIA_PROGRAM, t0);
+    nand_media_seal(&m, &a, t0 + 40000);
+    rd.lun = 1;
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("seal: a read on another LUN still suspends", lat, 5000 + 10000);
+    check("seal: a read on another LUN is not counted", m.seal_waits, 0);
+    rd.lun = 0;
+    nand_media_destroy(&m);
+
+    /* the LUN rule: a seal by one plane holds a read on another plane */
+    seal_config(&cfg);
+    cfg.planes_per_lun = 2;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    b = a;
+    b.pl = 1;
+    nand_media_seal(&m, &b, t0 + 40000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("seal: planes of a LUN share the seal",
+          lat, (40000 - 1000) + 10000);
+    nand_media_destroy(&m);
+
+    /*
+     * Staged channel: the command phase runs at the request time, and the
+     * array sees the read at the seal. Erase: command 300, array 2 ms.
+     */
+    seal_config(&cfg);
+    cfg.policy.channel_mode = NAND_CH_STAGED;
+    cfg.timing.cmd_addr_ns = 300;
+    cfg.timing.page_xfer_ns = 20000;
+    cfg.timing.status_ns = 100;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_ERASE, t0);
+    check("seal, staged: the erase ends at cmd + array",
+          lun_avail[0], t0 + 300 + 2000000);
+    nand_media_seal(&m, &a, lun_avail[0]);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("seal, staged: read = erase end + array + xfer + status",
+          lat, (300 + 2000000 - 1000) + 10000 + 20000 + 100);
+    nand_media_destroy(&m);
+
+    /* suspend off: the seal does nothing */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    check("seal, suspend off: no seal", nand_media_seal(&m, &a, t0 + 90000), 0);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("seal, suspend off: the read is as before",
+          lat, (40000 - 1000) + 10000);
+    nand_media_destroy(&m);
+
+    /* read_prio alone keeps suspend state too: still no seal */
+    bb_config(&cfg);
+    cfg.policy.read_prio = true;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    check("seal, read_prio alone: no seal",
+          nand_media_seal(&m, &a, t0 + 80000), 0);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("seal, read_prio alone: the read goes ahead of the queued program",
+          lat, (40000 - 1000) + 10000);
+    check("seal, read_prio alone: no read is counted", m.seal_waits, 0);
+    nand_media_destroy(&m);
+}
+
 static void test_pe_suspend(void)
 {
     NandMediaConfig cfg;
@@ -1479,6 +1669,7 @@ int main(void)
     test_copyback();
     test_pe_suspend();
     test_pe_suspend_limits();
+    test_pe_seal();
     test_read_prio();
     test_media_hold();
     test_partial_xfer();

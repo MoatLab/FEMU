@@ -189,7 +189,7 @@ Devices:
 | `plane_first` | `int32` | `0` | bbssd, CSD: non-zero makes write pointers fill the planes of a LUN before the next channel, so consecutive pages form one multi-plane program with mp_program; needs pls_per_lun > 1 and no FDP, and warns at realize otherwise |
 | `trcbsy` | `int32` | `0` | bbssd, CSD: tRCBSY in ns, the busy time of each copy in a read cache sequence; only with onfi_cache_read, and a value without it warns at realize. 0 (default) takes 3000, the ONFI 6.0 typical value. Negative is refused with onfi_cache_read |
 | `trim_lat_ns` | `int32` | `0` | bbssd, CSD: time in ns charged per Dataset Management deallocate range, with or without FDP |
-| `pe_suspend` | `int32` | `0` | bbssd, CSD, KV: non-zero lets a read suspend a program or erase on its LUN instead of waiting for it to finish |
+| `pe_suspend` | `int32` | `0` | bbssd, CSD, KV: non-zero lets a read suspend a program or erase on its LUN instead of waiting for it to finish; with a tier_mode a read waits for the fold work of the pSLC tier |
 | `tsusp_ns` | `int32` | `0` | bbssd, CSD, KV: overhead in ns added to a read that suspends a program or erase, 0 or more |
 | `pe_suspend_max` | `uint32` | `0` | bbssd, CSD, KV: with pe_suspend, the suspensions one program or erase allows; a read past them waits for it; 0 (default) allows any |
 | `tresume_ns` | `int32` | `0` | bbssd, CSD, KV: with pe_suspend, ns added to a suspended program or erase each time it resumes, 0 or more (default 0) |

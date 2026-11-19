@@ -60943,7 +60943,8 @@ enum {
     TIER_BUSY, TIER_DYN, TIER_ALLOWED, TIER_BAD_LIVE, TIER_BAD_DYN,
     TIER_CAP_FAIL, TIER_RULE_B, TIER_RULE_C, TIER_IDLE_STEPS,
     TIER_IDLE_FOLDS, TIER_IDLE_PAGES, TIER_IDLE_EARLY, TIER_FOLD_OPEN,
-    TIER_UPKEEP_STEPS, TIER_BG_DEFERS, TIER_FOLD_HELD,
+    TIER_UPKEEP_STEPS, TIER_BG_DEFERS, TIER_FOLD_HELD, TIER_SEALS,
+    TIER_SEAL_SHORT, TIER_FOLD_SUSP, TIER_SEAL_WAITS,
     TIER_FIELDS,
 };
 
@@ -60982,6 +60983,9 @@ static uint64_t femu_tier_check_geo(QTestState *qts, uint64_t *v,
     g_assert_cmpuint(v[TIER_IDLE_EARLY], ==, 0);
     /* a fold never reads a page whose multi-plane program is still held */
     g_assert_cmpuint(v[TIER_FOLD_HELD], ==, 0);
+    /* pe_suspend: each seal covers its work, and no fold read suspends */
+    g_assert_cmpuint(v[TIER_SEAL_SHORT], ==, 0);
+    g_assert_cmpuint(v[TIER_FOLD_SUSP], ==, 0);
     g_assert_cmpuint(v[TIER_LINES], ==, lines);
     g_assert_cmpuint(v[TIER_LINE_PGS], ==, line_pgs);
     g_assert_cmpuint(v[TIER_FREE] + v[TIER_CLOSED] + v[TIER_OPEN], ==,
@@ -61051,8 +61055,10 @@ static void femu_test_tier_refused(void *obj, void *data,
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
           "'tier_idle_ms':10,'tier_lazy_pct':100",
           "tier_lazy_pct must be 0 to 99" },
-        { 1, "'nand_cell_type':3,'tier_mode':'dynamic','pe_suspend':1",
-          "tier_mode=dynamic is not supported with pe_suspend" },
+        { 1, "'nand_cell_type':3,'tier_mode':'dynamic','pe_suspend':1,"
+          "'buffer_size':64",
+          "tier_mode=dynamic is not supported with pe_suspend with a write "
+          "buffer" },
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
           "'tier_full_policy':'concurrent'",
           "tier_full_policy must be direct or through" },
@@ -61066,8 +61072,16 @@ static void femu_test_tier_refused(void *obj, void *data,
           "'tier_full_policy':'through'", "tier_full_policy=through" },
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
           "'tier_pslc_read_ns':20000000000", "must be at most" },
+        /* pe_suspend: only what the fold seals do not cover is refused */
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
-          "'pe_suspend':1", "pe_suspend" },
+          "'pe_suspend':1,'subsys':'fdpsub'", "pe_suspend under FDP" },
+        { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
+          "'pe_suspend':1,'buffer_size':64",
+          "pe_suspend with a write buffer" },
+        { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
+          "'pe_suspend':1,'mapping':'dftl'", "pe_suspend with mapping=dftl" },
+        { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
+          "'pe_suspend':1,'die_parity':1", "pe_suspend with die_parity" },
         { 1, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1,"
           "'ecc_step_ns':1000000", "ecc_step_ns" },
         { 3, "'nand_cell_type':3,'tier_mode':'static','tier_static_mb':1",
@@ -61605,6 +61619,198 @@ static void femu_test_tier_through(void *obj, void *data,
     /* one pSLC erase of 30000 rated (30 x TLC) is 33 millionths */
     g_assert_cmpuint(v[TIER_DAMAGE], ==, 33);
 
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * One doorbell ring on @q: a write of @wpages pages (1 or 2) from page
+ * @wpage, then a read of page @rpage. Returns the identifier of the write;
+ * the read has the next one. @cid gets the two in the order they
+ * completed, and @read_us how long the read took.
+ */
+static uint16_t femu_tier_write_read(FemuCtrlState *c, FemuQueue *q,
+                                     uint64_t buf, uint64_t wpage,
+                                     uint32_t wpages, uint64_t rpage,
+                                     uint16_t cid[2], int64_t *read_us)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeRwCmd rw;
+    uint16_t first = c->cid;
+    int64_t t0;
+    int i;
+
+    g_assert_cmpuint(wpages, >=, 1);
+    g_assert_cmpuint(wpages, <=, 2);
+    memset(&rw, 0, sizeof(rw));
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    /* every page of the write comes from the one buffer page */
+    rw.dptr.prp2 = cpu_to_le64(wpages == 2 ? buf : 0);
+    rw.nlb = cpu_to_le16(wpages * (FEMU_DATA_SIZE / c->lba_size) - 1);
+    femu_pe_suspend_rw(c, q, &rw, false, NVME_CMD_WRITE, wpage);
+    rw.dptr.prp2 = 0;
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c->lba_size - 1);
+    femu_pe_suspend_rw(c, q, &rw, false, NVME_CMD_READ, rpage);
+    t0 = g_get_monotonic_time();
+    femu_zap_ring(c, q);
+    for (i = 0; i < 2; i++) {
+        uint64_t slot = q->cq_addr + q->cq_head * sizeof(NvmeCqe);
+        NvmeCqe cqe;
+
+        g_assert_cmpint(femu_zap_complete(c, q, NULL), ==, NVME_SUCCESS);
+        qtest_memread(qts, slot, &cqe, sizeof(cqe));
+        cid[i] = le16_to_cpu(cqe.cid);
+        if (cid[i] == (uint16_t)(first + 1)) {
+            *read_us = g_get_monotonic_time() - t0;
+        }
+    }
+    return first;
+}
+
+/* the tries of tier-suspend-host, each on a new page of the die of page 0 */
+#define TIER_SUSP_TRIES 3
+
+/*
+ * The pSLC tier with pe_suspend: a host program to the pool is suspended
+ * as any program is. A pSLC program takes 200 ms and a pSLC read 25 us.
+ * Pages 0 to 3 go to the four dies, one each. Page 4 then programs on the
+ * die of page 0. A read of page 0 in the same doorbell ring suspends that
+ * program and completes first. No fold ran, so the tier sealed nothing
+ * and no read waited for a seal.
+ *
+ * The poller stamps the two commands one after the other. A host that
+ * stalls it for 200 ms between them makes the read arrive after the
+ * program, and then the write completes first. So a try that ends in
+ * that order runs again, on the next page of that die. A device that
+ * does not suspend fails every try.
+ */
+static void femu_test_tier_suspend_host(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    uint64_t pages = 4;
+    int64_t read_us = 0;
+    uint16_t cid[2];
+    uint16_t first;
+    bool read_first = false;
+    int tries;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_zap_create_queue(&c, &q, 2);
+    qtest_memset(qts, buf, 0x5a, 4096);
+    femu_tier_write(&c, 0, 4, 1, buf, list);
+
+    for (tries = 0; tries < TIER_SUSP_TRIES && !read_first; tries++) {
+        /* three more pages bring the pool pointer back to the die */
+        if (tries) {
+            femu_tier_write(&c, pages, 3, 1, buf, list);
+            pages += 3;
+        }
+        first = femu_tier_write_read(&c, &q, buf, pages++, 1, 0, cid,
+                                     &read_us);
+        g_test_message("tier host suspend: cid %u completed before cid %u, "
+                       "read %" PRId64 " us", cid[0], cid[1], read_us);
+        read_first = cid[0] == (uint16_t)(first + 1) && cid[1] == first;
+    }
+    g_assert_true(read_first);
+
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, pages);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, pages);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_SEALS], ==, 0);
+    g_assert_cmpuint(v[TIER_SEAL_WAITS], ==, 0);
+
+    femu_queue_free(&c, &q);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* the pSLC erase time of tier-suspend-fold, in ns */
+#define TIER_SUSP_ERASE_NS 2000000000
+
+/*
+ * A fold with pe_suspend: no read moves its work. tier_full_policy=through
+ * with a 20 ms pSLC program and a 2 s pSLC erase. The pool holds 255
+ * pages, and line 1 keeps pages 0 to 3, one on each die. One doorbell ring
+ * sends a write of pages 400 and 401, then a read of page 0. Page 400
+ * takes the last pool page, on ch1 lun1. Page 401 finds the pool full and
+ * folds line 1, while the program of page 400 runs.
+ *
+ *   fold order  source     destination
+ *   page 0      ch0 lun0   ch0 lun0
+ *   page 2      ch0 lun1   ch1 lun0
+ *   page 1      ch1 lun0   ch0 lun1   the source runs the copy of page 2
+ *   page 3      ch1 lun1   ch1 lun1   the source runs the program of 400
+ *   then the erase of line 1 on the four LUNs, 2 s
+ *
+ * The fold seals 4 source LUNs, 4 destination LUNs and 4 erases. Its read
+ * of page 3 meets a host program that no earlier seal holds. The seal
+ * before the read makes it wait. Without that seal the read suspends the
+ * program, which x-tier-check counts and femu_tier_check() holds at 0.
+ *
+ * The host read of page 0 arrives while the erase runs on its die. The
+ * erase is sealed, so the read waits for it and takes the erase time at
+ * least. A read that suspended the erase would take under 1 ms. Three
+ * reads wait for a seal: the fold reads of pages 1 and 3, and the host
+ * read. That count is model time, so a slow host does not change it.
+ */
+static void femu_test_tier_suspend_fold(void *obj, void *data,
+                                        QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    int64_t read_us = 0;
+    uint16_t cid[2];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_zap_create_queue(&c, &q, 2);
+    qtest_memset(qts, buf, 0x4e, 4096);
+
+    /* all but one pool page; the through policy never folds at request end */
+    femu_tier_write(&c, 0, 255, 16, buf, list);
+    g_assert_cmphex(femu_dealloc_pages(&c, 4, 60, list), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 195);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_SEALS], ==, 0);
+    g_assert_cmpuint(v[TIER_SEAL_WAITS], ==, 0);
+
+    femu_tier_write_read(&c, &q, buf, 400, 2, 0, cid, &read_us);
+    g_test_message("tier fold suspend: cid %u completed before cid %u, "
+                   "read %" PRId64 " us", cid[0], cid[1], read_us);
+    g_assert_cmpint(read_us * 1000, >=, TIER_SUSP_ERASE_NS);
+
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 197);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 4);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 4);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 257);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    /* 4 source LUNs, 4 destination LUNs and 4 erases */
+    g_assert_cmpuint(v[TIER_SEALS], ==, 12);
+    /* the fold reads of pages 1 and 3, and the host read of page 0 */
+    g_assert_cmpuint(v[TIER_SEAL_WAITS], ==, 3);
+
+    femu_queue_free(&c, &q);
     guest_free(alloc, list);
     guest_free(alloc, buf);
     femu_disable(&c);
@@ -65586,6 +65792,21 @@ static void femu_register_nodes(void)
             "pgs_per_blk=96,blks_per_pl=32,pls_per_lun=2,luns_per_ch=2,"
             "nchs=2,nand_cell_type=3,tier_mode=static,tier_static_mb=1,"
             "tier_full_policy=through,mp_program=1"
+    });
+    qos_add_test("tier-suspend-host", "femu", femu_test_tier_suspend_host,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_pslc_prog_ns=200000000,"
+            "pe_suspend=1,tsusp_ns=10000"
+    });
+    qos_add_test("tier-suspend-fold", "femu", femu_test_tier_suspend_fold,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=16,femu_mode=1," FEMU_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_full_policy=through,"
+            "pe_suspend=1,tsusp_ns=10000,tier_pslc_prog_ns=20000000,"
+            "tier_pslc_erase_ns=" stringify(TIER_SUSP_ERASE_NS)
     });
     qos_add_test("tier-direct", "femu", femu_test_tier_direct,
                  &(QOSGraphTestOptions) {

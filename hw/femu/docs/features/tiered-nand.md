@@ -203,6 +203,50 @@ each page as a direct write does: in the pool when it has room, else by
 - x-tier-check reports the upkeep steps and the idle write-backs that
   stopped for a fold.
 
+## Program and erase suspend
+
+With `pe_suspend`, a read suspends a program or erase on its LUN. All work
+queued on that LUN then ends after its booked end. A fold needs its work in
+a fixed order: source program, fold read, copy program, erase. So the tier
+seals each LUN that a fold uses.
+
+```
+ fold of one page                      seal
+   source LUN       [queued work]      before the fold read
+                    [fold read]
+   destination LUN  [copy program]     after the copy program
+ fold end
+   each LUN         [erase]            after the erase
+```
+
+- A seal holds the work booked so far on one LUN. A read that arrives
+  before that work ends starts when it ends.
+- After the seal time, the read can suspend the work booked after the seal.
+- A host write makes no seal. A read suspends a host program as on a
+  device without the tier, until a fold seals the LUN of that program.
+- A fold seal holds all work booked before it on the LUN, host programs
+  too. Programs booked after the newest seal stay open to suspension.
+- So `pe_suspend` shortens a read that meets a host program. It does not
+  shorten a read that meets fold work.
+- x-tier-check reports the seals and the reads that a seal made wait.
+- It also reports two counts that stay 0: seals that ended before their
+  work, and fold reads that suspended other work.
+
+Example: a 1 GiB TLC device with a 64 MiB pool and read suspend.
+
+<!-- femu-example: tiered-nand-suspend -->
+```
+-device femu,femu_mode=1,devsz_mb=1024,nand_cell_type=3,tier_mode=static,tier_static_mb=64,pe_suspend=1,tsusp_ns=15000
+```
+
+Realize refuses a tier with `pe_suspend` in four cases. Each one books work
+that the seals do not hold:
+
+- under FDP;
+- with `buffer_size`: a Flush trusts the booked end of a program;
+- with `mapping=dftl`: a translation page read trusts it too;
+- with `die_parity`: parity work runs on other dies.
+
 ## FDP
 
 Under Flexible Data Placement the pool is a set of pSLC reclaim units in
@@ -334,13 +378,14 @@ the channel too, set a bus profile such as `pg_xfer_lat` or `onfi_mode`.
   `gc_pace` and `gc_copyback`.
 - Realize also refuses it with `blk_pe_limit`, `wl_spread`,
   `read_reclaim_limit`, `retention_limit_sec`, the `pd_*` properties,
-  `onfi_cache_read`, `pe_suspend` and `ecc_step_ns`.
+  `onfi_cache_read`, `read_prio` and `ecc_step_ns`.
 - With `mp_program`, pool pages program as multi-plane commands, as dense
   pages do. A fold first charges the programs that the multi-plane batches
   still hold, so it never reads a page before its program. That charge
   goes to the request that holds them.
-- With `pe_suspend`, a read could move the end of a fold program past the
-  time the erase waits for, so the tier refuses it.
+- With `pe_suspend`, the tier seals fold work, so a read does not suspend
+  it. See [program and erase suspend](#program-and-erase-suspend) for the
+  four refused cases.
 - `tier_full_policy=through` needs `tier_static_mb` above 0. A static pool
   always needs it. A dynamic pool needs it only with `through`.
 - Folds always charge their time. `enable_gc_delay` off (the GC delay flip)

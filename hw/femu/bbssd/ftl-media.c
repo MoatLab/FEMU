@@ -694,6 +694,36 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     return c.latency_ns;
 }
 
+/**
+ * ssd_media_seal - keep the work booked on the LUN of @ppa where it is
+ * @ssd: the device
+ * @ppa: a page of the LUN
+ *
+ * With pe_suspend, a read suspends a program or erase on its LUN, and all
+ * work queued on the LUN then ends that much after its booked end. After
+ * this call no read moves the work booked so far: a read that arrives
+ * before that work ends starts when it ends, and may suspend only work
+ * booked after the call.
+ *
+ *   LUN  [booked work ........]|[booked after the call]
+ *                              ^ seal: reads start here or after
+ *
+ * Returns the seal time, the end of the booked work. With pe_suspend off
+ * it does nothing and returns 0.
+ */
+uint64_t ssd_media_seal(struct ssd *ssd, struct ppa *ppa)
+{
+    NandLoc loc = {
+        .ch = ppa->g.ch, .lun = ppa->g.lun, .pl = ppa->g.pl,
+    };
+
+    if (!ssd->sp.pe_suspend) {
+        return 0;
+    }
+    return nand_media_seal(&ssd->media, &loc,
+                           nand_lun_end(get_lun(ssd, ppa)));
+}
+
 /*
  * One more page read of a decode retry or a soft decode, booked on the LUN
  * and channel from @t. It stresses the block and counts as a media read,

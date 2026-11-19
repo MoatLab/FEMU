@@ -303,6 +303,8 @@ typedef struct NandBusResList {
 typedef struct NandSuspendState {
     uint64_t pe_end;
     uint64_t rd_end;
+    /* pe_suspend: no read starts before this (nand_media_seal()); 0 = none */
+    uint64_t seal;
     uint32_t nsusp;     /* suspensions of the program/erase in flight */
     uint64_t budget_end; /* the end of the work those suspensions shifted */
     /* read_prio: the queued program/erase windows, sorted by start */
@@ -348,6 +350,8 @@ typedef struct NandMedia {
     const uint32_t *lun_pct;
     /* die_stats: one entry per LUN, ch * luns_per_ch + lun; NULL is off */
     NandDieStat *die_stat;
+    /* reads that a seal made start after their request time */
+    uint64_t seal_waits;
 } NandMedia;
 
 uint64_t nand_media_last_end(const NandMedia *m);
@@ -372,6 +376,17 @@ uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint32_t pg,
 
 NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                                NandMediaOp op, uint64_t stime);
+
+/*
+ * pe_suspend: keep the work booked on the array position of @loc where it
+ * is, up to @t. A read there that nand_media_op() books then reaches the
+ * array at @t or after it, so a suspension moves only work that runs at or
+ * after @t. @t is at most the time the position is busy until: programs
+ * and erases start there and do not look at the seal. The time never
+ * falls. Returns the seal time, or 0 without pe_suspend, where it does
+ * nothing. The caller serializes it with the operations on the position.
+ */
+uint64_t nand_media_seal(NandMedia *m, const NandLoc *loc, uint64_t t);
 
 /*
  * Multi-plane group: one parallel array op + per-plane bus + inter-plane busy.

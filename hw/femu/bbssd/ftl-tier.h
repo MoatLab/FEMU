@@ -122,6 +122,14 @@ struct ftl_tier {
     uint64_t mp_drain_lat;
     uint64_t fold_held;     /* fold reads of a page still held: a bug */
 
+    /*
+     * pe_suspend: a fold seals each LUN before its read and after its
+     * program and its erase, so no read moves that work (ftl_tier_seal()).
+     */
+    uint64_t seals;         /* seals of fold work */
+    uint64_t seal_short;    /* seals that ended before their work: a bug */
+    uint64_t fold_susp;     /* fold reads that suspended other work: a bug */
+
     uint64_t valid;         /* valid pages in pool lines */
     uint64_t dense_valid;   /* valid host pages in dense lines */
     uint64_t dense_tp;      /* valid translation pages (dftl) */
