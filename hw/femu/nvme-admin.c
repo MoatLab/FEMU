@@ -642,6 +642,10 @@ static uint32_t nvme_ring_slots(FemuCtrl *n)
     uint64_t sqs = 1 + (n->nr_io_queues - 1) / n->nr_pollers;
     uint64_t reqs = sqs * ((uint64_t)n->max_q_ents + 1);
 
+    /* qtest only: a small ring that the queues can fill */
+    if (n->test_ring_slots) {
+        return pow2ceil(MAX(n->test_ring_slots, 4));
+    }
     return MAX((uint64_t)FEMU_MAX_INF_REQS, pow2ceil(reqs + 1));
 }
 
@@ -727,7 +731,6 @@ static void nvme_init_poller(FemuCtrl *n)
         assert(rte_ring_empty(n->to_poller[i]));
     }
 
-    n->ftl_held = g_new0(NvmeRequest *, n->nr_pollers + 1);
     n->pq = g_malloc0(sizeof(pqueue_t *) * (n->nr_pollers + 1));
     for (i = 1; i <= n->nr_pollers; i++) {
         n->pq[i] = pqueue_init(FEMU_MAX_INF_REQS, cmp_pri, get_pri, set_pri,

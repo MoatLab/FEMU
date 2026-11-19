@@ -36,7 +36,7 @@ DEVICES = [
                       "x-rain-fail",
                       "x-backend-size",
                       "x-query-delay-ms", "x-range-waits",
-                      "x-rber-u", "x-sdc", "x-stage-hold-ms",
+                      "x-rber-u", "x-ring-slots", "x-sdc", "x-stage-hold-ms",
                       "x-stream-test", "x-tier-check", "x-tier-fold-stop",
                       "x-tp-hold",
                       "x-zone-draining",

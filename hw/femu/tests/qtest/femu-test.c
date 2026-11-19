@@ -66740,6 +66740,105 @@ static void femu_test_g1_ring_capacity(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+#define FEMU_G1_SMALL_RING   64      /* x-ring-slots: holds 63 requests */
+#define FEMU_G1_SMALL_Q      128     /* entries of the SQ and the CQ */
+#define FEMU_G1_SMALL_MORE   10      /* Reads sent while the ring is full */
+
+/* a uint32 test property of device @id */
+static int64_t femu_g1_qom_get(QTestState *qts, const char *id,
+                               const char *prop)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':%s}}", path, prop);
+    int64_t v;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * The ring from the FTL thread is full. x-ring-slots 64 makes each ring
+ * hold 63 requests, and x-cpl-hold 1 keeps them on the ring to the
+ * poller. 63 Reads fill it; 10 more wait in the ring to the FTL thread,
+ * which must take none of them (x-ftl-ring-full counts its passes). A
+ * pause then still returns, and x-cpl-count finds 63: a thread that took
+ * one more request and held it, or waited with it, fails here. After the
+ * release each of the 73 commands completes one time.
+ */
+static void femu_test_g1_ring_full(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q = { .qid = 1, .phase = 1 };
+    const uint32_t full = FEMU_G1_SMALL_RING - 1;
+    const uint32_t count = full + FEMU_G1_SMALL_MORE;
+    uint64_t buf = guest_alloc(alloc, FEMU_G1_PAGE);
+    bool seen[FEMU_G1_SMALL_Q] = { false };
+    NvmeCqe cqe;
+    uint16_t first;
+    uint16_t cid;
+    uint32_t e;
+    int waited;
+
+    femu_cancel_hook(qts, "g1-small", "x-ring-slots", FEMU_G1_SMALL_RING);
+    femu_enable(&c, &femu->dev, alloc);
+    q.sq_addr = guest_alloc(alloc, FEMU_G1_SMALL_Q * sizeof(NvmeCmd));
+    q.cq_addr = guest_alloc(alloc, FEMU_G1_SMALL_Q * sizeof(NvmeCqe));
+    qtest_memset(qts, q.cq_addr, 0, FEMU_G1_SMALL_Q * sizeof(NvmeCqe));
+    g_assert_cmphex(femu_g1_create(&c, NVME_ADM_CMD_CREATE_CQ, 1, q.cq_addr,
+                                   FEMU_G1_SMALL_Q - 1, NVME_CQ_PC), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_g1_create(&c, NVME_ADM_CMD_CREATE_SQ, 1, q.sq_addr,
+                                   FEMU_G1_SMALL_Q - 1,
+                                   (1 << 16) | NVME_SQ_PC), ==,
+                    NVME_SUCCESS);
+
+    femu_cancel_hook(qts, "g1-small", "x-cpl-hold", 1);
+    first = c.cid;
+    femu_g1_sized_submit(&c, &q, buf, full, FEMU_G1_SMALL_Q);
+    femu_cancel_wait_cpl(qts, "g1-small", full);
+    g_assert_cmpint(femu_g1_qom_get(qts, "g1-small", "x-ftl-ring-full"),
+                    ==, 0);
+
+    femu_g1_sized_submit(&c, &q, buf, FEMU_G1_SMALL_MORE, FEMU_G1_SMALL_Q);
+    for (waited = 0;
+         !femu_g1_qom_get(qts, "g1-small", "x-ftl-ring-full"); waited++) {
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+    /* the pause returns, and no request moved past the full ring */
+    g_assert_cmpint(femu_g1_qom_get(qts, "g1-small", "x-cpl-count"), ==,
+                    full);
+    qtest_memread(qts, q.cq_addr, &cqe, sizeof(cqe));
+    g_assert_cmpuint(le16_to_cpu(cqe.status), ==, 0);
+
+    femu_cancel_hook(qts, "g1-small", "x-cpl-hold", 0);
+    for (e = 0; e < count; e++) {
+        femu_g1_cqe_wait(qts, &q, e, 1, &cqe);
+        g_assert_cmphex(le16_to_cpu(cqe.status) >> 1, ==, NVME_SUCCESS);
+        g_assert_cmpuint(le16_to_cpu(cqe.sq_id), ==, q.qid);
+        cid = le16_to_cpu(cqe.cid) - first;
+        g_assert_cmpuint(cid, <, count);
+        g_assert_false(seen[cid]);
+        seen[cid] = true;
+    }
+    qpci_io_writel(c.pdev, c.bar, femu_cq_doorbell(&c, q.qid), count);
+    g_usleep(10 * 1000);
+    qtest_memread(qts, q.cq_addr + count * sizeof(cqe), &cqe, sizeof(cqe));
+    g_assert_cmpuint(le16_to_cpu(cqe.status), ==, 0);
+
+    guest_free(alloc, q.cq_addr);
+    guest_free(alloc, q.sq_addr);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /* entry @e of a completion queue of @n entries: slot, phase */
 static uint32_t femu_g1_cqf_slot(uint32_t e, uint32_t n)
 {
@@ -74949,6 +75048,13 @@ static void femu_register_nodes(void)
             "id=g1-ring,devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=16,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
             "nchs=2,queues=17,entries=4095",
+    });
+    qos_add_test("ring-full-bbssd", "femu", femu_test_g1_ring_full,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=g1-small,devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2",
     });
     qos_add_test("cq-full-deep-nossd", "femu", femu_test_g1_cq_backlog,
                  &(QOSGraphTestOptions) {

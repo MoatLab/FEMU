@@ -3564,9 +3564,10 @@ static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
 }
 
 /*
- * An enqueue to the ring from the FTL thread to poller @i failed. The size
- * of the ring excludes that (nvme_ring_slots()), so the count stays 0 on a
- * correct device; x-ftl-ring-full reads it. The first event is logged.
+ * The ring from the FTL thread to poller @i was full. The size of the ring
+ * excludes that (nvme_ring_slots()), so the count stays 0 on a correct
+ * device unless x-ring-slots makes the ring small; x-ftl-ring-full reads
+ * it. The first event is logged.
  */
 static void femu_ftl_ring_full(FemuCtrl *n, int i)
 {
@@ -3578,6 +3579,32 @@ static void femu_ftl_ring_full(FemuCtrl *n, int i)
     if (seen != UINT32_MAX) {
         qatomic_set(&n->ftl_ring_full, seen + 1);
     }
+}
+
+/*
+ * Room on the ring from the FTL thread to poller @i. Only the poller moves
+ * the consumer tail, so a count taken between two equal reads of it is
+ * exact for that moment; other producers only make it larger, and the
+ * enqueue below copes with that. A tail that moves means the poller is
+ * draining: report no room and count nothing, the next pass tries again.
+ */
+static bool femu_ftl_ring_room(FemuCtrl *n, int i)
+{
+    struct rte_ring *r = n->to_poller[i];
+    uint32_t cons = r->cons.tail;
+    uint32_t prod;
+
+    smp_rmb();  /* read the producer tail after the first consumer tail */
+    prod = r->prod.tail;
+    smp_rmb();  /* and the second consumer tail after the producer tail */
+    if (r->cons.tail != cons) {
+        return false;
+    }
+    if (prod - cons < r->capacity) {
+        return true;
+    }
+    femu_ftl_ring_full(n, i);
+    return false;
 }
 
 /*
@@ -3654,8 +3681,7 @@ static void *femu_ftl_thread(void *arg)
         busy = false;
         stalled = false;
         for (i = 1; i <= n->nr_pollers; i++) {
-            if (!n->to_ftl[i] ||
-                (!n->ftl_held[i] && !femu_ring_count(n->to_ftl[i]))) {
+            if (!n->to_ftl[i] || !femu_ring_count(n->to_ftl[i])) {
                 continue;
             }
             busy = true;
@@ -3681,23 +3707,13 @@ static void *femu_ftl_thread(void *arg)
             }
 
             /*
-             * A request that found the ring to the poller full goes
-             * first, and no new one is taken from this ring until it
-             * leaves. A pause moves it to pq (nvme_pause_wait()).
+             * Take a request only when the ring to the poller has room,
+             * so this thread never holds one across a pause. A ring that
+             * is full leaves the request on to_ftl[i], where the queue
+             * drain, Cancel and a pause find it.
              */
-            if (unlikely(n->ftl_held[i])) {
-                if (femu_ring_enqueue(n->to_poller[i],
-                                      (void **)&n->ftl_held[i], 1) == 1) {
-                    n->ftl_held[i] = NULL;
-                } else {
-                    femu_ftl_ring_full(n, i);
-                    stalled = true;
-                }
-                n->ftl_in_sweep = false;
-                continue;
-            }
-            /* a pause moved the held request, and the ring may be empty */
-            if (!femu_ring_count(n->to_ftl[i])) {
+            if (unlikely(!femu_ftl_ring_room(n, i))) {
+                stalled = true;
                 n->ftl_in_sweep = false;
                 continue;
             }
@@ -3752,21 +3768,32 @@ static void *femu_ftl_thread(void *arg)
             }
 
             /*
-             * The ring holds every request of its queues
-             * (nvme_ring_slots()), so it takes this one. If it does not,
-             * hold the request for the next pass: a wait here would keep
-             * ftl_in_sweep set, and a pause stops the poller first.
+             * The ring had room, and a CSD worker may take a slot since.
+             * Each request on the ring is a request object of its
+             * queues, this one too, and the ring holds all of them
+             * (nvme_ring_slots()). So the enqueue cannot fail on a
+             * correct device. If it does, wait while the poller drains
+             * the ring; a pause stops the poller, so stop the device
+             * there instead of losing the command or the pause.
              */
             rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
-            if (unlikely(rc != 1)) {
+            while (unlikely(rc != 1) && !n->ftl_stopping) {
                 femu_ftl_ring_full(n, i);
-                n->ftl_held[i] = req;
-                stalled = true;
+                if (!n->dataplane_started) {
+                    error_report("femu: to_poller[%d] refused command %u "
+                                 "of queue %u during a pause; the request "
+                                 "ring size is wrong", i,
+                                 (unsigned)le16_to_cpu(req->cqe.cid),
+                                 (unsigned)req->sq->sqid);
+                    abort();
+                }
+                usleep(100);
+                rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
             }
 
             n->ftl_in_sweep = false;
         }
-        /* a held request waits for the poller: do not spin on it */
+        /* a full ring waits for the poller: do not spin on it */
         if (unlikely(stalled)) {
             usleep(100);
         }
@@ -5849,8 +5876,6 @@ static void nvme_destroy_poller(FemuCtrl *n)
 
     g_free(n->pq);
     n->pq = NULL;
-    g_free(n->ftl_held);
-    n->ftl_held = NULL;
     g_free(n->to_poller);
     n->to_poller = NULL;
     g_free(n->to_ftl);
@@ -7731,6 +7756,8 @@ static void femu_instance_init(Object *obj)
                             femu_test_cpl_count_get, NULL, NULL, NULL);
         femu_test_add_u32(obj, "x-ftl-ring-full",
                           &FEMU(obj)->ftl_ring_full, false);
+        femu_test_add_u32(obj, "x-ring-slots",
+                          &FEMU(obj)->test_ring_slots, true);
         femu_test_add_u32(obj, "x-ocp-lat-skew-ms",
                           &FEMU(obj)->test_ocp_lat_skew_ms, true);
         object_property_add_bool(obj, "x-telemetry-trigger", NULL,

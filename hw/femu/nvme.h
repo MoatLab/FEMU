@@ -3411,12 +3411,6 @@ typedef struct FemuCtrl {
     struct rte_ring **to_ftl;
     struct rte_ring **to_poller;
     pqueue_t        **pq;
-    /*
-     * One request for each poller that found its ring from the FTL full
-     * after its FTL step. Written by the FTL thread inside ftl_in_sweep;
-     * a pause moves it to pq.
-     */
-    NvmeRequest     **ftl_held;
     bool            *should_isr;
     /* pin level in bit 0, or MSI vectors held back by INTMS */
     uint32_t        irq_status;
@@ -3501,6 +3495,8 @@ typedef struct FemuCtrl {
      * returned in their ring; 2, they leave them in pq. Backlogs post.
      */
     uint32_t        test_cpl_hold;
+    /* qtest only: slots of each request ring before the first enable */
+    uint32_t        test_ring_slots;
     /*
      * wrr=on: weighted round robin with an urgent class (CC.AMS 001b).
      * The one poller owns the credits (high, medium, low) and the next-SQ
