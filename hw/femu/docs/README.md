@@ -126,6 +126,9 @@ two differ.
 - [Trace replay and I/O shapes](guides/trace-replay.md): replay an
   `io_trace` capture with fio, a shape report, and rate-limited fio jobs
   for accelerator workload shapes.
+- [Workload recipes](recipes/README.md): DLIO, DiskANN vector search and
+  LLM KV-cache offload on a FEMU device, with no accelerator in the
+  guest. Not yet validated on a host.
 - [Performance tuning](guides/performance-tuning.md): pollers, CPU pinning,
   hugepages, NUMA, host settings, and what each knob trades.
 

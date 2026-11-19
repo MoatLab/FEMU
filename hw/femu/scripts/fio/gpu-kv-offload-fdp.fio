@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# KV-cache offload of two tenants, with or without data placement.
+#
+# An inference server keeps the key-value cache of each session on the
+# SSD. Two tenants share the namespace here. The entries of the first
+# tenant live for a short time on average: it has a small region and a
+# high store rate. The entries of the second tenant live longer: it has
+# a large region and a low store rate. A third region holds entries that
+# the load job reads and that no job writes. Each entry starts at a
+# random 128 KiB boundary, so the lifetimes are statistical: an entry
+# can overlap an older entry in part.
+#
+#   namespace: |-- short 12% --|------ long 63% ------|-- load 25% --|
+#   store rate:    24 MiB/s           8 MiB/s            none
+#   placement:     index 0            index 1            (prefill: 2)
+#
+# One entry is 32 commands of 128 KiB in a row (4 MiB), as in
+# gpu-kv-offload.fio.
+#
+#   FEMU_DEV=/dev/ng0n1 FEMU_FDP=1 FEMU_RUNTIME=240 fio gpu-kv-offload-fdp.fio
+#
+# FEMU_DEV is the NVMe generic character device of the namespace.
+# FEMU_FDP=1 sends each store with a placement identifier: the namespace
+# needs Flexible Data Placement and two placement identifiers or more.
+# FEMU_FDP=0 sends the same stores with no placement, as the control.
+# FEMU_RUNTIME is the run time in seconds. All three variables are
+# necessary. The store jobs write over three quarters of the namespace.
+# recipe-kv-offload-guest.sh fills the namespace, runs this file and
+# reads the counters.
+#
+# Rate limit: each job has a fixed "rate". These jobs study the SSD
+# model (GC, WAF, data placement, tail latency). They do not measure the
+# speed of the emulator, so no job runs unthrottled. Do not remove the
+# limit. check-fio-jobs.py fails a job file that has none. The total is
+# 32 MiB/s of stores and 32 MiB/s of loads.
+
+[global]
+ioengine=io_uring_cmd
+cmd_type=nvme
+filename=${FEMU_DEV}
+thread=1
+time_based=1
+runtime=${FEMU_RUNTIME}
+bs=128k
+norandommap=1
+fdp=${FEMU_FDP}
+
+[kv-store-short]
+rw=randwrite:32
+iodepth=4
+size=12%
+fdp_pli=0
+# rate limit: see the header
+rate=24m
+
+[kv-store-long]
+rw=randwrite:32
+iodepth=4
+offset=12%
+size=63%
+fdp_pli=1
+# rate limit: see the header
+rate=8m
+
+[kv-load]
+rw=randread:32
+iodepth=4
+offset=75%
+size=25%
+# rate limit: see the header
+rate=32m

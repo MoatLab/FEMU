@@ -1,7 +1,7 @@
 # Trace replay and I/O shapes
 
 This page shows how to capture the I/O of a workload once and replay it
-many times. It also describes four fio job files that give the I/O
+many times. It also describes five fio job files that give the I/O
 shapes of an accelerator workload with no accelerator in the guest.
 
 ```
@@ -196,7 +196,7 @@ command counts and the `sizes` lines can differ for the reasons above.
 
 ## I/O shapes of an accelerator workload
 
-`hw/femu/scripts/fio/` holds four job files. Each gives the storage side
+`hw/femu/scripts/fio/` holds five job files. Each gives the storage side
 of one workload phase. CPU threads in the guest submit the I/O, so the
 guest needs no accelerator.
 
@@ -206,6 +206,7 @@ guest needs no accelerator.
 | `gpu-small-random-read.fio` | vector search, graph sampling | 8 jobs, random reads of 512 B and 4 KiB, bursts of 64 with a pause |
 | `gpu-checkpoint-burst.fio` | checkpoint | 1 MiB sequential writes for 2 s, then a pause of 8 s |
 | `gpu-kv-offload.fio` | KV-cache offload | entries of 4 MiB (32 commands of 128 KiB), one store job and one load job |
+| `gpu-kv-offload-fdp.fio` | KV-cache offload of two tenants | the same entries; a short-lived and a long-lived store job, each with its own placement index, and one load job |
 
 ```sh
 sudo FEMU_DEV=/dev/ng0n1 fio gpu-small-random-read.fio
@@ -216,6 +217,12 @@ The jobs use the `io_uring_cmd` engine, which needs Linux 5.19 or newer
 and fio 3.31 or newer. `gpu-checkpoint-burst.fio` needs fio 3.34 or
 newer for its first pause. `gpu-small-random-read.fio` needs a 512-byte
 LBA format. The write jobs write over the namespace.
+
+`gpu-kv-offload-fdp.fio` also needs `FEMU_FDP` (1 for placement, 0 for
+none) and `FEMU_RUNTIME` (seconds). With `FEMU_FDP=1` it needs fio 3.34
+or newer and an FDP namespace. The
+[KV-cache offload recipe](../recipes/kv-cache-offload.md) runs it with a
+prefill and reads the counters.
 
 The shapes come from public descriptions of these workloads. They are
 not traces of a real accelerator.
@@ -269,6 +276,7 @@ Run a job with `io_trace=FILE` on the device, then give the trace to
 | `gpu-small-random-read.fio` | reads only; half in the `512` line and half in the `4096` line; per queue, a largest burst that is a multiple of 64 |
 | `gpu-checkpoint-burst.fio` | writes only; a depth profile that falls to 0 in the pause |
 | `gpu-kv-offload.fio` | reads and writes in the `131072` line; a sequential share near 31 of 32 for each kind, when each job stays on one CPU |
+| `gpu-kv-offload-fdp.fio` | the same as `gpu-kv-offload.fio` |
 
 A queue is not a job. The guest maps each CPU to a queue, so two jobs
 on one CPU share a queue, and a job that moves changes its queue. Give
@@ -278,6 +286,8 @@ job when each job must keep one queue.
 
 ## Related pages
 
+- [Workload recipes](../recipes/README.md): DLIO, DiskANN and KV-cache
+  offload on a FEMU device.
 - [Measuring](measuring.md): counters, the I/O trace format and steady
   state.
 - [Scripts and tools](../reference/scripts.md): each script and its
