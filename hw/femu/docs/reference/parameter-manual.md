@@ -326,7 +326,7 @@ Reference: [NAND timing](properties.md#nand-timing-bbssd-csd-kv). Design:
 | `trcbsy` | ns | >= 0 | with `onfi_cache_read`, tRCBSY of each copy; 0 takes 3000 (Table 4-30 typical); without it, a value warns |
 | `onfi_param_page` | path | an ONFI 6.0 parameter page image | turns the profile on; gives the mode when `onfi_mode` is -1, and the spare bytes and address cycles; refused when the page does not match the device |
 | `tplebsy` | ns | >= 0 | busy time between the planes of a multi-plane erase (GC with `pls_per_lun` > 1) |
-| `pe_suspend`, `tsusp_ns` | flag, ns | `tsusp_ns` >= 0; with a `tier_mode`, refused under FDP and with `buffer_size`, `mapping=dftl` or `die_parity` | let a read suspend a program or erase on its LUN, at a cost of `tsusp_ns`; a read does not suspend the fold work of the pSLC tier |
+| `pe_suspend`, `tsusp_ns` | flag, ns | `tsusp_ns` >= 0; with a `tier_mode`, refused under FDP and with `buffer_size`, `mapping=dftl` or `die_parity` | let a read suspend a program or erase on its LUN, at a cost of `tsusp_ns`; a read does not suspend the fold work of the pSLC tier, or the work booked before a Flush on a device with `buffer_size` |
 | `trim_lat_ns` | ns per range | >= 0; bbssd and CSD, also under FDP | time charged per Dataset Management deallocate range |
 
 Interactions:

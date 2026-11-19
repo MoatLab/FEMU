@@ -799,6 +799,29 @@ The bbssd pSLC tier seals the LUNs of a fold, so no read moves a fold
 program or erase ([tiered NAND](../features/tiered-nand.md#program-and-erase-suspend)).
 ZNS does not seal. Without a seal call the rule is unchanged.
 
+A Flush of a bbssd device with a write buffer (`buffer_size`) seals each
+LUN too. A write-back program keeps the booked end of its command, as P
+does above. So a read could move the program past the time the Flush
+completed. The Flush first waits for the live end of the work on each LUN.
+Then it seals each LUN at that end.
+
+```text
+ booked   [prog 1][prog 2]            the Flush would complete here: F
+ a read moved prog 1 before the Flush:
+ live     [p][rd][prog 1 ][prog 2] |  the Flush waits and seals here
+ a read that arrives before the seal starts at the seal
+```
+
+- The data is on the media when the Flush completes, as the NVM Command
+  Set requires.
+- A read that arrives before the seal waits for the work booked before
+  the Flush. It suspends only work booked after the Flush.
+- A read still suspends a write-back program that no Flush has sealed.
+- A Flush seals only when a page left the buffer since the last seal. A
+  device without a buffer never seals here.
+- A direct write (no buffer, FUA, or the cache disabled) completes at the
+  booked end of its program, as P does.
+
 `nand_media_multiplane()` does not consult the suspend state, so a read
 issued through it never suspends; this applies to erases and to the batches
 of `mp_program` and `mp_read`. The state is

@@ -9821,6 +9821,139 @@ static void femu_test_pe_suspend(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* x-flush-check: sealed Flushes, Flush end, program end, seal waits */
+enum {
+    FLUSH_SEALS,
+    FLUSH_DONE,
+    FLUSH_PE_END,
+    FLUSH_SEAL_WAITS,
+    FLUSH_FIELDS,
+};
+
+static void femu_flush_check(QTestState *qts, uint64_t *v)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-flush-check'}}");
+    g_auto(GStrv) f = NULL;
+    int i;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-flush-check %s", qdict_get_str(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    qobject_unref(rsp);
+    g_assert_cmpuint(g_strv_length(f), ==, FLUSH_FIELDS);
+    for (i = 0; i < FLUSH_FIELDS; i++) {
+        v[i] = g_ascii_strtoull(f[i], NULL, 10);
+    }
+}
+
+/*
+ * A Flush with pe_suspend and a write buffer: its data is on the media
+ * when it completes. One LUN, a 200 ms program, a 20 ms read, 10 us to
+ * suspend. Page 0 goes to the media by a first Flush. Page 1 then waits in
+ * the buffer. One doorbell ring sends a second Flush and a read of page 0.
+ * The Flush has time T and books the program of page 1 from T to C = T +
+ * 200 ms. The read has time t, with T < t < C.
+ *
+ *   no seal  [p][rd][prog page 1   ]    the program ends at C + 20.01 ms:
+ *            read: t + 10 us to t + 20.01 ms; the Flush completed at C
+ *   seal     [prog page 1   ]|[rd]      the program ends at C; the read
+ *            runs from C to C + 20 ms; the Flush completes first
+ *
+ * x-flush-check gives the end of the newest program and of the newest
+ * Flush in model time, so a slow host does not change them. A host that
+ * stalls 200 ms between the two commands makes the read arrive after C:
+ * the order and the times then hold too. @data is "on" when the device
+ * has suspend turned on; "off" is the control, with no seal and no state.
+ */
+static void femu_test_pe_suspend_flush(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = g_str_equal(data, "on");
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    NvmeCmd flush;
+    NvmeRwCmd rw;
+    uint64_t v[FLUSH_FIELDS];
+    uint64_t done0;
+    uint64_t buf;
+    uint16_t cid[2];
+    uint16_t first;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q, 1);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+    memset(&flush, 0, sizeof(flush));
+    flush.opcode = NVME_CMD_FLUSH;
+    flush.nsid = cpu_to_le32(1);
+
+    /* page 0: into the buffer, then to the media */
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_WRITE, 0);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_SEALS], ==, 0);
+    g_assert_cmpuint(v[FLUSH_PE_END], ==, 0);
+    femu_zap_queue(&c, &q, &flush);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_SEALS], ==, on ? 1 : 0);
+    g_assert_cmpuint(v[FLUSH_PE_END] != 0, ==, on);
+    g_assert_cmpuint(v[FLUSH_PE_END], <=, v[FLUSH_DONE]);
+    g_assert_cmpuint(v[FLUSH_SEAL_WAITS], ==, 0);
+    done0 = v[FLUSH_DONE];
+
+    /* page 1 waits in the buffer; the Flush and the read go in one ring */
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_WRITE, 1);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    first = c.cid;
+    femu_zap_queue(&c, &q, &flush);
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_READ, 0);
+    femu_zap_ring(&c, &q);
+    for (i = 0; i < 2; i++) {
+        uint64_t slot = q.cq_addr + q.cq_head * sizeof(NvmeCqe);
+        NvmeCqe cqe;
+
+        g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+        qtest_memread(qts, slot, &cqe, sizeof(cqe));
+        cid[i] = le16_to_cpu(cqe.cid);
+    }
+    g_test_message("flush, suspend %s: cid %u completed before cid %u",
+                   on ? "on" : "off", cid[0], cid[1]);
+    /* the read waits for the program of page 1, sealed or not suspended */
+    g_assert_cmpuint(cid[0], ==, first);
+    g_assert_cmpuint(cid[1], ==, (uint16_t)(first + 1));
+
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_SEALS], ==, on ? 2 : 0);
+    /* no read moved the program past the time the Flush completed */
+    g_assert_cmpuint(v[FLUSH_PE_END], <=, v[FLUSH_DONE]);
+    if (on) {
+        g_assert_cmpuint(v[FLUSH_DONE], >, done0);
+        g_assert_cmpuint(v[FLUSH_SEAL_WAITS], <=, 1);
+    } else {
+        g_assert_cmpuint(v[FLUSH_DONE], ==, 0);
+        g_assert_cmpuint(v[FLUSH_SEAL_WAITS], ==, 0);
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
 /*
  * Read priority, end to end. On one LUN, two writes that each program NAND
  * and a read of a page written before go in one doorbell ring. Off, the
@@ -63419,6 +63552,25 @@ static void femu_register_nodes(void)
             "devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
             "pg_wr_lat=200000000,pg_rd_lat=40000,tsusp_ns=10000,pe_suspend=1"
+    });
+    /* the same LUN with a write buffer; a Flush and a read in one ring */
+    qos_add_test("pe-suspend-flush-off", "femu", femu_test_pe_suspend_flush,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=200000000,pg_rd_lat=20000000,tsusp_ns=10000,"
+            "buffer_size=16"
+    });
+    qos_add_test("pe-suspend-flush-on", "femu", femu_test_pe_suspend_flush,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=200000000,pg_rd_lat=20000000,tsusp_ns=10000,"
+            "pe_suspend=1,buffer_size=16"
     });
     qos_add_test("die-parity-waf", "femu", femu_test_die_parity,
                  &(QOSGraphTestOptions) {

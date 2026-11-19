@@ -555,6 +555,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Error Information entries name the command (TP4113a): byte 30 holds its command set and byte 31 its opcode. Every returned entry has Log Page Version 1h in byte 63. Open-Channel entries are unchanged.
 - Identify CNS 0Ah for key value ignores the NSID and reports only format capabilities: NSZE and the key limit read 0. Indexes other than 0 fail with Invalid Field.
 - With Namespace Management, Identify CNS 09h and CNS 0Ah answer for the NVM Command Set (TP4095a). Without it they stay refused.
+- With `pe_suspend` and `buffer_size`, a Flush completes only when its data is on the media (NVM Command Set, Flush). A read could move a write-back program past the time the Flush completed. The Flush now waits for the live end of the work on each LUN. A read that arrives before that time waits for the work booked before the Flush. Devices without `pe_suspend` or without a write buffer keep their timing. See [NAND timing](design/nand-timing.md#program-and-erase-suspend).
 
 ### Documentation and tooling
 

@@ -1242,6 +1242,12 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
             lat = MAX(lat, end - req->stime);
         }
         /*
+         * pe_suspend: a read can also move the programs that this Flush
+         * or a full buffer booked. Wait for their live end and seal the
+         * LUNs, so the data is on the media when the Flush completes.
+         */
+        lat = MAX(lat, ssd_buffer_flush_seal(ssd, req->stime));
+        /*
          * durable_at_done: a written page is durable when its program
          * ends, so the Flush completes no earlier than the last pending
          * one, also with an empty buffer. Later writes do not move it.
@@ -1252,6 +1258,10 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
             if (end > (int64_t)req->stime) {
                 lat = MAX(lat, end - (int64_t)req->stime);
             }
+        }
+        /* for x-flush-check: when this Flush completes, in model time */
+        if (ssd->sp.pe_suspend) {
+            ssd->flush_done = MAX(ssd->flush_done, req->stime + lat);
         }
         /* pages still held had no room on the media: say so */
         if (ssd->write_buffer_cnt) {

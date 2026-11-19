@@ -838,6 +838,14 @@ struct ssd {
     uint64_t buffer_full_destages;  /* writes that emptied a full buffer */
     uint64_t buffer_bg_pages;       /* pages written back while idle */
     uint64_t buffer_bg_fence;       /* end of write-backs no command waits for */
+    /*
+     * pe_suspend: a read can move a write-back program past its booked end.
+     * A Flush waits for the live end of the LUN work and seals each LUN.
+     */
+    bool buffer_unsealed;           /* write-back programs no Flush sealed */
+    uint64_t buffer_flush_fence;    /* the time the newest Flush sealed */
+    uint64_t flush_seals;           /* Flushes that sealed the LUNs */
+    uint64_t flush_done;            /* when the newest Flush completes */
     uint64_t iu_rmw_pages;          /* pages rewritten to complete an IU */
     bool wl_on;                     /* the wear gap is wide: levelling runs */
     uint64_t grown_bad_blocks;      /* worn-out blocks taken out of service */
@@ -1065,6 +1073,10 @@ bool femu_mapping_name_uses_log_class(const char *name);
 bool femu_mapping_scheme_known(const char *name);
 bool femu_ftl_policy_known(const char *name);
 uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
+/* pe_suspend: the wait of a Flush at @stime for the write-back programs */
+uint64_t ssd_buffer_flush_seal(struct ssd *ssd, uint64_t stime);
+/* the Flush seals, Flush end, program end and seal waits (x-flush-check) */
+char *ssd_flush_report(struct ssd *ssd);
 uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
 void ssd_release_stream(struct ssd *ssd, unsigned slot);
 void ssd_deallocate_fdp_ns(struct ssd *ssd, NvmeNamespace *ns);

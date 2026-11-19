@@ -844,6 +844,131 @@ static void test_pe_seal(void)
     nand_media_destroy(&m);
 }
 
+/*
+ * The wait of a Flush under pe_suspend. bbssd books the write-back programs
+ * and completes the Flush at their booked end. A read can still move them.
+ * So the Flush seals each LUN at its live end. tR 10 us, tPROG 40 us, tsusp
+ * 5 us; a suspension moves the work by tR + tsusp = 15 us.
+ *
+ *   booked  [prog 1][prog 2]            the Flush completes at 80 us
+ *   read at 1 us, no seal:
+ *           [p][rd][prog 1 ][prog 2]    the programs end at 95 us
+ *   read at 1 us, LUN sealed at 80 us:
+ *           [prog 1][prog 2][rd]        the programs end at 80 us
+ */
+static void test_pe_flush(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a;
+    NandLoc b;
+    NandLoc rd;
+    NandLoc rdb;
+    const uint64_t t0 = 1000000000ULL;
+    uint64_t fence;
+    uint64_t lat;
+
+    printf("# program/erase suspend: the wait of a Flush\n");
+    memset(&a, 0, sizeof(a));
+    b = a;
+    b.lun = 1;
+    /* reads of another block: no program here writes their page */
+    rd = a;
+    rd.blk = 7;
+    rdb = b;
+    rdb.blk = 7;
+
+    /*
+     * No seal: programs end at 40 and 80 us. The read arrives at 1 us,
+     * starts at 1 + 5, ends at 16 us, and both programs slide by 15 us.
+     */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    fence = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0).done_ns;
+    check("flush: two programs end at 80 us", fence, t0 + 80000);
+    check("flush: pe_end is the booked end", nand_media_pe_end(&m), fence);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("flush, no seal: the read suspends", lat, 5000 + 10000);
+    check("flush, no seal: the programs end after the booked end",
+          nand_media_pe_end(&m), fence + 15000);
+    nand_media_destroy(&m);
+
+    /* sealed at the LUN end: the read starts at 80 us and ends at 90 us */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    fence = nand_media_seal(&m, &a, lun_avail[0]);
+    check("flush: the seal is the end of the programs", fence, t0 + 80000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("flush: a read waits for the sealed programs",
+          lat, (80000 - 1000) + 10000);
+    check("flush: the programs end at the time the Flush waited for",
+          nand_media_pe_end(&m), fence);
+    check("flush: the read is counted", m.seal_waits, 1);
+    nand_media_destroy(&m);
+
+    /*
+     * A program that a read moved before the Flush: booked end 40 us, live
+     * end 55 us. A Flush at 45 us seals at 55 us, so it waits 10 us more.
+     * A read with the old time 20 us then starts at 55 us, ends at 65 us.
+     */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000);
+    fence = nand_media_seal(&m, &a, lun_avail[0]);
+    check("flush: the seal takes the moved end", fence, t0 + 55000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    check("flush: an old read does not move the program again",
+          lat, (55000 - 20000) + 10000);
+    check("flush: the moved program ends at the seal",
+          nand_media_pe_end(&m), fence);
+    nand_media_destroy(&m);
+
+    /*
+     * Two LUNs: one program on LUN 0 (40 us), two on LUN 1 (80 us). Each
+     * LUN gets its own seal, and the Flush waits for the larger one.
+     */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &b, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &b, NAND_MEDIA_PROGRAM, t0);
+    check("flush, 2 LUNs: the seal of LUN 0",
+          nand_media_seal(&m, &a, lun_avail[0]), t0 + 40000);
+    check("flush, 2 LUNs: the seal of LUN 1",
+          nand_media_seal(&m, &b, lun_avail[1]), t0 + 80000);
+    lat = nand_media_op(&m, &rdb, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("flush, 2 LUNs: a read on LUN 1 waits for its seal",
+          lat, (80000 - 1000) + 10000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("flush, 2 LUNs: a read on LUN 0 waits for its seal",
+          lat, (40000 - 1000) + 10000);
+    check("flush, 2 LUNs: pe_end is the end of the newest program",
+          nand_media_pe_end(&m), t0 + 80000);
+    nand_media_destroy(&m);
+
+    /* suspend off: no state, and the read waits as it always did */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("flush, suspend off: the read is as before",
+          lat, (40000 - 1000) + 10000);
+    check("flush, suspend off: no pe_end", nand_media_pe_end(&m), 0);
+    nand_media_destroy(&m);
+
+    /* read_prio alone keeps suspend state too: still no pe_end */
+    bb_config(&cfg);
+    cfg.policy.read_prio = true;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    check("flush, read_prio alone: no pe_end", nand_media_pe_end(&m), 0);
+    nand_media_destroy(&m);
+}
+
 static void test_pe_suspend(void)
 {
     NandMediaConfig cfg;
@@ -1670,6 +1795,7 @@ int main(void)
     test_pe_suspend();
     test_pe_suspend_limits();
     test_pe_seal();
+    test_pe_flush();
     test_read_prio();
     test_media_hold();
     test_partial_xfer();

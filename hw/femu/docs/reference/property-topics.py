@@ -20,6 +20,7 @@ DEVICES = [
                       "x-events-now",
                       "x-fdp-check",
                       "x-fdp-ns-mapped", "x-fdp-slc", "x-fetch-hold",
+                      "x-flush-check",
                       "x-ftl-check", "x-ftl-hold", "x-ftl-probe",
                       "x-ftl-trace",
                       "x-lsi", "x-lsi-state",

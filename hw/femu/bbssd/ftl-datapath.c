@@ -986,7 +986,13 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
 
     /* under FDP each page goes to the unit of its own placement handle */
     if (ssd->fdp_enabled) {
-        return fdp_buffer_destage(ssd, budget, stime);
+        int held = ssd->write_buffer_cnt;
+
+        maxlat = fdp_buffer_destage(ssd, budget, stime);
+        if (ssd->write_buffer_cnt < held) {
+            ssd->buffer_unsealed = true;
+        }
+        return maxlat;
     }
 
     while (budget <= 0 || done < budget) {
@@ -1070,6 +1076,10 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
     }
     curlat = ssd_mp_flush(ssd, NAND_WRITE);
     maxlat = (curlat > maxlat) ? curlat : maxlat;
+    /* pe_suspend: a read can move these programs until a Flush seals them */
+    if (done) {
+        ssd->buffer_unsealed = true;
+    }
 
     /*
      * Schemes without per-page reclaim get one merge per batch: for a
@@ -1095,6 +1105,70 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
 uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime)
 {
     return buffer_destage(ssd, budget, stime, false);
+}
+
+/**
+ * ssd_buffer_flush_seal - make the write-back programs stay where they are
+ * @ssd: the device
+ * @stime: start time of the Flush
+ *
+ * With pe_suspend, a read suspends a program on its LUN, and the program
+ * then ends after its booked end. A Flush that waited for the booked end
+ * would complete before its data is on the media. So the Flush waits for
+ * the live end of the work on each LUN and seals the LUN there: no read
+ * moves that work again (ssd_media_seal()).
+ *
+ *   booked  [prog 1][prog 2]           Flush waits until F
+ *   a read before the Flush moved prog 1:
+ *   live    [p][rd][prog 1 ][prog 2]|  seal at the live end: F moves here
+ *   a read after the Flush, before F:   it starts at the seal
+ *
+ * All LUNs get a seal: a write-back also books collection, translation
+ * pages and parity on other LUNs. Returns how long the Flush waits: 0 with
+ * pe_suspend off, and 0 when the sealed work ended before @stime.
+ */
+uint64_t ssd_buffer_flush_seal(struct ssd *ssd, uint64_t stime)
+{
+    struct ssdparams *spp = &ssd->sp;
+    struct ppa ppa = { .ppa = 0 };
+    uint64_t end = 0;
+    int ch;
+    int lun;
+
+    if (!spp->pe_suspend) {
+        return 0;
+    }
+    if (ssd->buffer_unsealed) {
+        for (ch = 0; ch < spp->nchs; ch++) {
+            for (lun = 0; lun < spp->luns_per_ch; lun++) {
+                ppa.g.ch = ch;
+                ppa.g.lun = lun;
+                end = MAX(end, ssd_media_seal(ssd, &ppa));
+            }
+        }
+        ssd->buffer_flush_fence = MAX(ssd->buffer_flush_fence, end);
+        ssd->buffer_unsealed = false;
+        ssd->flush_seals++;
+    }
+    return ssd->buffer_flush_fence > stime ?
+           ssd->buffer_flush_fence - stime : 0;
+}
+
+/**
+ * ssd_flush_report - the Flush state under pe_suspend, for tests
+ * @ssd: the device
+ *
+ * Four numbers in model time: the Flushes that sealed the LUNs, when the
+ * newest Flush completes, when the newest program or erase ends, and the
+ * reads that a seal made wait. All 0 with pe_suspend off. After a Flush,
+ * with no write-back since, the third is at most the second.
+ */
+char *ssd_flush_report(struct ssd *ssd)
+{
+    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64,
+                           ssd->flush_seals, ssd->flush_done,
+                           nand_media_pe_end(&ssd->media),
+                           ssd->media.seal_waits);
 }
 
 /*
@@ -1826,6 +1900,8 @@ void bbssd_deallocate_all(NvmeNamespace *ns)
         tp_discard_all(ssd);
         /* the data a pending write-back held is gone: Flush owes it nothing */
         ssd->buffer_bg_fence = 0;
+        ssd->buffer_unsealed = false;
+        ssd->buffer_flush_fence = 0;
     }
 }
 

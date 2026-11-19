@@ -6084,6 +6084,29 @@ static char *femu_test_durable_check(Object *obj, Error **errp)
                            lpns, gens, ended, waits);
 }
 
+/*
+ * pe_suspend and the Flush of namespace 1, in model time: the Flushes that
+ * sealed the LUNs, when the newest Flush completes, when the newest program
+ * or erase ends, and the reads a seal made wait. See ssd_flush_report.
+ */
+static char *femu_test_flush_check(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    char *report;
+    bool resume;
+
+    if (!ns || !(NS_BBSSD(ns) || NS_CSD(ns)) || !ns->ssd) {
+        error_setg(errp, "the flush check requires a bbssd or CSD "
+                   "namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    report = ssd_flush_report(ns->ssd);
+    nvme_resume_pollers(n, resume);
+    return report;
+}
+
 /* x-ftl-probe: Set an LPN of namespace 1, then Get its mapping */
 static void femu_test_ftl_probe_set(Object *obj, const char *value,
                                     Error **errp)
@@ -6920,6 +6943,8 @@ static void femu_instance_init(Object *obj)
                                 femu_test_ftl_probe_set);
         object_property_add_str(obj, "x-durable-check",
                                 femu_test_durable_check, NULL);
+        object_property_add_str(obj, "x-flush-check", femu_test_flush_check,
+                                NULL);
         object_property_add_str(obj, "x-rain-fail", NULL,
                                 femu_test_rain_fail);
         object_property_add_str(obj, "x-rain-check", femu_test_rain_check,

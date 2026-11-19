@@ -389,6 +389,12 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
 uint64_t nand_media_seal(NandMedia *m, const NandLoc *loc, uint64_t t);
 
 /*
+ * pe_suspend: when the newest program or erase of all array positions ends,
+ * with each suspension up to now in it. 0 without pe_suspend.
+ */
+uint64_t nand_media_pe_end(const NandMedia *m);
+
+/*
  * Multi-plane group: one parallel array op + per-plane bus + inter-plane busy.
  * Used for erases: line GC, FDP GC and KV reclaim erase a block on every plane
  * of a LUN at once. Host reads and programs still go one page at a time.

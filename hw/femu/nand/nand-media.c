@@ -860,6 +860,21 @@ uint64_t nand_media_seal(NandMedia *m, const NandLoc *loc, uint64_t t)
     return st->seal;
 }
 
+uint64_t nand_media_pe_end(const NandMedia *m)
+{
+    const NandMediaConfig *c = &m->cfg;
+    uint64_t n = (uint64_t)c->nchs * c->luns_per_ch * c->planes_per_lun;
+    uint64_t end = 0;
+
+    if (!c->policy.pe_suspend || !m->susp) {
+        return 0;
+    }
+    for (uint64_t i = 0; i < n; i++) {
+        end = mx(end, m->susp[i].pe_end);
+    }
+    return end;
+}
+
 /*
  * When a read that reaches the array at @t may start under pe_suspend: at
  * the seal of its position, if that is after @t. The suspend rule then

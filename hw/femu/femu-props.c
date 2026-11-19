@@ -642,7 +642,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "pe_suspend",
       "bbssd, CSD, KV: non-zero lets a read suspend a program or erase on "
       "its LUN instead of waiting for it to finish; with a tier_mode a "
-      "read waits for the fold work of the pSLC tier" },
+      "read waits for the fold work of the pSLC tier; with buffer_size a "
+      "Flush waits for the moved programs, and a read waits for the work "
+      "booked before a Flush" },
     { "tsusp_ns",
       "bbssd, CSD, KV: overhead in ns added to a read that suspends a "
       "program or erase, 0 or more" },
