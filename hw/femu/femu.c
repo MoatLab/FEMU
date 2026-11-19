@@ -183,6 +183,12 @@ static bool nvme_subsys_setup_fdp(NvmeSubsystem *subsys, Error **errp)
         }
     }
 
+    subsys->fdp_mem = endgrp->fdp.nrg * sizeof(NvmeReclaimUnit *) +
+                      endgrp->fdp.nrg * tt_nru * sizeof(NvmeReclaimUnit) +
+                      endgrp->fdp.nruh * (sizeof(NvmeRuHandle) +
+                                          endgrp->fdp.nrg *
+                                          sizeof(NvmeReclaimUnit *));
+    femu_mem_charge(&subsys->mem, FEMU_MEM_MEDIA, subsys->fdp_mem);
     qemu_mutex_init(&endgrp->fdp.events_lock);
     qemu_mutex_init(&endgrp->fdp.stats_lock);
     endgrp->fdp.enabled = true;
@@ -231,6 +237,33 @@ static void nvme_subsys_realize(DeviceState *dev, Error **errp)
     nvme_subsys_setup(subsys, errp);
 }
 
+/*
+ * The reclaim units and handles outlive every FTL that points into them, so
+ * free them only once no controller is left.
+ */
+static void nvme_subsys_free_fdp(NvmeSubsystem *subsys)
+{
+    NvmeEnduranceGroup *endgrp = &subsys->endgrp;
+
+    if (!endgrp->fdp.enabled) {
+        return;
+    }
+    for (uint16_t ruhid = 0; ruhid < endgrp->fdp.nruh; ruhid++) {
+        g_free(endgrp->fdp.ruhs[ruhid].rus);
+    }
+    g_clear_pointer(&endgrp->fdp.ruhs, g_free);
+    for (uint32_t rg = 0; rg < endgrp->fdp.nrg; rg++) {
+        g_free(endgrp->fdp.rus[rg]);
+    }
+    g_clear_pointer(&endgrp->fdp.rus, g_free);
+    qemu_mutex_destroy(&endgrp->fdp.events_lock);
+    qemu_mutex_destroy(&endgrp->fdp.stats_lock);
+    endgrp->fdp.enabled = false;
+    femu_mem_release(&subsys->mem, FEMU_MEM_MEDIA, subsys->fdp_mem);
+    subsys->fdp_mem = 0;
+    femu_mem_check_empty(&subsys->mem, "a subsystem");
+}
+
 static void nvme_subsys_release_storage(NvmeSubsystem *subsys)
 {
     FemuCtrl *storage = subsys->storage;
@@ -255,6 +288,7 @@ static void nvme_subsys_release_storage(NvmeSubsystem *subsys)
         qemu_mutex_destroy(&subsys->ns_lock);
         subsys->ns_lock_init = false;
     }
+    nvme_subsys_free_fdp(subsys);
 }
 
 static void nvme_subsys_unrealize(DeviceState *dev)
@@ -454,6 +488,9 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
         return false;
     }
     ns->fdp.phs = g_new(uint16_t, endgrp->fdp.nruh);
+    ns->fdp.phs_cap = endgrp->fdp.nruh;
+    femu_mem_charge(&ns->mem, FEMU_MEM_MEDIA,
+                    sizeof(uint16_t) * ns->fdp.phs_cap);
     ns->fdp.nphs = nvme_ns_phl(ns->ctrl, ns->id, ns->fdp.phs, errp);
     if (!ns->fdp.nphs) {
         return false;
@@ -1837,13 +1874,56 @@ static void nvme_ns_release(FemuCtrl *n, NvmeNamespace *ns)
     g_free(ns->lost);
     g_clear_pointer(&ns->sdc, g_free);
     g_free(ns->mdata);
+    ns->util = ns->uncorrectable = ns->lost = NULL;
+    ns->mdata = NULL;
+    nvme_ns_mem_maps(ns, 0);
     nvme_ns_detach_fdp(n, ns);
+    if (ns->fdp.phs) {
+        femu_mem_release(&ns->mem, FEMU_MEM_MEDIA,
+                         sizeof(uint16_t) * ns->fdp.phs_cap);
+    }
     g_free(ns->fdp.phs);
     if (ns->mdata_lock_init) {
         qemu_mutex_destroy(&ns->mdata_lock);
     }
+    femu_mem_check_empty(&ns->mem, "a namespace");
     memset(ns, 0, sizeof(*ns));
     ns->resv = resv;
+}
+
+uint32_t femu_mem_next_id(void)
+{
+    static uint32_t next;
+
+    return qatomic_fetch_inc(&next) + 1;
+}
+
+/*
+ * Charge @ns for the state its mode allocated, @now bytes per category.
+ * The charge replaces the last one; all zero releases it.
+ */
+void nvme_ns_mem_mode(NvmeNamespace *ns, const uint64_t now[FEMU_MEM__MAX])
+{
+    for (int c = 0; c < FEMU_MEM__MAX; c++) {
+        femu_mem_resize(&ns->mem, c, ns->mem_mode[c], now[c]);
+        ns->mem_mode[c] = now[c];
+    }
+}
+
+/*
+ * Charge @ns for its per-block bitmaps, sized for @blks blocks, and its
+ * metadata store, after any of them changed. The charge replaces the last
+ * one, so a release frees exactly what was charged.
+ */
+void nvme_ns_mem_maps(NvmeNamespace *ns, uint64_t blks)
+{
+    uint64_t one = BITS_TO_LONGS(blks) * sizeof(unsigned long);
+    uint64_t now = one * (!!ns->util + !!ns->uncorrectable + !!ns->lost +
+                          !!ns->sdc) +
+                   (ns->mdata ? ns->mdata_len : 0);
+
+    femu_mem_resize(&ns->mem, FEMU_MEM_OTHER, ns->mem_maps, now);
+    ns->mem_maps = now;
 }
 
 static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
@@ -1895,6 +1975,7 @@ static int nvme_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
             return -1;
         }
     }
+    nvme_ns_mem_maps(ns, num_blks);
 
     /* the block format the FTL and Flexible Data Placement size units by */
     ns->lbaf = id_ns->lbaf[lba_index];
@@ -5492,6 +5573,7 @@ static void femu_exit(PCIDevice *pci_dev)
     if (!n->shared_storage) {
         femu_exit_extensions(n);
     }
+    femu_mem_check_empty(&n->mem, "a controller");
 
     nvme_clear_ctrl(n, true);
     nvme_destroy_poller(n);

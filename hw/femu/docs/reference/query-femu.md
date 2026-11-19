@@ -633,6 +633,62 @@ each with its stages, bands and `returned-after-due`.
 - With `shared_ftl`, the read class of one namespace shows how long its
   reads wait while another namespace writes and collects.
 
+## Host memory: query-femu-memory
+
+QMP command `query-femu-memory` returns the host memory a FEMU device
+holds, by owner and by category. It works in each mode, also before
+the guest enables the controller. `path` is optional when there is one
+device.
+
+```
+ allocation site --> charge(owner, category, bytes)   atomic add
+ free site       --> release(owner, category, bytes)  atomic sub
+ query-femu-memory --> read each owner's counters --> reply
+```
+
+Each owner appears once in `owners`, with an `id` that stays the same
+in the reply of each controller that uses it. Each entry of
+`namespaces` lists the ids of the owners that hold its memory. Add each
+id once to get the total of several devices.
+
+| Owner kind | `id` | Holds now |
+|---|---|---|
+| `controller` | device path | the data backend, when the device owns it; the OCSSD 1.2 OOB area; the CSD memory namespace (SLM) |
+| `subsystem` | `femu-subsys` path | the backend of shared namespaces; FDP reclaim units and handles |
+| `namespace` | owner path + `/ns<nsid>` | per-block bitmaps, metadata; KV value arena, key table, free-slot stack, line byte counts; ZNS L2P, NAND tree, zones, write caches; OCSSD 1.2 translation and bad block tables; OCSSD 2.0 chunk state; FDP placement handles |
+| `ftl` | storage owner + `/ftl<n>` | bbssd, CSD and KV FTL: L2P, reverse map, NAND tree, lines, victim heap; FDP reclaim groups, units and handles |
+
+Each owner has six categories: `backend`, `mapping`, `media`, `values`,
+`index`, `other`.
+
+A number is the bytes FEMU asked for, so a lazy allocation counts in
+full before the guest touches it. Compare it with the
+resident size of the QEMU process to see what the guest touched.
+
+- `backend-pinned` is true when `mlock()` took the whole backend.
+- The numbers exclude allocator overhead, GLib internal storage and
+  thread stacks.
+- A backend that a `femu-cxl-ssd` lends counts at that device, which
+  this command does not report.
+- Each number is exact while the device is idle. A reply taken under
+  I/O can mix numbers of different instants.
+
+```
+-> { "execute": "query-femu-memory" }
+<- { "return": { "path": "/machine/peripheral/femu0", "mode": "nossd",
+     "backend-pinned": false,
+     "owners": [
+       { "id": "/machine/peripheral/femu0", "kind": "controller",
+         "backend": 67108864, "mapping": 0, "media": 0, "values": 0,
+         "index": 0, "other": 0 },
+       { "id": "/machine/peripheral/femu0/ns1", "kind": "namespace",
+         "backend": 0, "mapping": 0, "media": 0, "values": 0,
+         "index": 0, "other": 32768 } ],
+     "namespaces": [ { "nsid": 1, "mode": "nossd", "attached": true,
+                       "owners": [ "/machine/peripheral/femu0",
+                                   "/machine/peripheral/femu0/ns1" ] } ] } }
+```
+
 ## femu-save-data
 
 `femu-save-data` writes a checkpoint of a bbssd or NoSSD device while it

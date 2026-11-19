@@ -747,10 +747,12 @@ static void ssd_init_nand_page(struct nand_page *pg, struct ssdparams *spp)
     pg->status = PG_FREE;
 }
 
-static void ssd_init_nand_blk(struct nand_block *blk, struct ssdparams *spp)
+static void ssd_init_nand_blk(struct nand_block *blk, struct ssdparams *spp,
+                              FemuMemAcct *mem)
 {
     blk->npgs = spp->pgs_per_blk;
     blk->pg = g_malloc0(sizeof(struct nand_page) * blk->npgs);
+    femu_mem_charge(mem, FEMU_MEM_MEDIA, sizeof(struct nand_page) * blk->npgs);
     for (int i = 0; i < blk->npgs; i++) {
         ssd_init_nand_page(&blk->pg[i], spp);
     }
@@ -760,65 +762,83 @@ static void ssd_init_nand_blk(struct nand_block *blk, struct ssdparams *spp)
     blk->wp = 0;
 }
 
-static void ssd_init_nand_plane(struct nand_plane *pl, struct ssdparams *spp)
+static void ssd_init_nand_plane(struct nand_plane *pl, struct ssdparams *spp,
+                                FemuMemAcct *mem)
 {
     pl->nblks = spp->blks_per_pl;
     pl->blk = g_malloc0(sizeof(struct nand_block) * pl->nblks);
+    femu_mem_charge(mem, FEMU_MEM_MEDIA, sizeof(struct nand_block) * pl->nblks);
     for (int i = 0; i < pl->nblks; i++) {
-        ssd_init_nand_blk(&pl->blk[i], spp);
+        ssd_init_nand_blk(&pl->blk[i], spp, mem);
     }
 }
 
-static void ssd_init_nand_lun(struct nand_lun *lun, struct ssdparams *spp)
+static void ssd_init_nand_lun(struct nand_lun *lun, struct ssdparams *spp,
+                              FemuMemAcct *mem)
 {
     lun->npls = spp->pls_per_lun;
     lun->pl = g_malloc0(sizeof(struct nand_plane) * lun->npls);
+    femu_mem_charge(mem, FEMU_MEM_MEDIA, sizeof(struct nand_plane) * lun->npls);
     for (int i = 0; i < lun->npls; i++) {
-        ssd_init_nand_plane(&lun->pl[i], spp);
+        ssd_init_nand_plane(&lun->pl[i], spp, mem);
     }
     lun->next_lun_avail_time = 0;
     lun->busy = false;
 }
 
-void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp)
+/* @mem: the owner that the NAND tree is charged to */
+void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp,
+                 FemuMemAcct *mem)
 {
     ch->nluns = spp->luns_per_ch;
     ch->lun = g_malloc0(sizeof(struct nand_lun) * ch->nluns);
+    femu_mem_charge(mem, FEMU_MEM_MEDIA, sizeof(struct nand_lun) * ch->nluns);
     for (int i = 0; i < ch->nluns; i++) {
-        ssd_init_nand_lun(&ch->lun[i], spp);
+        ssd_init_nand_lun(&ch->lun[i], spp, mem);
     }
     ch->next_ch_avail_time = 0;
     ch->busy = 0;
 }
 
 /* release what ssd_init_ch() built, in the reverse order */
-void ssd_free_ch(struct ssd_channel *ch, struct ssdparams *spp)
+void ssd_free_ch(struct ssd_channel *ch, struct ssdparams *spp,
+                 FemuMemAcct *mem)
 {
     int lun, pl;
 
     if (!ch->lun) {
         return;
     }
-    for (lun = 0; lun < spp->luns_per_ch; lun++) {
+    for (lun = 0; lun < ch->nluns; lun++) {
         struct nand_lun *l = &ch->lun[lun];
 
         if (!l->pl) {
             continue;
         }
-        for (pl = 0; pl < spp->pls_per_lun; pl++) {
+        for (pl = 0; pl < l->npls; pl++) {
             struct nand_plane *p = &l->pl[pl];
             int blk;
 
             if (!p->blk) {
                 continue;
             }
-            for (blk = 0; blk < spp->blks_per_pl; blk++) {
+            for (blk = 0; blk < p->nblks; blk++) {
+                if (p->blk[blk].pg) {
+                    femu_mem_release(mem, FEMU_MEM_MEDIA,
+                                     sizeof(struct nand_page) *
+                                     p->blk[blk].npgs);
+                }
                 g_free(p->blk[blk].pg);
             }
+            femu_mem_release(mem, FEMU_MEM_MEDIA,
+                             sizeof(struct nand_block) * p->nblks);
             g_free(p->blk);
         }
+        femu_mem_release(mem, FEMU_MEM_MEDIA,
+                         sizeof(struct nand_plane) * l->npls);
         g_free(l->pl);
     }
+    femu_mem_release(mem, FEMU_MEM_MEDIA, sizeof(struct nand_lun) * ch->nluns);
     g_free(ch->lun);
     ch->lun = NULL;
 }

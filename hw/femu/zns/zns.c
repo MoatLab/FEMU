@@ -238,7 +238,8 @@ static void zns_init_zoned_state(NvmeNamespace *ns)
     ns->zns->fin_any = 0;
     ns->zns->ftl_wait_new = false;
     if (ns->zd_extension_size) {
-        ns->zd_extensions = g_malloc0(ns->zd_extension_size * ns->num_zones);
+        ns->zd_extensions = g_malloc0((size_t)ns->zd_extension_size *
+                                      ns->num_zones);
     }
 
     QTAILQ_INIT(&ns->exp_open_zones);
@@ -482,9 +483,12 @@ uint8_t zns_percentage_used(NvmeNamespace *ns)
 
 void zns_ns_cleanup(NvmeNamespace *ns)
 {
+    static const uint64_t none[FEMU_MEM__MAX];
+
     if (!NS_ZNSSD(ns)) {
         return;
     }
+    nvme_ns_mem_mode(ns, none);
 
     g_free(ns->id_ns_zoned);
     g_free(ns->zone_array);
@@ -2571,6 +2575,36 @@ static bool zns_check_params(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     return true;
 }
 
+/* charge @ns for the zoned state zns_init() built; see query-femu-memory */
+static void zns_mem_charge(NvmeNamespace *ns)
+{
+    struct zns_ssd *zns = ns->zns;
+    uint64_t now[FEMU_MEM__MAX] = { 0 };
+    uint64_t dies = zns->num_ch * zns->num_lun;
+    uint64_t planes = dies * zns->num_plane;
+
+    now[FEMU_MEM_MAPPING] = sizeof(struct ppa) * zns->l2p_sz;
+    now[FEMU_MEM_MEDIA] = sizeof(*zns) + zns->num_ch * sizeof(struct zns_ch) +
+                          dies * sizeof(struct zns_fc) +
+                          planes * sizeof(struct zns_plane) +
+                          planes * zns->num_blk * sizeof(struct zns_blk);
+    /* the zone descriptors and the arrays zns_init_zoned_state() sizes */
+    now[FEMU_MEM_MEDIA] += ns->num_zones *
+        (sizeof(NvmeZone) + sizeof(*zns->zone_wp_slot) +
+         sizeof(*zns->zone_wp_plane) + sizeof(*zns->zgen) +
+         sizeof(*zns->ftl_gen) + sizeof(*zns->ftl_fin_ns) +
+         sizeof(*zns->fin_done)) +
+        BITS_TO_LONGS(ns->num_zones) * sizeof(unsigned long);
+    if (ns->zd_extensions) {
+        now[FEMU_MEM_MEDIA] += (size_t)ns->zd_extension_size * ns->num_zones;
+    }
+    now[FEMU_MEM_OTHER] = zns->cache.num_wc * sizeof(struct zns_write_cache);
+    for (int i = 0; i < zns->cache.num_wc; i++) {
+        now[FEMU_MEM_OTHER] += zns->cache.write_cache[i].cap * sizeof(uint64_t);
+    }
+    nvme_ns_mem_mode(ns, now);
+}
+
 static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     if (!zns_check_params(n, ns, errp)) {
@@ -2621,6 +2655,7 @@ static void zns_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      * namespace outright.
      */
     zns_init_zone_identify(n, ns, NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas));
+    zns_mem_charge(ns);
 
     if (ns->zns->fzr_sec || ns->zns->rzr_sec) {
         /* guest time, as the thermal model: a paused VM does not age zones */

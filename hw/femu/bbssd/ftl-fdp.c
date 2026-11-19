@@ -3560,9 +3560,67 @@ uint64_t ssd_fdp_ns_mapped(struct ssd *ssd, NvmeNamespace *ns)
  * pointers into those arrays rather than reclaim units of its own, so each is
  * freed exactly once from the side that allocated it.
  */
+/*
+ * Charge the FTL for the reclaim groups, units and handles FDP built, with
+ * their lines, victim heaps and written bitmap. The same sum is released at
+ * femu_fdp_ssd_free(), whatever the heaps hold then.
+ */
+void femu_fdp_ssd_mem_charge(struct ssd *ssd)
+{
+    uint64_t sum = 0;
+
+    if (ssd->rg_lines) {
+        sum += ssd->nrg * ssd->sp.blks_per_pl * sizeof(struct line);
+    }
+    if (ssd->fdp_written) {
+        sum += BITS_TO_LONGS(ssd->fdp_written_bits) * sizeof(unsigned long);
+    }
+    if (ssd->rg) {
+        sum += ssd->nrg * (sizeof(FemuReclaimGroup) +
+                           sizeof(FemuReclaimUnit *));
+    }
+    for (uint64_t i = 0; ssd->rg && i < ssd->nrg; i++) {
+        FemuReclaimGroup *rg = &ssd->rg[i];
+        struct ru_mgmt *rm = rg->ru_mgmt;
+
+        /* the unit array holds total_ru_cnt entries, as the free walks it */
+        for (uint64_t r = 0; rg->rus && r < ssd->sp.total_ru_cnt; r++) {
+            sum += sizeof(FemuReclaimUnit);
+            if (rg->rus[r].ssd_wptr) {
+                sum += sizeof(struct write_pointer);
+            }
+            if (rg->rus[r].lines) {
+                sum += rg->rus[r].n_lines * sizeof(struct line *);
+            }
+        }
+        if (rm) {
+            sum += sizeof(*rm) + pqueue_bytes(rm->victim_ru_pq) +
+                   pqueue_bytes(rm->victim_ru_cb);
+        }
+    }
+    if (ssd->ruhs) {
+        sum += ssd->nruhs * sizeof(FemuRuHandle);
+    }
+    for (uint64_t i = 0; ssd->ruhs && i < ssd->nruhs; i++) {
+        FemuRuHandle *ruh = &ssd->ruhs[i];
+        struct ru_mgmt *rm = ruh->ru_mgmt;
+
+        for (uint64_t g = 0; rm && g < ssd->nrg; g++) {
+            sum += sizeof(*rm) + pqueue_bytes(rm[g].victim_ru_pq);
+        }
+        sum += (ruh->rus ? ssd->nrg : 0) * sizeof(FemuReclaimUnit *) +
+               (ruh->gc_rus ? ssd->nrg : 0) * sizeof(FemuReclaimUnit *);
+    }
+    femu_mem_resize(&ssd->mem, FEMU_MEM_MEDIA, ssd->fdp_mem, sum);
+    ssd->fdp_mem = sum;
+}
+
 void femu_fdp_ssd_free(struct ssd *ssd)
 {
     uint64_t i;
+
+    femu_mem_release(&ssd->mem, FEMU_MEM_MEDIA, ssd->fdp_mem);
+    ssd->fdp_mem = 0;
 
     g_free(ssd->fdp_written);
     ssd->fdp_written = NULL;

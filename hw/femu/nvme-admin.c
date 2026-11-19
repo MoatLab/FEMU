@@ -5494,6 +5494,7 @@ static uint16_t nvme_format_namespace(NvmeNamespace *ns, uint8_t lba_idx,
     g_free(ns->mdata);
     ns->mdata = mdata;
     ns->mdata_len = mlen;
+    nvme_ns_mem_maps(ns, blks);
 
     /*
      * The block count and the state sized to it are changed together. Nothing

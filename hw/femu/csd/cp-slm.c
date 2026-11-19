@@ -149,6 +149,7 @@ void csd_cp_slm_init(FemuCtrl *n, FemuCsdState *csd, NvmeNamespace *ns,
     }
     csd->slm = slm;
     csd->slm_size = (uint64_t)n->csd_params.slm_size_mb * MiB;
+    femu_mem_charge(&n->mem, FEMU_MEM_OTHER, csd->slm_size);
     qemu_mutex_init(&csd->slm_lock);
     csd->slm_nsid = n->num_namespaces + 1;
     csd->cp_nsid = CSD_CP(n) ? csd->slm_nsid + 1 : 0;
@@ -185,6 +186,7 @@ void csd_cp_slm_exit(FemuCsdState *csd)
         csd->cp_mrs = NULL;
     }
     qemu_mutex_destroy(&csd->slm_lock);
+    femu_mem_release(&csd->n->mem, FEMU_MEM_OTHER, csd->slm_size);
     g_free(csd->slm);
     csd->slm = NULL;
 }

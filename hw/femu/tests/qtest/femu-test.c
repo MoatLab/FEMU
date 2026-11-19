@@ -19,6 +19,7 @@
 #include "qobject/qjson.h"
 #include "qobject/qlist.h"
 #include "qobject/qnum.h"
+#include "qobject/qstring.h"
 #include "libqos/qgraph.h"
 #include "libqos/pci.h"
 #include "libqos/libqos-pc.h"
@@ -44132,6 +44133,389 @@ static void femu_test_kv_no_backend(void *obj, void *data,
     }
 }
 
+/*
+ * query-femu-memory: the backend, and the per-block bitmaps (util and
+ * uncorrectable, 8 bytes per 64 blocks each) plus metadata of each
+ * namespace, all of 512-byte blocks.
+ */
+static const struct {
+    const char *opts;
+    uint64_t backend;
+    uint32_t nr_ns;
+    uint64_t ns_other;          /* each namespace */
+    uint64_t ns_values;         /* the key-value arena of each namespace */
+} femu_mem_cases[] = {
+    { "femu_mode=2,devsz_mb=64", 64 * MiB, 1, 2 * 16384, 0 },
+    { "femu_mode=2,devsz_mb=64,meta=8,mc=3", 64 * MiB, 1,
+      2 * 16384 + 131072 * 8, 0 },
+    { "femu_mode=2,devsz_mb=64,namespaces=2", 64 * MiB, 2, 2 * 8192, 0 },
+    { "femu_mode=5,devsz_mb=64", 0, 1, 2 * 16384, 64 * MiB },
+};
+
+static void femu_test_memory(void *obj, void *data, QGuestAllocator *unused)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(femu_mem_cases); i++) {
+        QTestState *qts = qtest_initf("-machine pc -nodefaults "
+                                      "-device femu,addr=5,id=mem,%s",
+                                      femu_mem_cases[i].opts);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-memory'}");
+        QDict *ret = qdict_get_qdict(rsp, "return");
+        QList *owners = qdict_get_qlist(ret, "owners");
+        QList *nss = qdict_get_qlist(ret, "namespaces");
+        const QListEntry *e;
+        uint32_t seen_ns = 0;
+        uint32_t seen_ctrl = 0;
+        uint32_t seen_ftl = 0;
+        uint64_t total = 0;
+
+        g_assert_cmpstr(qdict_get_str(ret, "path"), ==,
+                        "/machine/peripheral/mem");
+        g_assert_false(qdict_get_bool(ret, "backend-pinned") &&
+                       !femu_mem_cases[i].backend);
+        QLIST_FOREACH_ENTRY(owners, e) {
+            QDict *o = qobject_to(QDict, qlist_entry_obj(e));
+            const char *kind = qdict_get_str(o, "kind");
+
+            /*
+             * A key-value namespace has an FTL with no block L2P: its
+             * mapping is the reverse map, 8 bytes per page of the default
+             * 16 GiB geometry.
+             */
+            if (!strcmp(kind, "ftl")) {
+                g_assert_cmpuint(femu_mem_cases[i].ns_values, >, 0);
+                g_assert_cmpuint(qdict_get_int(o, "mapping"), ==,
+                                 16 * GiB / 4096 * 8);
+                g_assert_cmpuint(qdict_get_int(o, "media"), >, 0);
+                seen_ftl++;
+                continue;
+            }
+            total += qdict_get_int(o, "backend") + qdict_get_int(o, "other");
+            if (!strcmp(kind, "controller")) {
+                seen_ctrl++;
+                g_assert_cmpstr(qdict_get_str(o, "id"), ==,
+                                "/machine/peripheral/mem");
+                g_assert_cmpuint(qdict_get_int(o, "backend"), ==,
+                                 femu_mem_cases[i].backend);
+            } else {
+                g_assert_cmpstr(kind, ==, "namespace");
+                g_assert_cmpuint(qdict_get_int(o, "backend"), ==, 0);
+                g_assert_cmpuint(qdict_get_int(o, "other"), ==,
+                                 femu_mem_cases[i].ns_other);
+                g_assert_cmpuint(qdict_get_int(o, "values"), ==,
+                                 femu_mem_cases[i].ns_values);
+                /* a key-value namespace has a key table, the others none */
+                g_assert_true(!!qdict_get_int(o, "index") ==
+                              !!femu_mem_cases[i].ns_values);
+                seen_ns++;
+            }
+        }
+        g_assert_cmpuint(seen_ctrl, ==, 1);
+        g_assert_cmpuint(seen_ftl, ==, !!femu_mem_cases[i].ns_values);
+        g_assert_cmpuint(seen_ns, ==, femu_mem_cases[i].nr_ns);
+        g_assert_cmpuint(total, ==, femu_mem_cases[i].backend +
+                         femu_mem_cases[i].nr_ns * femu_mem_cases[i].ns_other);
+        g_assert_cmpuint(qlist_size(nss), ==, femu_mem_cases[i].nr_ns);
+        QLIST_FOREACH_ENTRY(nss, e) {
+            QDict *ns = qobject_to(QDict, qlist_entry_obj(e));
+            g_autofree char *id = g_strdup_printf(
+                "/machine/peripheral/mem/ns%" PRId64,
+                qdict_get_int(ns, "nsid"));
+            QList *ids = qdict_get_qlist(ns, "owners");
+            const QListEntry *ie;
+            bool has_ns = false;
+            bool has_ctrl = false;
+            bool has_ftl = false;
+
+            g_assert_true(qdict_get_bool(ns, "attached"));
+            QLIST_FOREACH_ENTRY(ids, ie) {
+                const char *s = qstring_get_str(qobject_to(QString,
+                                                qlist_entry_obj(ie)));
+
+                has_ns |= !strcmp(s, id);
+                has_ctrl |= !strcmp(s, "/machine/peripheral/mem");
+                has_ftl |= !!strstr(s, "/ftl");
+            }
+            g_assert_true(has_ns);
+            /* the backend owner, for a namespace with a backend slice */
+            g_assert_true(has_ctrl == !!femu_mem_cases[i].backend);
+            g_assert_true(has_ftl == !!femu_mem_cases[i].ns_values);
+            g_assert_cmpuint(qlist_size(ids), ==, 1 + has_ctrl + has_ftl);
+        }
+        qobject_unref(rsp);
+
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-memory','arguments':{"
+                        "'path':'/machine/peripheral/none'}}");
+        g_assert_true(qdict_haskey(rsp, "error"));
+        qobject_unref(rsp);
+        qtest_quit(qts);
+    }
+}
+
+/*
+ * The FTL owners of query-femu-memory. 384 physical pages: the L2P and the
+ * reverse map take 8 bytes per page each. shared_ftl=on gives both
+ * namespaces one FTL owner; without it each namespace has its own.
+ */
+#define FEMU_MEM_FTL "femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8," \
+                     "pgs_per_blk=8,blks_per_pl=12,pls_per_lun=1," \
+                     "luns_per_ch=2,nchs=2"
+
+static void femu_test_memory_ftl(void *obj, void *data,
+                                 QGuestAllocator *unused)
+{
+    static const struct {
+        const char *opts;
+        uint32_t nr_ftl;
+    } cases[] = {
+        { FEMU_MEM_FTL, 1 },
+        { FEMU_MEM_FTL ",namespaces=2,shared_ftl=on", 1 },
+        { FEMU_MEM_FTL ",namespaces=2", 2 },
+    };
+
+    for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+        QTestState *qts = qtest_initf("-machine pc -nodefaults "
+                                      "-device femu,addr=5,id=mem,%s",
+                                      cases[i].opts);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-memory'}");
+        QDict *ret = qdict_get_qdict(rsp, "return");
+        const QListEntry *e;
+        g_autofree char *ftl = NULL;
+        g_autoptr(GHashTable) ftls = g_hash_table_new_full(g_str_hash,
+                                                           g_str_equal,
+                                                           g_free, NULL);
+        g_autoptr(GHashTable) named = g_hash_table_new(g_str_hash,
+                                                       g_str_equal);
+        uint32_t nr_ftl = 0;
+
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(ret, "owners"), e) {
+            QDict *o = qobject_to(QDict, qlist_entry_obj(e));
+
+            if (strcmp(qdict_get_str(o, "kind"), "ftl")) {
+                g_assert_cmpuint(qdict_get_int(o, "mapping"), ==, 0);
+                g_assert_cmpuint(qdict_get_int(o, "media"), ==, 0);
+                continue;
+            }
+            nr_ftl++;
+            g_free(ftl);
+            ftl = g_strdup(qdict_get_str(o, "id"));
+            g_assert_true(g_str_has_prefix(ftl, "/machine/peripheral/mem/ftl"));
+            g_assert_true(g_hash_table_add(ftls, g_strdup(ftl)));
+            /* each FTL has the whole geometry, also one of two namespaces */
+            g_assert_cmpint(qdict_get_int(o, "mapping"), ==, 2 * 8 * 384);
+            g_assert_cmpuint(qdict_get_int(o, "media"), >, 0);
+        }
+        g_assert_cmpuint(nr_ftl, ==, cases[i].nr_ftl);
+        /* each namespace names exactly one FTL owner */
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(ret, "namespaces"), e) {
+            QDict *ns = qobject_to(QDict, qlist_entry_obj(e));
+            const QListEntry *ie;
+            uint32_t n = 0;
+
+            QLIST_FOREACH_ENTRY(qdict_get_qlist(ns, "owners"), ie) {
+                const char *id = qstring_get_str(qobject_to(QString,
+                                                 qlist_entry_obj(ie)));
+
+                if (strstr(id, "/ftl")) {
+                    n++;
+                    g_assert_true(g_hash_table_contains(ftls, id));
+                    g_hash_table_add(named, (gpointer)id);
+                }
+            }
+            g_assert_cmpuint(n, ==, 1);
+        }
+        /* each FTL owner is named by a namespace */
+        g_assert_cmpuint(g_hash_table_size(named), ==, cases[i].nr_ftl);
+        g_hash_table_remove_all(named);
+        qobject_unref(rsp);
+        qtest_quit(qts);
+    }
+
+    /*
+     * Two FDP reclaim groups add group lines and victim heaps to the FTL,
+     * so its media exceeds that of the same geometry without FDP.
+     */
+    {
+        uint64_t media[2] = { 0, 0 };
+
+        for (int fdp = 0; fdp < 2; fdp++) {
+            QTestState *qts = qtest_initf("-machine pc -nodefaults %s "
+                "-device femu,addr=5,id=mem,devsz_mb=1,femu_mode=1,secsz=512,"
+                "secs_per_pg=8,pgs_per_blk=4,pls_per_lun=1,luns_per_ch=2,"
+                "nchs=2,blks_per_pl=80,lba_index=3%s",
+                fdp ? "-device femu-subsys,id=memsub,nqn=memsub,fdp=on,"
+                      "fdp.nruh=4,fdp.nrg=2" : "",
+                fdp ? ",subsys=memsub" : "");
+            QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-memory'}");
+            const QListEntry *e;
+            uint32_t nr_sub = 0;
+
+            QLIST_FOREACH_ENTRY(qdict_get_qlist(qdict_get_qdict(rsp, "return"),
+                                                "owners"), e) {
+                QDict *o = qobject_to(QDict, qlist_entry_obj(e));
+
+                if (!strcmp(qdict_get_str(o, "kind"), "ftl")) {
+                    media[fdp] += qdict_get_int(o, "media");
+                }
+                /*
+                 * The reclaim units and handles of the endurance group: 2
+                 * group pointers, 2 x 128 units of 8 bytes, 4 handles of
+                 * 64 bytes with 2 unit pointers each.
+                 */
+                if (!strcmp(qdict_get_str(o, "kind"), "subsystem")) {
+                    g_assert_true(fdp);
+                    g_assert_cmpstr(qdict_get_str(o, "id"), ==,
+                                    "/machine/peripheral/memsub");
+                    g_assert_cmpuint(qdict_get_int(o, "media"), ==, 2384);
+                    nr_sub++;
+                }
+                /* 4 placement handles of 2 bytes */
+                if (!strcmp(qdict_get_str(o, "kind"), "namespace")) {
+                    g_assert_cmpuint(qdict_get_int(o, "media"), ==,
+                                     fdp ? 8 : 0);
+                }
+            }
+            g_assert_cmpuint(nr_sub, ==, fdp);
+            qobject_unref(rsp);
+            qtest_quit(qts);
+        }
+        g_assert_cmpuint(media[1], >, media[0]);
+    }
+
+    /*
+     * A zoned namespace has no FTL owner: its L2P (8 bytes per 4 KiB of
+     * the 32 MiB namespace), NAND tree and zones count at the namespace.
+     */
+    {
+        QTestState *qts = qtest_initf("-machine pc -nodefaults "
+            "-device femu,addr=5,id=mem,devsz_mb=32,femu_mode=3,secsz=512,"
+            "zns_num_ch=1,zns_num_lun=1,zns_num_plane=2,zns_num_blk=32,"
+            "zns_flash_type=1");
+        QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-memory'}");
+        QDict *ret = qdict_get_qdict(rsp, "return");
+        const QListEntry *e;
+        uint32_t nr_ns = 0;
+
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(ret, "owners"), e) {
+            QDict *o = qobject_to(QDict, qlist_entry_obj(e));
+            const char *kind = qdict_get_str(o, "kind");
+
+            g_assert_cmpstr(kind, !=, "ftl");
+            if (!strcmp(kind, "namespace")) {
+                nr_ns++;
+                g_assert_cmpuint(qdict_get_int(o, "mapping"), ==,
+                                 32 * MiB / 4096 * 8);
+                g_assert_cmpuint(qdict_get_int(o, "media"), >, 0);
+                /*
+                 * Two bitmaps of 65536 blocks (16384 bytes), and three
+                 * write caches with their LPN arrays (288 bytes).
+                 */
+                g_assert_cmpuint(qdict_get_int(o, "other"), ==, 16672);
+            }
+        }
+        g_assert_cmpuint(nr_ns, ==, 1);
+        qobject_unref(rsp);
+        qtest_quit(qts);
+    }
+
+    /*
+     * Open-channel: OCSSD 1.2 has a translation table and bad block tables
+     * per namespace and an OOB area at the controller; OCSSD 2.0 has chunk
+     * state only.
+     */
+    for (int v = 1; v <= 2; v++) {
+        QTestState *qts = qtest_initf("-machine pc -nodefaults "
+            "-device femu,addr=5,id=mem,devsz_mb=64,femu_mode=0,lver=%d", v);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-memory'}");
+        QDict *ret = qdict_get_qdict(rsp, "return");
+        const QListEntry *e;
+
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(ret, "owners"), e) {
+            QDict *o = qobject_to(QDict, qlist_entry_obj(e));
+            const char *kind = qdict_get_str(o, "kind");
+
+            g_assert_cmpstr(kind, !=, "ftl");
+            if (!strcmp(kind, "controller")) {
+                g_assert_true(!!qdict_get_int(o, "media") == (v == 1));
+            } else {
+                g_assert_true(!!qdict_get_int(o, "mapping") == (v == 1));
+                g_assert_cmpuint(qdict_get_int(o, "media"), >, 0);
+            }
+        }
+        qobject_unref(rsp);
+        qtest_quit(qts);
+    }
+
+    /*
+     * CSD: the 4 MiB memory namespace (SLM) counts at the controller.
+     * Namespace 1 stores blocks; 2 is the memory namespace, whose arena the
+     * controller holds; 3 computes and holds nothing else. With FDP only
+     * namespace 1 names the subsystem.
+     */
+    for (int fdp = 0; fdp < 2; fdp++) {
+        QTestState *qts = qtest_initf("-machine pc -nodefaults %s "
+            "-device femu,addr=5,id=mem,femu_mode=4,fdm_size=16,"
+            "csd_slm_size=4,csd_cp=on%s",
+            fdp ? "-device femu-subsys,id=memsub,nqn=memsub,fdp=on,"
+                  "fdp.nruh=4" : "",
+            fdp ? ",subsys=memsub,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+                  "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4" : "");
+        QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-memory'}");
+        QDict *ret = qdict_get_qdict(rsp, "return");
+        const char *d = "/machine/peripheral/mem";
+        const char *sub = "/machine/peripheral/memsub";
+        g_autofree char *ftl = NULL;
+        const QListEntry *e;
+        uint32_t seen = 0;
+
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(ret, "owners"), e) {
+            QDict *o = qobject_to(QDict, qlist_entry_obj(e));
+            const char *kind = qdict_get_str(o, "kind");
+
+            if (!strcmp(kind, "controller")) {
+                g_assert_cmpuint(qdict_get_int(o, "other"), ==, 4 * MiB);
+            } else if (!strcmp(kind, "ftl")) {
+                g_assert_null(ftl);
+                ftl = g_strdup(qdict_get_str(o, "id"));
+                g_assert_cmpuint(qdict_get_int(o, "mapping"), >, 0);
+            }
+        }
+        g_assert_nonnull(ftl);
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(ret, "namespaces"), e) {
+            QDict *ns = qobject_to(QDict, qlist_entry_obj(e));
+            int64_t nsid = qdict_get_int(ns, "nsid");
+            g_autofree char *own = g_strdup_printf("%s/ns%" PRId64, d, nsid);
+            const char *want[4];
+            uint32_t nr = 0;
+            const QListEntry *ie;
+            uint32_t k = 0;
+
+            /* the list in the order the reply builds it */
+            if (nsid == 1) {
+                want[nr++] = d;
+                if (fdp) {
+                    want[nr++] = sub;
+                }
+                want[nr++] = ftl;
+            } else if (nsid == 2) {
+                want[nr++] = d;
+            } else {
+                g_assert_cmpint(nsid, ==, 3);
+            }
+            want[nr++] = own;
+            seen |= 1u << nsid;
+            g_assert_cmpuint(qlist_size(qdict_get_qlist(ns, "owners")), ==,
+                             nr);
+            QLIST_FOREACH_ENTRY(qdict_get_qlist(ns, "owners"), ie) {
+                g_assert_cmpstr(qstring_get_str(qobject_to(QString,
+                                qlist_entry_obj(ie))), ==, want[k++]);
+            }
+        }
+        g_assert_cmpuint(seen, ==, (1u << 1) | (1u << 2) | (1u << 3));
+        qobject_unref(rsp);
+        qtest_quit(qts);
+    }
+}
+
 static void femu_test_ignored_props(void *obj, void *data,
                                     QGuestAllocator *unused)
 {
@@ -64643,6 +65027,8 @@ static void femu_register_nodes(void)
     qos_add_test("doc-examples", "femu", femu_test_doc_examples, NULL);
     qos_add_test("ignored-props", "femu", femu_test_ignored_props, NULL);
     qos_add_test("kv-no-backend", "femu", femu_test_kv_no_backend, NULL);
+    qos_add_test("memory", "femu", femu_test_memory, NULL);
+    qos_add_test("memory-ftl", "femu", femu_test_memory_ftl, NULL);
     qos_add_test("multiplane-warnings", "femu", femu_test_multiplane_warnings,
                  NULL);
     qos_add_test("cxl-geometry-bounds", "femu", femu_test_cxl_geometry_bounds,

@@ -521,7 +521,8 @@ static inline bool zns_wp_is_valid(NvmeZone *zone)
 
 static inline uint8_t *zns_get_zd_extension(NvmeNamespace *ns, uint32_t zone_idx)
 {
-    return &ns->zd_extensions[zone_idx * ns->zd_extension_size];
+    /* 64-bit: zone count times extension size can pass 4 GiB */
+    return &ns->zd_extensions[(size_t)zone_idx * ns->zd_extension_size];
 }
 
 static inline void zns_aor_inc_open(NvmeNamespace *ns)

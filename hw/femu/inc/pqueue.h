@@ -66,6 +66,13 @@ typedef struct pqueue_t
     void **d;                   /**< The actualy queue in binary heap form */
 } pqueue_t;
 
+/* the bytes the queue holds: the struct and its heap array */
+static inline size_t pqueue_bytes(const pqueue_t *q)
+{
+    return q ? sizeof(*q) + q->avail * sizeof(void *) : 0;
+}
+
+
 /**
  * initialize the queue
  *

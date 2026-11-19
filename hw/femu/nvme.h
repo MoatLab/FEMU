@@ -13,6 +13,7 @@
 #include "hw/virtio/vhost.h"
 #include "qapi/error.h"
 #include "femu-freeze.h"
+#include "femu-mem.h"
 #include "system/kvm.h"
 #include "hw/block/block.h"
 
@@ -324,6 +325,8 @@ typedef struct NvmeSubsystem {
     FemuCtrl           *ctrls[NVME_MAX_CONTROLLERS];
     NvmeNamespace      *namespaces[NVME_MAX_NAMESPACES + 1];
     NvmeEnduranceGroup endgrp;
+    FemuMemAcct        mem;     /* the FDP reclaim units and handles */
+    uint64_t           fdp_mem; /* the part of @mem setup_fdp charged */
     bool ns_mgmt;
     FemuCtrl *storage;
     NvmeSanitizeState sanitize;
@@ -2344,6 +2347,11 @@ typedef struct NvmeNamespace {
      */
     QemuMutex       mdata_lock;
     bool            mdata_lock_init;
+    /* host memory this namespace owns; mem_maps: its share of OTHER */
+    FemuMemAcct     mem;
+    uint64_t        mem_maps;
+    /* the charge of the mode state of a zoned or open-channel namespace */
+    uint64_t        mem_mode[FEMU_MEM__MAX];
     uint32_t        id;
     bool            attached;
     bool            allocated;
@@ -2387,6 +2395,7 @@ typedef struct NvmeNamespace {
         uint16_t nphs;
         /* reclaim unit handle identifiers indexed by placement handle */
         uint16_t *phs;
+        uint16_t phs_cap;       /* entries allocated in @phs */
     } fdp;
 
     /*
@@ -2809,6 +2818,7 @@ typedef struct FemuCtrl {
     uint32_t    num_namespaces;
     bool        ns_mgmt;
     bool        shared_storage;
+    FemuMemAcct mem;            /* host memory the controller owns */
     DECLARE_BITMAP(attached_ns, NVME_MAX_NAMESPACES);
     bool        streams;
     uint16_t    streams_max;
@@ -4021,6 +4031,8 @@ enum {
 };
 bool femu_sdc_init(FemuCtrl *n, Error **errp);
 bool femu_sdc_ns_alloc(NvmeNamespace *ns, uint64_t blks);
+void nvme_ns_mem_maps(NvmeNamespace *ns, uint64_t blks);
+void nvme_ns_mem_mode(NvmeNamespace *ns, const uint64_t now[FEMU_MEM__MAX]);
 void femu_sdc_clear(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
 void femu_lost_read(NvmeNamespace *ns, uint64_t slba, uint64_t elba);
 bool femu_lba_bad(NvmeNamespace *ns, uint64_t slba, uint64_t elba,

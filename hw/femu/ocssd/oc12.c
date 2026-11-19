@@ -1100,7 +1100,7 @@ static void oc12_init_id_ctrl(Oc12Ctrl *ln)
     ln_id->ppaf.ch_len      = qemu_fls(cpu_to_le16(ln->params.num_ch) - 1);
 }
 
-static int oc12_init_meta(Oc12Ctrl *ln)
+static int oc12_init_meta(FemuCtrl *n, Oc12Ctrl *ln)
 {
     /* Internal meta (state: ERASED / WRITTEN) */
     ln->int_meta_size = 4;
@@ -1121,8 +1121,24 @@ static int oc12_init_meta(Oc12Ctrl *ln)
                  ln->meta_tbytes);
         return -1;
     }
+    femu_mem_charge(&n->mem, FEMU_MEM_MEDIA, ln->meta_tbytes);
 
     return 0;
+}
+
+/* charge @ns for its translation and bad block tables */
+static void oc12_mem_charge(FemuCtrl *n, NvmeNamespace *ns)
+{
+    Oc12IdGroup *c = &n->oc12_ctrl->id_ctrl.groups[0];
+    uint64_t luns = (uint64_t)c->num_ch * c->num_lun;
+    uint64_t now[FEMU_MEM__MAX] = { 0 };
+
+    now[FEMU_MEM_MAPPING] = ns->tbl ? oc12_tbl_size(ns) : 0;
+    if (ns->bbtbl) {
+        now[FEMU_MEM_MEDIA] = luns * (sizeof(Oc12Bbt *) + sizeof(Oc12Bbt) +
+                                      (uint64_t)c->num_blk * c->num_pln);
+    }
+    nvme_ns_mem_mode(ns, now);
 }
 
 static int oc12_init_bbtbl(FemuCtrl *n, NvmeNamespace *ns)
@@ -1457,11 +1473,12 @@ static int oc12_init_more(FemuCtrl *n, Error **errp)
             return -1;
         }
         oc12_tbl_initialize(ns);
+        oc12_mem_charge(n, ns);
     }
 
     init_nand_flash(n);
 
-    ret = oc12_init_meta(ln);
+    ret = oc12_init_meta(n, ln);
     if (ret) {
         error_setg(errp, "FEMU ocssd: could not build the metadata area");
         return ret;
@@ -1490,11 +1507,13 @@ static void oc12_exit(FemuCtrl *n)
      * released, so each add and remove of the device cost tens of megabytes.
      */
     for (i = 0; ln && n->namespaces && i < n->num_namespaces; i++) {
+        static const uint64_t none[FEMU_MEM__MAX];
         NvmeNamespace *ns = &n->namespaces[i];
         Oc12IdGroup *c = &ln->id_ctrl.groups[0];
         int nr_luns = c->num_ch * c->num_lun;
         int j;
 
+        nvme_ns_mem_mode(ns, none);
         for (j = 0; ns->bbtbl && j < nr_luns; j++) {
             g_free(ns->bbtbl[j]);
         }
@@ -1506,6 +1525,9 @@ static void oc12_exit(FemuCtrl *n)
     }
 
     if (ln) {
+        if (ln->meta_buf) {
+            femu_mem_release(&n->mem, FEMU_MEM_MEDIA, ln->meta_tbytes);
+        }
         g_free(ln->meta_buf);
         ln->meta_buf = NULL;
         nand_media_destroy(&ln->media);

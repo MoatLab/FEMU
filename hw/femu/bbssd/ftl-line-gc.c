@@ -58,6 +58,8 @@ void ssd_init_lines(struct ssd *ssd)
     lm->tt_lines = spp->blks_per_pl;
     ftl_assert(lm->tt_lines == spp->tt_lines);
     lm->lines = g_malloc0(sizeof(struct line) * lm->tt_lines);
+    femu_mem_charge(&ssd->mem, FEMU_MEM_MEDIA,
+                    sizeof(struct line) * lm->tt_lines);
 
     QTAILQ_INIT(&lm->free_line_list);
     if (ssd->policy->by_close_order) {
@@ -69,6 +71,8 @@ void ssd_init_lines(struct ssd *ssd)
                 victim_line_get_pri, victim_line_set_pri,
                 victim_line_get_pos, victim_line_set_pos);
     }
+    femu_mem_charge(&ssd->mem, FEMU_MEM_MEDIA,
+                    pqueue_bytes(lm->victim_line_pq));
     lm->next_close_seq = 0;
     QTAILQ_INIT(&lm->full_line_list);
 
@@ -3248,8 +3252,14 @@ void ssd_free_lines(struct ssd *ssd)
 
     ssd->pace_line = NULL;
 
+    femu_mem_release(&ssd->mem, FEMU_MEM_MEDIA,
+                     pqueue_bytes(lm->victim_line_pq));
     pqueue_free(lm->victim_line_pq);
     lm->victim_line_pq = NULL;
+    if (lm->lines) {
+        femu_mem_release(&ssd->mem, FEMU_MEM_MEDIA,
+                         sizeof(struct line) * lm->tt_lines);
+    }
     g_free(lm->lines);
     lm->lines = NULL;
     lm->tt_lines = 0;

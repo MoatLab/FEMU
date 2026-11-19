@@ -699,6 +699,30 @@ static void kv_tree_issue(FemuKvssdState *s)
  * A free slot. The table grows when none is left, so a held entry
  * pointer is stale after this; callers keep slot numbers.
  */
+/*
+ * Charge the namespace for the KV buffers as they are now allocated. Each
+ * call replaces the last charge, so a free site sets the sizes to zero
+ * and calls it once.
+ */
+static void kv_mem_sync(FemuKvssdState *s)
+{
+    uint64_t now[FEMU_MEM__MAX] = { 0 };
+
+    if (!s->ns) {
+        return;
+    }
+    now[FEMU_MEM_VALUES] = s->values ? s->values_bytes : 0;
+    now[FEMU_MEM_INDEX] =
+        (s->table ? (uint64_t)s->table_cap * sizeof(*s->table) : 0) +
+        (s->free_slots ? (uint64_t)s->free_cap * sizeof(uint32_t) : 0);
+    now[FEMU_MEM_MEDIA] = s->line_live && s->ssd ?
+        (uint64_t)s->ssd->lm.tt_lines * sizeof(uint64_t) : 0;
+    for (int c = 0; c < FEMU_MEM__MAX; c++) {
+        femu_mem_resize(&s->ns->mem, c, s->mem_charged[c], now[c]);
+        s->mem_charged[c] = now[c];
+    }
+}
+
 static bool kv_slot_pop(FemuKvssdState *s, uint32_t *slot)
 {
     if (!s->nr_free) {
@@ -720,11 +744,15 @@ static bool kv_slot_pop(FemuKvssdState *s, uint32_t *slot)
         }
         s->table = t;
         memset(&t[old], 0, (want - old) * sizeof(*t));
+        s->table_cap = (uint32_t)want;
+        kv_mem_sync(s);
         f = g_try_renew(uint32_t, s->free_slots, want);
         if (!f) {
             return false;
         }
         s->free_slots = f;
+        s->free_cap = (uint32_t)want;
+        kv_mem_sync(s);
         s->hash_slots = (uint32_t)want;
         for (uint64_t i = want; i > old; i--) {
             s->free_slots[s->nr_free++] = (uint32_t)(i - 1);
@@ -2781,6 +2809,7 @@ static bool kv_index_size(FemuKvssdState *s, FemuCtrl *n, uint64_t cap)
     s->kv_max_keys = keys;
     s->hash_slots = (uint32_t)slots;
     s->table = g_try_new0(FemuKvssdMappingEntry, slots);
+    s->table_cap = s->table ? (uint32_t)slots : 0;
     return s->table != NULL;
 }
 
@@ -2891,6 +2920,7 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     s->line_live = g_try_new0(uint64_t, s->ssd->lm.tt_lines);
 
     s->values = g_try_malloc0(s->value_capacity);
+    s->values_bytes = s->value_capacity;
     if (s->table && s->values && n->kv_index && !strcmp(n->kv_index, "lsm")) {
         /* a meta page record: 16 key bytes, 8 pointer, 8 length and flags */
         if (s->pgsz < KV_LSM_REC_BYTES) {
@@ -2901,6 +2931,7 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         }
         s->lsm = g_try_new0(KvLsm, 1);
         s->free_slots = g_try_new(uint32_t, s->hash_slots);
+        s->free_cap = s->free_slots ? s->hash_slots : 0;
         s->meta_wp = g_try_new0(struct write_pointer, 1);
         if (!s->lsm || !s->free_slots || !s->meta_wp ||
             kv_lsm_init(s->lsm, n->kv_lsm_memtable_keys,
@@ -2917,6 +2948,7 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         goto fail;
     }
 
+    kv_mem_sync(s);
     qemu_mutex_init(&s->lock);
     /* the owner check of every page, for tests; it is slow */
     s->check = getenv("FEMU_KV_CHECK") != NULL;
@@ -2939,6 +2971,10 @@ fail:
     g_free(s->line_live);
     g_free(s->values);
     g_free(s->table);
+    s->line_live = NULL;
+    s->values = NULL;
+    s->table = NULL;
+    kv_mem_sync(s);
     kvssd_free_ssd(s);
     g_free(s);
     return NULL;
@@ -3678,6 +3714,10 @@ void kvssd_ftl_free(FemuKvssdState *s)
     g_free(s->line_live);
     g_free(s->values);
     g_free(s->table);
+    s->line_live = NULL;
+    s->values = NULL;
+    s->table = NULL;
+    kv_mem_sync(s);
     kvssd_free_ssd(s);
     g_free(s);
 }

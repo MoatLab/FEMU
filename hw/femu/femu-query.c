@@ -1412,3 +1412,114 @@ FemuIoStages *qmp_query_femu_stages(const char *path, bool has_nsid,
     }
     return info;
 }
+
+static void femu_mem_put(FemuMemOwnerList ***tail, GHashTable *seen,
+                         const char *id, FemuMemOwnerKind kind,
+                         const FemuMemAcct *a, uint64_t backend)
+{
+    FemuMemOwner *o;
+
+    if (g_hash_table_contains(seen, id)) {
+        return;
+    }
+    g_hash_table_add(seen, g_strdup(id));
+    o = g_new0(FemuMemOwner, 1);
+    o->id = g_strdup(id);
+    o->kind = kind;
+    o->backend = backend;
+    if (a) {
+        o->backend += femu_mem_get(a, FEMU_MEM_BACKEND);
+        o->mapping = femu_mem_get(a, FEMU_MEM_MAPPING);
+        o->media = femu_mem_get(a, FEMU_MEM_MEDIA);
+        o->values = femu_mem_get(a, FEMU_MEM_VALUES);
+        o->index = femu_mem_get(a, FEMU_MEM_INDEX);
+        o->other = femu_mem_get(a, FEMU_MEM_OTHER);
+    }
+    QAPI_LIST_APPEND(*tail, o);
+}
+
+/*
+ * Main loop, BQL held, no yield: Namespace Create and Delete and Format
+ * change the namespaces only with the BQL held and the workers paused, and
+ * the counters are atomic.
+ */
+FemuMemory *qmp_query_femu_memory(const char *path, Error **errp)
+{
+    FemuCtrl *n = femu_query_find(path, errp);
+    g_autoptr(GHashTable) seen = NULL;
+    g_autofree char *dev = NULL;
+    g_autofree char *store = NULL;
+    FemuMemOwnerList **otail;
+    FemuMemNsList **ntail;
+    FemuMemory *m;
+    uint64_t backend;
+
+    if (!n) {
+        return NULL;
+    }
+    seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    dev = object_get_canonical_path(OBJECT(n));
+    /* shared storage lives in the subsystem, whichever controller made it */
+    store = n->shared_storage ?
+            object_get_canonical_path(OBJECT(n->subsys)) : g_strdup(dev);
+    backend = n->mbe && !n->cxl_dev ? n->mbe->size : 0;
+
+    m = g_new0(FemuMemory, 1);
+    m->path = g_strdup(dev);
+    m->mode = femu_query_mode(n->femu_mode);
+    m->backend_pinned = n->mbe && n->mbe->pinned;
+    otail = &m->owners;
+    ntail = &m->namespaces;
+
+    femu_mem_put(&otail, seen, dev, FEMU_MEM_OWNER_KIND_CONTROLLER, &n->mem,
+                 n->shared_storage ? 0 : backend);
+    if (n->subsys) {
+        g_autofree char *sub = object_get_canonical_path(OBJECT(n->subsys));
+
+        femu_mem_put(&otail, seen, sub, FEMU_MEM_OWNER_KIND_SUBSYSTEM,
+                     &n->subsys->mem, n->shared_storage ? backend : 0);
+    }
+    for (uint32_t nsid = 1; nsid <= n->namespace_limit; nsid++) {
+        NvmeNamespace *ns = nvme_ns_allocated(n, nsid);
+        g_autofree char *id = NULL;
+        FemuMemNs *e;
+
+        if (!ns) {
+            continue;
+        }
+        id = g_strdup_printf("%s/ns%" PRIu32, store, nsid);
+        femu_mem_put(&otail, seen, id, FEMU_MEM_OWNER_KIND_NAMESPACE,
+                     &ns->mem, 0);
+        e = g_new0(FemuMemNs, 1);
+        e->nsid = nsid;
+        e->mode = femu_query_mode(ns->femu_mode);
+        e->attached = nvme_ns_attached(n, ns);
+        QAPI_LIST_PREPEND(e->owners, g_strdup(id));
+        /* an FTL that several namespaces share appears once in owners */
+        if (ns->ssd && !ns->ssd_borrowed) {
+            g_autofree char *fid = g_strdup_printf("%s/ftl%" PRIu32, store,
+                                                   ns->ssd->mem_id);
+
+            femu_mem_put(&otail, seen, fid, FEMU_MEM_OWNER_KIND_FTL,
+                         &ns->ssd->mem, 0);
+            QAPI_LIST_PREPEND(e->owners, g_strdup(fid));
+        }
+        /*
+         * The owner of the backend slice, for a namespace that uses one.
+         * The CSD memory namespace is the SLM arena of the controller.
+         */
+        /* only a namespace in the FDP endurance group uses its units */
+        if (ns->endgrp && ns->endgrp->fdp.enabled && ns->fdp.phs) {
+            QAPI_LIST_PREPEND(e->owners, object_get_canonical_path(
+                                  OBJECT(n->subsys)));
+        }
+        if (NS_SLM(ns)) {
+            QAPI_LIST_PREPEND(e->owners, g_strdup(dev));
+        } else if (backend && !NS_KVSSD(ns) && !NS_CP(ns)) {
+            QAPI_LIST_PREPEND(e->owners, g_strdup(store));
+        }
+        QAPI_LIST_APPEND(ntail, e);
+    }
+
+    return m;
+}

@@ -1172,13 +1172,28 @@ static uint16_t oc20_io_cmd(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     }
 }
 
+/* charge @ns for its chunk state; see query-femu-memory */
+static void oc20_mem_charge(NvmeNamespace *ns)
+{
+    Oc20Namespace *lns = ns->state;
+    uint64_t now[FEMU_MEM__MAX] = { 0 };
+
+    if (lns) {
+        now[FEMU_MEM_MEDIA] = sizeof(*lns) + lns->chunkinfo_size +
+            (lns->resetfail ? lns->chks_total * sizeof(*lns->resetfail) : 0);
+    }
+    nvme_ns_mem_mode(ns, now);
+}
+
 static void oc20_free_namespace(FemuCtrl *n, NvmeNamespace *ns)
 {
+    static const uint64_t none[FEMU_MEM__MAX];
     Oc20Namespace *lns = ns->state;
 
     if (!lns) {
         return;
     }
+    nvme_ns_mem_mode(ns, none);
     g_free(lns->writefail);
     g_free(lns->resetfail);
     g_free(lns->chunk_info);
@@ -1459,6 +1474,7 @@ static int oc20_init_namespace(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
             return 1;
         }
     }
+    oc20_mem_charge(ns);
 
     lns->writefail = NULL;
     if (params->writefail_fname) {

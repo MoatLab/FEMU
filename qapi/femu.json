@@ -1738,6 +1738,140 @@
   'returns': 'FemuEvents' }
 
 ##
+# @FemuMemOwnerKind:
+#
+# The object that owns a set of host allocations.
+#
+# @controller: the femu device
+#
+# @subsystem: the femu-subsys whose shared storage the device uses
+#
+# @namespace: one namespace
+#
+# @ftl: one flash translation layer, which one or more namespaces
+#     use
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuMemOwnerKind',
+  'data': [ 'controller', 'subsystem', 'namespace', 'ftl' ] }
+
+##
+# @FemuMemOwner:
+#
+# The host memory one owner holds, in bytes FEMU asked the allocator
+# for.  A number counts a lazy allocation in full before the guest
+# touches it, so it is not the resident size.
+#
+# @id: a name of the owner that is the same in the reply of each
+#     controller that uses it
+#
+# @kind: the type of the owner
+#
+# @backend: the data backend
+#
+# @mapping: logical to physical maps and translation tables
+#
+# @media: NAND state, lines, zones and chunks
+#
+# @values: the value arena of a key-value namespace
+#
+# @index: the key index and LSM state of a key-value namespace
+#
+# @other: per-block bitmaps, metadata and the rest
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuMemOwner',
+  'data': { 'id': 'str', 'kind': 'FemuMemOwnerKind',
+            'backend': 'uint64', 'mapping': 'uint64', 'media': 'uint64',
+            'values': 'uint64', 'index': 'uint64', 'other': 'uint64' } }
+
+##
+# @FemuMemNs:
+#
+# One allocated namespace of the device.
+#
+# @nsid: namespace identifier
+#
+# @mode: namespace mode
+#
+# @attached: whether the namespace is attached to this controller
+#
+# @owners: the @id of each owner that holds memory of this namespace
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuMemNs',
+  'data': { 'nsid': 'uint32', 'mode': 'FemuMode', 'attached': 'bool',
+            'owners': [ 'str' ] } }
+
+##
+# @FemuMemory:
+#
+# Host memory of a femu device by owner.
+#
+# @path: canonical QOM path of the device
+#
+# @mode: controller mode
+#
+# @backend-pinned: whether mlock() took the whole data backend
+#
+# @owners: each owner once, the device and the shared ones too
+#
+# @namespaces: each allocated namespace, attached or not
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuMemory',
+  'data': { 'path': 'str', 'mode': 'FemuMode', 'backend-pinned': 'bool',
+            'owners': [ 'FemuMemOwner' ],
+            'namespaces': [ 'FemuMemNs' ] } }
+
+##
+# @query-femu-memory:
+#
+# Report the host memory a femu device holds, by owner and category.
+# It works for each mode, before the first enable too.  Each number
+# is exact while the device is idle; a reply taken under I/O can mix
+# numbers of different instants.  The numbers exclude allocator
+# overhead, GLib internal storage and thread stacks.  A backend that
+# a femu-cxl-ssd lends counts at that device, which this command does
+# not report.  The FEMU reference page query-femu.md lists the
+# allocations each category counts.
+#
+# @path: QOM path of the femu device.  Optional when exactly one
+#     exists.
+#
+# Returns: the owners and the namespaces
+#
+# Since: 10.1
+#
+# .. qmp-example::
+#
+#     -> { "execute": "query-femu-memory" }
+#     <- { "return": {
+#            "path": "/machine/peripheral/femu0", "mode": "nossd",
+#            "backend-pinned": false,
+#            "owners": [
+#              { "id": "/machine/peripheral/femu0",
+#                "kind": "controller", "backend": 1073741824,
+#                "mapping": 0, "media": 0, "values": 0, "index": 0,
+#                "other": 0 },
+#              { "id": "/machine/peripheral/femu0/ns1",
+#                "kind": "namespace", "backend": 0, "mapping": 0,
+#                "media": 0, "values": 0, "index": 0,
+#                "other": 524288 } ],
+#            "namespaces": [
+#              { "nsid": 1, "mode": "nossd", "attached": true,
+#                "owners": [ "/machine/peripheral/femu0",
+#                            "/machine/peripheral/femu0/ns1" ] } ] } }
+##
+{ 'command': 'query-femu-memory',
+  'data': { '*path': 'str' },
+  'returns': 'FemuMemory' }
+
+##
 # @femu-save-data:
 #
 # Write a checkpoint of a femu device's data in the persist_file

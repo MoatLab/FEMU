@@ -185,6 +185,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ftl_assert(ssd);
     ssd->n = n;
     ssd->ns = ns;
+    ssd->mem_id = femu_mem_next_id();
     /* bbssd and CSD both build here; either may write back while idle */
     if (n->bb_params.buffer_low_pcent) {
         n->buffer_bg = true;
@@ -223,8 +224,10 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
 
     /* initialize ssd internal layout architecture */
     ssd->ch = g_malloc0(sizeof(struct ssd_channel) * spp->nchs);
+    femu_mem_charge(&ssd->mem, FEMU_MEM_MEDIA,
+                    sizeof(struct ssd_channel) * spp->nchs);
     for (int i = 0; i < spp->nchs; i++) {
-        ssd_init_ch(&ssd->ch[i], spp);
+        ssd_init_ch(&ssd->ch[i], spp, &ssd->mem);
     }
 
     /*
@@ -390,6 +393,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         femu_fdp_ssd_init_reclaim_group(n, ssd);
         ftl_log("FDP: initializing RU handles\n");
         femu_fdp_ssd_init_ru_handles(n, ssd);
+        femu_fdp_ssd_mem_charge(ssd);
         femu_fdp_ssd_init_eol_reserve(ssd);
         /* no line write pointer under FDP, but the buffer is shared */
         ssd_init_write_buffer(ssd);
@@ -1467,8 +1471,16 @@ void ssd_free(struct ssd *ssd)
     ssd_free_lines(ssd);
     ssd_free_write_buffer(ssd);
 
+    if (ssd->rmap) {
+        femu_mem_release(&ssd->mem, FEMU_MEM_MAPPING,
+                         sizeof(uint64_t) * spp->tt_pgs);
+    }
     g_free(ssd->rmap);
     ssd->rmap = NULL;
+    if (ssd->maptbl) {
+        femu_mem_release(&ssd->mem, FEMU_MEM_MAPPING,
+                         sizeof(struct ppa) * spp->tt_pgs);
+    }
     g_free(ssd->maptbl);
     ssd->maptbl = NULL;
     ssd_durable_free(ssd);
@@ -1488,9 +1500,12 @@ void ssd_free(struct ssd *ssd)
 
     if (ssd->ch) {
         for (i = 0; i < spp->nchs; i++) {
-            ssd_free_ch(&ssd->ch[i], spp);
+            ssd_free_ch(&ssd->ch[i], spp, &ssd->mem);
         }
+        femu_mem_release(&ssd->mem, FEMU_MEM_MEDIA,
+                         sizeof(struct ssd_channel) * spp->nchs);
         g_free(ssd->ch);
         ssd->ch = NULL;
     }
+    femu_mem_check_empty(&ssd->mem, "an FTL");
 }

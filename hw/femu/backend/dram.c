@@ -82,6 +82,8 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes)
         femu_err("cannot pin the %" PRId64 " MiB memory backend (%s); "
                  "latencies may jitter until RLIMIT_MEMLOCK allows it\n",
                  nbytes / MiB, strerror(errno));
+    } else {
+        b->pinned = true;
     }
 
     backend_init_range_locks(b);

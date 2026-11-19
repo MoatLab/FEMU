@@ -4,6 +4,7 @@
 #include "qemu/thread.h"
 #include "kv-model.h"
 #include "kv-lsm.h"
+#include "../femu-mem.h"
 
 typedef struct FemuCtrl FemuCtrl;
 typedef struct NvmeNamespace NvmeNamespace;
@@ -148,6 +149,15 @@ typedef struct FemuKvssdState {
     struct KvPackPage *open;
     GHashTable *packed;
     uint64_t *line_live;
+    /*
+     * The sizes that are allocated, which the counts above can lag: a
+     * table that grew while its free stack could not, an arena the
+     * selftest shrinks in name only. kv_mem_sync() charges from these.
+     */
+    uint64_t values_bytes;
+    uint32_t table_cap;
+    uint32_t free_cap;
+    uint64_t mem_charged[FEMU_MEM__MAX];
     uint64_t host_bytes;               /* value bytes Stores wrote */
     int64_t pack_persist;              /* the last packed program ends (ns) */
     uint64_t pack_pages;               /* packed pages programmed */

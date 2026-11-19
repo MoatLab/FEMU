@@ -633,6 +633,8 @@ struct ssd {
     struct ssdparams sp;
     NandMedia media;    /* uniform NAND media-layer timing handle */
     struct ssd_channel *ch;
+    FemuMemAcct mem;    /* host memory of this FTL, see femu-mem.h */
+    uint32_t mem_id;    /* names it in query-femu-memory */
     struct ppa *maptbl; /* page level mapping table */
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
@@ -681,6 +683,7 @@ struct ssd {
      * own dies: nrg x blks_per_pl lines, group by group. NULL with one.
      */
     struct line *rg_lines;
+    uint64_t fdp_mem;   /* FDP lines and victim heaps charged to @mem */
     int rg_dies;        /* dies in each group */
     uint16_t rg_next;   /* where the selection of a group starts next */
     FemuReclaimUnit **rus;
