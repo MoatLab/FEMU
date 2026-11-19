@@ -3411,6 +3411,12 @@ typedef struct FemuCtrl {
     struct rte_ring **to_ftl;
     struct rte_ring **to_poller;
     pqueue_t        **pq;
+    /*
+     * One request for each poller that found its ring from the FTL full
+     * after its FTL step. Written by the FTL thread inside ftl_in_sweep;
+     * a pause moves it to pq.
+     */
+    NvmeRequest     **ftl_held;
     bool            *should_isr;
     /* pin level in bit 0, or MSI vectors held back by INTMS */
     uint32_t        irq_status;

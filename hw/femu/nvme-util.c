@@ -129,6 +129,29 @@ int nvme_check_cqid(FemuCtrl *n, uint16_t cqid)
  * whether the data plane was running, which nvme_resume_pollers() takes back.
  */
 /*
+ * A request the FTL thread holds has had its FTL step; it waits for room
+ * on the ring to its poller. With nothing in flight, move it to pq, where
+ * the queue drain, the namespace retire, Cancel and the poller find it.
+ */
+static void nvme_ftl_held_to_pq(FemuCtrl *n)
+{
+    int p;
+
+    for (p = 1; n->ftl_held && n->pq && p <= (int)n->nr_pollers; p++) {
+        NvmeRequest *req = n->ftl_held[p];
+
+        if (!req) {
+            continue;
+        }
+        n->ftl_held[p] = NULL;
+        if (n->stage_sets && !req->t_return) {
+            req->t_return = femu_io_now(n);
+        }
+        pqueue_insert(n->pq[p], req);
+    }
+}
+
+/*
  * Wait until no poller and no FTL pass is in flight. False when the
  * host monotonic clock passes @deadline (us; 0 waits for ever).
  */
@@ -162,6 +185,7 @@ static bool nvme_pause_wait(FemuCtrl *n, int64_t deadline)
             usleep(100);
         }
     } while (busy);
+    nvme_ftl_held_to_pq(n);
     return true;
 }
 

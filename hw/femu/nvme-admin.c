@@ -727,6 +727,7 @@ static void nvme_init_poller(FemuCtrl *n)
         assert(rte_ring_empty(n->to_poller[i]));
     }
 
+    n->ftl_held = g_new0(NvmeRequest *, n->nr_pollers + 1);
     n->pq = g_malloc0(sizeof(pqueue_t *) * (n->nr_pollers + 1));
     for (i = 1; i <= n->nr_pollers; i++) {
         n->pq[i] = pqueue_init(FEMU_MAX_INF_REQS, cmp_pri, get_pri, set_pri,

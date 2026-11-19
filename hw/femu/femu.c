@@ -3564,8 +3564,8 @@ static uint64_t femu_ftl_process_req(FemuCtrl *n, NvmeRequest *req)
 }
 
 /*
- * The ring from the FTL thread to poller @i had no room. The size of the
- * ring excludes that (nvme_ring_slots()), so the count stays 0 on a
+ * An enqueue to the ring from the FTL thread to poller @i failed. The size
+ * of the ring excludes that (nvme_ring_slots()), so the count stays 0 on a
  * correct device; x-ftl-ring-full reads it. The first event is logged.
  */
 static void femu_ftl_ring_full(FemuCtrl *n, int i)
@@ -3595,6 +3595,7 @@ static void *femu_ftl_thread(void *arg)
     bool idle;
     uint32_t hold_req;
     uint32_t hold;
+    bool stalled;
     int rc, i;
 
     while (!n->dataplane_started) {
@@ -3651,8 +3652,10 @@ static void *femu_ftl_thread(void *arg)
         }
 
         busy = false;
+        stalled = false;
         for (i = 1; i <= n->nr_pollers; i++) {
-            if (!n->to_ftl[i] || !femu_ring_count(n->to_ftl[i])) {
+            if (!n->to_ftl[i] ||
+                (!n->ftl_held[i] && !femu_ring_count(n->to_ftl[i]))) {
                 continue;
             }
             busy = true;
@@ -3678,13 +3681,23 @@ static void *femu_ftl_thread(void *arg)
             }
 
             /*
-             * The ring to the poller holds every request of its queues
-             * (nvme_ring_slots()), so it has room. If it has none, take
-             * nothing: the request stays on to_ftl[i], which the queue
-             * drain, the cancel walk and a pause all read.
+             * A request that found the ring to the poller full goes
+             * first, and no new one is taken from this ring until it
+             * leaves. A pause moves it to pq (nvme_pause_wait()).
              */
-            if (unlikely(rte_ring_full(n->to_poller[i]))) {
-                femu_ftl_ring_full(n, i);
+            if (unlikely(n->ftl_held[i])) {
+                if (femu_ring_enqueue(n->to_poller[i],
+                                      (void **)&n->ftl_held[i], 1) == 1) {
+                    n->ftl_held[i] = NULL;
+                } else {
+                    femu_ftl_ring_full(n, i);
+                    stalled = true;
+                }
+                n->ftl_in_sweep = false;
+                continue;
+            }
+            /* a pause moved the held request, and the ring may be empty */
+            if (!femu_ring_count(n->to_ftl[i])) {
                 n->ftl_in_sweep = false;
                 continue;
             }
@@ -3739,27 +3752,23 @@ static void *femu_ftl_thread(void *arg)
             }
 
             /*
-             * The ring had room above. Only a CSD worker can take the
-             * last slot since then, and the poller empties the ring
-             * while the data plane runs, so wait for it. A pause stops
-             * the poller and waits for this pass: the wait ends there,
-             * and the command gets no completion.
+             * The ring holds every request of its queues
+             * (nvme_ring_slots()), so it takes this one. If it does not,
+             * hold the request for the next pass: a wait here would keep
+             * ftl_in_sweep set, and a pause stops the poller first.
              */
             rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
-            while (unlikely(rc != 1)) {
+            if (unlikely(rc != 1)) {
                 femu_ftl_ring_full(n, i);
-                if (!n->dataplane_started || n->ftl_stopping) {
-                    femu_err("FEMU: to_poller[%d] is full, command %u of "
-                             "queue %u is lost\n", i,
-                             (unsigned)le16_to_cpu(req->cqe.cid),
-                             (unsigned)req->sq->sqid);
-                    break;
-                }
-                usleep(100);
-                rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
+                n->ftl_held[i] = req;
+                stalled = true;
             }
 
             n->ftl_in_sweep = false;
+        }
+        /* a held request waits for the poller: do not spin on it */
+        if (unlikely(stalled)) {
+            usleep(100);
         }
 
         /*
@@ -5840,6 +5849,8 @@ static void nvme_destroy_poller(FemuCtrl *n)
 
     g_free(n->pq);
     n->pq = NULL;
+    g_free(n->ftl_held);
+    n->ftl_held = NULL;
     g_free(n->to_poller);
     n->to_poller = NULL;
     g_free(n->to_ftl);

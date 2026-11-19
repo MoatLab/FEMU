@@ -66632,8 +66632,8 @@ static void femu_g1_cqe_wait(QTestState *qts, FemuQueue *q, uint32_t slot,
  * at 65535, and those commands never complete. After the release each
  * queue shows 4095 entries, one for each command, and takes a new command.
  * NoSSD fills the ring to the FTL, and bbssd the ring from the FTL thread.
- * The FTL thread takes no request while its ring is full and counts each
- * such pass (x-ftl-ring-full), so a ring that is too small also shows there.
+ * The FTL thread counts each enqueue that its ring refuses
+ * (x-ftl-ring-full), and that count must stay 0.
  */
 static void femu_test_g1_ring_capacity(void *obj, void *data,
                                        QGuestAllocator *alloc)

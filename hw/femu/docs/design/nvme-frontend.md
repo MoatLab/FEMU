@@ -1155,8 +1155,9 @@ The documentation example above (`frontend-sharded-pollers`) is started by
   grant already under way finishes.
 - A queue can have at most `size` commands outstanding. Each ring of a
   poller holds every request of its queues, and at least 65535.
-- The FTL thread takes no request while its ring to the poller is full.
-  The request waits on the ring to the FTL thread.
+- If the ring to the poller refuses a request after its FTL step, the
+  FTL thread holds it and takes no other request of that ring. A pause
+  moves the held request to `pq`.
 - Abort only reaches commands not yet fetched.
 - Latency is a lower bound that depends on poller scheduling.
 - The controller is not migratable.
