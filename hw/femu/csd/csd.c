@@ -186,7 +186,15 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
     ssd->dataplane_started_ptr = &n->dataplane_started;
     ssd->ssdname = (char *)n->devname;
-    ssd_init(n, ns);
+    if (!ssd_init(n, ns, errp)) {
+        if (n->ssd == ssd) {
+            n->ssd = NULL;
+        }
+        ns->ssd = NULL;
+        g_free(ssd);
+        g_free(slm);
+        return;
+    }
 
     csd = g_new0(FemuCsdState, 1);
     csd->params = n->csd_params;

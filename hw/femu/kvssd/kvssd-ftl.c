@@ -714,7 +714,9 @@ static void kv_mem_sync(FemuKvssdState *s)
     now[FEMU_MEM_VALUES] = s->values ? s->values_bytes : 0;
     now[FEMU_MEM_INDEX] =
         (s->table ? (uint64_t)s->table_cap * sizeof(*s->table) : 0) +
-        (s->free_slots ? (uint64_t)s->free_cap * sizeof(uint32_t) : 0);
+        (s->free_slots ? (uint64_t)s->free_cap * sizeof(uint32_t) : 0) +
+        /* the LSM memtable; the levels a flush builds later are not counted */
+        (s->lsm ? (uint64_t)s->lsm->mem_cap * sizeof(KvLsmRec) : 0);
     now[FEMU_MEM_MEDIA] = s->line_live && s->ssd ?
         (uint64_t)s->ssd->lm.tt_lines * sizeof(uint64_t) : 0;
     for (int c = 0; c < FEMU_MEM__MAX; c++) {
@@ -2702,11 +2704,12 @@ static void kvssd_free_ssd(FemuKvssdState *s)
 }
 
 static bool kvssd_init_timing_ssd(FemuKvssdState *s, FemuCtrl *n,
-                                  NvmeNamespace *ns)
+                                  NvmeNamespace *ns, Error **errp)
 {
     struct ssd *ssd = g_try_new0(struct ssd, 1);
 
     if (!ssd) {
+        error_setg(errp, "KVSSD NAND timing allocation failed");
         return false;
     }
     ssd->ssdname = (char *)n->devname;
@@ -2720,7 +2723,14 @@ static bool kvssd_init_timing_ssd(FemuKvssdState *s, FemuCtrl *n,
     if (!n->ssd) {
         n->ssd = ssd;
     }
-    ssd_init(n, ns);
+    if (!ssd_init(n, ns, errp)) {
+        if (n->ssd == ssd) {
+            n->ssd = NULL;
+        }
+        ns->ssd = NULL;
+        g_free(ssd);
+        return false;
+    }
     s->ssd = ssd;
     s->pgsz = ssd->sp.secsz * ssd->sp.secs_per_pg;
     if (s->pgsz <= 0) {
@@ -2856,8 +2866,7 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      * NAND size.
      */
     s->ns = ns;
-    if (!kvssd_init_timing_ssd(s, n, ns)) {
-        error_setg(errp, "KVSSD NAND timing allocation failed");
+    if (!kvssd_init_timing_ssd(s, n, ns, errp)) {
         g_free(s);
         return NULL;
     }
@@ -2960,8 +2969,8 @@ FemuKvssdState *kvssd_ftl_alloc(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
              (1.0 - s->ssd->sp.gc_thres_pcent) * 100.0, s->index->name,
              s->hash_slots, s->pgsz);
 
-    if (getenv("FEMU_KV_SELFTEST")) {
-        kvssd_ftl_selftest(s);
+    if (getenv("FEMU_KV_SELFTEST") && !kvssd_ftl_selftest(s, errp)) {
+        goto fail;
     }
     return s;
 
@@ -3080,9 +3089,11 @@ static bool kv_selftest_delete_locked(FemuKvssdState *s, const void *key,
 /*
  * In-device self-test of the KV-FTL logic that the stock guest kernel cannot reach
  * (it won't attach a CSI=01h namespace, so no IO passthru). Logs KVSELFTEST
- * PASS/FAIL lines. Enabled with FEMU_KV_SELFTEST=1.
+ * PASS/FAIL lines. Enabled with FEMU_KV_SELFTEST=1. Returns false, with
+ * @errp set, when the timing FTL cannot be built again at the end: the
+ * device cannot run without it.
  */
-void kvssd_ftl_selftest(FemuKvssdState *s)
+bool kvssd_ftl_selftest(FemuKvssdState *s, Error **errp)
 {
     FemuCtrl *n = s->ssd ? s->ssd->n : NULL;
     NvmeRequest req = {};
@@ -3098,7 +3109,7 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
     if (s->kv_max_keys < 128) {
         femu_log("KVSELFTEST SKIP: kv_max_keys=%" PRIu64 " is below 128\n",
                  s->kv_max_keys);
-        return;
+        return true;
     }
     req.stime = req.expire_time = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     qemu_mutex_lock(&s->lock);
@@ -3333,9 +3344,9 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
             n->ssd = NULL;
         }
         kvssd_free_ssd(s);
-        if (!kvssd_init_timing_ssd(s, n, s->ns)) {
-            fails++;
+        if (!kvssd_init_timing_ssd(s, n, s->ns, errp)) {
             femu_err("KVSELFTEST FAIL reset-timing-ssd\n");
+            return false;
         }
         if (s->meta_wp) {
             memset(s->meta_wp, 0, sizeof(*s->meta_wp));
@@ -3348,6 +3359,7 @@ void kvssd_ftl_selftest(FemuKvssdState *s)
 
     femu_err("KVSELFTEST DONE pass=%d fails=%d\n", npass, fails);
 #undef KVT
+    return true;
 }
 
 /* a broken owner invariant: say which, and stop, so a test cannot miss it */

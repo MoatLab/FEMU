@@ -389,7 +389,10 @@ The common ones:
 | `FEMU bbssd: namespace 1 exposes 1024 MiB of the 1024 MiB this geometry has, leaving garbage collection no room; expose at most 960 MiB per namespace (lower devsz_mb, or set op_pcent)` | `devsz_mb` (or the namespace size) does not leave the free lines GC needs. Lower `devsz_mb`, grow the geometry, or set `op_pcent`. |
 | `FEMU bbssd: the geometry has only N lines, fewer than the M garbage collection needs free` | `blks_per_pl` is too small for the reserve that `gc_thres_pcent_high`, `hot_cold_sep`, Streams and log-block mapping add up to. |
 | `FEMU bbssd: nchs must be greater than 0, got 0` | A geometry property is 0 or negative. The same message names any of them. |
-| `FEMU bbssd: the geometry describes N sectors, which exceeds the 2147483647 the FTL can address; ...` | The NAND is too large; reduce one of the geometry properties. |
+| `FEMU bbssd: a line has N sectors, more than 2147483647; ...` | A line is one block of every plane. Reduce `secs_per_pg`, `pgs_per_blk`, `pls_per_lun`, `luns_per_ch` or `nchs`. To keep the capacity, raise `blks_per_pl` too. |
+| `FEMU bbssd: the geometry has N blocks, more than 2147483647; ...` | Reduce `blks_per_pl`, `pls_per_lun`, `luns_per_ch` or `nchs`. To keep the capacity, raise `pgs_per_blk` too. |
+| `FEMU bbssd: a page has N bytes, more than 16777216; ...` | `secsz` times `secs_per_pg` is above 16 MiB. |
+| `FEMU bbssd: the geometry has more than 72057594037927936 bytes of NAND; ...` | The NAND is above 64 PiB. Reduce `secsz` or a geometry axis. |
 | `FEMU bbssd: unknown mapping "x"`, `unknown gc_policy "x"`, `unknown cache_evict "x"; ...` | A misspelled policy name. |
 
 If the host cannot allocate `devsz_mb` (or, with `op_pcent`, the raw NAND)

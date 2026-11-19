@@ -110,10 +110,10 @@ Related issues: #2, #56, #136, #150, #168.
 
 As large as the host's free memory. FEMU keeps the whole device in host
 DRAM, so a 256 GiB device needs 256 GiB of free host RAM, plus the guest's
-RAM and the FTL tables. In BlackBox, CSD and KV mode the NAND geometry as
-a whole (every namespace plus spare space) may hold at most 2^31 - 1
-sectors of `secsz` bytes, just under 1 TiB with the default 512-byte
-sectors; a larger geometry is refused at start.
+RAM and the FTL tables. In BlackBox, CSD and KV mode the NAND geometry
+may hold at most 64 PiB, a line at most 2^31 - 1 sectors and the geometry
+at most 2^31 - 1 blocks. A larger geometry is refused at start; the
+[BlackBox errors](modes/blackbox.md) name the property to change.
 
 FEMU allocates the whole device at start-up and tries to lock it in memory.
 Under `sudo` the lock normally succeeds, so all of it must be free when QEMU

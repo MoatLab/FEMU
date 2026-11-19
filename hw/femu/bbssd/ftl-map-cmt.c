@@ -214,18 +214,18 @@ uint64_t cmt_access(struct ssd *ssd, uint64_t lpn, uint64_t stime,
  * The sizing is held in 64 bits and bounded so capacity and hash_sz stay within
  * uint32_t. lpn_per_tp is the number of PPAs a translation page holds.
  */
-void cmt_init(struct ssd *ssd, uint32_t cache_mb)
+bool cmt_init(struct ssd *ssd, uint32_t cache_mb)
 {
     struct ssdparams *spp = &ssd->sp;
 
     ssd->cmt.capacity = 0;
     if (!cache_mb) {
-        return;
+        return true;
     }
     /* the CMT models translation-page reads on a home LUN; without LUNs there is
      * nothing to model (and tp_id % tt_luns would divide by zero) */
     if (spp->tt_luns == 0) {
-        return;
+        return true;
     }
     uint64_t pgsz = (uint64_t)spp->secsz * spp->secs_per_pg;
     if (pgsz == 0) {
@@ -247,20 +247,33 @@ void cmt_init(struct ssd *ssd, uint32_t cache_mb)
     if (ssd->n && ssd->n->test_cmt_slots) {
         cap = ssd->n->test_cmt_slots;
     }
+    ssd->cmt.hash_sz = (uint32_t)cap * 2 + 1;
+    ssd->cmt.slots = ssd_try_alloc(ssd, cap, sizeof(*ssd->cmt.slots),
+                                   "mapping cache slots");
+    ssd->cmt.hash = ssd->cmt.slots ?
+                    ssd_try_alloc(ssd, ssd->cmt.hash_sz,
+                                  sizeof(*ssd->cmt.hash),
+                                  "mapping cache hash") : NULL;
+    if (!ssd->cmt.hash) {
+        return false;
+    }
+    /* a capacity marks the cache on, so it waits for both arrays */
     ssd->cmt.capacity = (uint32_t)cap;
-    ssd->cmt.hash_sz = ssd->cmt.capacity * 2 + 1;
-    ssd->cmt.slots = g_malloc0(sizeof(*ssd->cmt.slots) * ssd->cmt.capacity);
-    ssd->cmt.hash = g_malloc(sizeof(*ssd->cmt.hash) * ssd->cmt.hash_sz);
     for (uint32_t i = 0; i < ssd->cmt.hash_sz; i++) {
         ssd->cmt.hash[i] = -1;
     }
+    ssd_mem_hold(ssd, &ssd->mem_held.cmt, FEMU_MEM_MAPPING,
+                 sizeof(*ssd->cmt.slots) * ssd->cmt.capacity +
+                 sizeof(*ssd->cmt.hash) * ssd->cmt.hash_sz);
     ssd->cmt.used = ssd->cmt.hand = 0;
     ssd->cmt.hits = ssd->cmt.misses = 0;
+    return true;
 }
 
 /* release what cmt_init() took */
 void cmt_destroy(struct ssd *ssd)
 {
+    ssd_mem_hold(ssd, &ssd->mem_held.cmt, FEMU_MEM_MAPPING, 0);
     g_free(ssd->cmt.slots);
     g_free(ssd->cmt.hash);
     ssd->cmt.slots = NULL;

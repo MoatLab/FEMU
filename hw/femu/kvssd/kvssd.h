@@ -263,7 +263,7 @@ uint16_t kvssd_ftl_delete(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
 uint16_t kvssd_ftl_list(FemuCtrl *n, FemuKvssdState *s, NvmeRequest *req,
                         const uint8_t *start_key, uint8_t start_len,
                         uint32_t hbs);
-void kvssd_ftl_selftest(FemuKvssdState *s);
+bool kvssd_ftl_selftest(FemuKvssdState *s, Error **errp);
 
 /* --- KV admin (kvssd-admin.c): Identify CNS 05h/06h/0Ah, Feature 20h --- */
 uint16_t kvssd_admin_cmd(FemuCtrl *n, NvmeCmd *cmd);

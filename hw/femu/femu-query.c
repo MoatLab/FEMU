@@ -733,6 +733,9 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
     geo->pages_per_block = q->pgs_per_blk;
     geo->page_size = q->page_size;
     geo->pages_per_line = q->pgs_per_line;
+    geo->total_sectors = q->tt_secs;
+    geo->total_pages = q->tt_pgs;
+    geo->total_blocks = q->tt_blks;
     info->geometry = geo;
     if (q->precon_on) {
         FemuPreconInfo *pc = g_new0(FemuPreconInfo, 1);

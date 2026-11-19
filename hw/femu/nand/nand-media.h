@@ -362,8 +362,13 @@ typedef struct NandOpCompletion {
 } NandOpCompletion;
 
 void nand_media_init(NandMedia *m, const NandMediaConfig *cfg);
+int nand_media_try_init(NandMedia *m, const NandMediaConfig *cfg);
+bool nand_media_needs_memory(const NandMediaConfig *cfg);
+/* unit tests only: allocation @at of the next media builds fails */
+void nand_media_test_fail(uint32_t at);
 void nand_media_destroy(NandMedia *m);
-void nand_media_idle(NandMedia *m);
+/* the bytes the media holds now: bus window lists and suspend state */
+uint64_t nand_media_bytes(const NandMedia *m);
 
 /* single-chip op; returns completion (done_ns absolute, latency_ns = done - stime) */
 /*

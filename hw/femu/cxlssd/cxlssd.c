@@ -2115,30 +2115,15 @@ void femu_cxl_nvme_flip(FemuCtrl *n, int64_t cdw10)
     qemu_mutex_unlock(&s->lock);
 }
 
-void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
-                     FemuCxlPolicy policy)
+/*
+ * Build the FTL of an ftl=on device. Runs before the CXL type 3 realize:
+ * it reads only the properties, and a refusal leaves nothing published.
+ */
+bool femu_cxl_build_ftl(FemuCxlMedia *s, Error **errp)
 {
     FemuCtrl *n;
     BbCtrlParams *p;
 
-    s->backend.size = size;
-    s->backend.logical_space = payload;
-    /*
-     * A linked controller copies through backend_rw(), which takes a zero
-     * mode for OCSSD and reads one offset per scatter entry: every transfer
-     * past one page then read its offsets from beyond the caller's one.
-     */
-    s->backend.femu_mode = FEMU_BBSSD_MODE;
-    femu_cxl_cache_init(&s->cache, s->cache_pages, s->cache_ways, policy);
-    /*
-     * No run yet: no access ends at UINT64_MAX, so the first one, even an
-     * unguarded read at DPA 0, starts a run and charges its page.
-     */
-    s->dma_run_end = UINT64_MAX;
-    s->dma_run_posted = UINT64_MAX;
-    if (!s->ftl) {
-        return;
-    }
     s->ctrl = n = g_new0(FemuCtrl, 1);
     n->mbe = &s->backend;
     p = &n->bb_params;
@@ -2164,7 +2149,54 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
     s->ns.ssd = g_new0(struct ssd, 1);
     pstrcpy(n->devname, sizeof(n->devname), "femu-cxl-ssd");
     s->ns.ssd->ssdname = n->devname;
-    ssd_init(n, &s->ns);
+    n->test_ftl_fail_at = s->test_ftl_fail_at;
+    if (!ssd_init(n, &s->ns, errp)) {
+        /* ssd_init() freed what it built */
+        g_free(s->ns.ssd);
+        s->ns.ssd = NULL;
+        s->ns.ctrl = NULL;
+        g_free(n);
+        s->ctrl = NULL;
+        return false;
+    }
+    return true;
+}
+
+/* free an FTL that no linked controller holds */
+void femu_cxl_free_ftl(FemuCxlMedia *s)
+{
+    if (!s->ctrl) {
+        return;
+    }
+    ssd_free(s->ns.ssd);
+    g_free(s->ns.ssd);
+    s->ns.ssd = NULL;
+    s->ns.ctrl = NULL;
+    g_free(s->ctrl);
+    s->ctrl = NULL;
+}
+
+void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
+                     FemuCxlPolicy policy)
+{
+    s->backend.size = size;
+    s->backend.logical_space = payload;
+    /*
+     * A linked controller copies through backend_rw(), which takes a zero
+     * mode for OCSSD and reads one offset per scatter entry: every transfer
+     * past one page then read its offsets from beyond the caller's one.
+     */
+    s->backend.femu_mode = FEMU_BBSSD_MODE;
+    femu_cxl_cache_init(&s->cache, s->cache_pages, s->cache_ways, policy);
+    /*
+     * No run yet: no access ends at UINT64_MAX, so the first one, even an
+     * unguarded read at DPA 0, starts a run and charges its page.
+     */
+    s->dma_run_end = UINT64_MAX;
+    s->dma_run_posted = UINT64_MAX;
+    if (!s->ftl) {
+        return;
+    }
     qemu_mutex_init(&s->lock);
     qemu_mutex_init(&s->post_lock);
     qemu_event_init(&s->worker_event, false);
@@ -2229,7 +2261,5 @@ void femu_cxl_stop(FemuCxlMedia *s)
         nvme_resume_pollers(nvme, resume);
         return;
     }
-    ssd_free(s->ns.ssd);
-    g_free(s->ns.ssd);
-    g_free(s->ctrl);
+    femu_cxl_free_ftl(s);
 }

@@ -180,13 +180,20 @@
 #
 # @pages-per-line: pages per line
 #
+# @total-sectors: sectors of the whole NAND geometry
+#
+# @total-pages: pages of the whole NAND geometry
+#
+# @total-blocks: blocks of the whole NAND geometry
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuGeometry',
   'data': { 'channels': 'uint32', 'luns-per-channel': 'uint32',
             'planes-per-lun': 'uint32', 'blocks-per-plane': 'uint32',
             'pages-per-block': 'uint32', 'page-size': 'uint32',
-            'pages-per-line': 'uint32' } }
+            'pages-per-line': 'uint32', 'total-sectors': 'uint64',
+            'total-pages': 'uint64', 'total-blocks': 'uint64' } }
 
 ##
 # @FemuWriteCounters:

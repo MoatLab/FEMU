@@ -27,7 +27,7 @@ static inline uint64_t tp_now(struct ssd *ssd, uint64_t stime)
     return stime ? stime : ssd_now(ssd);
 }
 
-void tp_init(struct ssd *ssd)
+bool tp_init(struct ssd *ssd)
 {
     uint64_t n = DIV_ROUND_UP((uint64_t)ssd->sp.tt_pgs, ssd->cmt.lpn_per_tp);
 
@@ -36,16 +36,39 @@ void tp_init(struct ssd *ssd)
     ssd->tp_live_max = MIN(n, DIV_ROUND_UP(DIV_ROUND_UP(ssd->ns->size,
                                                         ssd_page_size(ssd)),
                                            ssd->cmt.lpn_per_tp) + 1);
-    ssd->gtd = g_new(struct ppa, n);
+    ssd->gtd = ssd_try_alloc(ssd, n, sizeof(struct ppa), "GTD");
+    if (!ssd->gtd) {
+        return false;
+    }
     for (uint64_t i = 0; i < n; i++) {
         ssd->gtd[i].ppa = UNMAPPED_PPA;
     }
-    ssd->tp_ver = g_new0(uint32_t, n);
-    ssd->gtd_ver = g_new0(uint32_t, n);
-    ssd->tp_done = g_new0(uint64_t, n);
-    ssd->tp_pending = bitmap_new(n);
-    ssd->tp_queued = bitmap_new(n);
-    ssd->tp_fifo = g_new(uint64_t, n);
+    ssd->tp_ver = ssd_try_alloc(ssd, n, sizeof(uint32_t),
+                                "translation page versions");
+    ssd->gtd_ver = ssd->tp_ver ?
+                   ssd_try_alloc(ssd, n, sizeof(uint32_t), "GTD versions") :
+                   NULL;
+    ssd->tp_done = ssd->gtd_ver ?
+                   ssd_try_alloc(ssd, n, sizeof(uint64_t),
+                                 "translation page times") : NULL;
+    ssd->tp_pending = ssd->tp_done ?
+                      ssd_try_alloc(ssd, BITS_TO_LONGS(n),
+                                    sizeof(unsigned long),
+                                    "translation page bitmap") : NULL;
+    ssd->tp_queued = ssd->tp_pending ?
+                     ssd_try_alloc(ssd, BITS_TO_LONGS(n),
+                                   sizeof(unsigned long),
+                                   "translation page queue bitmap") : NULL;
+    ssd->tp_fifo = ssd->tp_queued ?
+                   ssd_try_alloc(ssd, n, sizeof(uint64_t),
+                                 "translation page queue") : NULL;
+    if (!ssd->tp_fifo) {
+        return false;
+    }
+    ssd_mem_hold(ssd, &ssd->mem_held.tp, FEMU_MEM_MAPPING,
+                 n * (sizeof(struct ppa) + 2 * sizeof(uint32_t) +
+                      2 * sizeof(uint64_t)) +
+                 2 * BITS_TO_LONGS(n) * sizeof(unsigned long));
     ssd->tp_fifo_head = 0;
     ssd->tp_fifo_cnt = 0;
     memset(&ssd->tp_wp, 0, sizeof(ssd->tp_wp));
@@ -54,10 +77,12 @@ void tp_init(struct ssd *ssd)
     ssd->tp_moves = 0;
     ssd->tp_stale_loads = 0;
     ssd->tp_on = true;
+    return true;
 }
 
 void tp_free(struct ssd *ssd)
 {
+    ssd_mem_hold(ssd, &ssd->mem_held.tp, FEMU_MEM_MAPPING, 0);
     g_free(ssd->gtd);
     g_free(ssd->tp_ver);
     g_free(ssd->gtd_ver);

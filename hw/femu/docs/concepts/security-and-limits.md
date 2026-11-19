@@ -212,8 +212,10 @@ the totals for each launcher. If the allocation is more than the kernel
 will commit, QEMU aborts at start with `failed to allocate N bytes`.
 
 In BlackBox, CSD and KV mode the NAND geometry as a whole (every namespace
-plus spare space) may hold at most 2^31 - 1 sectors of `secsz` bytes, just
-under 1 TiB with the default 512-byte sectors.
+plus spare space) may hold at most 64 PiB. One line (one block of every
+plane) may hold at most 2^31 - 1 sectors, the geometry at most 2^31 - 1
+blocks, and a page at most 16 MiB. Host memory is the real bound: the
+FTL tables cost about 20 bytes per NAND page.
 
 ### Hugepages
 

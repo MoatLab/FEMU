@@ -693,7 +693,14 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     ssd->dataplane_started_ptr = &n->dataplane_started;
     ssd->ssdname = (char *)n->devname;
     femu_debug("Starting FEMU in Blackbox-SSD mode ...\n");
-    ssd_init(n, ns);
+    if (!ssd_init(n, ns, errp)) {
+        if (n->ssd == ssd) {
+            n->ssd = NULL;
+        }
+        ns->ssd = NULL;
+        g_free(ssd);
+        return;
+    }
     if (n->die_stats && !ssd->media.die_stat) {
         error_setg(errp, "die_stats does not count plane_reads, pe_suspend, "
                    "read priority, cache reads or bus timing yet");

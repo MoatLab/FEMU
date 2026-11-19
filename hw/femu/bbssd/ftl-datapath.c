@@ -1225,7 +1225,8 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
 
     if (end_lpn >= spp->tt_pgs) {
-        ftl_err("read past device geometry: end_lpn=%"PRIu64" tt_pgs=%d\n",
+        ftl_err("read past device geometry: end_lpn=%" PRIu64 " tt_pgs=%"
+                PRId64 "\n",
                 end_lpn, ssd->sp.tt_pgs);
         req->status = NVME_LBA_RANGE | NVME_DNR;
         return 0;
@@ -1404,7 +1405,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     txn = snap_all && start_lpn != end_lpn;
 
     if (end_lpn >= spp->tt_pgs) {
-        ftl_err("write past device geometry: end_lpn=%"PRIu64" tt_pgs=%d\n",
+        ftl_err("write past device geometry: end_lpn=%" PRIu64 " tt_pgs=%"
+                PRId64 "\n",
                 end_lpn, ssd->sp.tt_pgs);
         req->status = NVME_LBA_RANGE | NVME_DNR;
         return 0;
@@ -1657,10 +1659,11 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
  * Returns the number of pages that had a mapping to invalidate and counts the
  * rest through already_invalid.
  */
-static int ssd_deallocate_lpns(struct ssd *ssd, uint64_t start_lpn,
-                               uint64_t end_lpn, int *already_invalid)
+static uint64_t ssd_deallocate_lpns(struct ssd *ssd, uint64_t start_lpn,
+                                    uint64_t end_lpn,
+                                    uint64_t *already_invalid)
 {
-    int deallocated = 0;
+    uint64_t deallocated = 0;
     uint64_t lpn;
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
@@ -1735,7 +1738,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
     struct ssdparams *spp = &ssd->sp;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
     uint64_t start_lpn, end_lpn;
-    int already_invalid = 0;
+    uint64_t already_invalid = 0;
 
     ssd_lpn_range(ssd, req, le64_to_cpu(rw->slba), le16_to_cpu(rw->nlb) + 1,
                   &start_lpn, &end_lpn);
@@ -1847,7 +1850,7 @@ void bbssd_deallocate_lbas(NvmeNamespace *ns, uint64_t slba, uint64_t nlb)
     NvmeRequest req = { .ns = ns };
     uint64_t start_lpn;
     uint64_t end_lpn;
-    int already_invalid = 0;
+    uint64_t already_invalid = 0;
 
     if (!ssd || !ssd->sp.tt_pgs || !nlb ||
         !ssd_lpn_range_full(ssd, &req, slba, nlb, &start_lpn, &end_lpn) ||
@@ -1868,7 +1871,7 @@ void bbssd_deallocate_lbas(NvmeNamespace *ns, uint64_t slba, uint64_t nlb)
 void bbssd_deallocate_all(NvmeNamespace *ns)
 {
     struct ssd *ssd = ns->ssd;
-    int already_invalid = 0;
+    uint64_t already_invalid = 0;
 
     if (!ssd || !ssd->sp.tt_pgs) {
         return;
@@ -1910,6 +1913,10 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
     NvmeDsmRange *ranges = req->dsm_ranges;
     int nr_ranges = req->dsm_nr_ranges;
 
+    uint64_t total_trimmed_pages = 0;
+    uint64_t total_already_invalid = 0;
+    int total_out_of_bounds = 0;
+
     if (!ranges || nr_ranges <= 0) {
         printf("TRIM: Invalid ranges or count\n");
         return 0;
@@ -1917,7 +1924,8 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
 
     for (int range_idx = 0; range_idx < nr_ranges; range_idx++) {
         uint64_t start_lpn, end_lpn;
-        int already_invalid = 0;
+        uint64_t trimmed_pages;
+        uint64_t already_invalid = 0;
 
         /* only the pages the range covers in full lose their mapping */
         if (!ssd_lpn_range_full(ssd, req,
@@ -1929,7 +1937,8 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
 
         /* Boundary check */
         if (end_lpn >= spp->tt_pgs) {
-            ftl_err("TRIM: Range %d exceeds FTL capacity - end_lpn=%lu, tt_pgs=%d\n",
+            ftl_err("TRIM: Range %d exceeds FTL capacity - end_lpn=%" PRIu64
+                    ", tt_pgs=%" PRId64 "\n",
                    range_idx, end_lpn, spp->tt_pgs);
             continue;  /* Skip this range, continue with others */
         }

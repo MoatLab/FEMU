@@ -2834,14 +2834,11 @@ typedef struct FemuCtrl {
     bool        test_oc12_clock;
     FemuOc12Trace *oc12_trace;
     bool        test_ns_fail;
-    /* x-fuzz: no poller thread, and a system reset is a CLR */
-    bool        test_fuzz;
-    /* x-fuzz: the guest ranges the controller touched since the reset */
-    GArray      *fuzz_touched;
-    /* x-fuzz-control: the buffer the plant writes past */
-    uint8_t     *fuzz_control_buf;
-    /* x-fuzz-control: enable the controller when bus mastering is set */
-    bool        fuzz_control_pending;
+    /* qtest: FTL allocation number x-ftl-fail-at fails; 0 is off */
+    uint32_t    test_ftl_fail_at;
+    uint32_t    test_ftl_allocs;    /* FTL allocations so far */
+    /* the FDP subsystem state before this controller; see femu_fdp_snap */
+    struct FemuFdpSnap *fdp_snap;
     uint32_t    changed_nsids[1024];
     uint16_t    changed_ns_count;
     bool        ns_notice_pending;

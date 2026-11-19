@@ -257,11 +257,12 @@ void rcache_invalidate(struct ssd *ssd, uint64_t lpn)
  * within uint32_t even for an absurdly large request. hit_lat defaults to ~1/16
  * of a page read (a DRAM-ish hit) when pg_rd_lat is known.
  */
-void rcache_init(struct ssd *ssd, uint32_t read_cache_mb, uint32_t evict_policy)
+bool rcache_init(struct ssd *ssd, uint32_t read_cache_mb,
+                 uint32_t evict_policy)
 {
     ssd->rcache.capacity = 0;
     if (read_cache_mb == 0) {
-        return;
+        return true;
     }
     uint32_t page_sz = (uint32_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
     if (page_sz == 0) {
@@ -275,7 +276,6 @@ void rcache_init(struct ssd *ssd, uint32_t read_cache_mb, uint32_t evict_policy)
     if (cap < 1) {
         cap = 1;
     }
-    ssd->rcache.capacity = (uint32_t)cap;
     ssd->rcache.used = 0;
     ssd->rcache.hand = 0;
     ssd->rcache.evict_policy = evict_policy; /* 0 = CLOCK, 1 = random, 2 = LRU, 3 = 2Q */
@@ -289,17 +289,31 @@ void rcache_init(struct ssd *ssd, uint32_t read_cache_mb, uint32_t evict_policy)
     if (ssd->rcache.hit_lat < 1) {
         ssd->rcache.hit_lat = 1;
     }
-    ssd->rcache.hash_sz = ssd->rcache.capacity * 2 + 1;
-    ssd->rcache.slots = g_malloc0(sizeof(*ssd->rcache.slots) * ssd->rcache.capacity);
-    ssd->rcache.hash = g_malloc(sizeof(*ssd->rcache.hash) * ssd->rcache.hash_sz);
+    ssd->rcache.hash_sz = (uint32_t)cap * 2 + 1;
+    ssd->rcache.slots = ssd_try_alloc(ssd, cap, sizeof(*ssd->rcache.slots),
+                                      "read cache slots");
+    ssd->rcache.hash = ssd->rcache.slots ?
+                       ssd_try_alloc(ssd, ssd->rcache.hash_sz,
+                                     sizeof(*ssd->rcache.hash),
+                                     "read cache hash") : NULL;
+    if (!ssd->rcache.hash) {
+        return false;
+    }
+    /* a capacity marks the cache on, so it waits for both arrays */
+    ssd->rcache.capacity = (uint32_t)cap;
     for (uint32_t i = 0; i < ssd->rcache.hash_sz; i++) {
         ssd->rcache.hash[i] = -1;
     }
+    ssd_mem_hold(ssd, &ssd->mem_held.rcache, FEMU_MEM_OTHER,
+                 sizeof(*ssd->rcache.slots) * ssd->rcache.capacity +
+                 sizeof(*ssd->rcache.hash) * ssd->rcache.hash_sz);
+    return true;
 }
 
 /* release what rcache_init() took */
 void rcache_destroy(struct ssd *ssd)
 {
+    ssd_mem_hold(ssd, &ssd->mem_held.rcache, FEMU_MEM_OTHER, 0);
     g_free(ssd->rcache.slots);
     g_free(ssd->rcache.hash);
     ssd->rcache.slots = NULL;

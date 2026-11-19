@@ -1753,6 +1753,13 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     if (s->cca_enabled && !femu_cxl_cca_alloc(s, OBJECT(dev), errp)) {
         return;
     }
+    /* before the parent: a refused FTL leaves only the CCA region to undo */
+    if (s->ftl && !femu_cxl_build_ftl(s, errp)) {
+        if (s->cca_enabled) {
+            object_unparent(OBJECT(&s->cca.shm));
+        }
+        return;
+    }
     /*
      * Realize runs in the main-loop thread, at startup or for device_add.
      * Where the main loop moves to a thread of its own after startup
@@ -1761,6 +1768,8 @@ static void cxl_realize(PCIDevice *dev, Error **errp)
     qemu_thread_get_self(&FEMU_CXL_SSD(dev)->main_loop);
     parent_realize(dev, &local_err);
     if (local_err) {
+        /* PCI runs no exit for a refused realize */
+        femu_cxl_free_ftl(s);
         if (s->cca_enabled) {
             object_unparent(OBJECT(&s->cca.shm));
         }
@@ -2355,6 +2364,9 @@ static void cxl_init(Object *obj)
     FemuCxlMedia *s = &FEMU_CXL_SSD(obj)->media;
 
     if (qtest_driver()) {
+        object_property_add_uint32_ptr(obj, "test-ftl-fail-at",
+                                       &s->test_ftl_fail_at,
+                                       OBJ_PROP_FLAG_READWRITE);
         object_property_add_bool(obj, "test-change-dpa", NULL,
                                  adapter_test_change_dpa);
         object_property_add_bool(obj, "test-slot-reservation",
@@ -2700,9 +2712,7 @@ static void cxl_nvme_detach(FemuCtrl *n)
         /* The device went away first and left its FTL to this controller. */
         n->ssd = NULL;
         n->namespaces[0].ssd = NULL;
-        ssd_free(s->ns.ssd);
-        g_clear_pointer(&s->ns.ssd, g_free);
-        g_clear_pointer(&s->ctrl, g_free);
+        femu_cxl_free_ftl(s);
         s->nvme_owns_ftl = false;
     }
     /* Unplug left the backend mapped for this controller; release it. */

@@ -55,21 +55,36 @@ static inline struct femu_map_fast *fa(struct ssd *ssd)
     return (struct femu_map_fast *)ssd->map_priv;
 }
 
-static void femu_map_fast_init(struct ssd *ssd)
+static bool femu_map_fast_init(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
-    struct femu_map_fast *f = g_malloc0(sizeof(*f));
+    struct femu_map_fast *f = ssd_try_alloc(ssd, 1, sizeof(*f),
+                                            "FAST mapping");
 
+    if (!f) {
+        return false;
+    }
+    /* attached at once, so the exit hook frees the arrays of a failure */
+    ssd->map_priv = f;
     f->pgs_per_blk = spp->pgs_per_blk;
     f->rw_capacity_pages = FAST_RW_LOG_BLOCKS * spp->pgs_per_blk;
     f->rw_used_pages = 0;
     f->nr_lbns = spp->tt_pgs / spp->pgs_per_blk + 1;
-    f->lbn_dirty = g_malloc0(sizeof(uint8_t) * f->nr_lbns);
-    f->dirty_list = g_malloc0(sizeof(int64_t) * FAST_MAX_DIRTY_LBNS);
+    f->lbn_dirty = ssd_try_alloc(ssd, f->nr_lbns, sizeof(uint8_t),
+                                 "FAST dirty flags");
+    f->dirty_list = f->lbn_dirty ?
+                    ssd_try_alloc(ssd, FAST_MAX_DIRTY_LBNS, sizeof(int64_t),
+                                  "FAST dirty list") : NULL;
+    if (!f->dirty_list) {
+        return false;
+    }
     f->dirty_cnt = 0;
     f->sw_lbn = -1;
     f->sw_used = 0;
-    ssd->map_priv = f;
+    ssd_mem_hold(ssd, &ssd->mem_held.map_priv, FEMU_MEM_MAPPING,
+                 sizeof(*f) + sizeof(uint8_t) * f->nr_lbns +
+                 sizeof(int64_t) * FAST_MAX_DIRTY_LBNS);
+    return true;
 }
 
 /* translate: flat L2P holds the real ppa (log or data) -- always correct. */
@@ -294,6 +309,7 @@ static void femu_map_fast_exit(struct ssd *ssd)
     if (!f) {
         return;
     }
+    ssd_mem_hold(ssd, &ssd->mem_held.map_priv, FEMU_MEM_MAPPING, 0);
     g_free(f->lbn_dirty);
     g_free(f->dirty_list);
     g_free(f);

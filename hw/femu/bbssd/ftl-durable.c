@@ -44,7 +44,7 @@ bool ssd_durable_on(struct ssd *ssd)
     return ssd->n && ssd->n->durable_at_done;
 }
 
-void ssd_durable_init(struct ssd *ssd)
+bool ssd_durable_init(struct ssd *ssd)
 {
     QTAILQ_INIT(&ssd->gens);
     ssd->nr_gens = 0;
@@ -53,13 +53,21 @@ void ssd_durable_init(struct ssd *ssd)
     ssd->gen_max = MAX(8 * ssd->gen_cap, 1024);
     ssd->gen_first = INT64_MAX;
     if (ssd_durable_on(ssd)) {
-        ssd->gen_slot = g_new0(int64_t, ssd->gen_cap);
+        ssd->gen_slot = ssd_try_alloc(ssd, ssd->gen_cap, sizeof(int64_t),
+                                      "durable program slots");
+        if (!ssd->gen_slot) {
+            return false;
+        }
+        ssd_mem_hold(ssd, &ssd->mem_held.durable, FEMU_MEM_OTHER,
+                     sizeof(int64_t) * ssd->gen_cap);
     }
+    return true;
 }
 
 void ssd_durable_free(struct ssd *ssd)
 {
     ssd_durable_drop_all(ssd);
+    ssd_mem_hold(ssd, &ssd->mem_held.durable, FEMU_MEM_OTHER, 0);
     g_clear_pointer(&ssd->gen_slot, g_free);
 }
 

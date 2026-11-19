@@ -49,7 +49,7 @@ static inline void victim_line_set_pos(void *a, size_t pos)
     ((struct line *)a)->pos = pos;
 }
 
-void ssd_init_lines(struct ssd *ssd)
+bool ssd_init_lines(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
@@ -57,24 +57,31 @@ void ssd_init_lines(struct ssd *ssd)
 
     lm->tt_lines = spp->blks_per_pl;
     ftl_assert(lm->tt_lines == spp->tt_lines);
-    lm->lines = g_malloc0(sizeof(struct line) * lm->tt_lines);
-    femu_mem_charge(&ssd->mem, FEMU_MEM_MEDIA,
-                    sizeof(struct line) * lm->tt_lines);
-
     QTAILQ_INIT(&lm->free_line_list);
+    QTAILQ_INIT(&lm->full_line_list);
+    lm->lines = ssd_alloc(ssd, FEMU_MEM_MEDIA, lm->tt_lines,
+                          sizeof(struct line), "lines");
+    if (!lm->lines) {
+        return false;
+    }
+
     if (ssd->policy->by_close_order) {
-        lm->victim_line_pq = pqueue_init(spp->tt_lines, victim_line_cmp_pri,
+        lm->victim_line_pq = ssd_pqueue_new(ssd, spp->tt_lines,
+                victim_line_cmp_pri,
                 victim_line_get_close_seq, victim_line_set_close_seq,
-                victim_line_get_pos, victim_line_set_pos);
+                victim_line_get_pos, victim_line_set_pos, "victim line heap");
     } else {
-        lm->victim_line_pq = pqueue_init(spp->tt_lines, victim_line_cmp_pri,
+        lm->victim_line_pq = ssd_pqueue_new(ssd, spp->tt_lines,
+                victim_line_cmp_pri,
                 victim_line_get_pri, victim_line_set_pri,
-                victim_line_get_pos, victim_line_set_pos);
+                victim_line_get_pos, victim_line_set_pos, "victim line heap");
+    }
+    if (!lm->victim_line_pq) {
+        return false;
     }
     femu_mem_charge(&ssd->mem, FEMU_MEM_MEDIA,
                     pqueue_bytes(lm->victim_line_pq));
     lm->next_close_seq = 0;
-    QTAILQ_INIT(&lm->full_line_list);
 
     lm->free_line_cnt = 0;
     lm->retired_line_cnt = 0;
@@ -103,6 +110,7 @@ void ssd_init_lines(struct ssd *ssd)
     ftl_assert(lm->free_line_cnt ==
                lm->tt_lines - ssd->spare_lines - ssd->eol_reserve_lines);
     lm->full_line_cnt = 0;
+    return true;
 }
 
 void ssd_init_write_pointer(struct ssd *ssd)
@@ -429,7 +437,7 @@ static void ssd_rain_append(struct ssdparams *spp, int t)
  * rain_parity: the failure list. Epoch e can go up to dies - 2, which
  * leaves two members (one data, one parity page per row).
  */
-void ssd_rain_init(struct ssd *ssd)
+bool ssd_rain_init(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     int dies = spp->tt_luns;
@@ -437,22 +445,32 @@ void ssd_rain_init(struct ssd *ssd)
 
     ssd_rain_free(ssd);
     if (!spp->rain_parity) {
-        return;
+        return true;
     }
-    spp->rain_fidx = g_new(int, dies);
-    spp->rain_rank = g_new0(int, (size_t)dies * MAX(dies - 1, 1));
+    spp->rain_fidx = ssd_try_alloc(ssd, dies, sizeof(int),
+                                   "RAIN failure list");
+    spp->rain_rank = spp->rain_fidx ?
+                     ssd_try_alloc(ssd, (uint64_t)dies * MAX(dies - 1, 1),
+                                   sizeof(int), "RAIN ranks") : NULL;
+    if (!spp->rain_rank) {
+        return false;
+    }
     for (int d = 0; d < dies; d++) {
         spp->rain_fidx[d] = INT_MAX;
         spp->rain_rank[d] = d;
     }
+    ssd_mem_hold(ssd, &ssd->mem_held.rain, FEMU_MEM_MEDIA,
+                 sizeof(int) * (dies + (size_t)dies * MAX(dies - 1, 1)));
     if (die >= 0 && die < dies) {
         ssd_rain_append(spp, (die % spp->luns_per_ch) * spp->nchs +
                              die / spp->luns_per_ch);
     }
+    return true;
 }
 
 void ssd_rain_free(struct ssd *ssd)
 {
+    ssd_mem_hold(ssd, &ssd->mem_held.rain, FEMU_MEM_MEDIA, 0);
     g_clear_pointer(&ssd->sp.rain_fidx, g_free);
     g_clear_pointer(&ssd->sp.rain_rank, g_free);
     ssd->sp.rain_nfail = 0;

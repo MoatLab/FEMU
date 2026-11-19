@@ -179,7 +179,8 @@ static inline int ssd_line_usable_pgs(struct ssd *ssd, struct line *line)
                                       ssd->sp.pgs_per_line;
 }
 
-void ftl_tier_init(struct ssd *ssd, FemuCtrl *n);
+bool ftl_tier_init(struct ssd *ssd, FemuCtrl *n);
+void ftl_tier_publish(struct ssd *ssd, FemuCtrl *n);
 void ftl_tier_take_lines(struct ssd *ssd);
 void ftl_tier_free(struct ssd *ssd);
 void ftl_tier_media_cfg(struct ssd *ssd, NandMediaConfig *cfg);

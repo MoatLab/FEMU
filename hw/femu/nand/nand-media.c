@@ -13,12 +13,31 @@
  */
 
 #include "qemu/osdep.h"
+#include <errno.h>
 #include "nand-media.h"
+
+/* unit tests: allocation number @at of a media build fails; 0 is off */
+static uint32_t media_fail_at;
+static uint32_t media_allocs;
+
+void nand_media_test_fail(uint32_t at)
+{
+    media_fail_at = at;
+    media_allocs = 0;
+}
+
+static void *media_calloc(size_t nmemb, size_t size)
+{
+    if (media_fail_at && ++media_allocs == media_fail_at) {
+        return NULL;
+    }
+    return calloc(nmemb, size);
+}
 
 /* nchs window lists of the grown kind, or NULL on no memory */
 static NandBusResList *bus_lists_grown(uint32_t nchs)
 {
-    NandBusResList *l = calloc(nchs, sizeof(*l));
+    NandBusResList *l = media_calloc(nchs, sizeof(*l));
     uint32_t ch;
 
     if (!l) {
@@ -27,15 +46,33 @@ static NandBusResList *bus_lists_grown(uint32_t nchs)
     for (ch = 0; ch < nchs; ch++) {
         l[ch].cap = NAND_BUS_RES_MAX;
         l[ch].hist_cap = NAND_BUS_HISTORY_MAX;
-        l[ch].grown = malloc(NAND_BUS_RES_MAX * sizeof(NandBusRes));
+        l[ch].grown = media_calloc(NAND_BUS_RES_MAX, sizeof(NandBusRes));
         if (!l[ch].grown) {
-            abort();
+            while (ch--) {
+                free(l[ch].grown);
+            }
+            free(l);
+            return NULL;
         }
     }
     return l;
 }
 
-void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
+/* true when nand_media_try_init() allocates for @cfg */
+bool nand_media_needs_memory(const NandMediaConfig *cfg)
+{
+    return (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs) ||
+           ((cfg->policy.pe_suspend || cfg->policy.read_prio) &&
+            cfg->nchs && cfg->luns_per_ch && cfg->planes_per_lun);
+}
+
+/*
+ * Build @m from @cfg. Returns 0, or -ENOMEM with @m left empty. With
+ * @strict false, two parts work without their memory and are left out:
+ * the bounded bus lists (the bus is then booked from now) and the suspend
+ * state (no suspend). Grown lists have no such fallback.
+ */
+static int media_init(NandMedia *m, const NandMediaConfig *cfg, bool strict)
 {
     m->cfg = *cfg;
     m->bus_res = NULL;
@@ -50,15 +87,14 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
         /* a burst must find its gaps on both buses; nothing falls back */
         m->cfg.policy.bus_res_unbounded = true;
         m->bus_res = bus_lists_grown(cfg->nchs);
-        m->ca_res = bus_lists_grown(cfg->nchs);
-        if (!m->bus_res || !m->ca_res) {
-            abort();
+        m->ca_res = m->bus_res ? bus_lists_grown(cfg->nchs) : NULL;
+        if (!m->ca_res) {
+            goto fail;
         }
     } else if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs) {
-        m->bus_res = calloc(cfg->nchs, sizeof(*m->bus_res));
-        /* Without its lists an unbounded bus would silently hold the bus. */
-        if (!m->bus_res && cfg->policy.bus_res_unbounded) {
-            abort();
+        m->bus_res = media_calloc(cfg->nchs, sizeof(*m->bus_res));
+        if (!m->bus_res && (strict || cfg->policy.bus_res_unbounded)) {
+            goto fail;
         }
         if (m->bus_res && cfg->policy.bus_res_unbounded) {
             uint32_t ch;
@@ -66,10 +102,10 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
             for (ch = 0; ch < cfg->nchs; ch++) {
                 m->bus_res[ch].cap = NAND_BUS_RES_MAX;
                 m->bus_res[ch].hist_cap = NAND_BUS_HISTORY_MAX;
-                m->bus_res[ch].grown = malloc(NAND_BUS_RES_MAX *
-                                              sizeof(NandBusRes));
+                m->bus_res[ch].grown = media_calloc(NAND_BUS_RES_MAX,
+                                                    sizeof(NandBusRes));
                 if (!m->bus_res[ch].grown) {
-                    abort();
+                    goto fail;
                 }
             }
         }
@@ -77,9 +113,35 @@ void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
     /* suspend and read_prio need the geometry for per-position state */
     if ((cfg->policy.pe_suspend || cfg->policy.read_prio) &&
         cfg->nchs && cfg->luns_per_ch && cfg->planes_per_lun) {
-        m->susp = calloc((size_t)cfg->nchs * cfg->luns_per_ch *
-                         cfg->planes_per_lun, sizeof(*m->susp));
+        m->susp = media_calloc((size_t)cfg->nchs * cfg->luns_per_ch *
+                               cfg->planes_per_lun, sizeof(*m->susp));
+        if (!m->susp && strict) {
+            goto fail;
+        }
     }
+    return 0;
+
+fail:
+    /* the grown arrays not yet reached are NULL, and free() skips them */
+    nand_media_destroy(m);
+    return -ENOMEM;
+}
+
+/*
+ * For ZNS and open-channel, which cannot refuse a device here yet: the
+ * fallbacks of media_init() apply, and a grown list that fails stops QEMU.
+ */
+void nand_media_init(NandMedia *m, const NandMediaConfig *cfg)
+{
+    if (media_init(m, cfg, false)) {
+        abort();
+    }
+}
+
+/* For an FTL that refuses its device: every part must get its memory. */
+int nand_media_try_init(NandMedia *m, const NandMediaConfig *cfg)
+{
+    return media_init(m, cfg, true);
 }
 
 /*
@@ -116,35 +178,34 @@ void nand_media_destroy(NandMedia *m)
     m->susp = NULL;
 }
 
-/* empty every window list of @l, keeping its memory */
-static void bus_lists_idle(NandBusResList *l, uint32_t nchs)
+static uint64_t bus_lists_bytes(const NandBusResList *l, uint32_t nchs)
 {
-    for (uint32_t ch = 0; l && ch < nchs; ch++) {
-        l[ch].n = 0;
-        l[ch].high = 0;
-        l[ch].low = 0;
+    uint64_t bytes = (uint64_t)nchs * sizeof(*l);
+    uint32_t ch;
+
+    for (ch = 0; ch < nchs; ch++) {
+        if (l[ch].grown) {
+            bytes += (uint64_t)l[ch].cap * sizeof(NandBusRes);
+        }
     }
+    return bytes;
 }
 
-/*
- * Forget all booked work, as on a new media: no bus or CA window, no
- * suspend or read priority state, and die_stats at zero. The caller
- * resets the busy-until timelines it owns. Preconditioning calls this
- * after its writes, so the guest finds idle dies.
- */
-void nand_media_idle(NandMedia *m)
+uint64_t nand_media_bytes(const NandMedia *m)
 {
-    const NandMediaConfig *cfg = &m->cfg;
-    size_t luns = (size_t)cfg->nchs * cfg->luns_per_ch;
+    uint64_t bytes = 0;
 
-    bus_lists_idle(m->bus_res, cfg->nchs);
-    bus_lists_idle(m->ca_res, cfg->nchs);
+    if (m->bus_res) {
+        bytes += bus_lists_bytes(m->bus_res, m->cfg.nchs);
+    }
+    if (m->ca_res) {
+        bytes += bus_lists_bytes(m->ca_res, m->cfg.nchs);
+    }
     if (m->susp) {
-        memset(m->susp, 0, luns * cfg->planes_per_lun * sizeof(*m->susp));
+        bytes += (uint64_t)m->cfg.nchs * m->cfg.luns_per_ch *
+                 m->cfg.planes_per_lun * sizeof(*m->susp);
     }
-    if (m->die_stat) {
-        memset(m->die_stat, 0, luns * sizeof(*m->die_stat));
-    }
+    return bytes;
 }
 
 static inline uint64_t mx(uint64_t a, uint64_t b) { return a > b ? a : b; }

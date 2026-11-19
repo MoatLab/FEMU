@@ -9,28 +9,34 @@
 #include "ftl.h"
 #include "ftl-internal.h"
 
-void ssd_init_maptbl(struct ssd *ssd)
+bool ssd_init_maptbl(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
 
-    ssd->maptbl = g_malloc0(sizeof(struct ppa) * spp->tt_pgs);
-    femu_mem_charge(&ssd->mem, FEMU_MEM_MAPPING,
-                    sizeof(struct ppa) * spp->tt_pgs);
-    for (int i = 0; i < spp->tt_pgs; i++) {
+    ssd->maptbl = ssd_alloc(ssd, FEMU_MEM_MAPPING, spp->tt_pgs,
+                            sizeof(struct ppa), "L2P table");
+    if (!ssd->maptbl) {
+        return false;
+    }
+    for (uint64_t i = 0; i < spp->tt_pgs; i++) {
         ssd->maptbl[i].ppa = UNMAPPED_PPA;
     }
+    return true;
 }
 
-void ssd_init_rmap(struct ssd *ssd)
+bool ssd_init_rmap(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
 
-    ssd->rmap = g_malloc0(sizeof(uint64_t) * spp->tt_pgs);
-    femu_mem_charge(&ssd->mem, FEMU_MEM_MAPPING,
-                    sizeof(uint64_t) * spp->tt_pgs);
-    for (int i = 0; i < spp->tt_pgs; i++) {
+    ssd->rmap = ssd_alloc(ssd, FEMU_MEM_MAPPING, spp->tt_pgs,
+                          sizeof(uint64_t), "reverse map");
+    if (!ssd->rmap) {
+        return false;
+    }
+    for (uint64_t i = 0; i < spp->tt_pgs; i++) {
         ssd->rmap[i] = INVALID_LPN;
     }
+    return true;
 }
 
 /*

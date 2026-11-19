@@ -57,25 +57,42 @@ static inline struct femu_map_hybrid *hy(struct ssd *ssd)
     return (struct femu_map_hybrid *)ssd->map_priv;
 }
 
-static void femu_map_hybrid_init(struct ssd *ssd)
+static bool femu_map_hybrid_init(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
-    struct femu_map_hybrid *h = g_malloc0(sizeof(*h));
+    struct femu_map_hybrid *h = ssd_try_alloc(ssd, 1, sizeof(*h),
+                                              "hybrid mapping");
 
+    if (!h) {
+        return false;
+    }
+    /* attached at once, so the exit hook frees the arrays of a failure */
+    ssd->map_priv = h;
     h->pgs_per_blk = spp->pgs_per_blk;
     h->nr_logs = HYBRID_DEFAULT_LOG_BLOCKS;
-    h->logs = g_malloc0(sizeof(struct hybrid_log) * h->nr_logs);
+    h->nr_lbns = spp->tt_pgs / spp->pgs_per_blk + 1;
+    h->logs = ssd_try_alloc(ssd, h->nr_logs, sizeof(struct hybrid_log),
+                            "hybrid log blocks");
+    h->lbn_to_log = h->logs ?
+                    ssd_try_alloc(ssd, h->nr_lbns, sizeof(int),
+                                  "hybrid log index") : NULL;
+    h->data_blocks = h->lbn_to_log ?
+                     ssd_try_alloc(ssd, h->nr_lbns, sizeof(struct ppa),
+                                   "hybrid data blocks") : NULL;
+    if (!h->data_blocks) {
+        return false;
+    }
     for (int i = 0; i < h->nr_logs; i++) {
         h->logs[i].lbn = -1;
     }
-    h->nr_lbns = spp->tt_pgs / spp->pgs_per_blk + 1;
-    h->lbn_to_log = g_malloc0(sizeof(int) * h->nr_lbns);
-    h->data_blocks = g_new(struct ppa, h->nr_lbns);
     for (int64_t i = 0; i < h->nr_lbns; i++) {
         h->lbn_to_log[i] = -1;
         h->data_blocks[i].ppa = UNMAPPED_PPA;
     }
-    ssd->map_priv = h;
+    ssd_mem_hold(ssd, &ssd->mem_held.map_priv, FEMU_MEM_MAPPING,
+                 sizeof(*h) + sizeof(struct hybrid_log) * h->nr_logs +
+                 (sizeof(int) + sizeof(struct ppa)) * h->nr_lbns);
+    return true;
 }
 
 /*
@@ -326,6 +343,7 @@ static void femu_map_hybrid_exit(struct ssd *ssd)
     if (!h) {
         return;
     }
+    ssd_mem_hold(ssd, &ssd->mem_held.map_priv, FEMU_MEM_MAPPING, 0);
     g_free(h->logs);
     g_free(h->lbn_to_log);
     g_free(h->data_blocks);

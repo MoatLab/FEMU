@@ -61,8 +61,148 @@ int femu_subsys_register_ctrl(FemuCtrl *n)
     return cntlid;
 }
 
+/*
+ * The FDP state a controller writes into its subsystem: the unit size, the
+ * handles and every unit's writable space. The subsystem outlives a refused
+ * controller, so a refusal puts these back, and the next device_add sees
+ * the subsystem as the last working controller left it.
+ *
+ *   admission check --> snapshot --> realize --> commit BH frees it
+ *                                       |
+ *                                       +--> refused --> restore, free
+ *
+ * An FDP subsystem takes one controller, so no other controller writes
+ * this state between the snapshot and the restore.
+ */
+typedef struct FemuFdpHandleSnap {
+    uint8_t ruha;
+    uint8_t lbafi;
+    uint8_t lbads;
+    uint64_t ruamw;
+    NvmeReclaimUnit **rus;      /* the handle's unit of each group */
+} FemuFdpHandleSnap;
+
+typedef struct FemuFdpSnap {
+    uint64_t runs;
+    bool had_serial;
+    uint16_t nruh;              /* entries of @ruhs with a @rus array */
+    FemuFdpHandleSnap *ruhs;
+    uint64_t *ruamw;            /* nrg x nru unit counters */
+} FemuFdpSnap;
+
+static void femu_fdp_snap_free(FemuFdpSnap *s)
+{
+    if (!s) {
+        return;
+    }
+    for (uint16_t i = 0; i < s->nruh; i++) {
+        g_free(s->ruhs[i].rus);
+    }
+    g_free(s->ruhs);
+    g_free(s->ruamw);
+    g_free(s);
+}
+
+/* save the FDP state of @n's subsystem before @n writes any of it */
+static bool femu_fdp_snap_take(FemuCtrl *n, Error **errp)
+{
+    NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
+    uint16_t nrg = endgrp->fdp.nrg;
+    uint64_t nru = endgrp->fdp.nru;
+    FemuFdpSnap *s;
+
+    if (!endgrp->fdp.enabled) {
+        return true;
+    }
+    s = g_try_new0(FemuFdpSnap, 1);
+    if (s) {
+        s->ruhs = g_try_new0(FemuFdpHandleSnap, endgrp->fdp.nruh);
+        s->ruamw = g_try_new(uint64_t, (size_t)nrg * nru);
+    }
+    for (uint16_t i = 0; s && s->ruhs && i < endgrp->fdp.nruh; i++) {
+        NvmeRuHandle *ruh = &endgrp->fdp.ruhs[i];
+
+        s->ruhs[i].rus = g_try_new(NvmeReclaimUnit *, nrg);
+        if (!s->ruhs[i].rus) {
+            break;
+        }
+        s->nruh = i + 1;
+        s->ruhs[i].ruha = ruh->ruha;
+        s->ruhs[i].lbafi = ruh->lbafi;
+        s->ruhs[i].lbads = ruh->lbads;
+        s->ruhs[i].ruamw = ruh->ruamw;
+        memcpy(s->ruhs[i].rus, ruh->rus, nrg * sizeof(*ruh->rus));
+    }
+    if (!s || !s->ruamw || s->nruh != endgrp->fdp.nruh) {
+        femu_fdp_snap_free(s);
+        error_setg(errp, "no memory to save the FDP state of subsystem %s",
+                   n->subsys->parent_obj.id);
+        return false;
+    }
+    for (uint16_t rg = 0; rg < nrg; rg++) {
+        for (uint64_t j = 0; j < nru; j++) {
+            s->ruamw[rg * nru + j] = endgrp->fdp.rus[rg][j].ruamw;
+        }
+    }
+    s->runs = endgrp->fdp.runs;
+    s->had_serial = n->subsys->serial != NULL;
+    n->fdp_snap = s;
+    return true;
+}
+
+/*
+ * A refused controller puts the subsystem back. Runs once the FTL and the
+ * namespaces are gone, since their teardown writes the same fields.
+ */
+static void femu_fdp_snap_restore(FemuCtrl *n)
+{
+    FemuFdpSnap *s = n->fdp_snap;
+    NvmeEnduranceGroup *endgrp;
+    uint64_t nru;
+
+    if (!s) {
+        return;
+    }
+    endgrp = &n->subsys->endgrp;
+    nru = endgrp->fdp.nru;
+    for (uint16_t i = 0; i < s->nruh; i++) {
+        NvmeRuHandle *ruh = &endgrp->fdp.ruhs[i];
+
+        ruh->ruha = s->ruhs[i].ruha;
+        ruh->lbafi = s->ruhs[i].lbafi;
+        ruh->lbads = s->ruhs[i].lbads;
+        ruh->ruamw = s->ruhs[i].ruamw;
+        memcpy(ruh->rus, s->ruhs[i].rus,
+               endgrp->fdp.nrg * sizeof(*ruh->rus));
+    }
+    for (uint16_t rg = 0; rg < endgrp->fdp.nrg; rg++) {
+        for (uint64_t j = 0; j < nru; j++) {
+            endgrp->fdp.rus[rg][j].ruamw = s->ruamw[rg * nru + j];
+        }
+    }
+    endgrp->fdp.runs = s->runs;
+    if (!s->had_serial) {
+        g_clear_pointer(&n->subsys->serial, g_free);
+    }
+    femu_fdp_snap_free(s);
+    n->fdp_snap = NULL;
+}
+
+/*
+ * PCI realize, femu_realize() included, accepted the device. PCI can refuse
+ * a device after femu_realize(), for example over its romfile, and then
+ * femu_exit() restores; a device that reaches this is attached.
+ */
+static void femu_fdp_snap_commit(FemuCtrl *n)
+{
+
+    femu_fdp_snap_free(n->fdp_snap);
+    n->fdp_snap = NULL;
+}
+
 void femu_subsys_unregister_ctrl(NvmeSubsystem *subsys, FemuCtrl *n)
 {
+
     /*
      * Clear only the slot this controller actually holds. cntlid is unsigned,
      * so the -1 this used to leave behind reads back as 65535, and a second
@@ -313,6 +453,65 @@ static const Property nvme_subsystem_props[] = {
                        params.fdp.isolation_mode, 0),
 };
 
+/*
+ * qtest only: the FDP state a controller writes into the subsystem, as
+ * text. A refused controller must leave it as it was, and no guest command
+ * can read all of it.
+ */
+static char *nvme_subsys_test_fdp_state(Object *obj, Error **errp)
+{
+    NvmeSubsystem *subsys = NVME_SUBSYS(obj);
+    NvmeEnduranceGroup *endgrp = &subsys->endgrp;
+    GString *s = g_string_new(NULL);
+    uint64_t sum = 0;
+    int nctrl = 0;
+
+    for (int i = 0; i < ARRAY_SIZE(subsys->ctrls); i++) {
+        nctrl += subsys->ctrls[i] != NULL;
+    }
+    g_string_append_printf(s, "ctrls=%d serial=%d", nctrl,
+                           subsys->serial != NULL);
+    if (!endgrp->fdp.enabled) {
+        return g_string_free(s, false);
+    }
+    g_string_append_printf(s, " runs=%" PRIu64, endgrp->fdp.runs);
+    for (uint16_t i = 0; i < endgrp->fdp.nruh; i++) {
+        NvmeRuHandle *ruh = &endgrp->fdp.ruhs[i];
+
+        g_string_append_printf(s, " ruh%u=%u/%u/%u/%" PRIu64, i, ruh->ruha,
+                               ruh->lbafi, ruh->lbads, ruh->ruamw);
+        for (uint16_t g = 0; g < endgrp->fdp.nrg; g++) {
+            /* the FTL may point a handle at a unit of its own: "x" */
+            uintptr_t at = (uintptr_t)ruh->rus[g];
+            uintptr_t base = (uintptr_t)endgrp->fdp.rus[g];
+            uintptr_t sz = sizeof(NvmeReclaimUnit);
+
+            if (at >= base && at < base + endgrp->fdp.nru * sz &&
+                !((at - base) % sz)) {
+                g_string_append_printf(s, ",%" PRIuPTR, (at - base) / sz);
+            } else {
+                g_string_append(s, ",x");
+            }
+        }
+    }
+    /* the unit counters, folded so the text stays short */
+    for (uint16_t g = 0; g < endgrp->fdp.nrg; g++) {
+        for (uint64_t j = 0; j < endgrp->fdp.nru; j++) {
+            sum = sum * 1000003 + endgrp->fdp.rus[g][j].ruamw;
+        }
+    }
+    g_string_append_printf(s, " ruamw=%016" PRIx64, sum);
+    return g_string_free(s, false);
+}
+
+static void nvme_subsys_instance_init(Object *obj)
+{
+    if (qtest_enabled()) {
+        object_property_add_str(obj, "x-fdp-state",
+                                nvme_subsys_test_fdp_state, NULL);
+    }
+}
+
 static void nvme_subsys_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -329,6 +528,7 @@ static const TypeInfo nvme_subsys_info = {
     .name          = TYPE_NVME_SUBSYS,
     .parent        = TYPE_DEVICE,
     .instance_size = sizeof(NvmeSubsystem),
+    .instance_init = nvme_subsys_instance_init,
     .class_init    = nvme_subsys_class_init,
 };
 
@@ -469,21 +669,45 @@ static bool nvme_check_phls(FemuCtrl *n, Error **errp)
     return true;
 }
 
+/*
+ * The unit size this controller gives the endurance group. A bbssd or CSD
+ * FTL sets it from its geometry in bb_init_fdp(), after the namespaces, so
+ * the value a previous controller left there is not this one's.
+ */
+static uint64_t nvme_fdp_runs(NvmeNamespace *ns)
+{
+    FemuCtrl *n = ns->ctrl;
+    NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
+    const BbCtrlParams *p = &n->bb_params;
+    uint64_t runs;
+
+    /* namespace_modes may mix modes; only these two run bb_init_fdp() */
+    if (ns->femu_mode != FEMU_BBSSD_MODE && ns->femu_mode != FEMU_CSD_MODE) {
+        return endgrp->fdp.runs;
+    }
+    runs = (uint64_t)p->nchs * p->luns_per_ch * p->pls_per_lun *
+           p->pgs_per_blk * p->secs_per_pg * p->secsz / endgrp->fdp.nrg;
+    /* a geometry the mode refuses later keeps its own error message */
+    return runs ? runs : endgrp->fdp.runs;
+}
+
 static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
 {
     NvmeEnduranceGroup *endgrp = ns->endgrp;
     NvmeRuHandle *ruh;
     uint8_t lbafi = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
+    uint64_t runs;
 
     if (!endgrp || !endgrp->fdp.enabled) {
         return true;
     }
 
     ns->id_ns.endgid = cpu_to_le16(1);
+    runs = nvme_fdp_runs(ns);
     /* RUAMW counts blocks, so a unit must hold one */
-    if (!(endgrp->fdp.runs >> ns->lbaf.lbads)) {
+    if (!(runs >> ns->lbaf.lbads)) {
         error_setg(errp, "fdp.runs (%" PRIu64 ") is smaller than a logical "
-                   "block of namespace %u (%u bytes)", endgrp->fdp.runs,
+                   "block of namespace %u (%u bytes)", runs,
                    ns->id, 1u << ns->lbaf.lbads);
         return false;
     }
@@ -504,7 +728,7 @@ static bool nvme_ns_init_fdp(NvmeNamespace *ns, Error **errp)
             ruh->ruha = NVME_RUHA_HOST;
             ruh->lbafi = lbafi;
             ruh->lbads = ns->lbaf.lbads;
-            ruh->ruamw = endgrp->fdp.runs >> ns->lbaf.lbads;
+            ruh->ruamw = runs >> ns->lbaf.lbads;
 
             for (uint16_t rg = 0; rg < endgrp->fdp.nrg; rg++) {
                 for (uint64_t j = 0; j < endgrp->fdp.nru; j++) {
@@ -581,8 +805,13 @@ static int nvme_init_subsys(FemuCtrl *n, Error **errp)
         }
     }
 
+    /* past every admission check: from here this controller writes S */
+    if (!femu_fdp_snap_take(n, errp)) {
+        return -1;
+    }
     cntlid = femu_subsys_register_ctrl(n);
     if (cntlid < 0) {
+        femu_fdp_snap_restore(n);
         error_setg(errp, "failed to register controller with subsystem");
         return -1;
     }
@@ -3782,9 +4011,6 @@ static void femu_realize_undo(FemuCtrl *n)
         femu_exit_extensions(n);
     }
 
-    if (n->subsys) {
-        femu_subsys_unregister_ctrl(n->subsys, n);
-    }
     femu_cancel_exit(n);
     if (n->aer_bh) {
         qemu_bh_delete(n->aer_bh);
@@ -3800,6 +4026,11 @@ static void femu_realize_undo(FemuCtrl *n)
     n->cmbuf = NULL;
     if (!n->shared_storage) {
         femu_free_namespace_bitmaps(n);
+    }
+    /* after the FTL and the namespaces, which write the same fields */
+    if (n->subsys) {
+        femu_fdp_snap_restore(n);
+        femu_subsys_unregister_ctrl(n->subsys, n);
     }
     g_free(n->aer_held);
     n->aer_held = NULL;
@@ -5057,6 +5288,11 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
      */
     if (BBSSD(n) && n->op_pcent) {
         BbCtrlParams *bb = &n->bb_params;
+
+        /* the checks keep the NAND bytes, and 100 times them, in 64 bits */
+        if (bb_check_geometry(n, errp)) {
+            return;
+        }
         nand_cap = (uint64_t)bb->nchs * bb->luns_per_ch * bb->pls_per_lun *
                    bb->blks_per_pl * bb->pgs_per_blk * bb->secs_per_pg * bb->secsz;
         bs_size = nand_cap;
@@ -5379,6 +5615,25 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     femu_pmeas_start(n);
 }
 
+static DeviceRealize femu_parent_realize;
+
+/*
+ * Wraps the PCI realize, which calls femu_realize() and then loads the
+ * option ROM. On a refusal it has already run femu_exit(), which restored
+ * the subsystem; on success the snapshot goes.
+ */
+static void femu_qdev_realize(DeviceState *dev, Error **errp)
+{
+    Error *err = NULL;
+
+    femu_parent_realize(dev, &err);
+    if (err) {
+        error_propagate(errp, err);
+        return;
+    }
+    femu_fdp_snap_commit(FEMU(dev));
+}
+
 /*
  * Stop and join the FTL thread. The rings, namespaces, FTL state and backend it
  * works on are all freed right after this, so it must no longer be running.
@@ -5603,6 +5858,8 @@ static void femu_exit(PCIDevice *pci_dev)
 
     /* FDP: unregister controller from subsystem */
     if (n->subsys) {
+        /* PCI refused the device after femu_realize() */
+        femu_fdp_snap_restore(n);
         femu_subsys_unregister_ctrl(n->subsys, n);
     }
 
@@ -7243,6 +7500,9 @@ static void femu_instance_init(Object *obj)
         femu_sdc_add_props(obj);
         femu_lsi_add_props(obj);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
+        object_property_add_uint32_ptr(obj, "x-ftl-fail-at",
+                                       &FEMU(obj)->test_ftl_fail_at,
+                                       OBJ_PROP_FLAG_READWRITE);
         object_property_add_str(obj, "x-ftl-probe", femu_test_ftl_probe_get,
                                 femu_test_ftl_probe_set);
         object_property_add_str(obj, "x-durable-check",
@@ -7449,6 +7709,8 @@ static void femu_class_init(ObjectClass *oc, const void *data)
 
     pc->realize = femu_realize;
     pc->exit = femu_exit;
+    device_class_set_parent_realize(dc, femu_qdev_realize,
+                                    &femu_parent_realize);
     pc->config_write = femu_pci_write_config;
     pc->class_id = PCI_CLASS_STORAGE_EXPRESS;
     pc->vendor_id = PCI_VENDOR_ID_INTEL;

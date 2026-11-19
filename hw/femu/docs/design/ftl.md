@@ -148,9 +148,20 @@ A `struct ppa` packs a NAND location into 64 bits:
 The field widths bound the geometry: at most 4096 channels, 128 LUNs per
 channel, 16 planes per LUN, 65536 blocks per plane, 65536 pages per block and
 256 sectors per page. `bb_check_geometry()` refuses larger values, and also
-refuses a geometry whose total sector count exceeds `INT_MAX`, because the
-derived totals in `struct ssdparams` are `int`. The FTL always addresses
-whole pages; the `sec` field is unused by the mapping.
+refuses a geometry past the limits below. The device-wide sector, page and
+block counts in `struct ssdparams` are 64-bit; the counts of one line stay
+`int`. The FTL always addresses whole pages; the `sec` field is unused by
+the mapping.
+
+```
+ count               limit       reason
+ sectors per line    INT_MAX     line counts, persist file, GC
+ blocks              INT_MAX     block ids, query-femu block list
+ page bytes          16 MiB      page buffers
+ NAND bytes          2^56        op_pcent size math
+```
+
+The CXL-SSD mode keeps its own, lower page limit.
 
 ### NAND state
 

@@ -94,6 +94,8 @@ struct FemuCxlMedia {
     bool tracing;
     uint64_t snapshot[8];
     bool ftl;
+    /* qtest: the FTL allocation that fails; 0 is off */
+    uint32_t test_ftl_fail_at;
     bool first_touch_program;
     bool free_writeback;
     uint32_t channels;
@@ -445,6 +447,8 @@ bool femu_cxl_protected_by(FemuCxlMedia *s, int owner, uint64_t lpn);
 void femu_cxl_backlog(FemuCxlMedia *s);
 uint64_t femu_cxl_nand_idle(FemuCxlMedia *s);
 bool femu_cxl_geometry(FemuCxlMedia *s, uint64_t size, Error **errp);
+bool femu_cxl_build_ftl(FemuCxlMedia *s, Error **errp);
+void femu_cxl_free_ftl(FemuCxlMedia *s);
 void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
                      FemuCxlPolicy policy);
 void femu_cxl_stop(FemuCxlMedia *s);

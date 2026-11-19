@@ -152,7 +152,7 @@ static const NandTimelineOps bb_timeline_ops = {
  * timing bound by the LUN only, with no channel-bus accounting. This reproduces
  * the historical ssd_advance_status latency exactly.
  */
-void bb_nand_media_init(struct ssd *ssd)
+bool bb_nand_media_init(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
     NandMediaConfig cfg = {0};
@@ -329,7 +329,19 @@ void bb_nand_media_init(struct ssd *ssd)
     }
     cfg.timeline = &bb_timeline_ops;
     cfg.timeline_opaque = ssd;
-    nand_media_init(&ssd->media, &cfg);
+    /* the media layer allocates with malloc(), so ask the hook here */
+    if (nand_media_needs_memory(&cfg) &&
+        ssd_alloc_refused(ssd, "NAND media lists", 0)) {
+        return false;
+    }
+    if (nand_media_try_init(&ssd->media, &cfg)) {
+        ssd->alloc_fail = "NAND media lists";
+        ssd->alloc_fail_bytes = 0;
+        return false;
+    }
+    /* the start size: a bus window list that grows later is not counted */
+    ssd_mem_hold(ssd, &ssd->mem_held.media, FEMU_MEM_MEDIA,
+                 nand_media_bytes(&ssd->media));
     /*
      * The controller's thermal throttle and power state cap stretch this
      * media's array time.
@@ -351,9 +363,18 @@ void bb_nand_media_init(struct ssd *ssd)
         cfg.policy.array_contend != NAND_CONTEND_LUN_PE_PLANE_READ &&
         !cfg.policy.pe_suspend && !cfg.policy.read_prio &&
         !cfg.policy.cache_read) {
-        ssd->media.die_stat = g_new0(NandDieStat,
-                                     (size_t)spp->nchs * spp->luns_per_ch);
+        ssd->media.die_stat = ssd_try_alloc(ssd,
+                                            (uint64_t)spp->nchs *
+                                            spp->luns_per_ch,
+                                            sizeof(NandDieStat),
+                                            "die statistics");
+        if (!ssd->media.die_stat) {
+            return false;
+        }
+        ssd_mem_hold(ssd, &ssd->mem_held.die_stat, FEMU_MEM_MEDIA,
+                     sizeof(NandDieStat) * spp->nchs * spp->luns_per_ch);
     }
+    return true;
 }
 
 /*

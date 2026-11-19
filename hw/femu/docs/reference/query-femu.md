@@ -80,8 +80,8 @@ A `bbssd` entry has these members:
 
 | Member | Content |
 | --- | --- |
-| `geometry` | `channels`, `luns-per-channel`, `planes-per-lun`, `blocks-per-plane`, `pages-per-block`, `page-size` (bytes) and `pages-per-line` |
-| `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, `pad-write-pages` (only after a pad), `map-write-pages` and `map-read-pages` (only with `mapping=dftl` and no FDP), `parity-write-pages` and `degraded-reads` (only with `die_parity` or `rain_parity`), `failed-dies`, `rebuild-lines-left`, `rebuild-pages`, `lost-pages` and `lost-blocks` (only with `rain_parity`), `gc-fw-pages` and `gc-fw-ns` (only with `fw_gc_page_ns` above 0, bbssd only), and `waf` |
+| `geometry` | `channels`, `luns-per-channel`, `planes-per-lun`, `blocks-per-plane`, `pages-per-block`, `page-size` (bytes), `pages-per-line`, and the totals `total-sectors`, `total-pages` and `total-blocks` |
+| `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, `pad-write-pages` (only after a pad), `map-write-pages` and `map-read-pages` (only with `mapping=dftl` and no FDP), `parity-write-pages` and `degraded-reads` (only with `die_parity` or `rain_parity`), `failed-dies`, `rebuild-lines-left`, `rebuild-pages`, `lost-pages` and `lost-blocks` (only with `rain_parity`), and `waf` |
 | `media` | the NAND bus timing: see [Media timing](#media-timing) |
 | `line-counts` | lines that are `free`, `victim`, `full`, `retired` and `spare`, and the `total`; absent with FDP |
 | `precondition` | only on a namespace that `precon_fill_pct` filled at this realize: `fill-pages`, `overwrite-pages`, `nand-write-pages`, `gc-write-pages`, `map-write-pages`, `pad-write-pages`, `parity-write-pages`, `block-erases`, `waf` and `elapsed-ms` of that run; the `counters` start at zero after it. See [preconditioning](../design/ftl.md#preconditioning-at-realize-precon_fill_pct) |
@@ -369,7 +369,9 @@ namespace. It needs no enabled controller.
   "nsid": 1, "mode": "bbssd",
   "geometry": {"channels": 8, "luns-per-channel": 8, "planes-per-lun": 1,
                "blocks-per-plane": 256, "pages-per-block": 256,
-               "page-size": 4096, "pages-per-line": 16384},
+               "page-size": 4096, "pages-per-line": 16384,
+               "total-sectors": 33554432, "total-pages": 4194304,
+               "total-blocks": 16384},
   "counters": {"host-write-pages": 20480, "nand-write-pages": 20480,
                "gc-write-pages": 0, "block-erases": 0, "waf": 1.0},
   "media": {"staged-bus": false, "onfi-profile": false, "column-cycles": 0,
@@ -444,7 +446,9 @@ Each handle has one unit open:
   "nsid": 1, "mode": "bbssd",
   "geometry": {"channels": 2, "luns-per-channel": 2, "planes-per-lun": 1,
                "blocks-per-plane": 25, "pages-per-block": 4,
-               "page-size": 4096, "pages-per-line": 16},
+               "page-size": 4096, "pages-per-line": 16,
+               "total-sectors": 3200, "total-pages": 400,
+               "total-blocks": 100},
   "counters": {"host-write-pages": 0, "nand-write-pages": 0,
                "gc-write-pages": 0, "block-erases": 0},
   "media": {"staged-bus": false, "onfi-profile": false, "column-cycles": 0,
@@ -655,8 +659,8 @@ id once to get the total of several devices.
 |---|---|---|
 | `controller` | device path | the data backend, when the device owns it; the OCSSD 1.2 OOB area; the CSD memory namespace (SLM) |
 | `subsystem` | `femu-subsys` path | the backend of shared namespaces; FDP reclaim units and handles |
-| `namespace` | owner path + `/ns<nsid>` | per-block bitmaps, metadata; KV value arena, key table, free-slot stack, line byte counts; ZNS L2P, NAND tree, zones, write caches; OCSSD 1.2 translation and bad block tables; OCSSD 2.0 chunk state; FDP placement handles |
-| `ftl` | storage owner + `/ftl<n>` | bbssd, CSD and KV FTL: L2P, reverse map, NAND tree, lines, victim heap; FDP reclaim groups, units and handles |
+| `namespace` | owner path + `/ns<nsid>` | per-block bitmaps, metadata; KV value arena, key table, free-slot stack, LSM memtable, line byte counts; ZNS L2P, NAND tree, zones, write caches; OCSSD 1.2 translation and bad block tables; OCSSD 2.0 chunk state; FDP placement handles |
+| `ftl` | storage owner + `/ftl<n>` | bbssd, CSD and KV FTL: L2P, reverse map, NAND tree, lines, victim heap; FDP reclaim groups, units and handles; the DFTL cache and translation pages, hybrid and FAST tables (`mapping`); the read cache (`read_cache_mb`); tier arrays; durable slots (`durable_at_done`); the RAIN tables (`rain_parity`); die statistics (`die_stats`); the NAND bus lists and suspend state at start; the namespace slices of a shared FTL |
 
 Each owner has six categories: `backend`, `mapping`, `media`, `values`,
 `index`, `other`.

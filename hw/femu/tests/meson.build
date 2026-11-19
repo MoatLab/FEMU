@@ -16,6 +16,7 @@ femu_unit_tests = {
   'test-femu-onfi-timing': files('unit/test-onfi-timing.c',
                                  '../nand/nand-media.c', '../nand/onfi.c'),
   'test-femu-pqueue': files('unit/test-pqueue.c', '../lib/pqueue.c'),
+  'test-femu-ftl-index': files('unit/test-ftl-index.c'),
   'test-femu-opal': files('unit/test-opal.c', '../femu-opal.c',
                           '../femu-hpke.c'),
   'test-femu-hpke': files('unit/test-hpke.c', '../femu-hpke.c'),

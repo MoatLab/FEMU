@@ -159,25 +159,162 @@ int ssd_wear_floor(struct ssd *ssd, int nfail)
  * The slice table of an FTL that several namespaces share: under shared_ftl
  * or FDP, each fixed namespace places at its backend offset.
  */
-static void ssd_init_ns_slices(FemuCtrl *n, struct ssd *ssd)
+static bool ssd_init_ns_slices(FemuCtrl *n, struct ssd *ssd)
 {
     uint64_t pg = (uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg;
     bool fdp = n->subsys && n->subsys->endgrp.fdp.enabled;
 
     ssd->nr_ns_slices = 0;
     if (n->num_namespaces < 2 || !(n->shared_ftl || fdp) || !pg) {
-        return;
+        return true;
     }
-    ssd->ns_slice_lo = g_new0(uint64_t, n->num_namespaces);
-    ssd->ns_ctr = g_new0(struct ssd_ns_ctr, n->num_namespaces);
-    ssd->stats_ns_pub = g_new0(uint64_t, 3 * n->num_namespaces);
+    ssd->ns_slice_lo = ssd_try_alloc(ssd, n->num_namespaces, sizeof(uint64_t),
+                                     "namespace slices");
+    ssd->ns_ctr = ssd->ns_slice_lo ?
+                  ssd_try_alloc(ssd, n->num_namespaces,
+                                sizeof(struct ssd_ns_ctr),
+                                "namespace counters") : NULL;
+    if (!ssd->ns_ctr) {
+        return false;
+    }
     for (uint32_t i = 0; i < n->num_namespaces; i++) {
         ssd->ns_slice_lo[i] = n->namespaces[i].backend_offset / pg;
     }
+    ssd_mem_hold(ssd, &ssd->mem_held.ns_slices, FEMU_MEM_OTHER,
+                 (sizeof(uint64_t) + sizeof(struct ssd_ns_ctr)) *
+                 n->num_namespaces);
     ssd->nr_ns_slices = n->num_namespaces;
+    return true;
 }
 
-void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
+/*
+ * True when the FTL allocation @what of @bytes must fail: a qtest set
+ * x-ftl-fail-at to the number of this allocation. Records @what for the
+ * error of ssd_init(). Counts every allocation of one controller, so a
+ * test can reach each one in turn.
+ */
+bool ssd_alloc_refused(struct ssd *ssd, const char *what, uint64_t bytes)
+{
+    FemuCtrl *n = ssd->n;
+
+    if (!n || !n->test_ftl_fail_at ||
+        ++n->test_ftl_allocs != n->test_ftl_fail_at) {
+        return false;
+    }
+    ssd->alloc_fail = what;
+    ssd->alloc_fail_bytes = bytes;
+    ssd->alloc_injected = true;
+    return true;
+}
+
+/*
+ * ssd_try_alloc - a zeroed array of @nmemb entries of @size bytes
+ *
+ * Returns NULL, with @what recorded for ssd_init(), when the size
+ * overflows, when the host has no memory, or when x-ftl-fail-at refuses
+ * it. Charges nothing: a part that holds several arrays charges their sum
+ * with ssd_mem_hold() once it is whole, so a part that fails halfway
+ * holds no charge.
+ */
+void *ssd_try_alloc(struct ssd *ssd, uint64_t nmemb, size_t size,
+                    const char *what)
+{
+    uint64_t bytes;
+    void *p;
+
+    if (size && nmemb > SIZE_MAX / size) {
+        ssd->alloc_fail = what;
+        ssd->alloc_fail_bytes = UINT64_MAX;
+        return NULL;
+    }
+    bytes = nmemb * size;
+    if (ssd_alloc_refused(ssd, what, bytes)) {
+        return NULL;
+    }
+    p = g_try_malloc0(bytes);
+    if (!p && bytes) {
+        ssd->alloc_fail = what;
+        ssd->alloc_fail_bytes = bytes;
+        return NULL;
+    }
+    return p;
+}
+
+/*
+ * ssd_alloc - ssd_try_alloc(), and on success a charge of the bytes to
+ * @cat. Free the array with ssd_release() and the same @cat, @nmemb and
+ * @size.
+ */
+void *ssd_alloc(struct ssd *ssd, FemuMemCat cat, uint64_t nmemb, size_t size,
+                const char *what)
+{
+    void *p = ssd_try_alloc(ssd, nmemb, size, what);
+
+    if (p) {
+        femu_mem_charge(&ssd->mem, cat, nmemb * size);
+    }
+    return p;
+}
+
+void ssd_release(struct ssd *ssd, FemuMemCat cat, void *p, uint64_t nmemb,
+                 size_t size)
+{
+    if (p) {
+        femu_mem_release(&ssd->mem, cat, nmemb * size);
+        g_free(p);
+    }
+}
+
+/* pqueue_init() of @n entries, refused as ssd_try_alloc() refuses */
+pqueue_t *ssd_pqueue_new(struct ssd *ssd, size_t n, pqueue_cmp_pri_f cmppri,
+                         pqueue_get_pri_f getpri, pqueue_set_pri_f setpri,
+                         pqueue_get_pos_f getpos, pqueue_set_pos_f setpos,
+                         const char *what)
+{
+    uint64_t bytes = (uint64_t)(n + 1) * sizeof(void *);
+    pqueue_t *q;
+
+    if (ssd_alloc_refused(ssd, what, bytes)) {
+        return NULL;
+    }
+    q = pqueue_init(n, cmppri, getpri, setpri, getpos, setpos);
+    if (!q) {
+        ssd->alloc_fail = what;
+        ssd->alloc_fail_bytes = bytes;
+    }
+    return q;
+}
+
+static bool ssd_init_fail(struct ssd *ssd, Error **errp)
+{
+    if (ssd->alloc_injected) {
+        error_setg(errp, "FEMU: injected failure of FTL allocation %u (%s)",
+                   ssd->n->test_ftl_allocs, ssd->alloc_fail);
+    } else if (ssd->alloc_fail_bytes == UINT64_MAX) {
+        error_setg(errp, "FEMU: the FTL %s are too large to address",
+                   ssd->alloc_fail);
+    } else if (!ssd->alloc_fail_bytes) {
+        error_setg(errp, "FEMU: the host has no memory for the FTL %s; "
+                   "lower the device size or turn off the feature that "
+                   "needs them", ssd->alloc_fail);
+    } else {
+        error_setg(errp, "FEMU: the host has no memory for the FTL %s "
+                   "(%" PRIu64 " bytes); lower the device size or turn "
+                   "off the feature that needs them",
+                   ssd->alloc_fail, ssd->alloc_fail_bytes);
+    }
+    ssd_free(ssd);
+    return false;
+}
+
+/*
+ * ssd_init - build the FTL of @ns into the zeroed ns->ssd
+ *
+ * Returns false, with @errp set, when an allocation fails. Then the FTL
+ * holds no memory and no charge; the caller frees the struct and clears
+ * every pointer to it.
+ */
+bool ssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
     struct ssd *ssd = ns->ssd;
     struct ssdparams *spp = &ssd->sp;
@@ -186,16 +323,14 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd->n = n;
     ssd->ns = ns;
     ssd->mem_id = femu_mem_next_id();
-    /* bbssd and CSD both build here; either may write back while idle */
-    if (n->bb_params.buffer_low_pcent) {
-        n->buffer_bg = true;
-    }
 
     /* read the data-remanence experiment env vars once (debug only, off by default) */
     exp_load_cfg();
 
     ssd_init_params(spp, n);
-    ssd_rain_init(ssd);
+    if (!ssd_rain_init(ssd)) {
+        return ssd_init_fail(ssd, errp);
+    }
     /*
      * failed_die counts only with parity: the CXL SSD builds its FTL
      * from a zeroed controller. A namespace made while an injected die is
@@ -223,11 +358,15 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     }
 
     /* initialize ssd internal layout architecture */
-    ssd->ch = g_malloc0(sizeof(struct ssd_channel) * spp->nchs);
-    femu_mem_charge(&ssd->mem, FEMU_MEM_MEDIA,
-                    sizeof(struct ssd_channel) * spp->nchs);
+    ssd->ch = ssd_alloc(ssd, FEMU_MEM_MEDIA, spp->nchs,
+                        sizeof(struct ssd_channel), "NAND channels");
+    if (!ssd->ch) {
+        return ssd_init_fail(ssd, errp);
+    }
     for (int i = 0; i < spp->nchs; i++) {
-        ssd_init_ch(&ssd->ch[i], spp, &ssd->mem);
+        if (!ssd_init_ch(ssd, &ssd->ch[i])) {
+            return ssd_init_fail(ssd, errp);
+        }
     }
 
     /*
@@ -281,9 +420,9 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd->host_write_pages = 0;
     ssd->nand_write_pages = 0;
     ssd->gc_write_pages = 0;
-    seqlock_init(&ssd->stats_seq);
-    ssd_init_ns_slices(n, ssd);
-    ssd_durable_init(ssd);
+    if (!ssd_init_ns_slices(n, ssd) || !ssd_durable_init(ssd)) {
+        return ssd_init_fail(ssd, errp);
+    }
     ssd->gc_copyback_pages = 0;
     ssd->gc_fw_free = 0;
     ssd->gc_fw_pages = 0;
@@ -293,8 +432,8 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd->forced_gc_end = 0;
 
     ssd->bad_blocks = n->nand_bad_blocks;
-    if (spp->tt_blks > 0 && ssd->bad_blocks > (uint32_t)spp->tt_blks) {
-        ssd->bad_blocks = (uint32_t)spp->tt_blks;
+    if (spp->tt_blks > 0 && ssd->bad_blocks > spp->tt_blks) {
+        ssd->bad_blocks = spp->tt_blks;
     }
 
     /*
@@ -307,21 +446,26 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd_init_wear(ssd, n, ns);
 
     /* the pSLC tier, before the media layer takes its timing row */
-    ftl_tier_init(ssd, n);
+    if (!ftl_tier_init(ssd, n)) {
+        return ssd_init_fail(ssd, errp);
+    }
 
     /* configure the NAND media-layer timing (reads spp, points at ssd->ch) */
-    bb_nand_media_init(ssd);
+    if (!bb_nand_media_init(ssd)) {
+        return ssd_init_fail(ssd, errp);
+    }
 
     /*
      * A key-value namespace maps keys to values itself and never reads the
      * block L2P: 8 bytes per physical page it would not use.
      */
-    if (!ns || !NS_KVSSD(ns)) {
-        ssd_init_maptbl(ssd);
+    if ((!ns || !NS_KVSSD(ns)) && !ssd_init_maptbl(ssd)) {
+        return ssd_init_fail(ssd, errp);
     }
 
-    /* initialize rmap */
-    ssd_init_rmap(ssd);
+    if (!ssd_init_rmap(ssd)) {
+        return ssd_init_fail(ssd, errp);
+    }
 
     /* the policy orders the victim queue, so resolve it before the lines */
     ssd->policy = femu_ftl_policy_lookup(n->bb_params.gc_policy);
@@ -331,8 +475,9 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         ftl_rber_init_tables();
     }
 
-    /* initialize all the lines */
-    ssd_init_lines(ssd);
+    if (!ssd_init_lines(ssd)) {
+        return ssd_init_fail(ssd, errp);
+    }
     if (unlikely(ssd->tier)) {
         ftl_tier_take_lines(ssd);
     }
@@ -345,8 +490,8 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd->mapping = femu_mapping_scheme_lookup(n->bb_params.mapping_scheme);
     /* schemes that keep private state allocate it here; page/dftl keep it NULL */
     ssd->map_priv = NULL;
-    if (ssd->mapping->init) {
-        ssd->mapping->init(ssd);
+    if (ssd->mapping->init && !ssd->mapping->init(ssd)) {
+        return ssd_init_fail(ssd, errp);
     }
     uint32_t map_cache_mb = n->mapping_cache_mb;
     if (femu_mapping_scheme_uses_cmt(ssd->mapping) && map_cache_mb == 0) {
@@ -354,15 +499,18 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     }
     /* the CMT is a dftl-only cost model: never charge it under the page scheme,
      * even if mapping_cache_mb was set */
-    cmt_init(ssd, femu_mapping_scheme_uses_cmt(ssd->mapping) ? map_cache_mb : 0);
+    if (!cmt_init(ssd, femu_mapping_scheme_uses_cmt(ssd->mapping) ?
+                  map_cache_mb : 0)) {
+        return ssd_init_fail(ssd, errp);
+    }
     /*
      * With dftl and no FDP the translation pages live on flash. FDP keeps
      * the timing-only model: its reclaim units own every free line.
      */
     ssd->tp_on = false;
     if (ssd->cmt.capacity && bb_tp_physical(n) &&
-        (NS_BBSSD(ns) || NS_CSD(ns))) {
-        tp_init(ssd);
+        (NS_BBSSD(ns) || NS_CSD(ns)) && !tp_init(ssd)) {
+        return ssd_init_fail(ssd, errp);
     }
 
     /*
@@ -379,7 +527,9 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
             rc_evict = 3; /* scan-resistant 2Q-style */
         }
     }
-    rcache_init(ssd, n->read_cache_mb, rc_evict);
+    if (!rcache_init(ssd, n->read_cache_mb, rc_evict)) {
+        return ssd_init_fail(ssd, errp);
+    }
 
     /* FDP vs non-FDP init path */
     ssd->fdp_enabled = (n->subsys != NULL &&
@@ -390,9 +540,15 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         ssd_init_fdp_params(spp, n);
 
         ftl_log("FDP: initializing reclaim groups\n");
-        femu_fdp_ssd_init_reclaim_group(n, ssd);
+        if (!femu_fdp_ssd_init_reclaim_group(n, ssd)) {
+            return ssd_init_fail(ssd, errp);
+        }
         ftl_log("FDP: initializing RU handles\n");
-        femu_fdp_ssd_init_ru_handles(n, ssd);
+        if (!femu_fdp_ssd_init_ru_handles(n, ssd)) {
+            return ssd_init_fail(ssd, errp);
+        }
+        /* the last step that can fail is done: now the subsystem sees it */
+        femu_fdp_ssd_publish(n, ssd);
         femu_fdp_ssd_mem_charge(ssd);
         femu_fdp_ssd_init_eol_reserve(ssd);
         /* no line write pointer under FDP, but the buffer is shared */
@@ -403,8 +559,14 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         /* non-FDP: use single write pointer */
         ssd_init_write_pointer(ssd);
     }
-    /* no FTL thread runs this FTL yet: the first copy is the empty one */
-    ssd_stats_publish(ssd);
+
+    /* the controller flags wait for a whole FTL */
+    ftl_tier_publish(ssd, n);
+    /* bbssd and CSD both build here; either may write back while idle */
+    if (n->bb_params.buffer_low_pcent) {
+        n->buffer_bg = true;
+    }
+    return true;
 }
 
 /*
@@ -1485,12 +1647,15 @@ void ssd_free(struct ssd *ssd)
     ssd->maptbl = NULL;
     ssd_durable_free(ssd);
     ssd_rain_free(ssd);
+    ssd_mem_hold(ssd, &ssd->mem_held.ns_slices, FEMU_MEM_OTHER, 0);
     g_clear_pointer(&ssd->ns_slice_lo, g_free);
     g_clear_pointer(&ssd->ns_ctr, g_free);
     g_clear_pointer(&ssd->stats_ns_pub, g_free);
     ssd->nr_ns_slices = 0;
 
+    ssd_mem_hold(ssd, &ssd->mem_held.media, FEMU_MEM_MEDIA, 0);
     nand_media_destroy(&ssd->media);
+    ssd_mem_hold(ssd, &ssd->mem_held.die_stat, FEMU_MEM_MEDIA, 0);
     g_clear_pointer(&ssd->media.die_stat, g_free);
     if (ssd->wear_lock_on) {
         qemu_mutex_destroy(&ssd->wear_lock);

@@ -84,6 +84,10 @@ enum {
 
 #define BLK_BITS    (16)
 #define PG_BITS     (16)
+/* the largest NAND page and device bb_check_geometry() accepts */
+#define FEMU_MAX_PAGE_BYTES     (16 * 1024 * 1024)
+#define FEMU_MAX_NAND_BYTES     (UINT64_C(1) << 56)
+
 #define SEC_BITS    (8)
 #define PL_BITS     (4)
 #define LUN_BITS    (7)
@@ -266,19 +270,20 @@ struct ssdparams {
 
     /* below are all calculated values */
     int secs_per_blk; /* # of sectors per block */
-    int secs_per_pl;  /* # of sectors per plane */
-    int secs_per_lun; /* # of sectors per LUN */
-    int secs_per_ch;  /* # of sectors per channel */
-    int tt_secs;      /* # of sectors in the SSD */
+    /* device-wide counts are 64-bit: a device can pass 2^31 pages */
+    int64_t secs_per_pl;  /* # of sectors per plane */
+    int64_t secs_per_lun; /* # of sectors per LUN */
+    int64_t secs_per_ch;  /* # of sectors per channel */
+    int64_t tt_secs;      /* # of sectors in the SSD */
 
-    int pgs_per_pl;   /* # of pages per plane */
-    int pgs_per_lun;  /* # of pages per LUN (Die) */
-    int pgs_per_ch;   /* # of pages per channel */
-    int tt_pgs;       /* total # of pages in the SSD */
+    int64_t pgs_per_pl;   /* # of pages per plane */
+    int64_t pgs_per_lun;  /* # of pages per LUN (Die) */
+    int64_t pgs_per_ch;   /* # of pages per channel */
+    int64_t tt_pgs;       /* total # of pages in the SSD */
 
     int blks_per_lun; /* # of blocks per LUN */
     int blks_per_ch;  /* # of blocks per channel */
-    int tt_blks;      /* total # of blocks in the SSD */
+    int64_t tt_blks;  /* total # of blocks in the SSD, below 2^31 */
 
     int secs_per_line;
     int pgs_per_line;
@@ -525,7 +530,7 @@ struct FemuRuHandle {
     uint16_t ruh_type;
     uint16_t ruhid;
     int ru_in_use_cnt;
-    int ruh_live_pages_cnt;
+    int64_t ruh_live_pages_cnt;
     NvmeRuHandle *ruh;
     /*
      * Per reclaim group: the unit host writes go to, and the unit collection
@@ -553,6 +558,76 @@ struct FemuReclaimGroup {
     int nch;
     int lun0;
     int nlun;
+};
+
+/*
+ * Pluggable GC victim-selection policy (vtable). Alternative policies coexist
+ * without forking the GC path; the default ("greedy") is the original behavior
+ * verbatim. Selected by the gc_policy device property. Under FDP the same
+ * names select a reclaim unit strategy instead (femu_fdp_gc_strategy()).
+ */
+struct femu_ftl_policy_ops {
+    const char *name;
+    struct line *(*select_victim_line)(struct ssd *ssd, bool force);
+    /* the victim queue is ordered by close_seq instead of valid pages */
+    bool by_close_order;
+};
+
+/*
+ * Allocation class chosen for a new write. Page and dftl use DATA, or DATA and
+ * HOT when hot/cold separation is on; a log-block scheme puts its overwrites in
+ * LOG so they land in blocks of their own rather than mixed in with data.
+ */
+enum { FEMU_MAP_CLASS_DATA = 0, FEMU_MAP_CLASS_LOG = 1,
+       FEMU_MAP_CLASS_HOT = 2, FEMU_MAP_CLASS_GC = 3 };
+
+struct map_write_plan {
+    int target_class;      /* allocation class for the new page */
+    bool may_need_reclaim; /* the scheme may have to reclaim before committing */
+};
+
+/*
+ * Pluggable L2P mapping scheme (vtable). The default "page" scheme is the
+ * original full-DRAM mapping, bit-identical; "dftl" adds a demand-cached
+ * translation table (the CMT cost model in ftl-map-cmt.c). Selected by the
+ * mapping device property. The flat maptbl/rmap stay the source of truth.
+ */
+struct femu_mapping_ops {
+    const char *name;
+    bool uses_cmt;          /* dftl-style demand-cached translation table */
+    bool uses_log_class;    /* allocates through the LOG write pointer */
+    bool reclaim_per_page; /* merge before another page can consume log space */
+
+    /* allocate and release scheme-private state in ssd->map_priv */
+    bool (*init)(struct ssd *ssd);  /* false: no memory, see ssd_init() */
+    void (*exit)(struct ssd *ssd);
+
+    /* translate a read: lpn -> ppa (unmapped if absent) */
+    struct ppa (*translate)(struct ssd *ssd, uint64_t lpn);
+
+    /*
+     * write split: choose placement, then commit the new mapping and invalidate
+     * the old one
+     */
+    struct map_write_plan (*prepare_write)(struct ssd *ssd, uint64_t lpn,
+                                           int io_type);
+    void (*commit_write)(struct ssd *ssd, uint64_t lpn, struct ppa *new_ppa);
+
+    /*
+     * Reclaim of the scheme's own structures, such as a log-block merge. The
+     * NAND cost it incurs is charged inside reclaim(), which returns the latency
+     * to add to the request that triggered it. A scheme with nothing to reclaim
+     * leaves both hooks NULL.
+     */
+    bool (*needs_reclaim)(struct ssd *ssd);
+    uint64_t (*reclaim)(struct ssd *ssd, int budget);
+
+    /* GC relocation: point lpn at its relocated ppa (victim policy is separate) */
+    void (*gc_relocate_commit)(struct ssd *ssd, uint64_t lpn,
+                               struct ppa *old_ppa, struct ppa *new_ppa);
+
+    /* unmap an lpn on DSM deallocate; NULL falls back to the flat invalidation */
+    void (*trim)(struct ssd *ssd, uint64_t lpn);
 };
 
 /* one slot of the optional DRAM read cache (ftl-cache.c) */
@@ -635,6 +710,15 @@ struct ssd {
     struct ssd_channel *ch;
     FemuMemAcct mem;    /* host memory of this FTL, see femu-mem.h */
     uint32_t mem_id;    /* names it in query-femu-memory */
+    /* the bytes each optional part holds in @mem, set by ssd_mem_hold() */
+    struct {
+        uint64_t cmt, tp, map_priv, rcache, tier, durable, rain, die_stat;
+        uint64_t media, ns_slices;
+    } mem_held;
+    /* the allocation that stopped ssd_init(), and its size in bytes */
+    const char *alloc_fail;
+    uint64_t alloc_fail_bytes;
+    bool alloc_injected;    /* x-ftl-fail-at, not the host, refused it */
     struct ppa *maptbl; /* page level mapping table */
     uint64_t *rmap;     /* reverse mapptbl, assume it's stored in OOB */
     struct write_pointer wp;
@@ -684,6 +768,7 @@ struct ssd {
      */
     struct line *rg_lines;
     uint64_t fdp_mem;   /* FDP lines and victim heaps charged to @mem */
+    bool fdp_published; /* the subsystem handles point at this FTL */
     int rg_dies;        /* dies in each group */
     uint16_t rg_next;   /* where the selection of a group starts next */
     FemuReclaimUnit **rus;
@@ -1059,7 +1144,7 @@ char *ssd_state_digest(struct ssd *ssd);
 
 /* durable_at_done (ftl-durable.c) */
 bool ssd_durable_on(struct ssd *ssd);
-void ssd_durable_init(struct ssd *ssd);
+bool ssd_durable_init(struct ssd *ssd);
 void ssd_durable_drop_all(struct ssd *ssd);
 void ssd_durable_retire(struct ssd *ssd, int64_t now);
 bool ssd_durable_room(struct ssd *ssd);
@@ -1067,7 +1152,7 @@ void ssd_rain_close(struct ssd *ssd, struct write_pointer *wp);
 bool ssd_rain_fail_ok(struct ssd *ssd, int die, Error **errp);
 bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp);
 bool ssd_rain_loss_due(struct ssd *ssd, int die);
-void ssd_rain_init(struct ssd *ssd);
+bool ssd_rain_init(struct ssd *ssd);
 void ssd_rain_free(struct ssd *ssd);
 void ssd_rain_rebuild_step(struct ssd *ssd);
 void ssd_rain_check(struct ssd *ssd, uint64_t *nfail, uint64_t *left,
@@ -1098,7 +1183,7 @@ char *ssd_gc_order_report(struct ssd *ssd);
 uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
 void ssd_release_stream(struct ssd *ssd, unsigned slot);
 void ssd_deallocate_fdp_ns(struct ssd *ssd, NvmeNamespace *ns);
-void ssd_init(FemuCtrl *n, NvmeNamespace *ns);
+bool ssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp);
 
 /* now on the clock that times the controller's I/O, in ns and in us */
 static inline uint64_t ssd_now(struct ssd *ssd)
@@ -1145,7 +1230,7 @@ static inline uint64_t ssd_age_now(struct ssd *ssd)
 }
 
 /* NAND media-layer bridge (hw/femu/bbssd/ftl-media.c) */
-void bb_nand_media_init(struct ssd *ssd);
+bool bb_nand_media_init(struct ssd *ssd);
 void bb_nand_media_refresh_timing(struct ssd *ssd);
 uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
                             struct nand_cmd *ncmd);

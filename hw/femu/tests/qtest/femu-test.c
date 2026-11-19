@@ -2422,6 +2422,52 @@ static void femu_test_zns_page_types_plc(void *obj, void *data,
     qobject_unref(rsp);
 }
 
+/* each geometry limit refuses the device and names what to change */
+static void femu_test_geometry_limits(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    static const struct {
+        const char *geo;
+        const char *want;
+    } cases[] = {
+        /* a line of 4096 x 128 x 16 x 256 pages of 256 sectors */
+        { "'nchs':4096,'luns_per_ch':128,'pls_per_lun':16,'blks_per_pl':256,"
+          "'pgs_per_blk':256,'secs_per_pg':256,'secsz':512",
+          "raise blks_per_pl" },
+        /* 2^39 blocks, a line of 2^23 sectors */
+        { "'nchs':4096,'luns_per_ch':128,'pls_per_lun':16,'blks_per_pl':65536,"
+          "'pgs_per_blk':1,'secs_per_pg':1,'secsz':512",
+          "raise pgs_per_blk" },
+        /* a page of 128 KiB x 256 = 32 MiB */
+        { "'nchs':1,'luns_per_ch':1,'pls_per_lun':1,'blks_per_pl':256,"
+          "'pgs_per_blk':16,'secs_per_pg':256,'secsz':131072",
+          "reduce secsz or secs_per_pg" },
+        /* 2^33 sectors of 16 MiB: 2^57 bytes */
+        { "'nchs':2,'luns_per_ch':1,'pls_per_lun':1,'blks_per_pl':65536,"
+          "'pgs_per_blk':65536,'secs_per_pg':1,'secsz':16777216",
+          "bytes of NAND" },
+    };
+    QTestState *qts = qtest_init("-machine pc -nodefaults");
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *json = g_strdup_printf("{'driver':'femu','id':'lim',"
+                                                "'addr':'5','femu_mode':1,"
+                                                "'devsz_mb':16,%s}",
+                                                cases[i].geo);
+        QObject *args = qobject_from_json(json, &error_abort);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add',"
+                               "'arguments':%p}", args);
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s", desc);
+        g_assert_nonnull(strstr(desc, cases[i].want));
+        qobject_unref(rsp);
+    }
+    qtest_quit(qts);
+}
+
 static void femu_test_zns_ecc(void *obj, void *data, QGuestAllocator *alloc)
 {
     QFemu *femu = obj;
@@ -4316,6 +4362,30 @@ static QDict *femu_query_ns(QTestState *qts, const char *args, QDict **rsp)
     nss = qdict_get_qlist(ret, "namespaces");
     g_assert_cmpuint(qlist_size(nss), ==, 1);
     return qobject_to(QDict, qlist_peek(nss));
+}
+
+/*
+ * A bbssd device of 2^31 sectors, one past the old limit, starts, and
+ * query-femu reports its 64-bit totals. 8 x 4 x 256 x 1024 pages of 256
+ * sectors is 2^23 pages, 2^31 sectors.
+ */
+static void femu_test_geometry_big(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    QDict *rsp;
+    QDict *ns;
+    QDict *geo;
+
+    femu_enable(&c, &femu->dev, alloc);
+    ns = femu_query_ns(qts, "'path':'/machine/peripheral/big'", &rsp);
+    geo = qdict_get_qdict(ns, "geometry");
+    g_assert_cmpuint(qdict_get_int(geo, "total-sectors"), ==, 1ULL << 31);
+    g_assert_cmpuint(qdict_get_int(geo, "total-pages"), ==, 1ULL << 23);
+    g_assert_cmpuint(qdict_get_int(geo, "total-blocks"), ==, 8192);
+    qobject_unref(rsp);
 }
 
 /* The summary must report what log page C0h reports for one namespace. */
@@ -37777,6 +37847,46 @@ static void femu_test_cxl_realize_retry(void *obj, void *data,
     unlink(cdat);
 }
 
+/*
+ * A femu-cxl-ssd whose FTL does not fit is refused, and QEMU runs on. Each
+ * FTL allocation fails in turn, then the device starts on the same memory
+ * backend. 4 x 4 dies of 21 blocks: the NAND tree is 1 + 4 + 16 + 16 +
+ * 336 arrays, then the two maps, the lines and the line heap.
+ */
+static void femu_test_cxl_ftl_fail_sweep(void *obj, void *data,
+                                         QGuestAllocator *alloc)
+{
+    QTestState *qts = qtest_init(FEMU_CXL_MACHINE);
+    uint32_t k;
+
+    for (k = 1; k < 1000; k++) {
+        g_autofree char *want = NULL;
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                               "'driver':'femu-cxl-ssd','id':'ssd',"
+                               "'bus':'rp0','volatile-memdev':'mem',"
+                               "'ftl':true,'cache-pages':16,'cache-ways':16,"
+                               "'channels':4,'luns-per-channel':4,"
+                               "'pages-per-block':256,'blocks-per-plane':21,"
+                               "'test-ftl-fail-at':%u}}", k);
+
+        if (qdict_haskey(rsp, "return")) {
+            qobject_unref(rsp);
+            break;
+        }
+        want = g_strdup_printf("injected failure of FTL allocation %u (", k);
+        if (!strstr(qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"),
+                    want)) {
+            g_test_message("k=%u: %s", k,
+                           qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                         "desc"));
+            g_assert_not_reached();
+        }
+        qobject_unref(rsp);
+    }
+    g_assert_cmpuint(k - 1, ==, 1 + 4 + 16 + 16 + 336 + 4);
+    qtest_quit(qts);
+}
+
 static uint64_t femu_cxl_stat(QTestState *qts, const char *name)
 {
     QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
@@ -44152,6 +44262,48 @@ static const struct {
     { "femu_mode=5,devsz_mb=64", 0, 1, 2 * 16384, 64 * MiB },
 };
 
+/* the index bytes of the one key-value namespace of a device */
+static uint64_t femu_mem_kv_index(const char *opts)
+{
+    QTestState *qts = qtest_initf("-machine pc -nodefaults "
+                                  "-device femu,addr=5,id=mem,%s", opts);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-memory'}");
+    const QListEntry *e;
+    uint64_t index = 0;
+    uint32_t nr = 0;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(qdict_get_qdict(rsp, "return"),
+                                        "owners"), e) {
+        QDict *o = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (!strcmp(qdict_get_str(o, "kind"), "namespace")) {
+            index = qdict_get_int(o, "index");
+            nr++;
+        }
+    }
+    g_assert_cmpuint(nr, ==, 1);
+    qobject_unref(rsp);
+    qtest_quit(qts);
+    return index;
+}
+
+/*
+ * The LSM memtable counts in the index: a record is a 16-byte key, its
+ * length, a tombstone flag and a 4-byte slot, 24 bytes with padding.
+ */
+static void femu_test_memory_kv_lsm(void *obj, void *data,
+                                    QGuestAllocator *unused)
+{
+    uint64_t small = femu_mem_kv_index("femu_mode=5,devsz_mb=64,"
+                                       "kv_index=lsm,"
+                                       "kv_lsm_memtable_keys=1024");
+    uint64_t large = femu_mem_kv_index("femu_mode=5,devsz_mb=64,"
+                                       "kv_index=lsm,"
+                                       "kv_lsm_memtable_keys=2048");
+
+    g_assert_cmpuint(large - small, ==, 1024 * 24);
+}
+
 static void femu_test_memory(void *obj, void *data, QGuestAllocator *unused)
 {
     for (unsigned i = 0; i < ARRAY_SIZE(femu_mem_cases); i++) {
@@ -44259,6 +44411,302 @@ static void femu_test_memory(void *obj, void *data, QGuestAllocator *unused)
 #define FEMU_MEM_FTL "femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8," \
                      "pgs_per_blk=8,blks_per_pl=12,pls_per_lun=1," \
                      "luns_per_ch=2,nchs=2"
+/* 13 lines: DFTL keeps 5 of them, and 256 pages must still fit */
+#define FEMU_MEM_FTL13 "femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8," \
+                       "pgs_per_blk=8,blks_per_pl=13,pls_per_lun=1," \
+                       "luns_per_ch=2,nchs=2"
+
+/*
+ * x-ftl-fail-at=k fails the k-th FTL allocation of a realize. Each k must
+ * refuse the device with an error that names k, and QEMU must go on. The
+ * sanitizer build aborts when the failed build leaves a charge. The sweep
+ * stops at the first k that starts the device: every allocation before it
+ * failed once.
+ */
+#define FEMU_FAIL_GEO "devsz_mb=1,secsz=512,secs_per_pg=8,pgs_per_blk=8," \
+                      "blks_per_pl=12,pls_per_lun=1,luns_per_ch=2,nchs=2"
+
+/* the FDP state a controller writes into subsystem @id; qtest only */
+static char *femu_fdp_state(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-fdp-state'}}", path);
+    char *state;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    state = g_strdup(qdict_get_str(rsp, "return"));
+    qobject_unref(rsp);
+    return state;
+}
+
+static void femu_test_ftl_fail_sweep(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    /*
+     * One FTL has 63 allocations: the 59 NAND tree arrays, the L2P, the
+     * reverse map, the lines and the victim heap. KV has no L2P.
+     */
+    static const struct {
+        const char *opts;
+        uint32_t allocs;
+        bool selftest;  /* FEMU_KV_SELFTEST builds the KV FTL twice */
+        const char *pre;        /* more of the QEMU command line */
+    } cases[] = {
+        { "femu_mode=1," FEMU_FAIL_GEO, 63 },
+        /* the second FTL fails after the first one is whole */
+        { "femu_mode=1,namespaces=2," FEMU_FAIL_GEO, 2 * 63 },
+        { "femu_mode=4,fdm_size=16,csd_slm_size=4," FEMU_FAIL_GEO, 63 },
+        { "femu_mode=5," FEMU_FAIL_GEO, 62 },
+        { "femu_mode=5," FEMU_FAIL_GEO, 2 * 62, true },
+        /* the optional parts, each on top of the 63 */
+        { "femu_mode=1,read_cache_mb=1," FEMU_FAIL_GEO, 63 + 2 },
+        { "femu_mode=1,rain_parity=1," FEMU_FAIL_GEO, 2 + 63 },
+        { "femu_mode=1,buffer_size=16,power_loss=on,durable_at_done=on,"
+          FEMU_FAIL_GEO, 63 + 1 },
+        { "femu_mode=1,mapping=hybrid," FEMU_FAIL_GEO, 63 + 4 },
+        { "femu_mode=1,mapping=fast," FEMU_FAIL_GEO, 63 + 3 },
+        { "femu_mode=1,die_stats=on," FEMU_FAIL_GEO, 63 + 1 },
+        { "femu_mode=1,pg_xfer_lat=1000," FEMU_FAIL_GEO, 63 + 1 },
+        /* one FTL with two slices */
+        { "femu_mode=1,namespaces=2,shared_ftl=on," FEMU_FAIL_GEO, 63 + 2 },
+        /*
+         * 13 lines: a NAND tree of 63 arrays, 4 more of its own, the mapping
+         * cache slots and hash, and 7 translation page arrays
+         */
+        { FEMU_MEM_FTL13 ",mapping=dftl,mapping_cache_mb=1", 63 + 4 + 2 + 7 },
+        /*
+         * The static pSLC tier on 32 blocks of TLC: a NAND tree of
+         * 1 + 2 + 4 + 4 + 128 arrays, the tier header and its 4 arrays,
+         * then the maps, the lines and the heap
+         */
+        { "femu_mode=1,devsz_mb=16,secsz=512,secs_per_pg=8,pgs_per_blk=48,"
+          "blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+          "nand_cell_type=3,tier_mode=static,tier_static_mb=1",
+          139 + 5 + 4 },
+        /*
+         * FDP, 2 groups of 80 units and 4 handles. After the NAND tree of
+         * 331 arrays and the 4 of the maps and lines: the group and unit
+         * arrays (2), per group the units, a manager and 2 heaps (8), the
+         * block ids and group lines (2), a write pointer and line list per
+         * unit (320), the handles and the written bitmap (2), and per
+         * handle its active and collection unit arrays (8). The handles
+         * are persistently isolated by default, so each also has a manager
+         * array and a heap per group (12). The same options are added
+         * again after each refusal on the one subsystem.
+         */
+        { "femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+          "pls_per_lun=1,luns_per_ch=2,nchs=2,blks_per_pl=80,lba_index=3,"
+          "subsys=failsub",
+          331 + 4 + 2 + 8 + 2 + 320 + 2 + 8 + 12, false,
+          "-device femu-subsys,id=failsub,nqn=failsub,fdp=on,fdp.nruh=4,"
+          "fdp.nrg=2" },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        const char *opts = cases[i].opts;
+        g_autofree char *ctl = NULL;
+        QTestState *qts;
+        uint32_t k;
+
+        /* QEMU inherits the variable, and each realize runs the selftest */
+        if (cases[i].selftest) {
+            g_setenv("FEMU_KV_SELFTEST", "1", true);
+        }
+        qts = qtest_initf("-machine pc -nodefaults %s", cases[i].pre ?: "");
+        g_unsetenv("FEMU_KV_SELFTEST");
+
+        /*
+         * The control: the line starts with no injection. A subsystem case
+         * skips it, so each refusal compares with a new subsystem, which
+         * a working controller would have changed; the last add that
+         * starts is its control.
+         */
+        if (!cases[i].pre) {
+            ctl = qtest_hmp(qts, "device_add femu,addr=5,id=ff,%s", opts);
+            if (*ctl) {
+                g_test_message("%s: %s", opts, ctl);
+                g_assert_not_reached();
+            }
+            qpci_unplug_acpi_device_test(qts, "ff", 5);
+        }
+
+        for (k = 1; k < 2000; k++) {
+            g_autofree char *out = NULL;
+            g_autofree char *want = NULL;
+            g_autofree char *before = NULL;
+            g_autofree char *after = NULL;
+
+            /* a refusal leaves the subsystem as the last controller did */
+            if (cases[i].pre) {
+                before = femu_fdp_state(qts, "failsub");
+            }
+            out = qtest_hmp(qts, "device_add femu,addr=5,id=ff,%s,"
+                            "x-ftl-fail-at=%u", opts, k);
+            if (!*out) {
+                qpci_unplug_acpi_device_test(qts, "ff", 5);
+                break;
+            }
+            if (cases[i].pre) {
+                after = femu_fdp_state(qts, "failsub");
+                g_assert_cmpstr(after, ==, before);
+            }
+            want = g_strdup_printf("injected failure of FTL allocation %u (",
+                                   k);
+            if (!strstr(out, want)) {
+                g_test_message("%s k=%u: %s", opts, k, out);
+                g_assert_not_reached();
+            }
+        }
+        g_test_message("%s: %u allocations failed in turn", opts, k - 1);
+        g_assert_cmpuint(k - 1, ==, cases[i].allocs);
+        qtest_quit(qts);
+    }
+}
+
+/*
+ * A refused FDP controller leaves its subsystem as it found it, so the next
+ * controller starts as it does on a new subsystem. The first refusal fails
+ * the first FDP allocation, after the namespaces wrote the handles. The
+ * second passes femu_realize() and fails in PCI on the romfile. Subsystem
+ * "ctl" sees neither refusal and is the control.
+ */
+#define FEMU_FDP_REFUSE "femu_mode=1,devsz_mb=1,secsz=512,pgs_per_blk=4," \
+    "pls_per_lun=1,luns_per_ch=2,nchs=2,blks_per_pl=80"
+
+static void femu_test_fdp_refused_restores(void *obj, void *data,
+                                           QGuestAllocator *unused)
+{
+    QTestState *qts = qtest_init("-machine pc -nodefaults "
+        "-device femu-subsys,id=sub,nqn=sub,fdp=on,fdp.nruh=4,fdp.nrg=2 "
+        "-device femu-subsys,id=ctl,nqn=ctl,fdp=on,fdp.nruh=4,fdp.nrg=2");
+    g_autofree char *fresh = femu_fdp_state(qts, "sub");
+    g_autofree char *out = NULL;
+    g_autofree char *now = NULL;
+    g_autofree char *control = femu_fdp_state(qts, "ctl");
+
+    g_assert_cmpstr(fresh, ==, control);
+    out = qtest_hmp(qts, "device_add femu,addr=5,id=ff,subsys=sub,"
+                    FEMU_FDP_REFUSE ",secs_per_pg=8,lba_index=3,"
+                    "x-ftl-fail-at=336");
+    g_assert_nonnull(strstr(out, "injected failure of FTL allocation 336"));
+    now = femu_fdp_state(qts, "sub");
+    g_assert_cmpstr(now, ==, fresh);
+    g_free(out);
+    g_free(now);
+
+    out = qtest_hmp(qts, "device_add femu,addr=5,id=ff,subsys=sub,"
+                    FEMU_FDP_REFUSE ",secs_per_pg=8,lba_index=3,"
+                    "romfile=/nonexistent/femu.rom");
+    g_assert_nonnull(strstr(out, "romfile"));
+    now = femu_fdp_state(qts, "sub");
+    g_assert_cmpstr(now, ==, fresh);
+    g_free(out);
+    g_free(now);
+
+    /*
+     * A 64 KiB block: the 32 KiB unit of the refused line cannot hold one,
+     * the 512 KiB unit of this line can.
+     */
+    for (int c = 0; c < 2; c++) {
+        out = qtest_hmp(qts, "device_add femu,addr=%d,id=f%d,subsys=%s,"
+                        FEMU_FDP_REFUSE ",secs_per_pg=128,nlbaf=8,"
+                        "lba_index=7", 5 + c, c, c ? "ctl" : "sub");
+        if (*out) {
+            g_test_message("%s: %s", c ? "ctl" : "sub", out);
+            g_assert_not_reached();
+        }
+        g_free(out);
+        out = NULL;
+    }
+    now = femu_fdp_state(qts, "sub");
+    g_free(control);
+    control = femu_fdp_state(qts, "ctl");
+    g_assert_cmpstr(now, ==, control);
+    g_assert_cmpstr(now, !=, fresh);
+    qtest_quit(qts);
+}
+
+/* the bytes of one FTL owner in each category */
+static void femu_mem_ftl_bytes(const char *opts, uint64_t out[3])
+{
+    QTestState *qts = qtest_initf("-machine pc -nodefaults "
+                                  "-device femu,addr=5,id=mem,%s", opts);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-memory'}");
+    const QListEntry *e;
+    uint32_t nr = 0;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(qdict_get_qdict(rsp, "return"),
+                                        "owners"), e) {
+        QDict *o = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (!strcmp(qdict_get_str(o, "kind"), "ftl")) {
+            out[0] = qdict_get_int(o, "mapping");
+            out[1] = qdict_get_int(o, "media");
+            out[2] = qdict_get_int(o, "other");
+            nr++;
+        }
+    }
+    g_assert_cmpuint(nr, ==, 1);
+    qobject_unref(rsp);
+    qtest_quit(qts);
+}
+
+/*
+ * The optional parts of an FTL, each against the same FTL without it, on
+ * the 4-LUN geometry above (384 pages, 49 logical blocks with the one past
+ * the end). The slot structs are 24 bytes: two uint64_t and their bools,
+ * padded. A hash entry is an int32_t. Sizes are for x86-64.
+ */
+static void femu_test_memory_parts(void *obj, void *data,
+                                   QGuestAllocator *unused)
+{
+    static const struct {
+        const char *base;
+        const char *with;
+        uint64_t add[3];        /* mapping, media, other */
+        const char *geo;        /* NULL: FEMU_MEM_FTL */
+    } cases[] = {
+        /* read cache of 1 MiB: 256 slots and a hash of 513 */
+        { "", ",read_cache_mb=1", { 0, 0, 256 * 24 + 513 * 4 } },
+        /* RAIN over 4 dies: 4 failure ids and a 4 x 3 rank matrix */
+        { "", ",rain_parity=1", { 0, 4 * 4 + 4 * 3 * 4, 0 } },
+        /* a durable slot per buffer page */
+        { ",buffer_size=16,power_loss=on",
+          ",buffer_size=16,power_loss=on,durable_at_done=on",
+          { 0, 0, 16 * 8 } },
+        /*
+         * DFTL with a 1 MiB cache: 256 slots and a hash of 513, and one
+         * translation page of 512 LPNs (32 bytes and two one-word bitmaps)
+         */
+        { "", ",mapping=dftl,mapping_cache_mb=1",
+          { 256 * 24 + 513 * 4 + 32 + 2 * 8, 0, 0 }, FEMU_MEM_FTL13 },
+        /* hybrid: 80-byte state, 16 logs of 24 bytes, 49 blocks of 12 */
+        { "", ",mapping=hybrid", { 80 + 16 * 24 + 49 * 12, 0, 0 } },
+        /* FAST: 96-byte state, 49 dirty flags, 4096 dirty block ids */
+        { "", ",mapping=fast", { 96 + 49 + 4096 * 8, 0, 0 } },
+        /* a 32-byte statistics entry per die */
+        { "", ",die_stats=on", { 0, 4 * 32, 0 } },
+        /* two namespace slices of one shared FTL: an offset, 3 counters */
+        { "", ",namespaces=2,shared_ftl=on", { 0, 0, 2 * 32 } },
+    };
+
+    for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+        const char *geo = cases[i].geo ?: FEMU_MEM_FTL;
+        g_autofree char *a = g_strdup_printf("%s%s", geo, cases[i].base);
+        g_autofree char *b = g_strdup_printf("%s%s", geo, cases[i].with);
+        uint64_t without[3];
+        uint64_t with[3];
+
+        femu_mem_ftl_bytes(a, without);
+        femu_mem_ftl_bytes(b, with);
+        for (int c = 0; c < 3; c++) {
+            g_test_message("%s: category %d %" PRIu64 " -> %" PRIu64,
+                           cases[i].with, c, without[c], with[c]);
+            g_assert_cmpuint(with[c] - without[c], ==, cases[i].add[c]);
+        }
+    }
+}
 
 static void femu_test_memory_ftl(void *obj, void *data,
                                  QGuestAllocator *unused)
@@ -44457,8 +44905,9 @@ static void femu_test_memory_ftl(void *obj, void *data,
             "csd_slm_size=4,csd_cp=on%s",
             fdp ? "-device femu-subsys,id=memsub,nqn=memsub,fdp=on,"
                   "fdp.nruh=4" : "",
-            fdp ? ",subsys=memsub,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
-                  "blks_per_pl=80,pls_per_lun=1,luns_per_ch=4,nchs=4" : "");
+            fdp ? ",subsys=memsub,devsz_mb=32,secsz=512,secs_per_pg=8,"
+                  "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,"
+                  "luns_per_ch=4,nchs=4" : "");
         QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-memory'}");
         QDict *ret = qdict_get_qdict(rsp, "return");
         const char *d = "/machine/peripheral/mem";
@@ -57597,9 +58046,14 @@ static void femu_test_fdp_ns_refused(void *obj, void *data,
           "a reclaim group must hold every namespace" },
         { "'devsz_mb':1,'femu_mode':4,'fdm_size':1,'subsys':'fdpsub-rg2'",
           "needs a logical block of whole NAND pages" },
-        /* four groups of one die: 16 KiB units hold no 32 KiB block */
+        /*
+         * four groups of one die: 16 KiB units hold no 32 KiB block. The
+         * namespace check sizes the unit from this geometry, so it refuses
+         * before the bbssd check.
+         */
         { "'devsz_mb':1,'femu_mode':1,'nlbaf':7,'lba_index':6,"
-          "'subsys':'fdpsub-rg4'", "must hold a logical block" },
+          "'subsys':'fdpsub-rg4'", "fdp.runs (16384) is smaller than a "
+          "logical block of namespace 1 (32768 bytes)" },
     };
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -65029,6 +65483,19 @@ static void femu_register_nodes(void)
     qos_add_test("kv-no-backend", "femu", femu_test_kv_no_backend, NULL);
     qos_add_test("memory", "femu", femu_test_memory, NULL);
     qos_add_test("memory-ftl", "femu", femu_test_memory_ftl, NULL);
+    qos_add_test("memory-parts", "femu", femu_test_memory_parts, NULL);
+    qos_add_test("memory-kv-lsm", "femu", femu_test_memory_kv_lsm, NULL);
+    qos_add_test("ftl-fail-sweep", "femu", femu_test_ftl_fail_sweep, NULL);
+    qos_add_test("fdp-refused-restores", "femu",
+                 femu_test_fdp_refused_restores, NULL);
+    qos_add_test("geometry-big", "femu", femu_test_geometry_big,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=big,femu_mode=1,devsz_mb=64,secsz=512,secs_per_pg=256,"
+            "pgs_per_blk=1024,blks_per_pl=256,pls_per_lun=1,luns_per_ch=4,"
+            "nchs=8"
+    });
+    qos_add_test("geometry-limits", "femu", femu_test_geometry_limits, NULL);
     qos_add_test("multiplane-warnings", "femu", femu_test_multiplane_warnings,
                  NULL);
     qos_add_test("cxl-geometry-bounds", "femu", femu_test_cxl_geometry_bounds,
@@ -65096,6 +65563,8 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("cxl-slot-reservation", "femu",
                  femu_test_cxl_slot_reservation, NULL);
+    qos_add_test("cxl-ftl-fail-sweep", "femu", femu_test_cxl_ftl_fail_sweep,
+                 NULL);
     qos_add_test("cxl-realize-retry", "femu", femu_test_cxl_realize_retry,
                  NULL);
     qos_add_test("cxl-bg-reset-unplug", "femu", femu_test_cxl_bg_unplug,

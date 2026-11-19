@@ -2025,7 +2025,8 @@ static uint64_t ssd_stream_write_lpns(FemuCtrl *n, struct ssd *ssd,
     }
 
     if (end_lpn >= spp->tt_pgs) {
-        ftl_err("write past device geometry: end_lpn=%" PRIu64 " tt_pgs=%d\n",
+        ftl_err("write past device geometry: end_lpn=%" PRIu64 " tt_pgs=%"
+                PRId64 "\n",
                 end_lpn, spp->tt_pgs);
         req->status = NVME_LBA_RANGE | NVME_DNR;
         return 0;
@@ -2251,7 +2252,8 @@ static uint64_t fdp_buffered_write(struct ssd *ssd, NvmeRequest *req)
     ssd_count_partial_pages(ssd, req, req->slba, req->nlb);
     fdp_place(ssd, req, &rgid, &ruhid);
     if (end_lpn >= spp->tt_pgs) {
-        ftl_err("write past device geometry: end_lpn=%" PRIu64 " tt_pgs=%d\n",
+        ftl_err("write past device geometry: end_lpn=%" PRIu64 " tt_pgs=%"
+                PRId64 "\n",
                 end_lpn, spp->tt_pgs);
         req->status = NVME_LBA_RANGE | NVME_DNR;
         return 0;
@@ -2531,7 +2533,7 @@ uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req, uint64_t slba,
 /*
  * femu_fdp_init_ru_mgmt - initialize RU management for a reclaim group
  */
-static void femu_fdp_init_ru_mgmt(struct ssd *ssd, FemuReclaimGroup *rg)
+static bool femu_fdp_init_ru_mgmt(struct ssd *ssd, FemuReclaimGroup *rg)
 {
     struct ru_mgmt *rm = rg->ru_mgmt;
 
@@ -2547,14 +2549,19 @@ static void femu_fdp_init_ru_mgmt(struct ssd *ssd, FemuReclaimGroup *rg)
     QTAILQ_INIT(&rm->slc_free_list);
     QTAILQ_INIT(&rm->slc_closed_list);
 
-    rm->victim_ru_pq = pqueue_init(rm->tt_rus, victim_ru_cmp_pri,
-                                   victim_ru_get_pri, victim_ru_set_pri,
-                                   victim_ru_get_pos, victim_ru_set_pos);
-
-    rm->victim_ru_cb = pqueue_init(rm->tt_rus, victim_ru_cmp_pri_by_cb,
-                                   victim_ru_get_pri_by_cb,
-                                   victim_ru_set_pri_by_cb,
-                                   victim_ru_get_pos, victim_ru_set_pos);
+    rm->victim_ru_pq = ssd_pqueue_new(ssd, rm->tt_rus, victim_ru_cmp_pri,
+                                      victim_ru_get_pri, victim_ru_set_pri,
+                                      victim_ru_get_pos, victim_ru_set_pos,
+                                      "FDP victim heap");
+    if (!rm->victim_ru_pq) {
+        return false;
+    }
+    rm->victim_ru_cb = ssd_pqueue_new(ssd, rm->tt_rus, victim_ru_cmp_pri_by_cb,
+                                      victim_ru_get_pri_by_cb,
+                                      victim_ru_set_pri_by_cb,
+                                      victim_ru_get_pos, victim_ru_set_pos,
+                                      "FDP cost-benefit heap");
+    return rm->victim_ru_cb != NULL;
 }
 
 /*
@@ -2563,7 +2570,7 @@ static void femu_fdp_init_ru_mgmt(struct ssd *ssd, FemuReclaimGroup *rg)
  * it takes the lines of its group with the block ids in @ids: one block of
  * each plane of each die of the group.
  */
-static void femu_fdp_init_ssd_reclaim_unit(struct ssd *ssd,
+static bool femu_fdp_init_ssd_reclaim_unit(struct ssd *ssd,
                                            FemuReclaimUnit *femu_ru,
                                            int rgidx, int index,
                                            const int *ids)
@@ -2577,12 +2584,19 @@ static void femu_fdp_init_ssd_reclaim_unit(struct ssd *ssd,
     femu_ru->ipc = 0;
     femu_ru->pos = 0;
     femu_ru->ruh_pos = 0;     /* not yet in any victim pqueue */
-    femu_ru->ssd_wptr = g_malloc0(sizeof(struct write_pointer));
     femu_ru->blk_pgs = spp->pgs_per_blk;
     femu_ru->npages = spp->lines_per_ru * (spp->pgs_per_line / ssd->nrg);
+    femu_ru->ssd_wptr = ssd_try_alloc(ssd, 1, sizeof(struct write_pointer),
+                                      "FDP unit write pointer");
+    femu_ru->lines = femu_ru->ssd_wptr ?
+                     ssd_try_alloc(ssd, femu_ru->n_lines,
+                                   sizeof(struct line *),
+                                   "FDP unit lines") : NULL;
+    if (!femu_ru->lines) {
+        return false;
+    }
 
     wpp = femu_ru->ssd_wptr;
-    femu_ru->lines = g_malloc0(femu_ru->n_lines * sizeof(struct line *));
     for (int i = 0; i < femu_ru->n_lines; i++) {
         if (ssd->rg_lines) {
             femu_ru->lines[i] = &ssd->rg_lines[rgidx * spp->blks_per_pl +
@@ -2604,6 +2618,7 @@ static void femu_fdp_init_ssd_reclaim_unit(struct ssd *ssd,
     wpp->lun0 = rg->lun0;
     wpp->nlun = rg->nlun;
     ssd_wp_reset(wpp, femu_ru->lines[0]);
+    return true;
 }
 
 /*
@@ -2709,7 +2724,7 @@ void fdp_slc_tick(struct ssd *ssd)
     }
 }
 
-void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
+bool femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
 {
     NvmeSubsystem *subsys = n->subsys;
     struct ssdparams *spp = &ssd->sp;
@@ -2721,9 +2736,16 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
 
     ftl_assert(tt_nru > 0);
 
-    ssd->rg = g_malloc0(rgs * sizeof(FemuReclaimGroup));
+    ssd->rg = ssd_try_alloc(ssd, rgs, sizeof(FemuReclaimGroup),
+                            "FDP reclaim groups");
+    ssd->rus = ssd->rg ?
+               ssd_try_alloc(ssd, rgs, sizeof(FemuReclaimUnit *),
+                             "FDP unit arrays") : NULL;
+    if (!ssd->rus) {
+        return false;
+    }
+    /* the free path walks nrg groups, so set it once both arrays exist */
     ssd->nrg = rgs;
-    ssd->rus = g_malloc0(rgs * sizeof(FemuReclaimUnit *));
     ssd->rg_dies = spp->nchs * spp->luns_per_ch / rgs;
 
     for (int i = 0; i < (int)rgs; i++) {
@@ -2731,10 +2753,15 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
         rg->rgidx = i;
         rg->tt_nru = tt_nru;
         femu_fdp_rg_window(spp, rgs, i, rg);
-        ssd->rus[i] = g_malloc0(tt_nru * sizeof(FemuReclaimUnit));
+        ssd->rus[i] = ssd_try_alloc(ssd, tt_nru, sizeof(FemuReclaimUnit),
+                                    "FDP reclaim units");
         rg->rus = ssd->rus[i];
-        rg->ru_mgmt = g_malloc0(sizeof(struct ru_mgmt));
-        femu_fdp_init_ru_mgmt(ssd, rg);
+        rg->ru_mgmt = rg->rus ?
+                      ssd_try_alloc(ssd, 1, sizeof(struct ru_mgmt),
+                                    "FDP unit manager") : NULL;
+        if (!rg->ru_mgmt || !femu_fdp_init_ru_mgmt(ssd, rg)) {
+            return false;
+        }
         fdp_log("Allocated %lu RUs to rg[%d]\n", tt_nru, i);
     }
 
@@ -2744,7 +2771,11 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
      * group gets a line of its own for each id.
      */
     if (rgs > 1) {
-        ids = g_new(int, tt_nru * spp->lines_per_ru);
+        ids = ssd_try_alloc(ssd, tt_nru * spp->lines_per_ru, sizeof(int),
+                            "FDP block ids");
+        if (!ids) {
+            return false;
+        }
         for (uint64_t j = 0; j < tt_nru * spp->lines_per_ru; j++) {
             struct line *l = get_next_free_line(ssd);
 
@@ -2754,7 +2785,11 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
             }
             ids[j] = l->id;
         }
-        ssd->rg_lines = g_new0(struct line, rgs * spp->blks_per_pl);
+        ssd->rg_lines = ssd_try_alloc(ssd, rgs * spp->blks_per_pl,
+                                      sizeof(struct line), "FDP group lines");
+        if (!ssd->rg_lines) {
+            return false;
+        }
         for (uint64_t g = 0; g < rgs; g++) {
             for (int b = 0; b < spp->blks_per_pl; b++) {
                 ssd->rg_lines[g * spp->blks_per_pl + b].id = b;
@@ -2773,7 +2808,10 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
                 rg->rus[j].rgidx = i;
                 rg->rus[j].nvme_ru = &russ[i][j];
                 rg->rus[j].ruidx = j;
-                femu_fdp_init_ssd_reclaim_unit(ssd, &rg->rus[j], i, j, ids);
+                if (!femu_fdp_init_ssd_reclaim_unit(ssd, &rg->rus[j], i, j,
+                                                    ids)) {
+                    return false;
+                }
                 QTAILQ_INSERT_TAIL(&rg->ru_mgmt->free_ru_list,
                                    &rg->rus[j], entry);
                 rg->ru_mgmt->free_ru_cnt++;
@@ -2801,6 +2839,7 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
                     rg->ru_mgmt->mgmt_type);
         }
     }
+    return true;
 }
 
 /*
@@ -2808,8 +2847,12 @@ void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
  * handle of the endurance group, in ID order. The handles belong to the
  * group, not to a namespace: a namespace's list may name any subset of them,
  * and a handle no list names still holds its units.
+ *
+ * Allocates only, and writes nothing of the subsystem: a build that fails
+ * here leaves the subsystem as it was. femu_fdp_ssd_publish() then gives
+ * each handle its active units.
  */
-void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
+bool femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
 {
     NvmeNamespace *ns = &n->namespaces[0];
     uint64_t bits;
@@ -2817,7 +2860,11 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
     NvmeEnduranceGroup *endgrp = &subsys->endgrp;
     uint16_t nruh = subsys->params.fdp.nruh;
 
-    ssd->ruhs = g_malloc0(nruh * sizeof(FemuRuHandle));
+    ssd->ruhs = ssd_try_alloc(ssd, nruh, sizeof(FemuRuHandle),
+                              "FDP handles");
+    if (!ssd->ruhs) {
+        return false;
+    }
     ssd->nruhs = nruh;
     /*
      * The bitmap covers the FTL space up to the end of the last namespace,
@@ -2831,7 +2878,12 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
     if (!(((uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg) %
           (1 << FDP_WRITTEN_SHIFT)) && bits <= LONG_MAX) {
         ssd->fdp_written_bits = bits;
-        ssd->fdp_written = bitmap_new(bits);
+        ssd->fdp_written = ssd_try_alloc(ssd, BITS_TO_LONGS(bits),
+                                         sizeof(unsigned long),
+                                         "FDP written bitmap");
+        if (!ssd->fdp_written) {
+            return false;
+        }
     }
 
     for (uint16_t i = 0; i < nruh; i++) {
@@ -2848,7 +2900,12 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
 
         /* PI type RUHs get their own victim queue in each group */
         if (nvme_ruh->ruht == NVME_RUHT_PERSISTENTLY_ISOLATED) {
-            ssd->ruhs[i].ru_mgmt = g_new0(struct ru_mgmt, endgrp->fdp.nrg);
+            ssd->ruhs[i].ru_mgmt = ssd_try_alloc(ssd, endgrp->fdp.nrg,
+                                                 sizeof(struct ru_mgmt),
+                                                 "FDP handle managers");
+            if (!ssd->ruhs[i].ru_mgmt) {
+                return false;
+            }
             for (int j = 0; j < (int)endgrp->fdp.nrg; j++) {
                 struct ru_mgmt *hm = &ssd->ruhs[i].ru_mgmt[j];
 
@@ -2861,15 +2918,44 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
                  * so they do not alias the per-RG queue's pos (issue #189).
                  */
                 hm->victim_ru_pq =
-                    pqueue_init(ssd->rg[j].tt_nru, victim_ru_cmp_pri,
-                                victim_ru_get_pri, victim_ru_set_pri,
-                                victim_ru_get_pos_ruh, victim_ru_set_pos_ruh);
+                    ssd_pqueue_new(ssd, ssd->rg[j].tt_nru, victim_ru_cmp_pri,
+                                   victim_ru_get_pri, victim_ru_set_pri,
+                                   victim_ru_get_pos_ruh,
+                                   victim_ru_set_pos_ruh,
+                                   "FDP handle victim heap");
+                if (!hm->victim_ru_pq) {
+                    return false;
+                }
             }
         }
 
         /* an active unit in each group; collection units come on demand */
-        ssd->ruhs[i].rus = g_new0(FemuReclaimUnit *, endgrp->fdp.nrg);
-        ssd->ruhs[i].gc_rus = g_new0(FemuReclaimUnit *, endgrp->fdp.nrg);
+        ssd->ruhs[i].rus = ssd_try_alloc(ssd, endgrp->fdp.nrg,
+                                         sizeof(FemuReclaimUnit *),
+                                         "FDP active units");
+        ssd->ruhs[i].gc_rus = ssd->ruhs[i].rus ?
+                              ssd_try_alloc(ssd, endgrp->fdp.nrg,
+                                            sizeof(FemuReclaimUnit *),
+                                            "FDP collection units") : NULL;
+        if (!ssd->ruhs[i].gc_rus) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * femu_fdp_ssd_publish - give each handle an active unit in each group
+ *
+ * Writes the subsystem: the active unit of each handle and the writable
+ * space of that unit. Allocates nothing, so it runs once the whole FTL is
+ * built, and femu_fdp_ssd_free() points the handles back only after it.
+ */
+void femu_fdp_ssd_publish(FemuCtrl *n, struct ssd *ssd)
+{
+    NvmeEnduranceGroup *endgrp = &n->subsys->endgrp;
+
+    for (uint16_t i = 0; i < ssd->nruhs; i++) {
         for (int j = 0; j < (int)endgrp->fdp.nrg; j++) {
             ssd->ruhs[i].rus[j] = fdp_get_new_ru(ssd, j, i, true);
             ssd->ruhs[i].rus[j]->ruh = &ssd->ruhs[i];
@@ -2880,6 +2966,7 @@ void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd)
                 i, ssd->ruhs[i].ruh_type, ssd->ruhs[i].rus[0]->ruidx,
                 ssd->ruhs[i].rus[0]->lines[0]->id);
     }
+    ssd->fdp_published = true;
 }
 
 /*
@@ -2964,7 +3051,7 @@ static void ssd_reset_maptbl(struct ssd *ssd)
 {
     struct ssdparams *spp = &ssd->sp;
 
-    for (int i = 0; i < spp->tt_pgs; i++) {
+    for (uint64_t i = 0; i < spp->tt_pgs; i++) {
         ssd->maptbl[i].ppa = UNMAPPED_PPA;
         ssd->rmap[i] = INVALID_LPN;
     }
@@ -2978,12 +3065,13 @@ static void ssd_reset_maptbl(struct ssd *ssd)
  * the reclaim unit's valid/invalid counts and victim state stay right, then
  * unmap. Shared by DSM Deallocate and Write Zeroes with the Deallocate bit.
  */
-static int ssd_deallocate_fdp_lpns(struct ssd *ssd, uint64_t start_lpn,
-                                   uint64_t end_lpn, int *already_invalid)
+static uint64_t ssd_deallocate_fdp_lpns(struct ssd *ssd, uint64_t start_lpn,
+                                        uint64_t end_lpn,
+                                        uint64_t *already_invalid)
 {
     uint64_t per = ((uint64_t)ssd->sp.secsz * ssd->sp.secs_per_pg) >>
                    FDP_WRITTEN_SHIFT;
-    int deallocated = 0;
+    uint64_t deallocated = 0;
     uint64_t lpn;
 
     for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
@@ -3029,7 +3117,7 @@ void ssd_deallocate_fdp_ns(struct ssd *ssd, NvmeNamespace *ns)
     uint64_t base = ssd_ns_byte_base(ssd, ns);
     uint64_t last = MIN(DIV_ROUND_UP(base + ns->size, pg),
                         (uint64_t)ssd->sp.tt_pgs);
-    int already_invalid = 0;
+    uint64_t already_invalid = 0;
 
     if (last > base / pg) {
         ssd_deallocate_fdp_lpns(ssd, base / pg, last - 1, &already_invalid);
@@ -3055,9 +3143,8 @@ static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
     struct ssdparams *spp = &ssd->sp;
     NvmeDsmRange *ranges = req->dsm_ranges;
     int nr_ranges = req->dsm_nr_ranges;
-    /* read only by the ftl_debug() below, which FEMU_DEBUG_FTL turns on */
-    G_GNUC_UNUSED int total_trimmed_pages = 0;
-    int total_already_invalid = 0;
+    uint64_t total_trimmed_pages = 0;
+    uint64_t total_already_invalid = 0;
 
     if (!ranges || nr_ranges <= 0) {
         return;
@@ -3076,8 +3163,8 @@ static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
             continue;
         }
         if (end_lpn >= spp->tt_pgs) {
-            ftl_err("FDP TRIM: range %d exceeds capacity (end_lpn=%lu "
-                    "tt_pgs=%d)\n", range_idx, end_lpn, spp->tt_pgs);
+            ftl_err("FDP TRIM: range %d exceeds capacity (end_lpn=%" PRIu64 " "
+                    "tt_pgs=%" PRId64 ")\n", range_idx, end_lpn, spp->tt_pgs);
             continue;
         }
 
@@ -3085,7 +3172,8 @@ static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
                                                       &total_already_invalid);
     }
 
-    ftl_debug("FDP TRIM: %d pages trimmed, %d already invalid across %d ranges\n",
+    ftl_debug("FDP TRIM: %" PRIu64 " pages trimmed, %" PRIu64
+              " already invalid across %d ranges\n",
               total_trimmed_pages, total_already_invalid, nr_ranges);
 }
 
@@ -3100,7 +3188,7 @@ uint64_t ssd_write_zeroes_fdp_style(FemuCtrl *n, NvmeRequest *req)
     struct ssdparams *spp = &ssd->sp;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
     uint64_t start_lpn, end_lpn;
-    int already_invalid = 0;
+    uint64_t already_invalid = 0;
 
     ssd_lpn_range(ssd, req, le64_to_cpu(rw->slba), le16_to_cpu(rw->nlb) + 1,
                   &start_lpn, &end_lpn);
@@ -3634,9 +3722,11 @@ void femu_fdp_ssd_free(struct ssd *ssd)
             /*
              * The subsystem's handle outlives this FTL. Point it back at the
              * unit it had before the FTL took it over, not at the stand-in
-             * for no unit, which goes with ssd->ruhs.
+             * for no unit, which goes with ssd->ruhs. A build that failed
+             * never pointed it here.
              */
-            for (uint64_t g = 0; nruh && g < ssd->nrg; g++) {
+            for (uint64_t g = 0; ssd->fdp_published && nruh && g < ssd->nrg;
+                 g++) {
                 nruh->rus[g] = &ssd->n->subsys->endgrp.fdp.rus[g][i];
             }
 
@@ -3651,6 +3741,7 @@ void femu_fdp_ssd_free(struct ssd *ssd)
         ssd->ruhs = NULL;
         ssd->nruhs = 0;
     }
+    ssd->fdp_published = false;
 
     if (ssd->rg) {
         for (i = 0; i < ssd->nrg; i++) {

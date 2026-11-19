@@ -2285,8 +2285,9 @@ static void zns_init_params(FemuCtrl *n, NvmeNamespace *ns)
     /* init the mapping table */
     id_zns->l2p_sz = ns->size/LOGICAL_PAGE_SIZE;
     id_zns->maptbl = g_malloc0(sizeof(struct ppa) * id_zns->l2p_sz);
-    for (i = 0; i < id_zns->l2p_sz; i++) {
-        id_zns->maptbl[i].ppa = UNMAPPED_PPA;
+    /* the table can pass 2^31 entries: a 64-bit index */
+    for (uint64_t lpn = 0; lpn < id_zns->l2p_sz; lpn++) {
+        id_zns->maptbl[lpn].ppa = UNMAPPED_PPA;
     }
 
     /* init the SRAM */

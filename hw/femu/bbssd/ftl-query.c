@@ -323,6 +323,9 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->page_size = ssd_page_size(ssd);
     q->pgs_per_line = spp->pgs_per_line;
     q->tt_lines = lm->tt_lines;
+    q->tt_secs = spp->tt_secs;
+    q->tt_pgs = spp->tt_pgs;
+    q->tt_blks = spp->tt_blks;
 
     q->host_pages = ssd->host_write_pages;
     q->nand_pages = ssd->nand_write_pages;

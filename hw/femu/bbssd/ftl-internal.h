@@ -3,6 +3,7 @@
 
 #include "ftl.h"
 #include "ftl-tier.h"
+#include "ftl-index.h"
 
 /* geometry / validity / resource accessors -- hot-path inlines */
 static inline void check_addr(int a, int max)
@@ -340,16 +341,34 @@ static inline bool rmap_is_tp(uint64_t owner)
     return owner != INVALID_LPN && (owner & TP_RMAP_TAG);
 }
 
+/* a part of the FTL now holds @bytes of @cat, in place of what it held */
+static inline void ssd_mem_hold(struct ssd *ssd, uint64_t *held,
+                                FemuMemCat cat, uint64_t bytes)
+{
+    femu_mem_resize(&ssd->mem, cat, *held, bytes);
+    *held = bytes;
+}
+
+bool ssd_alloc_refused(struct ssd *ssd, const char *what, uint64_t bytes);
+void *ssd_try_alloc(struct ssd *ssd, uint64_t nmemb, size_t size,
+                    const char *what);
+void *ssd_alloc(struct ssd *ssd, FemuMemCat cat, uint64_t nmemb, size_t size,
+                const char *what);
+void ssd_release(struct ssd *ssd, FemuMemCat cat, void *p, uint64_t nmemb,
+                 size_t size);
+pqueue_t *ssd_pqueue_new(struct ssd *ssd, size_t n, pqueue_cmp_pri_f cmppri,
+                         pqueue_get_pri_f getpri, pqueue_set_pri_f setpri,
+                         pqueue_get_pos_f getpos, pqueue_set_pos_f setpos,
+                         const char *what);
+
 static inline uint64_t ppa2pgidx(struct ssd *ssd, struct ppa *ppa)
 {
     struct ssdparams *spp = &ssd->sp;
     uint64_t pgidx;
 
-    pgidx = ppa->g.ch  * spp->pgs_per_ch  + \
-            ppa->g.lun * spp->pgs_per_lun + \
-            ppa->g.pl  * spp->pgs_per_pl  + \
-            ppa->g.blk * spp->pgs_per_blk + \
-            ppa->g.pg;
+    pgidx = ftl_page_index(ppa->g.ch, ppa->g.lun, ppa->g.pl, ppa->g.blk,
+                           ppa->g.pg, spp->pgs_per_ch, spp->pgs_per_lun,
+                           spp->pgs_per_pl, spp->pgs_per_blk);
 
     ftl_assert(pgidx < spp->tt_pgs);
 
@@ -373,17 +392,16 @@ static inline void set_rmap_ent(struct ssd *ssd, uint64_t lpn, struct ppa *ppa)
 
 /* geometry setup (hw/femu/bbssd/ftl-geom.c) */
 void ssd_init_params(struct ssdparams *spp, FemuCtrl *n);
-void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp,
-                 FemuMemAcct *mem);
+bool ssd_init_ch(struct ssd *ssd, struct ssd_channel *ch);
 
 /* page mapping table init + mapping-scheme registry (hw/femu/bbssd/ftl-map.c) */
-void ssd_init_maptbl(struct ssd *ssd);
-void ssd_init_rmap(struct ssd *ssd);
+bool ssd_init_maptbl(struct ssd *ssd);
+bool ssd_init_rmap(struct ssd *ssd);
 const struct femu_mapping_ops *femu_mapping_scheme_lookup(const char *name);
 bool femu_mapping_scheme_uses_cmt(const struct femu_mapping_ops *ops);
 
 /* DFTL cached mapping table cost model (hw/femu/bbssd/ftl-map-cmt.c) */
-void cmt_init(struct ssd *ssd, uint32_t cache_mb);
+bool cmt_init(struct ssd *ssd, uint32_t cache_mb);
 uint64_t cmt_touch(struct ssd *ssd, uint64_t lpn, uint64_t stime, bool is_write);
 uint64_t cmt_access(struct ssd *ssd, uint64_t lpn, uint64_t stime,
                     bool is_write);
@@ -391,7 +409,7 @@ int32_t cmt_slot_of(struct ssd *ssd, uint64_t tp);
 void cmt_drop_all(struct ssd *ssd);
 
 /* translation pages on flash (hw/femu/bbssd/ftl-map-tp.c) */
-void tp_init(struct ssd *ssd);
+bool tp_init(struct ssd *ssd);
 void tp_free(struct ssd *ssd);
 bool tp_program(struct ssd *ssd, uint64_t tp, bool reserve, uint64_t stime,
                 bool timed, uint64_t *done);
@@ -454,7 +472,7 @@ static inline bool fdp_rg_short(struct ssd *ssd, uint16_t g)
 
 /* line management + garbage collection (hw/femu/bbssd/ftl-line-gc.c) */
 struct line *get_next_free_line(struct ssd *ssd);
-void ssd_init_lines(struct ssd *ssd);
+bool ssd_init_lines(struct ssd *ssd);
 void ssd_init_write_pointer(struct ssd *ssd);
 void ssd_init_write_buffer(struct ssd *ssd);
 struct ppa ssd_stream_page(struct ssd *ssd, unsigned slot, uint64_t tag);
@@ -656,14 +674,16 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req);
 void ssd_read_check_wear(struct ssd *ssd, struct ppa *ppa, uint64_t stime);
 
 /* optional DRAM read cache (hw/femu/bbssd/ftl-cache.c) */
-void rcache_init(struct ssd *ssd, uint32_t read_cache_mb, uint32_t evict_policy);
+bool rcache_init(struct ssd *ssd, uint32_t read_cache_mb,
+                 uint32_t evict_policy);
 uint64_t rcache_touch(struct ssd *ssd, uint64_t lpn);
 void rcache_invalidate(struct ssd *ssd, uint64_t lpn);
 
 /* Flexible Data Placement (hw/femu/bbssd/ftl-fdp.c) */
 void ssd_init_fdp_params(struct ssdparams *spp, FemuCtrl *n);
-void femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd);
-void femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd);
+bool femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd);
+bool femu_fdp_ssd_init_ru_handles(FemuCtrl *n, struct ssd *ssd);
+void femu_fdp_ssd_publish(FemuCtrl *n, struct ssd *ssd);
 void femu_fdp_ssd_free(struct ssd *ssd);
 void femu_fdp_ssd_mem_charge(struct ssd *ssd);
 void rcache_destroy(struct ssd *ssd);

@@ -360,7 +360,7 @@ bool bb_tier_check_props(FemuCtrl *n, Error **errp)
  * hook stays inert.
  * Runs before the media layer, which takes the pSLC timing row from here.
  */
-void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
+bool ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
 {
     const BbCtrlParams *p = &n->bb_params;
     struct ssdparams *spp = &ssd->sp;
@@ -369,27 +369,43 @@ void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
 
     ssd->tier = NULL;
     if (!ftl_tier_on(p) || !ssd->ns || !NS_BBSSD(ssd->ns)) {
-        return;
+        return true;
     }
     /* FDP keeps its pSLC units in its reclaim groups: no line tier */
     if (n->subsys && n->subsys->params.fdp.enabled) {
-        return;
+        return true;
     }
     density = ftl_tier_density(n->nand_cell_type);
     if (!density) {
-        return;
+        return true;
     }
 
-    t = g_new0(struct ftl_tier, 1);
+    /* attached at once, so ftl_tier_free() finds the arrays of a failure */
+    t = ssd_try_alloc(ssd, 1, sizeof(*t), "tier");
+    if (!t) {
+        return false;
+    }
+    ssd->tier = t;
     t->mode = ftl_tier_dynamic(p) ? FTL_TIER_DYNAMIC : FTL_TIER_STATIC;
     t->policy = ftl_tier_through(p) ? FTL_TIER_THROUGH : FTL_TIER_DIRECT;
     t->density = density;
     t->blk_pgs = tier_blk_pgs(spp->pgs_per_blk, density);
     t->line_pgs = t->blk_pgs * spp->blks_per_line;
     t->nlines = (int)bb_tier_pool_lines(n);
-    t->state = g_new0(uint8_t, spp->tt_lines);
-    t->ready = g_new0(uint64_t, spp->tt_lines);
-    t->dyn = g_new0(uint8_t, spp->tt_lines);
+    t->state = ssd_try_alloc(ssd, spp->tt_lines, sizeof(uint8_t),
+                             "tier line states");
+    t->ready = t->state ?
+               ssd_try_alloc(ssd, spp->tt_lines, sizeof(uint64_t),
+                             "tier ready times") : NULL;
+    t->dyn = t->ready ?
+             ssd_try_alloc(ssd, spp->tt_lines, sizeof(uint8_t),
+                           "tier pool flags") : NULL;
+    t->slc_erases = t->dyn ?
+                    ssd_try_alloc(ssd, spp->tt_blks, sizeof(uint32_t),
+                                  "tier erase counts") : NULL;
+    if (!t->slc_erases) {
+        return false;
+    }
     /* a cap holds whole lines; with none, every line is the bound */
     t->dyn_max = p->tier_max_mb ?
                  tier_cap_lines(p->tier_max_mb,
@@ -398,13 +414,6 @@ void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
     t->shrink_pct = p->tier_shrink_pct;
     t->idle_ns = (uint64_t)p->tier_idle_ms * 1000000;
     t->lazy_pct = p->tier_lazy_pct;
-    if (t->idle_ns) {
-        n->tier_idle = true;
-    }
-    /* a buffer in front of the pool can leave it owing a fold */
-    if (p->buffer_size > 0) {
-        n->tier_upkeep = true;
-    }
     t->user_pgs = DIV_ROUND_UP(ssd->ns->size,
                                (uint64_t)p->secs_per_pg * p->secsz);
     /* dftl: the lines its translation pages take, as realize reserves */
@@ -414,11 +423,30 @@ void ftl_tier_init(struct ssd *ssd, FemuCtrl *n)
     t->read_ns = p->tier_pslc_read_ns;
     t->prog_ns = p->tier_pslc_prog_ns;
     t->erase_ns = p->tier_pslc_erase_ns;
-    t->slc_erases = g_new0(uint32_t, spp->tt_blks);
     t->dense_limit = ssd->rated_pe_cycles;
     t->slc_limit = tier_slc_limit(p->tier_pslc_pe_cycles,
                                   ssd->rated_pe_cycles);
-    ssd->tier = t;
+    ssd_mem_hold(ssd, &ssd->mem_held.tier, FEMU_MEM_MEDIA,
+                 sizeof(*t) + (2 * sizeof(uint8_t) + sizeof(uint64_t)) *
+                 spp->tt_lines + sizeof(uint32_t) * spp->tt_blks);
+    return true;
+}
+
+/* tell the controller what a whole tier needs of its idle work */
+void ftl_tier_publish(struct ssd *ssd, FemuCtrl *n)
+{
+    struct ftl_tier *t = ssd->tier;
+
+    if (!t) {
+        return;
+    }
+    if (t->idle_ns) {
+        n->tier_idle = true;
+    }
+    /* a buffer in front of the pool can leave it owing a fold */
+    if (n->bb_params.buffer_size > 0) {
+        n->tier_upkeep = true;
+    }
 }
 
 /**
@@ -454,6 +482,7 @@ void ftl_tier_free(struct ssd *ssd)
     if (!t) {
         return;
     }
+    ssd_mem_hold(ssd, &ssd->mem_held.tier, FEMU_MEM_MEDIA, 0);
     g_free(t->slc_erases);
     g_free(t->dyn);
     g_free(t->ready);

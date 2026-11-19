@@ -61,6 +61,9 @@ pqueue_t *pqueue_init(size_t n, pqueue_cmp_pri_f cmppri, pqueue_get_pri_f getpri
 
 void pqueue_free(pqueue_t *q)
 {
+    if (!q) {
+        return;
+    }
     free(q->d);
     free(q);
 }

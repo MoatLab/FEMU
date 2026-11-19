@@ -238,11 +238,9 @@ int bb_pd_wl_pages(FemuCtrl *n)
  * axis of zero or less divides by zero on the datapath -- an LBA becomes a page
  * by dividing by secs_per_pg -- or allocates an empty array the FTL still
  * indexes. Separately, an axis that fits its own PPA field can still overflow
- * the derived totals: those are held in int, and the sector count is the
- * product of every axis, so per-axis values that are each legal can push the
- * aggregate past INT_MAX and wrap negative. Compute the aggregate in 64-bit
- * here and reject it, rather than letting ssd_init() allocate from a wrapped
- * count.
+ * the counts of a line, of the blocks or of the bytes. Compute those in
+ * 64-bit here and reject them, rather than letting ssd_init() allocate from a
+ * wrapped count.
  */
 int bb_check_geometry(FemuCtrl *n, Error **errp)
 {
@@ -260,6 +258,9 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         { "luns_per_ch", p->luns_per_ch, 1 << LUN_BITS },
         { "nchs",        p->nchs,        1 << CH_BITS  },
     };
+    uint64_t line_pgs;
+    uint64_t tt_blks;
+    uint64_t pg_bytes;
     uint64_t tt_secs;
     int i;
 
@@ -557,13 +558,42 @@ int bb_check_geometry(FemuCtrl *n, Error **errp)
         return -1;
     }
 
-    tt_secs = (uint64_t)p->secs_per_pg * p->pgs_per_blk * p->blks_per_pl *
-              p->pls_per_lun * p->luns_per_ch * p->nchs;
-    if (tt_secs > INT_MAX) {
-        error_setg(errp, "FEMU bbssd: the geometry describes %" PRIu64 " sectors, "
-                   "which exceeds the %d the FTL can address; reduce one of "
-                   "secs_per_pg, pgs_per_blk, blks_per_pl, pls_per_lun, "
-                   "luns_per_ch or nchs", tt_secs, INT_MAX);
+    /*
+     * Device-wide counts are 64-bit. Each line, FDP unit and block id stays
+     * 32-bit, so a line, the block count and the page bytes have a limit.
+     * Each product below fits in 64 bits after the per-axis limits above.
+     */
+    line_pgs = (uint64_t)p->nchs * p->luns_per_ch * p->pls_per_lun *
+               p->pgs_per_blk;
+    tt_blks = (uint64_t)p->nchs * p->luns_per_ch * p->pls_per_lun *
+              p->blks_per_pl;
+    pg_bytes = (uint64_t)p->secsz * p->secs_per_pg;
+    tt_secs = line_pgs * p->secs_per_pg * p->blks_per_pl;
+    if (line_pgs * p->secs_per_pg > INT_MAX) {
+        error_setg(errp, "FEMU bbssd: a line has %" PRIu64 " sectors, more "
+                   "than %d; reduce secs_per_pg, pgs_per_blk, "
+                   "pls_per_lun, luns_per_ch or nchs, and raise blks_per_pl "
+                   "to keep the capacity",
+                   line_pgs * p->secs_per_pg, INT_MAX);
+        return -1;
+    }
+    if (tt_blks > INT_MAX) {
+        error_setg(errp, "FEMU bbssd: the geometry has %" PRIu64 " blocks, "
+                   "more than %d; reduce blks_per_pl, pls_per_lun, "
+                   "luns_per_ch or nchs, and raise pgs_per_blk to keep the "
+                   "capacity", tt_blks, INT_MAX);
+        return -1;
+    }
+    if (pg_bytes > FEMU_MAX_PAGE_BYTES) {
+        error_setg(errp, "FEMU bbssd: a page has %" PRIu64 " bytes, more "
+                   "than %d; reduce secsz or secs_per_pg", pg_bytes,
+                   FEMU_MAX_PAGE_BYTES);
+        return -1;
+    }
+    if (tt_secs > FEMU_MAX_NAND_BYTES / p->secsz) {
+        error_setg(errp, "FEMU bbssd: the geometry has more than %" PRIu64
+                   " bytes of NAND; reduce secsz or a geometry axis",
+                   FEMU_MAX_NAND_BYTES);
         return -1;
     }
 
@@ -695,19 +725,19 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
 
     /* calculated values */
     spp->secs_per_blk = spp->secs_per_pg * spp->pgs_per_blk;
-    spp->secs_per_pl = spp->secs_per_blk * spp->blks_per_pl;
+    spp->secs_per_pl = (int64_t)spp->secs_per_blk * spp->blks_per_pl;
     spp->secs_per_lun = spp->secs_per_pl * spp->pls_per_lun;
     spp->secs_per_ch = spp->secs_per_lun * spp->luns_per_ch;
     spp->tt_secs = spp->secs_per_ch * spp->nchs;
 
-    spp->pgs_per_pl = spp->pgs_per_blk * spp->blks_per_pl;
+    spp->pgs_per_pl = (int64_t)spp->pgs_per_blk * spp->blks_per_pl;
     spp->pgs_per_lun = spp->pgs_per_pl * spp->pls_per_lun;
     spp->pgs_per_ch = spp->pgs_per_lun * spp->luns_per_ch;
     spp->tt_pgs = spp->pgs_per_ch * spp->nchs;
 
     spp->blks_per_lun = spp->blks_per_pl * spp->pls_per_lun;
     spp->blks_per_ch = spp->blks_per_lun * spp->luns_per_ch;
-    spp->tt_blks = spp->blks_per_ch * spp->nchs;
+    spp->tt_blks = (int64_t)spp->blks_per_ch * spp->nchs;
 
     spp->pls_per_ch =  spp->pls_per_lun * spp->luns_per_ch;
     spp->tt_pls = spp->pls_per_ch * spp->nchs;
@@ -742,62 +772,78 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     check_params(spp);
 }
 
-static void ssd_init_nand_page(struct nand_page *pg, struct ssdparams *spp)
+static bool ssd_init_nand_blk(struct ssd *ssd, struct nand_block *blk)
 {
-    pg->status = PG_FREE;
-}
-
-static void ssd_init_nand_blk(struct nand_block *blk, struct ssdparams *spp,
-                              FemuMemAcct *mem)
-{
-    blk->npgs = spp->pgs_per_blk;
-    blk->pg = g_malloc0(sizeof(struct nand_page) * blk->npgs);
-    femu_mem_charge(mem, FEMU_MEM_MEDIA, sizeof(struct nand_page) * blk->npgs);
+    blk->npgs = ssd->sp.pgs_per_blk;
+    blk->pg = ssd_alloc(ssd, FEMU_MEM_MEDIA, blk->npgs,
+                        sizeof(struct nand_page), "NAND page states");
+    if (!blk->pg) {
+        return false;
+    }
     for (int i = 0; i < blk->npgs; i++) {
-        ssd_init_nand_page(&blk->pg[i], spp);
+        blk->pg[i].status = PG_FREE;
     }
     blk->ipc = 0;
     blk->vpc = 0;
     blk->erase_cnt = 0;
     blk->wp = 0;
+    return true;
 }
 
-static void ssd_init_nand_plane(struct nand_plane *pl, struct ssdparams *spp,
-                                FemuMemAcct *mem)
+static bool ssd_init_nand_plane(struct ssd *ssd, struct nand_plane *pl)
 {
-    pl->nblks = spp->blks_per_pl;
-    pl->blk = g_malloc0(sizeof(struct nand_block) * pl->nblks);
-    femu_mem_charge(mem, FEMU_MEM_MEDIA, sizeof(struct nand_block) * pl->nblks);
-    for (int i = 0; i < pl->nblks; i++) {
-        ssd_init_nand_blk(&pl->blk[i], spp, mem);
+    pl->nblks = ssd->sp.blks_per_pl;
+    pl->blk = ssd_alloc(ssd, FEMU_MEM_MEDIA, pl->nblks,
+                        sizeof(struct nand_block), "NAND blocks");
+    if (!pl->blk) {
+        return false;
     }
+    for (int i = 0; i < pl->nblks; i++) {
+        if (!ssd_init_nand_blk(ssd, &pl->blk[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
-static void ssd_init_nand_lun(struct nand_lun *lun, struct ssdparams *spp,
-                              FemuMemAcct *mem)
+static bool ssd_init_nand_lun(struct ssd *ssd, struct nand_lun *lun)
 {
-    lun->npls = spp->pls_per_lun;
-    lun->pl = g_malloc0(sizeof(struct nand_plane) * lun->npls);
-    femu_mem_charge(mem, FEMU_MEM_MEDIA, sizeof(struct nand_plane) * lun->npls);
+    lun->npls = ssd->sp.pls_per_lun;
+    lun->pl = ssd_alloc(ssd, FEMU_MEM_MEDIA, lun->npls,
+                        sizeof(struct nand_plane), "NAND planes");
+    if (!lun->pl) {
+        return false;
+    }
     for (int i = 0; i < lun->npls; i++) {
-        ssd_init_nand_plane(&lun->pl[i], spp, mem);
+        if (!ssd_init_nand_plane(ssd, &lun->pl[i])) {
+            return false;
+        }
     }
     lun->next_lun_avail_time = 0;
     lun->busy = false;
+    return true;
 }
 
-/* @mem: the owner that the NAND tree is charged to */
-void ssd_init_ch(struct ssd_channel *ch, struct ssdparams *spp,
-                 FemuMemAcct *mem)
+/*
+ * Build the NAND tree of one channel, charged to @ssd. On false a part is
+ * missing, and ssd_free_ch() frees the parts that exist.
+ */
+bool ssd_init_ch(struct ssd *ssd, struct ssd_channel *ch)
 {
-    ch->nluns = spp->luns_per_ch;
-    ch->lun = g_malloc0(sizeof(struct nand_lun) * ch->nluns);
-    femu_mem_charge(mem, FEMU_MEM_MEDIA, sizeof(struct nand_lun) * ch->nluns);
+    ch->nluns = ssd->sp.luns_per_ch;
+    ch->lun = ssd_alloc(ssd, FEMU_MEM_MEDIA, ch->nluns,
+                        sizeof(struct nand_lun), "NAND LUNs");
+    if (!ch->lun) {
+        return false;
+    }
     for (int i = 0; i < ch->nluns; i++) {
-        ssd_init_nand_lun(&ch->lun[i], spp, mem);
+        if (!ssd_init_nand_lun(ssd, &ch->lun[i])) {
+            return false;
+        }
     }
     ch->next_ch_avail_time = 0;
     ch->busy = 0;
+    return true;
 }
 
 /* release what ssd_init_ch() built, in the reverse order */
