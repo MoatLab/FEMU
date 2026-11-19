@@ -45011,14 +45011,22 @@ static void femu_test_kv_no_backend(void *obj, void *data,
         g_assert_cmpuint(qdict_get_int(rsp, "return"), ==,
                          femu_kv_backend_cases[i].backend);
         qobject_unref(rsp);
-        if (!femu_kv_backend_cases[i].backend) {
-            /* the sanitize fixtures need a backend and say so */
-            rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
-                            "'path':'/machine/peripheral/kvb',"
-                            "'property':'x-ns-test','value':'seed-sanitize'}}");
+        /*
+         * The sanitize fixtures need a backend and say so. A device with a
+         * backend takes the same command, so the error is not a missing
+         * property.
+         */
+        rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                        "'path':'/machine/peripheral/kvb',"
+                        "'property':'x-ns-test','value':'seed-sanitize'}}");
+        if (femu_kv_backend_cases[i].backend) {
+            g_assert_true(qdict_haskey(rsp, "return"));
+        } else {
             g_assert_true(qdict_haskey(rsp, "error"));
-            qobject_unref(rsp);
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                                    "error"), "desc"), "no data backend"));
         }
+        qobject_unref(rsp);
         qtest_quit(qts);
     }
 }
