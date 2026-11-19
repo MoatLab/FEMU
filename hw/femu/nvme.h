@@ -3066,6 +3066,8 @@ typedef struct FemuCtrl {
     Notifier        persist_notifier;
     bool            persist_active;  /* loaded; saves at unplug or exit */
     bool            persist_ftl;     /* the file holds the bbssd FTL too */
+    /* persist_file is a checkpoint: load it under a shared lock, never save */
+    bool            persist_load_only;
     char            *mode_name;      /* mode=NAME, resolved into femu_mode */
     /* io_trace: one CSV line per posted I/O completion (femu-iotrace.c) */
     char            *io_trace;

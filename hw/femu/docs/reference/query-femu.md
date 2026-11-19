@@ -697,9 +697,11 @@ resident size of the QEMU process to see what the guest touched.
 
 `femu-save-data` writes a checkpoint of a bbssd or NoSSD device while it
 runs. The file has the `persist_file` format: the data, each namespace's
-slice and LBA format, and the deallocated and uncorrectable blocks. A
-later run loads it with `-device femu,...,persist_file=FILE`. The FTL state
-is not in the file.
+slice and LBA format, the deallocated and uncorrectable blocks, and the LBA
+status information. With `persist_ftl=on` the file holds the FTL state too.
+A later run loads it with `-device femu,...,persist_file=FILE`. With
+`persist_load_only=on` that run never saves the file, so many runs and
+devices can start from one checkpoint.
 
 ```text
  {"execute": "femu-save-data", "arguments": {"file": "/vm/femu-ckpt"}}
@@ -709,7 +711,8 @@ is not in the file.
 The write runs under QEMU's main lock, so the whole QEMU waits for it, not
 only this device. Commands queued but not yet run may or may not be in the
 file; a completed write is in it. The file must not be the `persist_file`
-of another device (its lock file keeps the two apart), a `pel_file`, a
-name that ends in `.lock`, or a link to nothing. A namespace formatted to
+of another device (its lock file keeps the two apart), a `pel_file`, an
+`io_trace`, a name that ends in `.lock`, or a link to nothing. A
+`persist_load_only` device cannot save its own checkpoint. A namespace formatted to
 another LBA format than `lba_index` cannot take a checkpoint, because a
 later run could not load it.

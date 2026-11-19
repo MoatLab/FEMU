@@ -36642,6 +36642,356 @@ static void femu_test_checkpoint(void *obj, void *data, QGuestAllocator *alloc)
     rmdir(dir);
 }
 
+/* device_add of femu @id at @slot; the error text, or NULL */
+static char *femu_ckpt_try_add(QTestState *qts, const char *id, int slot,
+                               const char *extra)
+{
+    g_autofree char *args = g_strdup_printf(
+        "{'driver':'femu','id':'%s','addr':'%d','devsz_mb':16%s}", id, slot,
+        extra);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                           qobject_from_json(args, &error_abort));
+    char *err = NULL;
+
+    if (qdict_haskey(rsp, "error")) {
+        err = g_strdup(qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+    }
+    qobject_unref(rsp);
+    return err;
+}
+
+/* the SHA-256 of @file */
+static char *femu_ckpt_sum(const char *file)
+{
+    g_autofree char *buf = NULL;
+    gsize len;
+
+    g_assert_true(g_file_get_contents(file, &buf, &len, NULL));
+    return g_compute_checksum_for_data(G_CHECKSUM_SHA256, (guchar *)buf, len);
+}
+
+/* @file has its bytes of @sum, and its inode is still @ino */
+static void femu_ckpt_same(const char *file, const char *sum, uint64_t ino)
+{
+    g_autofree char *now = femu_ckpt_sum(file);
+    struct stat st;
+
+    g_assert_cmpstr(now, ==, sum);
+    g_assert_cmpint(stat(file, &st), ==, 0);
+    g_assert_cmpuint(st.st_ino, ==, ino);
+}
+
+/* open @file and return its inode; the open keeps the inode in use */
+static uint64_t femu_ckpt_hold(const char *file, int *fd)
+{
+    struct stat st;
+
+    *fd = open(file, O_RDONLY);
+    g_assert_cmpint(*fd, >=, 0);
+    g_assert_cmpint(fstat(*fd, &st), ==, 0);
+    return st.st_ino;
+}
+
+/*
+ * persist_load_only: checkpoint B holds page 2 = 0x21. Two readers of B
+ * read it, and each then writes its own byte. A writer of B, and another
+ * device's save to B, fail while a reader holds B. A reader cannot save
+ * B, also when it is the only reader or names B through a link, but can
+ * save C, which a later reader loads. A reader whose realize fails after
+ * its load releases B. A reader loads B from a directory it cannot write.
+ * A reader in a second QEMU loads C, writes it, and quits. B keeps its
+ * bytes and inode until the writer, and C keeps them to the end.
+ */
+static void femu_test_checkpoint_reuse(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *dir = g_dir_make_tmp("femu-reuse-XXXXXX", NULL);
+    g_autofree char *b = g_build_filename(dir, "b", NULL);
+    g_autofree char *alias = g_build_filename(dir, "alias", NULL);
+    g_autofree char *c_file = g_build_filename(dir, "c", NULL);
+    g_autofree char *none = g_build_filename(dir, "none", NULL);
+    g_autofree char *pel = g_build_filename(dir, "x.lock", NULL);
+    g_autofree char *lock_b = g_strconcat(b, ".lock", NULL);
+    g_autofree char *lock_c = g_strconcat(c_file, ".lock", NULL);
+    g_autofree char *lock_n = g_strconcat(none, ".lock", NULL);
+    g_autofree char *rb = g_strdup_printf(",'femu_mode':1,'persist_file':"
+                                          "'%s','persist_load_only':true", b);
+    g_autofree char *rc = g_strdup_printf(",'femu_mode':1,'persist_file':"
+                                          "'%s','persist_load_only':true",
+                                          c_file);
+    g_autofree char *wb = g_strdup_printf(",'femu_mode':1,'persist_file':"
+                                          "'%s'", b);
+    g_autofree char *rn = g_strdup_printf(",'femu_mode':1,'persist_file':"
+                                          "'%s','persist_load_only':true",
+                                          none);
+    g_autofree char *pl = g_strdup_printf(",'femu_mode':1,'pel_file':'%s'",
+                                          pel);
+    g_autofree char *rbp = g_strdup_printf("%s,'pel_file':'%s'", rb, pel);
+    g_autofree char *sum_b = NULL;
+    g_autofree char *sum_c = NULL;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    FemuCtrlState c1 = { 0 };
+    FemuCtrlState c2 = { 0 };
+    QPCIDevice *p1;
+    QPCIDevice *p2;
+    QOSState *qs2;
+    uint64_t ino_b;
+    uint64_t ino_c;
+    int fd_b;
+    int fd_c;
+    char *err;
+
+    femu_ckpt_add(qts, "ck", 5, ",'femu_mode':1");
+    p1 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c1, p1, alloc);
+    femu_create_io_queues(&c1);
+    femu_ns_page(&c1, buf, 1, 2, 0x21, true);
+    g_assert_null(femu_save_data(qts, "ck", b));
+    femu_disable(&c1);
+    femu_queue_free(&c1, &c1.io);
+    qpci_unplug_acpi_device_test(qts, "ck", 5);
+    g_free(p1);
+    sum_b = femu_ckpt_sum(b);
+    ino_b = femu_ckpt_hold(b, &fd_b);
+    g_assert_cmpint(symlink(b, alias), ==, 0);
+
+    /* two readers of B, each with its own copy */
+    memset(&c1, 0, sizeof(c1));
+    femu_ckpt_add(qts, "r1", 5, rb);
+    femu_ckpt_add(qts, "r2", 6, rb);
+    p1 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    p2 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(6, 0));
+    femu_enable(&c1, p1, alloc);
+    femu_create_io_queues(&c1);
+    femu_enable(&c2, p2, alloc);
+    femu_create_io_queues(&c2);
+    femu_ns_page(&c1, buf, 1, 2, 0x21, false);
+    femu_ns_page(&c2, buf, 1, 2, 0x21, false);
+    femu_ns_page(&c1, buf, 1, 2, 0x31, true);
+    femu_ns_page(&c2, buf, 1, 2, 0x41, true);
+    femu_ns_page(&c1, buf, 1, 2, 0x31, false);
+    femu_ns_page(&c2, buf, 1, 2, 0x41, false);
+
+    /* a writer of B and a save to B fail while a reader holds B */
+    err = femu_ckpt_try_add(qts, "w", 7, wb);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    femu_ckpt_add(qts, "x", 7, ",'femu_mode':1");
+    err = femu_save_data(qts, "x", b);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    qpci_unplug_acpi_device_test(qts, "x", 7);
+    err = femu_save_data(qts, "r1", b);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "persist_load_only checkpoint"));
+    g_free(err);
+    g_assert_null(femu_save_data(qts, "r1", c_file));
+    femu_ckpt_same(b, sum_b, ino_b);
+    sum_c = femu_ckpt_sum(c_file);
+    ino_c = femu_ckpt_hold(c_file, &fd_c);
+
+    femu_disable(&c1);
+    femu_queue_free(&c1, &c1.io);
+    qpci_unplug_acpi_device_test(qts, "r1", 5);
+    g_free(p1);
+    femu_ckpt_same(b, sum_b, ino_b);
+    err = femu_ckpt_try_add(qts, "w", 7, wb);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    /* r2 is the only reader: it still cannot save B, also through a link */
+    err = femu_save_data(qts, "r2", b);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "persist_load_only checkpoint"));
+    g_free(err);
+    err = femu_save_data(qts, "r2", alias);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "persist_load_only checkpoint"));
+    g_free(err);
+    femu_disable(&c2);
+    femu_queue_free(&c2, &c2.io);
+    qpci_unplug_acpi_device_test(qts, "r2", 6);
+    g_free(p2);
+    femu_ckpt_same(b, sum_b, ino_b);
+
+    /* the PEL fails after the load: realize must release B */
+    err = femu_ckpt_try_add(qts, "rp", 5, rbp);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "ends in .lock"));
+    g_free(err);
+    /* a reader needs no write access to the directory of B */
+    g_assert_cmpint(chmod(dir, 0500), ==, 0);
+    femu_ckpt_add(qts, "r7", 5, rb);
+    qpci_unplug_acpi_device_test(qts, "r7", 5);
+    g_assert_cmpint(chmod(dir, 0700), ==, 0);
+    femu_ckpt_same(b, sum_b, ino_b);
+
+    /* the last reader left: a writer starts, and a reader cannot */
+    femu_ckpt_add(qts, "w", 7, wb);
+    err = femu_ckpt_try_add(qts, "r3", 5, rb);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    qpci_unplug_acpi_device_test(qts, "w", 7);
+
+    /*
+     * C holds the page of r1. While r4 holds C, a second QEMU loads it,
+     * writes the page and quits with the reader plugged.
+     */
+    memset(&c1, 0, sizeof(c1));
+    femu_ckpt_add(qts, "r4", 5, rc);
+    p1 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c1, p1, alloc);
+    femu_create_io_queues(&c1);
+    femu_ns_page(&c1, buf, 1, 2, 0x31, false);
+    qs2 = qtest_pc_boot("-machine pc -nodefaults -device femu,addr=5,id=q2,"
+                        "devsz_mb=16,femu_mode=1,persist_file=%s,"
+                        "persist_load_only=on", c_file);
+    {
+        QPCIDevice *pq = qpci_device_find(qs2->pcibus, QPCI_DEVFN(5, 0));
+        uint64_t buf2 = guest_alloc(&qs2->alloc, 4096);
+        FemuCtrlState cq = { 0 };
+
+        femu_enable(&cq, pq, &qs2->alloc);
+        femu_create_io_queues(&cq);
+        femu_ns_page(&cq, buf2, 1, 2, 0x31, false);
+        femu_ns_page(&cq, buf2, 1, 2, 0x71, true);
+        femu_ns_page(&cq, buf2, 1, 2, 0x71, false);
+        qtest_qmp_send(qs2->qts, "{'execute':'quit'}");
+        qtest_set_expected_status(qs2->qts, 0);
+        qtest_wait_qemu(qs2->qts);
+        guest_free(&qs2->alloc, buf2);
+        g_free(pq);
+        qtest_pc_shutdown(qs2);
+    }
+    femu_ckpt_same(c_file, sum_c, ino_c);
+    femu_disable(&c1);
+    femu_queue_free(&c1, &c1.io);
+    qpci_unplug_acpi_device_test(qts, "r4", 5);
+    g_free(p1);
+    femu_ckpt_same(c_file, sum_c, ino_c);
+
+    /* no checkpoint to load; a PEL file that names a lock file */
+    err = femu_ckpt_try_add(qts, "r5", 5, rn);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "needs an existing persist_file"));
+    g_free(err);
+    err = femu_ckpt_try_add(qts, "r6", 5, pl);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "ends in .lock"));
+    g_free(err);
+
+    close(fd_b);
+    close(fd_c);
+    guest_free(alloc, buf);
+    unlink(alias);
+    unlink(lock_b);
+    unlink(lock_c);
+    unlink(lock_n);
+    unlink(b);
+    unlink(c_file);
+    rmdir(dir);
+}
+
+/* hot-add bbssd device pd at slot 5 on a 384-page FTL, with @extra */
+static void femu_ckpt_add_ftl(QTestState *qts, const char *extra)
+{
+    g_autofree char *args = g_strdup_printf(
+        "{'driver':'femu','id':'pd','addr':'5','femu_mode':1,'devsz_mb':1,"
+        "'secsz':512,'secs_per_pg':8,'pgs_per_blk':8,'blks_per_pl':12,"
+        "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,'persist_ftl':true%s}",
+        extra);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                           qobject_from_json(args, &error_abort));
+
+    if (qdict_haskey(rsp, "error")) {
+        g_test_message("device_add pd: %s", qdict_get_str(
+                       qdict_get_qdict(rsp, "error"), "desc"));
+    }
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/*
+ * persist_load_only with persist_ftl: a checkpoint E of the FTL after one
+ * write. Two readers in turn start with its lines and counters. Each
+ * overwrites page 2: the valid pages stay as they were only if the
+ * mapping of page 2 came back. The second starts as the first did, since
+ * no reader saves E.
+ */
+static void femu_test_checkpoint_reuse_ftl(void *obj, void *data,
+                                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *dir = g_dir_make_tmp("femu-reuse-ftl-XXXXXX", NULL);
+    g_autofree char *d = g_build_filename(dir, "d", NULL);
+    g_autofree char *e = g_build_filename(dir, "e", NULL);
+    g_autofree char *lock_d = g_strconcat(d, ".lock", NULL);
+    g_autofree char *lock_e = g_strconcat(e, ".lock", NULL);
+    g_autofree char *wd = g_strdup_printf(",'persist_file':'%s'", d);
+    g_autofree char *re = g_strdup_printf(",'persist_file':'%s',"
+                                          "'persist_load_only':true", e);
+    g_autofree char *ctr0 = NULL;
+    g_autofree char *lines0 = NULL;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t vpc0;
+    FemuCtrlState c = { 0 };
+    QPCIDevice *pdev;
+
+    femu_ckpt_add_ftl(qts, wd);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c, pdev, alloc);
+    femu_create_io_queues(&c);
+    femu_ns_page(&c, buf, 1, 2, 0x51, true);
+    ctr0 = femu_ftl_counters(qts);
+    lines0 = femu_ftl_dump(qts, "lines", 40);
+    vpc0 = femu_ftl_vpc_sum(qts);
+    g_assert_cmpuint(vpc0, >, 0);
+    g_assert_null(femu_save_data(qts, "pd", e));
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    qpci_unplug_acpi_device_test(qts, "pd", 5);
+    g_free(pdev);
+
+    for (int i = 0; i < 2; i++) {
+        g_autofree char *ctr = NULL;
+        g_autofree char *lines = NULL;
+        g_autofree char *after = NULL;
+
+        memset(&c, 0, sizeof(c));
+        femu_ckpt_add_ftl(qts, re);
+        pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+        /* query-femu needs an enabled controller */
+        femu_enable(&c, pdev, alloc);
+        femu_create_io_queues(&c);
+        ctr = femu_ftl_counters(qts);
+        lines = femu_ftl_dump(qts, "lines", 40);
+        g_assert_cmpstr(ctr, ==, ctr0);
+        g_assert_cmpstr(lines, ==, lines0);
+        g_assert_cmpuint(femu_ftl_vpc_sum(qts), ==, vpc0);
+        femu_ns_page(&c, buf, 1, 2, 0x51, false);
+        femu_ns_page(&c, buf, 1, 2, 0x61, true);
+        g_assert_cmpuint(femu_ftl_vpc_sum(qts), ==, vpc0);
+        after = femu_ftl_counters(qts);
+        g_assert_cmpstr(after, !=, ctr0);
+        femu_disable(&c);
+        femu_queue_free(&c, &c.io);
+        qpci_unplug_acpi_device_test(qts, "pd", 5);
+        g_free(pdev);
+    }
+    guest_free(alloc, buf);
+    unlink(lock_d);
+    unlink(lock_e);
+    unlink(d);
+    unlink(e);
+    rmdir(dir);
+}
+
 static void femu_test_pel_file_invalid(void *obj, void *data,
                                        QGuestAllocator *alloc)
 {
@@ -67673,6 +68023,10 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "id=mode-test,mode=bbssd,devsz_mb=16"
     });
     qos_add_test("checkpoint", "femu", femu_test_checkpoint, NULL);
+    qos_add_test("checkpoint-reuse", "femu", femu_test_checkpoint_reuse,
+                 NULL);
+    qos_add_test("checkpoint-reuse-ftl", "femu",
+                 femu_test_checkpoint_reuse_ftl, NULL);
     qos_add_test("persist-nossd", "femu", femu_test_persist,
                  &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(1) });
     qos_add_test("pel-file-media", "femu", femu_test_pel_file,

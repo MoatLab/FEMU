@@ -389,8 +389,9 @@ is also started under qtest and moves one block on namespace 1.
 - Allocated Namespace Attribute notices are not advertised.
 - Shared namespaces need homogeneous NoSSD or bbssd controllers without
   Streams, `dps` or `namespace_modes`.
-- All namespaces and metadata live in host memory and are lost when QEMU
-  exits.
+- All namespaces and metadata live in host memory. `persist_file` keeps
+  fixed namespaces across QEMU runs, but not metadata, shared namespaces
+  or namespace management. QEMU exit loses the rest.
 
 ## How to extend it
 

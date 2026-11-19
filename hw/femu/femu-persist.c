@@ -564,13 +564,16 @@ bool femu_path_in_use(FemuCtrl *self, const char *path, bool traces_only)
 static bool persist_lock(FemuCtrl *n, Error **errp)
 {
     g_autofree char *lock = g_strconcat(n->persist_path, ".lock", NULL);
-    int fd = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    bool reader = n->persist_load_only;
+    int fd = open(lock, (reader ? O_RDONLY : O_RDWR) | O_CREAT | O_CLOEXEC,
+                  0600);
 
     if (fd < 0) {
         error_setg_errno(errp, errno, "persist_file: cannot open '%s'", lock);
         return false;
     }
-    if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+    /* readers of a checkpoint share it; a device that saves it is alone */
+    if (flock(fd, (reader ? LOCK_SH : LOCK_EX) | LOCK_NB) < 0) {
         error_setg(errp, "persist_file '%s' is in use by another device",
                    n->persist_path);
         close(fd);
@@ -825,6 +828,10 @@ bool femu_persist_init(FemuCtrl *n, Error **errp)
             error_setg(errp, "persist_ftl needs persist_file");
             return false;
         }
+        if (n->persist_load_only) {
+            error_setg(errp, "persist_load_only needs persist_file");
+            return false;
+        }
         return true;
     }
     if (!*n->persist_file) {
@@ -855,11 +862,19 @@ bool femu_persist_init(FemuCtrl *n, Error **errp)
             return false;
         }
     }
-    if (!persist_lock(n, errp) || !persist_probe_dir(n, errp)) {
+    /* a checkpoint is never saved, so its directory need not take a file */
+    if (!persist_lock(n, errp) ||
+        (!n->persist_load_only && !persist_probe_dir(n, errp))) {
         persist_unlock(n);
         return false;
     }
     fd = open(n->persist_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0 && errno == ENOENT && n->persist_load_only) {
+        error_setg(errp, "persist_load_only needs an existing persist_file; "
+                   "'%s' does not exist", n->persist_path);
+        persist_unlock(n);
+        return false;
+    }
     if (fd < 0 && errno != ENOENT) {
         error_setg_errno(errp, errno, "persist_file: cannot open '%s'",
                          n->persist_path);
@@ -873,6 +888,10 @@ bool femu_persist_init(FemuCtrl *n, Error **errp)
             persist_unlock(n);
             return false;
         }
+    }
+    /* a checkpoint keeps its lock and path, and nothing saves it */
+    if (n->persist_load_only) {
+        return true;
     }
     n->persist_notifier.notify = persist_exit_notify;
     qemu_add_exit_notifier(&n->persist_notifier);
@@ -914,7 +933,9 @@ void femu_persist_exit(FemuCtrl *n)
 {
     Error *err = NULL;
 
+    /* no save is due (persist_load_only, or no file): only the lock goes */
     if (!n->persist_active) {
+        persist_unlock(n);
         return;
     }
     qemu_remove_exit_notifier(&n->persist_notifier);
@@ -974,6 +995,11 @@ bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp)
                        n->lba_index);
             return false;
         }
+    }
+    if (n->persist_load_only && !strcmp(path, n->persist_path)) {
+        error_setg(errp, "femu-save-data: '%s' is this device's "
+                   "persist_load_only checkpoint", path);
+        return false;
     }
     if (!n->persist_path || strcmp(path, n->persist_path)) {
         lock = g_strconcat(path, ".lock", NULL);

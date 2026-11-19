@@ -926,6 +926,11 @@
     "kind": "static",
     "type": "bool"
    },
+   "persist_load_only": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
    "pg_rd_lat": {
     "default": 40000,
     "kind": "static",

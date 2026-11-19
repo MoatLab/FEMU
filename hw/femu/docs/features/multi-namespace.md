@@ -159,8 +159,8 @@ A second controller is `/dev/nvme1` with its own namespaces.
   namespace instead.
 - **I want several separate SSDs.** Add one `-device femu` per SSD, each
   with its own `id` and `devsz_mb`.
-- **Data is gone after QEMU exits.** Every namespace lives in host memory
-  only. A guest reboot keeps the data.
+- **Data is gone after QEMU exits, unless `persist_file` keeps it.** Every
+  namespace lives in host memory. A guest reboot keeps the data.
 
 Related issues: #26, #52, #121.
 

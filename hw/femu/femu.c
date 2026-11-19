@@ -5987,6 +5987,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("pel_file", FemuCtrl, pel_file),
     DEFINE_PROP_STRING("persist_file", FemuCtrl, persist_file),
     DEFINE_PROP_BOOL("persist_ftl", FemuCtrl, persist_ftl, false),
+    DEFINE_PROP_BOOL("persist_load_only", FemuCtrl, persist_load_only, false),
     DEFINE_PROP_BOOL("rrl", FemuCtrl, rrl, false),
     DEFINE_PROP_UINT32("devsz_mb", FemuCtrl, memsz, 1024), /* in MB */
     DEFINE_PROP_SIZE("mem_limit", FemuCtrl, mem_limit, 0),

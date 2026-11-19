@@ -354,8 +354,8 @@ and locked into RAM when `RLIMIT_MEMLOCK` allows (`init_dram_backend()` in
 `hw/femu/backend/dram.c`). Namespaces are slices of it, packed back to back.
 Controllers that share namespaces through a subsystem share one buffer. The
 block modes read and write it with `backend_rw()`; KV keeps its values in a
-separate buffer of its own. Nothing is written to a
-file, so the contents are lost when QEMU exits. `FEMU_MBE_INTERLEAVE` controls
+separate buffer of its own. QEMU exit loses the contents, unless
+`persist_file` or a `femu-save-data` checkpoint keeps them in a file. `FEMU_MBE_INTERLEAVE` controls
 its NUMA placement (see the [environment
 variables](../reference/properties.md#environment-variables)).
 

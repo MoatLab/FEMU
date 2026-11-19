@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 314 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 315 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -39,9 +39,10 @@ Devices:
 | `op_pcent` | `uint32` | `0` | Over-provisioning in percent for bbssd: back the device with the full NAND capacity and expose capacity/(1 + op_pcent/100); 0 keeps devsz_mb sizing, not with cxl_ssd |
 | `subsys` | `link<femu-subsys>` | unset | ID of a femu-subsys device to join, created before this controller; needed for FDP, shared namespaces and the Endurance Group log |
 | `cxl_ssd` | `link<femu-cxl-ssd>` | unset | ID of a femu-cxl-ssd, listed before this controller, whose memory and FTL this bbssd controller serves as its one namespace |
-| `pel_file` | `str` | unset | Host file that keeps the Persistent Event Log and power cycle count across runs, created if missing; a corrupt or incompatible file fails realize |
-| `persist_file` | `str` | unset | bbssd, NoSSD: host file that keeps the data and the deallocated and uncorrectable blocks across runs; realize loads it, unplug or the end of QEMU saves it. A file of another mode, size, namespace layout or LBA format fails realize, and FILE.lock keeps a second user out. Format NVM keeps the LBA format. The FTL state is kept only with persist_ftl. Not with namespace_modes, ns_mgmt, shared namespaces, cxl_ssd, metadata or sanitize_ms |
+| `pel_file` | `str` | unset | Host file that keeps the Persistent Event Log and power cycle count across runs, created if missing; a corrupt or incompatible file fails realize, and so does a name that ends in .lock |
+| `persist_file` | `str` | unset | bbssd, NoSSD: host file that keeps the data and the deallocated and uncorrectable blocks across runs; realize loads it, unplug or the end of QEMU saves it (not with persist_load_only). A file of another mode, size, namespace layout or LBA format fails realize, and FILE.lock keeps a second user out (readers of persist_load_only share it). Format NVM keeps the LBA format. The FTL state is kept only with persist_ftl. Not with namespace_modes, ns_mgmt, shared namespaces, cxl_ssd, metadata or sanitize_ms |
 | `persist_ftl` | `bool` | `off` | bbssd with mapping=page: persist_file keeps the FTL state too (mapping, page and block state, lines, write pointer, counters, and the wear, retention, read reclaim, levelling and RBER state), so a restarted drive continues as it was; a file of other geometry, mapping, GC, NAND timing or aging properties fails realize, and so does a file without FTL state on a device with an aging model. Not with FDP or the FTL features whose state it does not keep (realize names the property); off (default) |
+| `persist_load_only` | `bool` | `off` | with persist_file: the file is a checkpoint that realize loads and nothing saves, so each run starts from it. The file must exist; FILE.lock is made if missing, so a directory the device cannot write needs it already. FILE.lock is held shared, so other devices and QEMU processes can load the same file, and a device that saves it cannot start. The guest still writes the device; femu-save-data can write another file. off (default) |
 | `io_trace` | `str` | unset | host file for an I/O trace: one CSV line per completed I/O command (t_submit_ns, t_cqe_ns, sqid, cid, nsid, opcode, slba, nlb, status), in every mode; the file must not exist; unset (default) is off |
 | `events_file` | `str` | unset | host file of timed actions, read at realize: lines '<ms> <action>' or '<ms>+<window>~<seed> <action>', the action ana=<group>:<state> (state 1 to 3, needs ana=on), power-loss (needs power_loss=on) or slow=<ch>:<lun>:<pct> (needs die_slow=on); times count from the first enable and survive resets; see query-femu-events; not with csd_pause; unset (default) is off |
 | `die_slow` | `bool` | `off` | bbssd, CSD: on makes the array time of each LUN settable at run time with the die-slow property or a slow= action of events_file, for a die that turns slow; one namespace only, not with ns_mgmt, namespace_modes, subsys or cxl_ssd; query-femu lists slow LUNs; off (default) adds nothing to the media path |

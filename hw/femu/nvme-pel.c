@@ -524,7 +524,21 @@ static void pel_snapshot_timer(void *opaque)
 
 bool femu_pel_init(FemuCtrl *n, Error **errp)
 {
-    FemuPel *pel = g_new0(FemuPel, 1);
+    FemuPel *pel;
+    g_autofree char *real = n->pel_file ? realpath(n->pel_file, NULL) : NULL;
+
+    /*
+     * FILE.lock keeps the users of a persist_file apart. A save of the
+     * PEL replaces its file by rename, which would put a new lock file
+     * under the users that hold the old one.
+     */
+    if (n->pel_file && (g_str_has_suffix(n->pel_file, ".lock") ||
+                        (real && g_str_has_suffix(real, ".lock")))) {
+        error_setg(errp, "pel_file '%s' ends in .lock, which names a lock "
+                   "file", n->pel_file);
+        return false;
+    }
+    pel = g_new0(FemuPel, 1);
 
     pel->cap = PEL_UNITS(n) * PEL_UNIT - PEL_HDR_SIZE;
     pel->events = g_malloc0(pel->cap);

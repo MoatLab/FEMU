@@ -480,8 +480,10 @@ sudo fio --name=fdp --filename=/dev/ng0n1 --ioengine=io_uring_cmd --cmd_type=nvm
    `DRY_RUN=1 ../femu-scripts/run-cxlssd.sh` prints the CXL command), the guest kernel and the fio job file. A number without these
    cannot be compared.
 3. **Start from a known state.** Restart QEMU between configurations. The
-   device memory and every counter start from zero when QEMU starts; a
-   guest reboot or controller reset keeps both. A namespace created with
+   device memory and the counters start from zero when QEMU starts, unless
+   a `persist_file` loads saved data (and with `persist_ftl`, saved
+   counters). A guest reboot or controller reset keeps both. A checkpoint
+   with `persist_load_only=on` gives each run the same state. A namespace created with
    namespace management starts its counters at zero, and deleting one
    removes its counts from C0h. Then precondition: fill the range you will read,
    and for steady-state write numbers, overwrite at random until the WAF

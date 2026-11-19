@@ -59,8 +59,8 @@ The `run-*.sh` launchers run QEMU with `sudo`, so they work without the group.
 
 ### Memory
 
-The emulated SSD lives in host DRAM. Nothing is stored in a file, and nothing
-written to it survives a shutdown. Plan host memory as:
+The emulated SSD lives in host DRAM. Data survives a shutdown only in a
+`persist_file` or a `femu-save-data` checkpoint. Plan host memory as:
 
 ```
 host RAM needed = devsz_mb (the emulated SSD) + guest RAM (-m) + about 1 GiB for QEMU

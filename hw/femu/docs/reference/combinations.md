@@ -868,6 +868,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 - femu-save-data: '%s' is a device's pel_file
 - io_trace: '%s' is a persist_file, pel_file or io_trace of a device
+- pel_file '%s' ends in .lock, which names a lock file
 - persist_file and pel_file name one file
 
 ## `perf_hints`
@@ -896,6 +897,8 @@ own description allows. A message keeps its format directives (`%s`,
 - persist_file: '%s' ends in .lock, which names a lock file
 - persist_file: '%s' is a link to nothing
 - persist_ftl needs persist_file
+- persist_load_only needs an existing persist_file; '%s' does not exist
+- persist_load_only needs persist_file
 - power_limit is not supported with persist_file
 
 ## `persist_ftl`
@@ -908,6 +911,12 @@ own description allows. A message keeps its format directives (`%s`,
 - persist_ftl: a fetched request left without reaching the FTL (a queue deleted or a reset under I/O, or a drain that timed out); nothing saved
 - persist_ftl: fetched requests stayed on the FTL queue; nothing saved
 - persist_ftl: namespace %u has an FTL larger than 4 GiB to save
+
+## `persist_load_only`
+
+- femu-save-data: '%s' is this device's persist_load_only checkpoint
+- persist_load_only needs an existing persist_file; '%s' does not exist
+- persist_load_only needs persist_file
 
 ## `pg_xfer_lat`
 

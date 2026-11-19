@@ -248,7 +248,8 @@ It does not model:
 
 - the time to copy data between guest memory and the device; the copy
   happens at once, and the model only delays the completion;
-- persistence: the device lives in host memory;
+- persistence in ZNS, OCSSD, KV and CXL modes: the device lives in host
+  memory (bbssd and NoSSD have `persist_file`);
 - power, heat or temperature changes (the reported temperature is the
   `temperature` property).
 
@@ -372,12 +373,14 @@ Related issues: #72, #114, #162.
 
 A guest reboot keeps the data, unless you trigger `simulate-power-loss` on
 a `power_loss=on` device, which drops the write buffer. Stopping QEMU loses
-it. FEMU keeps every NVMe namespace in host memory and never writes it to a
-file; there is no option
-to make it persistent. Snapshots and migration are refused
+it, unless the device has `persist_file`. That property keeps a bbssd or
+NoSSD device in a host file across runs, and `persist_ftl` keeps the FTL
+state too. QMP `femu-save-data` writes a checkpoint at any time.
+Snapshots and migration are refused
 ([security and limits](concepts/security-and-limits.md#migration-and-snapshots)).
 
-**Workaround:** keep data you need on the guest's boot disk or copy it out
-before you stop QEMU, and recreate the device contents after each start.
+**Workaround:** use `persist_file` on bbssd or NoSSD. To start many runs
+from one aged state, save a checkpoint once and load it with
+`persist_load_only=on`. In other modes, keep data on the guest's boot disk.
 
 Related issues: #52.

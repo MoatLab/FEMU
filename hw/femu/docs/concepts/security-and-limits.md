@@ -91,7 +91,9 @@ These are chosen on the host, not by the guest:
 - `persist_file` keeps every byte the guest wrote to a bbssd or NoSSD
   device in a host file, readable by anyone who can read that file.
   Unplug or the end of QEMU writes it; a QEMU that is killed writes
-  nothing, and the file keeps the data of the last clean end. With
+  nothing. The file then keeps the data of the last clean end or the last
+  `femu-save-data`. With `persist_load_only=on` nothing writes it,
+  and FILE.lock is held shared. With
   `persist_ftl`, a load checks every FTL record (mapping owners, page,
   block and line counts, list membership, the write pointer, the aging
   records, a CRC) before it changes the FTL, so a damaged file fails

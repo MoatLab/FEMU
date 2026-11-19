@@ -48,8 +48,9 @@ models. FEMU models:
   clock. Each operation has a cost in nanoseconds, and FEMU holds the
   completion until that much host time has passed (see
   [Design choices](#design-choices)).
-- **Persistent data.** Device data lives in host memory. A guest reboot or a
-  controller reset keeps it; QEMU exiting loses it. Migration and snapshots
+- **Persistent data in all modes.** Device data lives in host memory. A guest
+  reboot or a controller reset keeps it. QEMU exiting loses it, except on a
+  bbssd or NoSSD device with `persist_file`. Migration and snapshots
   are refused ([Security and limits](../concepts/security-and-limits.md#migration-and-snapshots)).
 - **Data errors from the medium.** The media model never changes a byte.
   ECC shows up as extra read time (`ecc_step_ns`). The medium never fails a
@@ -302,7 +303,8 @@ metadata only: mappings, valid bits, busy-until times. The bytes go straight
 to one host buffer at the namespace's offset. This keeps the models simple
 and fast, makes a read return the last write no matter what the FTL did, and
 lets a mapping bug change timing but never corrupt data. The cost is that
-capacity is bounded by host RAM and data does not survive QEMU. The
+capacity is bounded by host RAM and data survives QEMU only with
+`persist_file`. The
 power-loss model (`power_loss=on`) is the one place the FTL thread applies
 data, because it has to roll back unflushed writes.
 

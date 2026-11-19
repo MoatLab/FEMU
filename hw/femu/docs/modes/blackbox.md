@@ -430,8 +430,9 @@ The namespace must fit in the remaining lines.
   poller, which needs a host core. Give each `femu-poller` thread and the
   `FEMU-FTL-Thread` a core of its own
   ([timing model](../concepts/timing-model.md#compute-then-hold)).
-- **Data is gone after QEMU exits.** FEMU keeps the device only in host
-  memory and writes nothing to a file. A guest reboot keeps the data.
+- **Data is gone after QEMU exits, unless `persist_file` keeps it.** FEMU
+  keeps the device in host memory. A guest reboot keeps the data.
+  `persist_ftl` keeps the FTL state too.
 
 Related issues: #16, #50, #52, #92, #113, #130, #132, #137.
 

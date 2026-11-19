@@ -81,7 +81,8 @@ too small, since page faults would then add to the measured latency.
 Namespaces are slices of that buffer
 ([multi-namespace guide](../features/multi-namespace.md)).
 
-The data survives a guest reboot and is lost when QEMU exits.
+The data survives a guest reboot. It is lost when QEMU exits, unless
+`persist_file` keeps it.
 
 ## Completion path
 
@@ -184,7 +185,7 @@ A NoSSD device with four pollers, each owning two of eight queues:
   allocation fails, QEMU aborts. If it succeeds but cannot be pinned, the
   pages are faulted in as they are used, and a host short of memory may run
   out then instead.
-- Data is not kept across QEMU restarts.
+- Data is kept across QEMU restarts only with `persist_file`.
 
 Refusal messages are listed in the
 [NoSSD guide](../modes/nossd.md#limits-and-refusals).
