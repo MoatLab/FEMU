@@ -35,6 +35,9 @@
 #                  default: 1 when the namespace reports placement
 #                  identifiers, else 0
 #   KVO_RUNTIME    seconds of the run (default 240)
+#   KVO_PAUSE_FILE  wait after the prefill until this file exists, so
+#                  that the host can read the counters before the run;
+#                  at most KVO_PAUSE_TIMEOUT seconds (default 300)
 #   KVO_CONTROL    Use it only to show that the checks can fail.
 #                  no-store: run the load job alone, so the check that
 #                  the stores ran must fail.
@@ -73,10 +76,12 @@ shift
 fdp=${KVO_FDP:-auto}
 runtime=${KVO_RUNTIME:-240}
 control=${KVO_CONTROL:-}
+pause_file=${KVO_PAUSE_FILE:-}
+pause_limit=${KVO_PAUSE_TIMEOUT:-300}
 parent=${WORKDIR:-/tmp}
 job=$SCRIPT_DIR/fio/gpu-kv-offload-fdp.fio
 
-need_number runtime
+need_number runtime pause_limit
 case $fdp in
 auto | 0 | 1) ;;
 *) setup_fail "bad-fdp-$fdp" ;;
@@ -122,18 +127,20 @@ size=$(blockdev --getsize64 "$ns_dev") || setup_fail no-size
 ((size >= 512 * 1024 * 1024)) || setup_fail "namespace-below-512m"
 
 # HBMW of the FDP statistics log, in bytes. Without FDP the value is 0.
-# With FDP, a log that does not give a plain number is a setup failure.
+# With FDP, a command that fails or a log that does not give a plain
+# number is a setup failure.
 # nvme-cli can print digit groups, so the C locale is set and "," removed.
 fdp_host_bytes() {
-    local v
+    local raw v
 
     if ((fdp == 0)); then
         echo 0
         return 0
     fi
-    v=$(LC_ALL=C bounded 60 nvme fdp stats "$ctrl_dev" -e 1 2>/dev/null |
-        sed -nE 's/.*\(HBMW\): *([0-9,]+).*/\1/p' | head -n 1 |
-        tr -d ,) || true
+    raw=$(LC_ALL=C bounded 60 nvme fdp stats "$ctrl_dev" -e 1 2>/dev/null) ||
+        return 1
+    v=$(sed -nE '/\(HBMW\)/{s/.*\(HBMW\): *([0-9,]+).*/\1/p;q}' <<<"$raw" |
+        tr -d ,)
     [[ $v =~ ^[0-9]+$ ]] || return 1
     echo "$v"
 }
@@ -156,6 +163,18 @@ if ((rc != 0)); then
     setup_fail "prefill-status-$rc"
 fi
 echo "KVO_PREFILL=ok namespace_bytes=$size"
+
+# The host reads the bytes of each handle between the prefill and the
+# run. With KVO_PAUSE_FILE the script waits here until that file exists.
+if [[ -n $pause_file ]]; then
+    waited=0
+    until [[ -e $pause_file ]]; do
+        ((waited < pause_limit)) || setup_fail pause-file-time-limit
+        sleep 1
+        waited=$((waited + 1))
+    done
+    echo "KVO_PAUSE=done waited_sec=$waited"
+fi
 
 sections=()
 [[ $control == no-store ]] && sections=(--section=kv-load)

@@ -59,6 +59,9 @@ the speed of the emulator.
 `PASS` from a guest script means that the workload ran and the stated
 counters moved. It is not a statement on performance.
 
+A script that made a file system unmounts it at its end. An unmount
+that fails turns `PASS` into `FAIL`, with the line `<NAME>_FAIL=umount`.
+
 ## Before you start
 
 You need a built FEMU and a guest image, as in the

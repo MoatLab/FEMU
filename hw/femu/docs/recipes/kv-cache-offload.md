@@ -130,6 +130,7 @@ control on an FDP device too.
 | --- | --- | --- |
 | `KVO_FDP` | by the device | 1: place each store; 0: no placement |
 | `KVO_RUNTIME` | 240 | seconds of the run |
+| `KVO_PAUSE_FILE` | none | after the prefill, wait until this file exists; at most `KVO_PAUSE_TIMEOUT` seconds (default 300) |
 | `KVO_CONTROL` | none | `no-store`: run the load job alone, so the check that the stores ran must fail. `frozen-counters`: use the first counter sample two times, so the counter checks must fail |
 
 The last line of the script is the verdict:
@@ -189,7 +190,9 @@ The main result is the WAF of the FDP run against the WAF of the
 control run. Run each one on a fresh QEMU.
 
 On the host, read the bytes of each handle two times: when the script
-prints `KVO_PREFILL=ok`, and after the verdict.
+prints `KVO_PREFILL=ok`, and after the verdict. The script starts the
+run at once after that line. Set `KVO_PAUSE_FILE` to make it wait: read
+the counters, then make the file in the guest.
 
 ```sh
 python3 hw/femu/scripts/femu-stat.py /tmp/femu-qmp.sock --once

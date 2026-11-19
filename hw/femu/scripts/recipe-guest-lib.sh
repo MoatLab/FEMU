@@ -42,17 +42,26 @@ apt_step() {
 }
 
 # Clean up, write the completion marker, print the result line and exit.
-# A cleanup or a marker that fails does not stop the result line.
+# A cleanup or a marker that fails does not stop the result line. The
+# unmount writes the last data to the namespace, so an unmount that
+# fails turns PASS into FAIL.
 recipe_end() {
     local verdict=$1 status=$2
     shift 2
-    local line="${RECIPE}_RESULT=$verdict${*:+ $*}"
+    local line
 
     recipe_done=1
     if [[ -n $recipe_mnt ]] && mountpoint -q "$recipe_mnt"; then
-        bounded 120 umount "$recipe_mnt" 2>/dev/null ||
+        if ! bounded 120 umount "$recipe_mnt" 2>/dev/null; then
             echo "${RECIPE}_CLEANUP=umount-failed"
+            if [[ $verdict == PASS ]]; then
+                echo "${RECIPE}_FAIL=umount"
+                verdict=FAIL
+                status=1
+            fi
+        fi
     fi
+    line="${RECIPE}_RESULT=$verdict${*:+ $*}"
     if [[ -n $recipe_workdir && -d $recipe_workdir ]]; then
         echo "$line" 2>/dev/null >"$recipe_workdir/DONE" ||
             echo "${RECIPE}_CLEANUP=no-done-file"
@@ -118,7 +127,9 @@ resolve_namespace() {
 # The FEMU counters of log page C0h, as six numbers on one line: host
 # pages, GC pages, programmed pages, plane reads, reads of the most-read
 # block and lines rewritten for read stress. The status is 1 when the
-# device has no such log page: the recipe needs a BlackBox namespace.
+# device has no such log page: the recipe needs a BlackBox namespace. A
+# command that fails or reaches its time limit gives status 1 too, also
+# when it wrote a full page before.
 c0_read() {
     local out
 
@@ -127,7 +138,7 @@ c0_read() {
         od -An -v -t u8 -w8 |
         awk 'NR == 2 { h = $1 } NR == 3 { g = $1 } NR == 4 { n = $1 }
              NR == 5 { m = $1 } NR == 6 { r = $1 } NR == 21 { p = $1 }
-             END { if (NR == 64) print h, g, n, p, m, r }') || true
+             END { if (NR == 64) print h, g, n, p, m, r }') || return 1
     [[ -n $out ]] || return 1
     echo "$out"
 }
