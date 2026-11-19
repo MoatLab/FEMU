@@ -162,7 +162,8 @@ Rules:
   the line it returns from the queue. When it returns NULL, the queue keeps
   the same lines, but `random` can change the heap order of equal keys.
 - A GC policy tests its candidate with `gc_line_worth()`: a background pass
-  needs at least `ssd_line_data_pgs() / 8` invalid pages, rounded down.
+  needs the invalid share that `gc_bg_invalid_pcent` sets. The default 0
+  asks for `ssd_line_data_pgs() / 8` invalid pages, rounded down.
 - A GC policy draws random numbers only from `ftl_gc_rand()`, so `gc_seed`
   fixes the victim order of the policies that sample. `cost-benefit` reads
   the host clock, so its order is not fixed.

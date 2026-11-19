@@ -331,7 +331,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `gc_bg_invalid_pcent`
 
-- gc_bg_invalid_pcent must be 0 to 100, got %u
+- gc_bg_invalid_pcent must be 0 to 100, got %d
 
 ## `gc_copyback`
 

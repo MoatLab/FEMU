@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 314 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 315 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -271,9 +271,9 @@ Devices:
 
 | Property | Type | Default | Description |
 | --- | --- | --- | --- |
-| `gc_thres_pcent` | `int32` | `75` | bbssd, CSD: percent of lines in use at which background garbage collection starts, 1 to 100; one attempt follows each command and takes a victim with 1/8 or more of its pages invalid; KV uses it only as the fraction of NAND usable for values |
+| `gc_thres_pcent` | `int32` | `75` | bbssd, CSD: percent of lines in use at which background garbage collection starts, 1 to 100; one attempt follows each command and takes a victim with 1/8 or more of its pages invalid (by default, see gc_bg_invalid_pcent); KV uses it only as the fraction of NAND usable for values |
 | `gc_thres_pcent_high` | `int32` | `95` | bbssd, CSD: percent of lines in use at which garbage collection is forced, from gc_thres_pcent to 100; a forced pass has no 1/8 test; under FDP it keeps at least one reclaim unit free unless it is 100 |
-| `gc_bg_invalid_pcent` | `uint8` | `0` | bbssd, CSD, FDP: least percent of invalid pages in the victim of a background garbage collection pass, 1 to 100; a victim with no valid page always passes; 0 (default) keeps the 1/8 rule; forced collection does not use it |
+| `gc_bg_invalid_pcent` | `uint8` | `0` | bbssd, CSD, FDP: least percent of invalid pages in the victim of a background garbage collection pass, 1 to 100; FDP counts every page an erase gives back, unwritten ones too; a victim with no valid page always passes; 0 (default) keeps the 1/8 rule, rounded down; forced collection does not use it |
 | `gc_policy` | `str` | unset | bbssd, CSD: victim policy, one of greedy, random, cost-benefit, fifo or d-choice; unset is greedy. Under FDP it picks the reclaim unit strategy, and a name other than greedy needs gc_strategy=0 |
 | `gc_seed` | `uint64` | `0` | bbssd, CSD: seed for the victims the random and d-choice gc_policy and the FDP random gc_strategy pick; the same seed and workload pick the same victims, so vary it to vary runs |
 | `gc_strategy` | `int32` | `0` | bbssd with FDP: reclaim unit victim strategy, 0 greedy, 1 cost-benefit, 2 random or 4 per-handle; a gc_policy other than greedy picks it instead |

@@ -1791,7 +1791,7 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
     }
     /* a share of the pages of a victim, in percent */
     if (n->bb_params.gc_bg_invalid_pcent > 100) {
-        error_setg(errp, "gc_bg_invalid_pcent must be 0 to 100, got %u",
+        error_setg(errp, "gc_bg_invalid_pcent must be 0 to 100, got %d",
                    n->bb_params.gc_bg_invalid_pcent);
         return false;
     }

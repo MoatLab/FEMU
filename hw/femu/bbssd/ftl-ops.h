@@ -145,8 +145,9 @@ struct femu_mapping_ops {
  * @name: value of the gc_policy property
  * @select_victim_line: take the next victim out of the victim queue, or
  *                      return NULL. With @force false it returns NULL when
- *                      its candidate has fewer invalid pages than
- *                      ssd_line_data_pgs() / 8. Required.
+ *                      its candidate fails ssd_bg_line_ok(): fewer invalid
+ *                      pages than gc_bg_invalid_pcent asks, or than
+ *                      ssd_line_data_pgs() / 8 when that is 0. Required.
  * @by_close_order: the victim queue is ordered by close_seq instead of the
  *                  valid page count
  * @fdp_strategy: the reclaim unit strategy (GC_GLOBAL_*, above 0) that this

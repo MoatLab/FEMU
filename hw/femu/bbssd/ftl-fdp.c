@@ -925,9 +925,9 @@ static FemuReclaimUnit *select_victim_ru(struct ssd *ssd, uint16_t rgid,
 
     if (!force && !fdp_bg_worth_collecting(ssd, victim_ru)) {
         FDP_TRACE(ssd, "GC_BACK_RESERT triggered but delay GC "
-                  "(ru %d ipc %d threshold %d full %d)\n",
-                  victim_ru->ruidx, victim_ru->ipc, victim_ru->npages / 8,
-                  victim_ru->npages);
+                  "(ru %d freeable %d of %d, gc_bg_invalid_pcent %d)\n",
+                  victim_ru->ruidx, victim_ru->npages - victim_ru->vpc,
+                  victim_ru->npages, ssd->sp.gc_bg_invalid_pcent);
         fdp_victim_enqueue(ssd, victim_ru);
         return NULL;
     }

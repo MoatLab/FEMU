@@ -989,7 +989,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "gc_thres_pcent",
       "bbssd, CSD: percent of lines in use at which background garbage "
       "collection starts, 1 to 100; one attempt follows each command and "
-      "takes a victim with 1/8 or more of its pages invalid; KV uses it "
+      "takes a victim with 1/8 or more of its pages invalid (by default, "
+      "see gc_bg_invalid_pcent); KV uses it "
       "only as the fraction of NAND usable for values" },
     { "gc_thres_pcent_high",
       "bbssd, CSD: percent of lines in use at which garbage collection is "
@@ -1058,9 +1059,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "gc_thres_pcent, else 1 to 99" },
     { "gc_bg_invalid_pcent",
       "bbssd, CSD, FDP: least percent of invalid pages in the victim of a "
-      "background garbage collection pass, 1 to 100; a victim with no valid "
-      "page always passes; 0 (default) keeps the 1/8 rule; forced "
-      "collection does not use it" },
+      "background garbage collection pass, 1 to 100; FDP counts every "
+      "page an erase gives back, unwritten ones too; a victim with no "
+      "valid page always passes; 0 (default) keeps the 1/8 rule, rounded "
+      "down; forced collection does not use it" },
     { "buffer_size",
       "bbssd, CSD: DRAM write buffer capacity in NAND pages, not bytes; 0 "
       "programs every write directly" },
