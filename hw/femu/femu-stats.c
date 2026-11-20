@@ -34,6 +34,7 @@
 #include "system/stats.h"
 #include "qom/object.h"
 #include "nvme.h"
+#include "bbssd/ftl.h"
 #include "femu-query.h"
 
 /* the FTL thread publishes at most this often while it stays busy */
@@ -550,7 +551,7 @@ static void femu_stats_register(void)
     };
 
     /* FemuIoStage numbers the stages as FEMU_STAGE_* does */
-    QEMU_BUILD_BUG_ON(FEMU_IO_STAGE__MAX != FEMU_STAGE_NR);
+    QEMU_BUILD_BUG_ON((int)FEMU_IO_STAGE__MAX != (int)FEMU_STAGE_NR);
     for (int st = 0; st < FEMU_STAGE_NR; st++) {
         for (int k = 0; k < FEMU_STAT_PER_STAGE; k++) {
             FemuStatDef *d = &femu_stat_defs[FEMU_STAT_STAGE +
