@@ -565,6 +565,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 ### Documentation and tooling
 
 - Four graded teaching labs under `docs/labs/`: GC and WAF, hot and cold data, DFTL, and FDP. Each lab has device lines, a guest script in `scripts/labs/`, a prediction step, questions and an answer key. `lab-waf-model.py` holds the paper models the labs use.
+- The hook tables of modes, mapping schemes and GC policies have a written, versioned contract in `femu-ext-ops.h` and `bbssd/ftl-ops.h` ([extension interface](development/extension-interface.md)). Realize stops on a table that breaks it. The uncalled `rw_check_req` hook is gone. No device behaviour changes.
 - A release process ([releases](development/release.md)): a signed tag, notes from this changelog, and a read-only release check workflow. A property that goes away, or whose type, default or kind changes, now needs a line in `reference/interface-changes.list`; `check-property-compat.py` checks each push against the new `reference/properties.snapshot` snapshot. A deprecated property works for one more minor release before its removal. The README badge shows the newest published release.
 - `femu-steady-state.py` reports when per-round fio results reach steady state, by the SNIA PTS rule, so a WAF or GC study can skip the fresh-device rounds.
 - `femu-stat.py` prints the end-of-life state of a namespace with `eol_read_only`: read-only or writable, and the reserve pages that admitted writes hold.

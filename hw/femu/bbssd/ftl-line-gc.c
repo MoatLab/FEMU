@@ -1594,6 +1594,16 @@ static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa,
     return true;
 }
 
+/*
+ * Whether a background pass may collect @line: at least an eighth of its data
+ * pages, rounded down, are invalid. A forced pass takes any line. Every victim
+ * policy applies this test to the line it chose.
+ */
+static bool gc_line_worth(struct ssd *ssd, struct line *line, bool force)
+{
+    return force || line->ipc >= ssd_line_data_pgs(ssd, line) / 8;
+}
+
 static struct line *select_victim_line(struct ssd *ssd, bool force)
 {
     struct line_mgmt *lm = &ssd->lm;
@@ -1604,8 +1614,7 @@ static struct line *select_victim_line(struct ssd *ssd, bool force)
         return NULL;
     }
 
-    if (!force &&
-        victim_line->ipc < ssd_line_data_pgs(ssd, victim_line) / 8) {
+    if (!gc_line_worth(ssd, victim_line, force)) {
         return NULL;
     }
 
@@ -1626,8 +1635,7 @@ static struct line *select_victim_line_random(struct ssd *ssd, bool force)
     if (!victim_line) {
         return NULL;
     }
-    if (!force &&
-        victim_line->ipc < ssd_line_data_pgs(ssd, victim_line) / 8) {
+    if (!gc_line_worth(ssd, victim_line, force)) {
         pqueue_insert(lm->victim_line_pq, victim_line);
         return NULL;
     }
@@ -1679,7 +1687,7 @@ static struct line *select_victim_line_cb(struct ssd *ssd, bool force)
     if (!best) {
         return NULL;
     }
-    if (!force && best->ipc < ssd_line_data_pgs(ssd, best) / 8) {
+    if (!gc_line_worth(ssd, best, force)) {
         return NULL;
     }
     pqueue_remove(pq, best);
@@ -1700,7 +1708,7 @@ static struct line *select_victim_line_fifo(struct ssd *ssd, bool force)
     if (!best) {
         return NULL;
     }
-    if (!force && best->ipc < ssd_line_data_pgs(ssd, best) / 8) {
+    if (!gc_line_worth(ssd, best, force)) {
         return NULL;
     }
     pqueue_pop(lm->victim_line_pq);
@@ -1735,7 +1743,7 @@ static struct line *select_victim_line_dchoice(struct ssd *ssd, bool force)
     if (!best) {
         return NULL;
     }
-    if (!force && best->ipc < ssd_line_data_pgs(ssd, best) / 8) {
+    if (!gc_line_worth(ssd, best, force)) {
         return NULL;
     }
     pqueue_remove(pq, best);

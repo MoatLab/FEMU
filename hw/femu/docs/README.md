@@ -144,6 +144,8 @@ two differ.
   each QEMU file that FEMU changes.
 - [Releases](development/release.md): the release checklist and what a
   release promises.
+- [Extension interface](development/extension-interface.md): the hook tables
+  of modes, mapping schemes and GC policies, with their rules and versions.
 - [Code structure](development/code-structure.md): what lives where under
   `hw/femu/`, and where to start a change. [Architecture](concepts/architecture.md)
   explains how the parts work together.

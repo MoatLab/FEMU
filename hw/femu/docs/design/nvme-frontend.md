@@ -581,7 +581,7 @@ A mode is a constant `FemuExtCtrlOps` table (`hw/femu/femu-ext-ops.h`):
 | `init` | realize, once per namespace of that mode, and Namespace Management create | build the mode's state for the namespace |
 | `init_ctrl_name` | realize, only with `ns_mgmt` (otherwise each mode's `init` sets the name); only a namespace of the controller's `femu_mode` names it, and the controller's own table names it when no namespace does | Identify model number and serial |
 | `start_ctrl` | controller enable, once per distinct mode | refuse settings the mode cannot serve; derive values from CC |
-| `io_cmd` | poller, for opcodes the frontend does not handle | the mode's I/O commands |
+| `io_cmd` | poller, or the FTL thread with `power_loss`, for opcodes the frontend does not handle | the mode's I/O commands |
 | `admin_cmd`, `admin_cmd_cqe` | vCPU, for admin opcodes the frontend does not handle | mode admin commands, such as the Open-Channel commands, BBSSD 0xEF and the CSD commands |
 | `get_log` | vCPU, for log ids the frontend does not handle | OC 2.0 chunk information, the ZNS Changed Zone List |
 | `exit`, `ns_exit` | teardown, namespace deletion | free the mode's state |
@@ -589,8 +589,11 @@ A mode is a constant `FemuExtCtrlOps` table (`hw/femu/femu-ext-ops.h`):
 `nvme_register_extensions()` copies the table of the controller's
 `femu_mode`, and `nvme_register_extensions_ns()` gives each namespace a copy of
 the table of its own mode, so I/O dispatches on the namespace, not the controller.
-Admin commands go to the controller's table; Get Log Page tries the named
-namespace's table first, then the controller's.
+Admin commands go to the controller's table. Get Log Page uses the named
+namespace's `get_log` when that table has one, and returns its status. Only
+when it has none does the controller's table answer. The
+[extension interface](../development/extension-interface.md) gives the rules
+of each hook.
 
 ### Capability registry
 

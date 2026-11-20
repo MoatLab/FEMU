@@ -1951,14 +1951,19 @@ calibrated against a specific commercial drive.
 
 ## Extending the FTL
 
+The [extension interface](../development/extension-interface.md) gives the
+rules that every mapping scheme and GC policy must keep: callers, time
+units, and the state a hook may change.
+
 ### Adding a GC victim policy
 
 1. Write `static struct line *select_victim_line_<name>(struct ssd *ssd,
    bool force)` in `hw/femu/bbssd/ftl-line-gc.c`. Candidates are the lines in
    `ssd->lm.victim_line_pq`; slots `1` to `size - 1` of `pq->d[]` hold them.
-2. Apply the background filter: when `!force` and the line has fewer than
-   `pgs_per_line / 8` invalid pages, return NULL and leave the queue as it
-   was.
+2. Apply the background filter with `gc_line_worth()`: when `!force` and the
+   line has fewer than `ssd_line_data_pgs() / 8` invalid pages, return NULL
+   and keep the same lines in the queue. `random` takes its candidate out and
+   puts it back, which can change the heap order of equal keys.
 3. Remove the chosen line with `pqueue_remove()` (or `pqueue_pop()` for the
    top), which sets `line->pos` to 0. The victim count is the queue size,
    so there is no counter to keep. `reclaim_line()` expects a line that is
@@ -1984,8 +1989,8 @@ calibrated against a specific commercial drive.
    then grows by one line and Streams are refused. Set `uses_cmt` to get the
    DFTL cost model.
 4. For merges, provide `needs_reclaim` and `reclaim(ssd, budget)`.
-   `reclaim()` charges its own NAND operations and returns the latency to add
-   to the triggering request. `reclaim_per_page` runs it after every page
+   `reclaim()` charges its own NAND operations and returns their latency. The
+   caller joins it to the triggering request with MAX. `reclaim_per_page` runs it after every page
    instead of once per request. Allocate a destination before invalidating
    the source, so a full device never loses the only copy.
 5. Provide `trim` if the scheme keeps per-page state.
