@@ -20,7 +20,8 @@ own patterns just before its doorbell write:
       write SQ0 tail, CQ0 head
 
 The admin commands follow the opcode list and the valid defaults of the
-admin-fuzz qtest (femu_test_admin_fuzz in hw/femu/tests/qtest/femu-test.c).
+admin-fuzz qtest (femu_test_admin_fuzz in
+hw/femu/tests/qtest/femu-test-nossd.c).
 
 Usage:
     gen-generic-seeds.py --target {nossd,bbssd,zns,cmb} --out DIR

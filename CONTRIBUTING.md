@@ -20,7 +20,8 @@ ninja qemu-system-x86_64 tests/qtest/qos-test
 ## Testing
 Every fix and feature needs a test that fails without the change and passes
 with it.
-- Device tests (qtest), in `hw/femu/tests/qtest/femu-test.c`:
+- Device tests (qtest), in `hw/femu/tests/qtest/` (one file per mode;
+  `femu-test.c` registers them all):
   ```sh
   cd build
   QTEST_QEMU_BINARY=./qemu-system-x86_64 ./tests/qtest/qos-test -m quick \

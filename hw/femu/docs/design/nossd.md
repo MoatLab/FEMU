@@ -166,7 +166,7 @@ A NoSSD device with four pollers, each owning two of eight queues:
 ## Validation status
 
 - NoSSD is the default mode, so most qtest cases in
-  `hw/femu/tests/qtest/femu-test.c` run on it through the default device
+  `hw/femu/tests/qtest/` run on it through the default device
   options. Cases named for it include `io-fuzz-nossd`, a fuzzer over I/O
   command fields, and the namespace management cases `ns-retire-nossd`,
   `ns-shared-remove-nossd` and `ns-shared-retire-nossd`. The poller cases

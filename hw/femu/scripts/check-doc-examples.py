@@ -50,7 +50,7 @@ then run in two stages:
      (the run lowers RLIMIT_MEMLOCK so it never pins) and the example's
      allow-warning text. Any QEMU warning or "[FEMU] Err:" line fails.
   2. For examples with an NVMe controller, the FEMU qtest doc-examples case
-     (hw/femu/tests/qtest/femu-test.c) starts the FEMU devices and what they
+     (hw/femu/tests/qtest/femu-test-nossd.c) starts the FEMU devices and what they
      need (the -device types in KEEP_DEVICES and every -object), enables each
      controller, sends Identify, and does one write and read back (or a
      key-value store and retrieve) on namespace 1.

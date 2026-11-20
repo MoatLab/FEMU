@@ -39,4 +39,15 @@ specific_ss.add(when: ['CONFIG_FEMU_PCI', 'CONFIG_CXL_MEM_DEVICE'],
 
 # FEMU qtests and the HPKE code they check, built into qos-test by
 # tests/qtest/meson.build
-femu_qos_test_files = files('tests/qtest/femu-test.c', 'femu-hpke.c')
+femu_qos_test_files = files('tests/qtest/femu-test.c',
+                            'tests/qtest/femu-test-common.c',
+                            'tests/qtest/femu-test-nossd.c',
+                            'tests/qtest/femu-test-bbssd.c',
+                            'tests/qtest/femu-test-fdp.c',
+                            'tests/qtest/femu-test-zns.c',
+                            'tests/qtest/femu-test-ocssd.c',
+                            'tests/qtest/femu-test-kv.c',
+                            'tests/qtest/femu-test-csd.c',
+                            'tests/qtest/femu-test-cxl.c',
+                            'tests/qtest/femu-test-modes.c',
+                            'femu-hpke.c')

@@ -465,7 +465,7 @@ bytes actually moved.
 
 ## Validation status
 
-- qtest cases in `hw/femu/tests/qtest/femu-test.c`, run in CI:
+- qtest cases in `hw/femu/tests/qtest/`, most in `femu-test-kv.c`, run in CI:
   `kv-discovery` (the command set list and its command effects log),
   `kv-namespaces` (separate key spaces), `kv-accounting` (SMART bytes and
   the most-read block figure), `kv-base-spread` (timing), `kv-gc-victim`

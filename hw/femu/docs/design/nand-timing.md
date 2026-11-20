@@ -1458,7 +1458,7 @@ Give each poller and the FTL thread its own host core while measuring;
   windows, the plane rule with the bus, multi-plane erase against serial
   erases, copyback, program/erase suspend and its seal. Run it with
   `make -C hw/femu/tests check`.
-- **qtests**: `hw/femu/tests/qtest/femu-test.c` covers the OCSSD 1.2 channel
+- **qtests**: `hw/femu/tests/qtest/` covers the OCSSD 1.2 channel
   model (`oc12-channel-timing`, `oc12-channel-gap`, `oc12-channel-default`,
   `oc12-channel-off`, `oc12-ppa-timing`, `oc12-flash-type`, `oc12-page-count`,
   `oc12-transfer-cost`, and the exact per-command times of `oc12-trace-on` and

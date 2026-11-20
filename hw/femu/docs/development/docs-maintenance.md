@@ -120,7 +120,7 @@ the fence. GitHub does not show it and still highlights the block.
    `RLIMIT_MEMLOCK` so that it never pins), and allowed warnings. Test-only
    properties (`x-...`) are refused.
 2. For an example with an NVMe controller, the `doc-examples` case in
-   `hw/femu/tests/qtest/femu-test.c` starts the FEMU devices, the CXL
+   `hw/femu/tests/qtest/femu-test-nossd.c` starts the FEMU devices, the CXL
    topology and the memory backends from step 1, without the guest's disks
    and NICs, enables each
    controller, sends Identify, and writes and reads back one block of

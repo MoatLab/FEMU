@@ -196,7 +196,7 @@ Where FEMU differs from the specifications:
 
 ## Verify
 
-The qtests in `hw/femu/tests/qtest/femu-test.c` named `csd-cpslm-*`,
+The qtests in `hw/femu/tests/qtest/` (most in `femu-test-csd.c`) named `csd-cpslm-*`,
 `csd-slm-*` and `csd-cp-*` send every command. `caps-csd-cpslm` checks every
 opcode and log page against the logs. Run them from `build-femu/`:
 

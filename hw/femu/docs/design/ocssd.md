@@ -467,8 +467,8 @@ mode does report:
 
 ## Validation status
 
-- The qtest suite in `hw/femu/tests/qtest/femu-test.c`, run in CI, has
-  command-level cases for both versions. For 1.2: `oc12-opcodes`,
+- The qtest suite in `hw/femu/tests/qtest/`, most in `femu-test-ocssd.c`,
+  run in CI, has command-level cases for both versions. For 1.2: `oc12-opcodes`,
   `oc12-capabilities`, `oc12-small-sectors`, `oc12-ppa-timing`,
   `oc12-flash-type`, `oc12-page-count`, `oc12-transfer-cost` and the
   `oc12-channel-*` cases for channel time. For 2.0: `oc20-vector-io`,

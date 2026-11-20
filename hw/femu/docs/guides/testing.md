@@ -6,7 +6,7 @@ CI; the last runs inside a booted guest.
 | Tests | Where | What they cover | Run with |
 | --- | --- | --- | --- |
 | Unit tests | `hw/femu/tests/unit/` | the NAND timing math, the completion priority queue, the hybrid mapping, the CXL cache, page table entries and caching API ring | `make -C hw/femu/tests check`, and `meson test --suite femu-unit` in a build; each runs a different subset |
-| Device tests (qtest) | `hw/femu/tests/qtest/femu-test.c` | about 400 cases that drive the controller through its registers with no guest: every mode, admin and I/O commands, error paths, fuzzers, the CXL SSD | `qos-test` |
+| Device tests (qtest) | `hw/femu/tests/qtest/femu-test*.c` | about 1,200 cases that drive the controller through its registers with no guest: every mode, admin and I/O commands, error paths, fuzzers, the CXL SSD | `qos-test` |
 | Documentation checks | `hw/femu/scripts/` | the property reference, mode tables, links and every example in the docs | `make -C hw/femu/tests check-docs` |
 | Host tool checks | `hw/femu/scripts/femu-stat.py`, `femu-config-check.py` | the host tools against QEMU under qtest, with planted faults | `make -C hw/femu/tests check-tools` |
 | Configuration files | `hw/femu/scripts/ssd-config-test.sh` | every file in `scripts/configs/` starts QEMU | `ssd-config-test.sh BINARY` |
@@ -550,11 +550,30 @@ All of them write to the namespace. The nvme-cli suite can format it, and
 
 ### A qtest
 
-1. Write a function in `hw/femu/tests/qtest/femu-test.c` with the signature
-   `static void femu_test_NAME(void *obj, void *data, QGuestAllocator *alloc)`.
-   `obj` is the `QFemu` device; the existing helpers enable the controller,
-   create queues and submit commands. Read a similar case first.
-2. Register it in `femu_register_nodes()`. For the default device:
+The qtests are split by mode. `femu-test.c` holds the qos driver and
+registers every test, in one function, so the test order stays fixed.
+
+| File | Tests |
+| --- | --- |
+| `femu-test-nossd.c` | the default NoSSD device: the controller, admin and I/O commands |
+| `femu-test-bbssd.c` | `femu_mode=1`: the FTL, GC, the NAND model |
+| `femu-test-fdp.c` | `fdp-*` |
+| `femu-test-zns.c`, `femu-test-ocssd.c`, `femu-test-kv.c`, `femu-test-csd.c` | one mode each |
+| `femu-test-cxl.c` | `cxl-*` |
+| `femu-test-modes.c` | one function registered on more than one mode |
+| `femu-test-common.c`, `femu-test.h` | helpers, macros and types that more than one file uses |
+
+A helper that only one file uses stays `static` in that file.
+
+1. Write a function in the file of the mode that the test uses, for
+   example `hw/femu/tests/qtest/femu-test-zns.c`, with the signature
+   `void femu_test_NAME(void *obj, void *data, QGuestAllocator *alloc)`.
+   Put its prototype in `femu-test.h`, in the list for that file.
+   `obj` is the `QFemu` device. The helpers in `femu-test-common.c` enable
+   the controller, create queues and submit commands. Read a similar case
+   first.
+2. Register it in `femu_register_nodes()` in `femu-test.c`. For the
+   default device:
 
    ```c
    qos_add_test("my-case", "femu", femu_test_my_case, NULL);

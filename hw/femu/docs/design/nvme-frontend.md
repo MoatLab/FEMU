@@ -1091,7 +1091,7 @@ from the FTL, not the frontend; see
 ## Validation
 
 The frontend is covered by the qtest suite in
-`hw/femu/tests/qtest/femu-test.c`, which drives the controller through its
+`hw/femu/tests/qtest/`, which drives the controller through its
 registers with no guest. Cases that target this chapter include:
 
 | Case | Checks |

@@ -1,0 +1,23784 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
+ * QTest testcases for the FEMU SSD emulator: the tests on the black-box
+ * SSD (femu_mode=1): the FTL, GC, the NAND model and the NVMe features
+ * that these tests check on this mode.
+ *
+ * femu-test.c registers every test. This file holds the test bodies
+ * and the helpers that only they use.
+ */
+
+#include "qemu/osdep.h"
+#include "femu-test.h"
+
+/*
+ * The zone append size limit is derived when the controller starts, by the hook
+ * belonging to the mode that needs it. Only the controller's own hook was ever
+ * called, so on a controller whose mode is something else the limit stayed at
+ * zero -- which Identify reports as no limit at all while the write path
+ * rejects anything over one host page.
+ */
+void femu_test_zoned_append_limit(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd;
+    uint64_t buf;
+    uint8_t page[64];
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(femu->dev.bus->qts, buf, 0xff, 4096);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_CNS_CS_CTRL);
+    cmd.cdw11 = cpu_to_le32(FEMU_CSI_ZONED << 24);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+    g_assert_cmpint(page[0], >, 0);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* each geometry limit refuses the device and names what to change */
+void femu_test_geometry_limits(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    static const struct {
+        const char *geo;
+        const char *want;
+    } cases[] = {
+        /* a line of 4096 x 128 x 16 x 256 pages of 256 sectors */
+        { "'nchs':4096,'luns_per_ch':128,'pls_per_lun':16,'blks_per_pl':256,"
+          "'pgs_per_blk':256,'secs_per_pg':256,'secsz':512",
+          "raise blks_per_pl" },
+        /* 2^39 blocks, a line of 2^23 sectors */
+        { "'nchs':4096,'luns_per_ch':128,'pls_per_lun':16,'blks_per_pl':65536,"
+          "'pgs_per_blk':1,'secs_per_pg':1,'secsz':512",
+          "raise pgs_per_blk" },
+        /* a page of 128 KiB x 256 = 32 MiB */
+        { "'nchs':1,'luns_per_ch':1,'pls_per_lun':1,'blks_per_pl':256,"
+          "'pgs_per_blk':16,'secs_per_pg':256,'secsz':131072",
+          "reduce secsz or secs_per_pg" },
+        /* 2^33 sectors of 16 MiB: 2^57 bytes */
+        { "'nchs':2,'luns_per_ch':1,'pls_per_lun':1,'blks_per_pl':65536,"
+          "'pgs_per_blk':65536,'secs_per_pg':1,'secsz':16777216",
+          "bytes of NAND" },
+    };
+    QTestState *qts = qtest_init("-machine pc -nodefaults");
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *json = g_strdup_printf("{'driver':'femu','id':'lim',"
+                                                "'addr':'5','femu_mode':1,"
+                                                "'devsz_mb':16,%s}",
+                                                cases[i].geo);
+        QObject *args = qobject_from_json(json, &error_abort);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add',"
+                               "'arguments':%p}", args);
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s", desc);
+        g_assert_nonnull(strstr(desc, cases[i].want));
+        qobject_unref(rsp);
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * C0h LE64 counters: copies at 16, user programs at 24, hybrid switches at
+ * 88, full merges at 96 and charged merge erases at 104. The merge counters
+ * exclude physical line GC, which these short traces never require.
+ */
+static void femu_hybrid_check(FemuCtrlState *c, uint64_t buf,
+                              const HybridOracle *o)
+{
+    uint8_t stats[512];
+
+    g_assert_cmpint(femu_get_log(c, FEMU_LOG_FEMU_STATS, buf, sizeof(stats),
+                                 0), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf, stats, sizeof(stats));
+    g_assert_cmpuint(ldq_le_p(stats + 24), ==, o->programs);
+    g_assert_cmpuint(ldq_le_p(stats + 16), ==, o->copies);
+    g_assert_cmpuint(ldq_le_p(stats + 88), ==, o->switches);
+    g_assert_cmpuint(ldq_le_p(stats + 96), ==, o->merges);
+    g_assert_cmpuint(ldq_le_p(stats + 104), ==, o->erases);
+}
+
+void femu_test_hybrid_trim(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    HybridOracle oracle;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd cmd = { 0 };
+    uint8_t range[16] = { 0 };
+    unsigned i;
+    uint16_t got;
+    bool sequential = GPOINTER_TO_INT(data);
+
+    hybrid_oracle_init(&oracle, 4, 16, 256);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    if (sequential) {
+        /* Establish the old data block before opening its replacement log. */
+        for (i = 0; i < 4; i++) {
+            qtest_memset(c.pdev->bus->qts, buf, 0x5a, 4096);
+            g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf), ==,
+                            NVME_SUCCESS);
+            hybrid_oracle_write(&oracle, i);
+        }
+    }
+    qtest_memset(c.pdev->bus->qts, buf, 0x5a, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    hybrid_oracle_write(&oracle, 0);
+
+    stl_le_p(range + 4, 8);
+    qtest_memwrite(c.pdev->bus->qts, buf, range, sizeof(range));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmpint(femu_complete(&c, &c.io, &got, NULL), ==, NVME_SUCCESS);
+    hybrid_oracle_trim(&oracle, 0);
+
+    /* The trimmed slot is still programmed: three more writes fill the log. */
+    for (i = 1; i < 4; i++) {
+        qtest_memset(c.pdev->bus->qts, buf, 0x5a, 4096);
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE,
+                                 (sequential ? i : 1) * 8, buf), ==,
+                        NVME_SUCCESS);
+        hybrid_oracle_write(&oracle, sequential ? i : 1);
+    }
+    femu_hybrid_check(&c, buf, &oracle);
+    if (sequential) {
+        uint8_t stats[512];
+
+        g_assert_cmpint(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                     sizeof(stats), 0), ==, NVME_SUCCESS);
+        qtest_memread(c.pdev->bus->qts, buf, stats, sizeof(stats));
+        /* C0h byte 104: LE64 charged hybrid merge erases, excluding line GC. */
+        g_assert_cmpuint(ldq_le_p(stats + 104), ==, 2);
+    }
+    hybrid_oracle_destroy(&oracle);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+void femu_test_hybrid_trace(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    HybridOracle oracle;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t contents[256] = { 0 };
+    unsigned kind = GPOINTER_TO_UINT(data);
+    uint32_t random = 7;
+    unsigned i;
+
+    hybrid_oracle_init(&oracle, 4, 16, 256);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 96; i++) {
+        unsigned lpn;
+
+        switch (kind) {
+        case 0:
+            lpn = i % 32;
+            break;
+        case 1:
+            random = random * 1664525U + 1013904223U;
+            lpn = (random >> 16) % 96;
+            break;
+        case 2:
+            lpn = 2;
+            break;
+        default:
+            lpn = (i % 24) * 4 + i / 24;
+            break;
+        }
+        contents[lpn] = i + 1;
+        qtest_memset(c.pdev->bus->qts, buf, contents[lpn], 4096);
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf), ==,
+                        NVME_SUCCESS);
+        hybrid_oracle_write(&oracle, lpn);
+        femu_hybrid_check(&c, buf, &oracle);
+    }
+
+    /* Merges must preserve the newest payload at every written offset. */
+    for (i = 0; i < G_N_ELEMENTS(contents); i++) {
+        uint8_t page[4096];
+        unsigned j;
+
+        if (!contents[i]) {
+            continue;
+        }
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, i * 8, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(c.pdev->bus->qts, buf, page, sizeof(page));
+        for (j = 0; j < sizeof(page); j++) {
+            g_assert_cmphex(page[j], ==, contents[i]);
+        }
+    }
+    g_test_message("programs=%" PRIu64 " copies=%" PRIu64
+                   " switches=%" PRIu64 " full-merges=%" PRIu64
+                   " erases=%" PRIu64,
+                   oracle.programs, oracle.copies, oracle.switches,
+                   oracle.merges, oracle.erases);
+    hybrid_oracle_destroy(&oracle);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+void femu_test_hybrid_batch(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    HybridOracle oracle;
+    uint64_t buf = guest_alloc(alloc, 8192);
+    bool buffered = GPOINTER_TO_INT(data);
+    NvmeRwCmd rw = { 0 };
+    uint16_t got;
+    unsigned i;
+
+    hybrid_oracle_init(&oracle, 4, 16, 256);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 3; i++) {
+        qtest_memset(c.pdev->bus->qts, buf, 0x5a, 4096);
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf), ==,
+                        NVME_SUCCESS);
+        if (buffered) {
+            femu_hybrid_flush(&c);
+        }
+        hybrid_oracle_write(&oracle, i);
+        femu_hybrid_check(&c, buf, &oracle);
+    }
+
+    /* The first page fills the log; the second needs a fresh log. */
+    qtest_memset(c.pdev->bus->qts, buf, 0xa5, 8192);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.dptr.prp2 = cpu_to_le64(buf + 4096);
+    rw.slba = cpu_to_le64(16);
+    rw.nlb = cpu_to_le16(15);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(femu_complete(&c, &c.io, &got, NULL), ==, NVME_SUCCESS);
+    if (buffered) {
+        femu_hybrid_flush(&c);
+    }
+    hybrid_oracle_write(&oracle, 2);
+    hybrid_oracle_write(&oracle, 3);
+    femu_hybrid_check(&c, buf, &oracle);
+
+    for (i = 0; i < 4; i++) {
+        uint8_t page[4096];
+        unsigned j;
+
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, i * 8, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(c.pdev->bus->qts, buf, page, sizeof(page));
+        for (j = 0; j < sizeof(page); j++) {
+            g_assert_cmphex(page[j], ==, i < 2 ? 0x5a : 0xa5);
+        }
+    }
+    hybrid_oracle_destroy(&oracle);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* Large dword counts must not wrap to a small, successful transfer. */
+/*
+ * The spare warning is for a spare that has fallen below the threshold, in
+ * the SMART log and the Endurance Group log alike. On 100 blocks, @data bad
+ * ones leave 100 - @data percent: 80 leaves the threshold itself, which is
+ * not below it, and 81 leaves one less.
+ */
+void femu_test_spare_threshold(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    uint8_t spare = 100 - atoi(data);
+    bool below = spare < FEMU_SPARE_THRESHOLD;
+    FemuCtrlState c = { 0 };
+    uint8_t page[512];
+    uint64_t buf;
+    NvmeCmd cmd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, sizeof(page));
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    g_assert_cmpuint(page[3], ==, spare);
+    g_assert_cmpuint(page[4], ==, FEMU_SPARE_THRESHOLD);
+    g_assert_cmpuint(page[0] & NVME_SMART_SPARE, ==,
+                     below ? NVME_SMART_SPARE : 0);
+
+    /* Endurance Group 1: critical warning at 0, spare at 3, threshold at 4 */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(NVME_LOG_ENDGRP | ((sizeof(page) / 4 - 1) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    g_assert_cmpuint(page[3], ==, spare);
+    g_assert_cmpuint(page[4], ==, FEMU_SPARE_THRESHOLD);
+    g_assert_cmpuint(page[0] & NVME_SMART_SPARE, ==,
+                     below ? NVME_SMART_SPARE : 0);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * The media counters are the emulator's own numbers, and the vendor page is
+ * the only place they are reported. A page that answers with zeroes looks the
+ * same as one that answers correctly on a device that has done no work, so
+ * this writes first and then requires the counters to have moved -- and
+ * requires the amplification factor to be consistent with them, which is what
+ * a caller actually reads the page for.
+ */
+void femu_test_media_counters(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, pattern;
+    uint32_t waf;
+    uint64_t host, gc, nand;
+    uint8_t page[512];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, sizeof(page));
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+    host = ldq_le_p(page + 8);
+    g_assert_cmpint(host, ==, 0);
+
+    /* enough writes that the counter cannot stay where it was */
+    pattern = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(femu->dev.bus->qts, pattern, 0x5a, FEMU_DATA_SIZE);
+    for (i = 0; i < 16; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        i * (FEMU_DATA_SIZE / c.lba_size),
+                                        pattern)), ==, NVME_SUCCESS);
+    }
+    guest_free(alloc, pattern);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+
+    waf  = ldl_le_p(page);
+    host = ldq_le_p(page + 8);
+    gc   = ldq_le_p(page + 16);
+    nand = ldq_le_p(page + 24);
+
+    g_assert_cmpint(host, >, 0);
+    g_assert_cmpint(nand, >=, host);
+    /* nothing has been rewritten yet, so the device has relocated nothing */
+    g_assert_cmpint(gc, ==, 0);
+    /* the factor is (programmed + relocated) / host, scaled by a thousand */
+    g_assert_cmpint(waf, ==, ((nand + gc) * 1000ull) / host);
+
+    /*
+     * This device has no write buffer, so it is the control for the buffered
+     * test below: the pages the buffer would have been asked about are still
+     * counted, and none of them can be a hit.
+     */
+    g_assert_cmpint(ldq_le_p(page + 72), ==, host);
+    g_assert_cmpint(ldq_le_p(page + 80), ==, 0);
+    g_assert_cmpint(ldq_le_p(page + 56), ==, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+    g_assert_cmpint(ldq_le_p(page + 56), >, 0);
+    g_assert_cmpint(ldq_le_p(page + 64), ==, 0);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * The same counters on a device that has a write buffer. Rewriting a page the
+ * buffer is still holding owes no extra program, and reading it is answered
+ * without the media; both show up as hits, which the unbuffered test above
+ * requires to stay at zero.
+ */
+void femu_test_buffer_counters(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, pattern;
+    uint8_t page[512];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, sizeof(page));
+    pattern = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(femu->dev.bus->qts, pattern, 0xa5, FEMU_DATA_SIZE);
+
+    /* the same page four times: three of them find it already held */
+    for (i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, pattern)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, pattern)), ==,
+                    NVME_SUCCESS);
+    guest_free(alloc, pattern);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(femu->dev.bus->qts, buf, page, sizeof(page));
+
+    g_assert_cmpint(ldq_le_p(page + 72), >, 0);
+    g_assert_cmpint(ldq_le_p(page + 80), >, 0);
+    g_assert_cmpint(ldq_le_p(page + 80), <=, ldq_le_p(page + 72));
+    g_assert_cmpint(ldq_le_p(page + 64), >, 0);
+    g_assert_cmpint(ldq_le_p(page + 64), <=, ldq_le_p(page + 56));
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Collection on a device with few lines. Below twenty lines the forced
+ * watermark rounds to zero free lines, so a large write could take the last
+ * line part way through, and collection then had nowhere to put what it
+ * moved: it erased the pages anyway, leaving their mappings pointing at erased
+ * pages, and every later write failed. Collection must never erase what it
+ * did not move, and a namespace within its capacity must never run out.
+ */
+void femu_test_gc_no_destination(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t lost, mapped, orphans;
+    uint32_t seed = 1;
+    uint32_t full = 0;
+    uint16_t status;
+    QDict *rsp;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    /* scattered single pages leave every line part valid, then large writes */
+    for (i = 0; i < 600; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        status = FEMU_SC(femu_write_pages(&c, page, npages, buf, list));
+        g_assert_true(status == NVME_SUCCESS || status == NVME_CAP_EXCEEDED);
+        full += status == NVME_CAP_EXCEEDED;
+    }
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-ftl-check'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           &mapped, &lost, &orphans), ==, 3);
+    qobject_unref(rsp);
+    g_test_message("capacity exceeded %u times, %" PRIu64 " of %" PRIu64
+                   " mappings lost, %" PRIu64 " orphans", full, lost, mapped,
+                   orphans);
+    g_assert_cmpuint(mapped, ==, pages);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(full, ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+static void femu_ftl_trace_run(void *obj, QGuestAllocator *alloc,
+                               const char *want, const FtlTraceMp *mp,
+                               const FtlTraceVar *var)
+{
+    const char *base = mp ? mp->base : NULL;
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint32_t seed = 1;
+    uint32_t read_seed = 3;
+    bool written[256] = { false };
+    int rounds = var && var->trim ? 2 : 1;
+    int nw = 0;
+    QDict *rsp;
+    int round;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+
+    for (i = 0; i < pages; i += 64) {
+        int pid = var && var->npids ? var->pids[nw++ % var->npids] : -1;
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 64, buf, list,
+                                                        pid)), ==,
+                        NVME_SUCCESS);
+    }
+    /*
+     * Reads long enough to cover the same page on more than one plane. No
+     * collection has run yet, so each command finds the media idle and the
+     * modelled time so far does not depend on how loaded the host is.
+     */
+    if (mp) {
+        uint32_t rseed = 7;
+        uint64_t seq_ns;
+
+        for (i = 0; i < 32; i++) {
+            rseed = rseed * 1103515245 + 12345;
+            g_assert_cmphex(femu_read_pages(&c, (rseed >> 8) % (pages - 16 + 1),
+                                            16, buf, list), ==, NVME_SUCCESS);
+        }
+        seq_ns = femu_ftl_trace_field(qts, 1);
+        g_test_message("model ns before collection %" PRIu64, seq_ns);
+        g_assert_cmpuint(seq_ns, ==, mp->seq_ns);
+        if (base) {
+            g_assert_cmpuint(seq_ns, <, mp->base_seq_ns);
+        }
+    }
+    for (round = 0; round < rounds; round++) {
+        if (round) {
+            g_assert_cmphex(femu_dealloc_pages(&c, 0, 1, list), ==,
+                            NVME_SUCCESS);
+            memset(written, 0, sizeof(written));
+        }
+        for (i = 0; i < 600; i++) {
+            uint32_t npages = i % 4 == 3 ? 64 : 1;
+            int pid = var && var->npids ? var->pids[nw++ % var->npids] : -1;
+            uint64_t page;
+            uint32_t j;
+
+            seed = seed * 1103515245 + 12345;
+            page = (seed >> 8) % (pages - npages + 1);
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, page, npages,
+                                                            buf, list, pid)),
+                            ==, NVME_SUCCESS);
+            for (j = 0; j < npages; j++) {
+                written[page + j] = true;
+            }
+            if (var && var->reread) {
+                read_seed = read_seed * 1103515245 + 12345;
+                g_assert_cmphex(femu_rw(&c, NVME_CMD_READ,
+                                        ((read_seed >> 8) % pages) * 8, buf),
+                                ==, NVME_SUCCESS);
+            }
+        }
+    }
+    for (i = 0; i < 128; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, ((seed >> 8) % pages) * 8,
+                                buf), ==, NVME_SUCCESS);
+    }
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/trace',"
+                    "'property':'x-ftl-trace'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-ftl-trace %s", qdict_get_str(rsp, "return"));
+    {
+        g_auto(GStrv) gotv = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+        g_auto(GStrv) expv = g_strsplit(want, " ", 0);
+        uint64_t got[FTL_TRACE_FIELDS];
+        uint64_t exp[FTL_TRACE_FIELDS];
+
+        g_assert_cmpuint(g_strv_length(gotv), ==, FTL_TRACE_FIELDS);
+        g_assert_cmpuint(g_strv_length(expv), ==, FTL_TRACE_FIELDS);
+        for (i = 0; i < FTL_TRACE_FIELDS; i++) {
+            got[i] = g_ascii_strtoull(gotv[i], NULL, 10);
+            exp[i] = g_ascii_strtoull(expv[i], NULL, 10);
+        }
+        for (i = 0; i < FTL_TRACE_FIELDS; i++) {
+            if (i == 1) {
+                g_assert_cmpuint(got[1], >=, exp[1] - exp[1] / 4);
+                g_assert_cmpuint(got[1], <=, exp[1] + exp[1] / 4);
+            } else {
+                g_assert_cmpuint(got[i], ==, exp[i]);
+            }
+        }
+        /*
+         * Against the same workload with every page charged on its own:
+         * the same commands, pages and erases, and fewer read and program
+         * commands. The modelled time is compared above, where it is exact.
+         */
+        if (base) {
+            g_auto(GStrv) basev = g_strsplit(base, " ", 0);
+            uint64_t b[FTL_TRACE_FIELDS];
+
+            g_assert_cmpuint(g_strv_length(basev), ==, FTL_TRACE_FIELDS);
+            for (i = 0; i < FTL_TRACE_FIELDS; i++) {
+                b[i] = g_ascii_strtoull(basev[i], NULL, 10);
+            }
+            for (i = 0; i < FTL_TRACE_FIELDS; i++) {
+                if (i == 1 || i == 6 || i == 7) {
+                    continue;
+                }
+                g_assert_cmpuint(got[i], ==, b[i]);
+            }
+            g_assert_cmpuint(got[6], <, b[6]);
+            g_assert_cmpuint(got[7], <, b[7]);
+        }
+    }
+    qobject_unref(rsp);
+
+    if (var && var->reread) {
+        g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, list,
+                                             512, 0)), ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readq(qts, list + 40), ==, var->read_reclaims);
+    }
+    if (var && var->trim) {
+        uint64_t mapped;
+        uint64_t lost;
+        uint64_t orphans;
+        uint64_t want_mapped = 0;
+
+        for (i = 0; i < pages; i++) {
+            want_mapped += written[i];
+        }
+        rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                        "'path':'/machine/peripheral/trace',"
+                        "'property':'x-ftl-check'}}");
+        g_assert_true(qdict_haskey(rsp, "return"));
+        g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                               "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                               &mapped, &lost, &orphans), ==, 3);
+        qobject_unref(rsp);
+        g_assert_cmpuint(mapped, ==, want_mapped);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+void femu_test_ftl_trace(void *obj, void *data, QGuestAllocator *alloc)
+{
+    femu_ftl_trace_run(obj, alloc, data, NULL, NULL);
+}
+
+/* the trace under one of the variants above; data is an FtlTraceVar */
+void femu_test_ftl_trace_var(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    const FtlTraceVar *var = data;
+
+    femu_ftl_trace_run(obj, alloc, var->want, NULL, var);
+}
+
+/* two planes per LUN, with reads of several pages; data is an FtlTraceMp */
+void femu_test_ftl_trace_mp(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    const FtlTraceMp *mp = data;
+
+    femu_ftl_trace_run(obj, alloc, mp->want, mp, NULL);
+}
+
+/*
+ * x-gc-order: victims, early, lun_early, seals of the copy LUNs, seals of
+ * the source LUNs (ssd_gc_order_report())
+ */
+#define GC_ORDER_FIELDS 5
+
+/*
+ * The order of collection, from the counts the FTL keeps as it books an
+ * erase (x-gc-order). The workload fills the device and overwrites random
+ * pages, so forced collection copies pages of most victims. A copy program
+ * ends at least tPROG after collection starts, so with gc_erase_order off
+ * each victim with a copy books its erase before its copies end: "early"
+ * is above 0, the planted control. With the order on, every erase waits
+ * for the fence and "early" is 0. The control uses the real clock: it
+ * fails only if the FTL thread stops for more than tPROG after the last
+ * copy of every one of the victims. The controls set tPROG to 2 ms, ten
+ * times the default, to make that very unlikely.
+ *
+ *   off  LUN s [rd][erase ....]       erase booked at now < copy end
+ *        LUN d [copy    ]
+ *   on   LUN s [rd]      [erase ....] erase booked at the copy end
+ *        LUN d     [copy    ]
+ *
+ * @data: "on", "off" (the control), "suspend" (on, with pe_suspend and a
+ * read after each write, so each copy program is sealed), or "prio" (the
+ * same with read_prio, where a read could go ahead of a queued copy).
+ */
+void femu_test_gc_erase_order(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool on = strcmp(mode, "off") != 0;
+    bool reads = !strcmp(mode, "suspend") || !strcmp(mode, "prio");
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[GC_ORDER_FIELDS];
+    g_auto(GStrv) f = NULL;
+    uint32_t seed = 1;
+    QDict *rsp;
+    uint32_t i;
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-order',"
+                    "'property':'gc_erase_order'}}");
+    g_assert_cmpint(qdict_get_bool(rsp, "return"), ==, on);
+    qobject_unref(rsp);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 64 * 4096);
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 400; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (seed >> 8) % pages, 1,
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+        if (reads) {
+            seed = seed * 1103515245 + 12345;
+            g_assert_cmphex(femu_rw(&c, NVME_CMD_READ,
+                                    ((seed >> 8) % pages) * 8, buf), ==,
+                            NVME_SUCCESS);
+        }
+    }
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-order',"
+                    "'property':'x-gc-order'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-gc-order %s: %s", mode, qdict_get_str(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    qobject_unref(rsp);
+    g_assert_cmpuint(g_strv_length(f), ==, GC_ORDER_FIELDS);
+    for (i = 0; i < GC_ORDER_FIELDS; i++) {
+        v[i] = g_ascii_strtoull(f[i], NULL, 10);
+    }
+
+    g_assert_cmpuint(v[0], >, 0);
+    if (on) {
+        g_assert_cmpuint(v[1], ==, 0);
+        g_assert_cmpuint(v[2], ==, 0);
+    } else {
+        /* the control: the erase is booked before its copies end */
+        g_assert_cmpuint(v[1], >, 0);
+        g_assert_cmpuint(v[3], ==, 0);
+    }
+    /* the copy LUNs and the source LUNs are sealed apart */
+    if (reads) {
+        g_assert_cmpuint(v[3], >, 0);
+        g_assert_cmpuint(v[4], >, 0);
+    } else {
+        g_assert_cmpuint(v[3], ==, 0);
+        g_assert_cmpuint(v[4], ==, 0);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * A bbssd device of 2^31 sectors, one past the old limit, starts, and
+ * query-femu reports its 64-bit totals. 8 x 4 x 256 x 1024 pages of 256
+ * sectors is 2^23 pages, 2^31 sectors.
+ */
+void femu_test_geometry_big(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    QDict *rsp;
+    QDict *ns;
+    QDict *geo;
+
+    femu_enable(&c, &femu->dev, alloc);
+    ns = femu_query_ns(qts, "'path':'/machine/peripheral/big'", &rsp);
+    geo = qdict_get_qdict(ns, "geometry");
+    g_assert_cmpuint(qdict_get_int(geo, "total-sectors"), ==, 1ULL << 31);
+    g_assert_cmpuint(qdict_get_int(geo, "total-pages"), ==, 1ULL << 23);
+    g_assert_cmpuint(qdict_get_int(geo, "total-blocks"), ==, 8192);
+    qobject_unref(rsp);
+}
+
+/*
+ * Kind blocks, paged to the end: one record per flash block, in channel,
+ * LUN, plane, block order, whose erase counts sum to block-erases.
+ */
+static void femu_query_check_blocks(QTestState *qts)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *geo = qdict_get_qdict(ns, "geometry");
+    uint64_t bpp = qdict_get_int(geo, "blocks-per-plane");
+    uint64_t total = qdict_get_int(geo, "channels") *
+                     qdict_get_int(geo, "luns-per-channel") *
+                     qdict_get_int(geo, "planes-per-lun") * bpp;
+    uint64_t erases = qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                    "block-erases");
+    uint64_t sum = 0;
+    uint64_t seen = 0;
+    uint32_t offset = 0;
+    bool more = true;
+
+    qobject_unref(rsp);
+    while (more) {
+        g_autofree char *args = g_strdup_printf(
+            "'kind':'blocks','offset':%u,'limit':4096", offset);
+        QList *blocks;
+        QListEntry *e;
+
+        ns = femu_query_ns(qts, args, &rsp);
+        blocks = qdict_get_qlist(ns, "blocks");
+        QLIST_FOREACH_ENTRY(blocks, e) {
+            QDict *b = qobject_to(QDict, qlist_entry_obj(e));
+
+            g_assert_cmpuint(qdict_get_int(b, "block"), ==, seen % bpp);
+            sum += qdict_get_int(b, "erase-count");
+            seen++;
+        }
+        more = qdict_haskey(ns, "next-offset");
+        if (more) {
+            offset = qdict_get_int(ns, "next-offset");
+            g_assert_cmpuint(offset, ==, seen);
+        }
+        qobject_unref(rsp);
+    }
+    g_assert_cmpuint(seen, ==, total);
+    g_assert_cmpuint(sum, ==, erases);
+    g_assert_cmpuint(sum, >, 0);
+}
+
+/*
+ * Background write-back (buffer_low_pcent=25 of a 64-page buffer, so the
+ * low mark is 16 pages, the high one 57). 40 one-page writes stay below
+ * the high mark, so no write writes back on its own. Idle, the FTL thread
+ * writes 24 pages back and stops at 16. Without buffer_low_pcent (@data
+ * NULL) all 40 stay held.
+ */
+void femu_test_buffer_bg(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    QDict *rsp;
+    QDict *ns;
+    QDict *ctr;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (int i = 0; i < 40; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        i * (FEMU_DATA_SIZE / c.lba_size),
+                                        buf)), ==, NVME_SUCCESS);
+    }
+    g_usleep(300 * 1000);
+    ns = femu_query_ns(qts, "", &rsp);
+    ctr = qdict_get_qdict(ns, "counters");
+    g_assert_cmpuint(qdict_get_int(ctr, "host-write-pages"), ==, 40);
+    g_assert_cmpuint(qdict_get_int(ctr, "nand-write-pages"), ==,
+                     data ? 24 : 0);
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A Flush waits for the programs of the idle write-back. 1 s programs and
+ * a low mark of 0: the idle step takes the one buffered page out and books
+ * its program. The buffer is then empty, but a Flush must still take the
+ * rest of that program, most of the second.
+ */
+void femu_test_buffer_flush_fence(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int64_t nand = 0;
+    int64_t t0;
+    uint16_t got;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4e, 4096);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    for (int i = 0; i < 100 && !nand; i++) {
+        QDict *ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp),
+                                     "counters");
+
+        nand = qdict_get_int(ctr, "nand-write-pages");
+        qobject_unref(rsp);
+        if (!nand) {
+            g_usleep(10 * 1000);
+        }
+    }
+    g_assert_cmpint(nand, ==, 1);
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(1);
+    t0 = g_get_monotonic_time();
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_test_message("flush after idle write-back: %" PRId64 " us",
+                   g_get_monotonic_time() - t0);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 300000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Disabling the volatile write cache drains the buffer (vwc=1, 1 s
+ * programs). A held page is programmed before Set Features completes, so a
+ * host that only reads after it does not leave the page in DRAM. A Flush
+ * right after still waits for that program.
+ */
+void femu_test_buffer_vwc_drain(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int64_t t0;
+    uint16_t got;
+    QDict *rsp;
+    QDict *ctr;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5f, 4096);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "counters");
+    g_assert_cmpint(qdict_get_int(ctr, "nand-write-pages"), ==, 0);
+    qobject_unref(rsp);
+    g_assert_cmphex(femu_set_feature(&c, 0x06, false, 0, 0, NULL), ==,
+                    NVME_SUCCESS);
+    ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "counters");
+    g_assert_cmpint(qdict_get_int(ctr, "nand-write-pages"), ==, 1);
+    qobject_unref(rsp);
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(1);
+    t0 = g_get_monotonic_time();
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_test_message("flush after cache disable: %" PRId64 " us",
+                   g_get_monotonic_time() - t0);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 300000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* x-place-fail: the next @n data pages of device @id find no place */
+static void femu_place_fail_id(QTestState *qts, const char *id, uint32_t n)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':%s,"
+                           "'property':'x-place-fail','value':%u}}", path, n);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+static void femu_place_fail(QTestState *qts, uint32_t n)
+{
+    femu_place_fail_id(qts, "bp", n);
+}
+
+static int64_t femu_nand_pages(QTestState *qts)
+{
+    QDict *rsp;
+    QDict *ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "counters");
+    int64_t v = qdict_get_int(ctr, "nand-write-pages");
+
+    qobject_unref(rsp);
+    return v;
+}
+
+static uint16_t femu_flush_sc(FemuCtrlState *c)
+{
+    NvmeCmd cmd = { 0 };
+    uint16_t got;
+
+    cmd.opcode = NVME_CMD_FLUSH;
+    cmd.nsid = cpu_to_le32(1);
+    femu_submit(c, &c->io, &cmd);
+    return FEMU_SC(femu_complete(c, &c->io, &got, NULL));
+}
+
+/*
+ * A buffered page whose program finds no place stays in the buffer. Three
+ * pages are held; the first placement fails, so the Flush fails and
+ * programs nothing. A second Flush programs all three. Then a held page
+ * meets an FUA write whose placement fails: the write fails, and the held
+ * page is still owed, so the next Flush programs it.
+ */
+void femu_test_buffer_place_fail(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeRwCmd rw = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint16_t got;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2b, 4096);
+    for (int i = 0; i < 3; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        i * (4096 / c.lba_size), buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_nand_pages(qts), ==, 0);
+    femu_place_fail(qts, 1);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_CAP_EXCEEDED);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 0);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 3);
+
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 3);
+    femu_place_fail(qts, 1);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(4096 / c.lba_size - 1);
+    rw.control = cpu_to_le16(NVME_RW_FUA);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_CAP_EXCEEDED);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 3);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 4);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Indirection unit of 4 pages (iu_pages=4): one 16 KiB write fills unit 0
+ * and programs 4 pages. A 4 KiB write to page 1 then reads pages 0, 2 and
+ * 3 and programs them again with it: 4 more NAND pages for 1 host page.
+ * Without iu_pages (@data NULL) it programs 1.
+ */
+void femu_test_iu_rmw(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    QDict *rsp;
+    QDict *ctr;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5d, 4 * 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 4, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 1, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+    ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "counters");
+    g_assert_cmpuint(qdict_get_int(ctr, "host-write-pages"), ==, 5);
+    g_assert_cmpuint(qdict_get_int(ctr, "nand-write-pages"), ==,
+                     data ? 8 : 5);
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/* @lines records from @offset, and where the listing continues (0 = end) */
+static void femu_query_window(QTestState *qts, uint32_t offset, uint32_t limit,
+                              uint32_t want, uint32_t next)
+{
+    g_autofree char *args = g_strdup_printf(
+        "'kind':'lines','offset':%u,'limit':%u", offset, limit);
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, args, &rsp);
+    QList *lines = qdict_get_qlist(ns, "lines");
+
+    g_assert_cmpuint(qlist_size(lines), ==, want);
+    g_assert_cmpuint(qdict_get_int(ns, "offset"), ==, offset);
+    if (want) {
+        QDict *first = qobject_to(QDict, qlist_peek(lines));
+
+        g_assert_cmpuint(qdict_get_int(first, "id"), ==, offset);
+    }
+    if (next) {
+        g_assert_cmpuint(qdict_get_int(ns, "next-offset"), ==, next);
+    } else {
+        g_assert_false(qdict_haskey(ns, "next-offset"));
+    }
+    qobject_unref(rsp);
+}
+
+/*
+ * query-femu on a bbssd namespace of 19 lines of 16 pages: its counters
+ * agree with log page C0h before and after writes and after collection, the
+ * valid pages of its lines are the FTL's mappings, windows and selectors
+ * are checked, and queries made while writes are in flight all return.
+ */
+void femu_test_query(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const char *path = "/machine/peripheral/qf";
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint32_t seed = 1;
+    int64_t slowest = 0;
+    QDict *rsp;
+    QDict *ns;
+    QDict *geo;
+    int i;
+
+    femu_query_fails(qts, "", "not enabled");
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+
+    ns = femu_query_ns(qts, "'path':'/machine/peripheral/qf'", &rsp);
+    g_assert_cmpstr(qdict_get_str(qdict_get_qdict(rsp, "return"), "path"), ==,
+                    path);
+    g_assert_cmpstr(qdict_get_str(qdict_get_qdict(rsp, "return"), "mode"), ==,
+                    "bbssd");
+    g_assert_cmpuint(qdict_get_int(ns, "nsid"), ==, 1);
+    g_assert_cmpstr(qdict_get_str(ns, "mode"), ==, "bbssd");
+    g_assert_false(qdict_haskey(ns, "lines"));
+    geo = qdict_get_qdict(ns, "geometry");
+    g_assert_cmpuint(qdict_get_int(geo, "channels"), ==, 2);
+    g_assert_cmpuint(qdict_get_int(geo, "luns-per-channel"), ==, 2);
+    g_assert_cmpuint(qdict_get_int(geo, "planes-per-lun"), ==, 1);
+    g_assert_cmpuint(qdict_get_int(geo, "blocks-per-plane"), ==, 19);
+    g_assert_cmpuint(qdict_get_int(geo, "pages-per-block"), ==, 4);
+    g_assert_cmpuint(qdict_get_int(geo, "page-size"), ==, 4096);
+    g_assert_cmpuint(qdict_get_int(geo, "pages-per-line"), ==, 16);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "line-counts"),
+                                   "total"), ==, 19);
+    qobject_unref(rsp);
+    femu_query_matches_c0h(&c, log);
+    femu_query_check_lines(qts, path, 0);
+
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_query_matches_c0h(&c, log);
+    femu_query_check_lines(qts, path, pages);
+
+    for (i = 0; i < 600; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, page, npages, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    ns = femu_query_ns(qts, "", &rsp);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                   "gc-write-pages"), >, 0);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                   "block-erases"), >, 0);
+    qobject_unref(rsp);
+    femu_query_matches_c0h(&c, log);
+    femu_query_check_lines(qts, path, pages);
+
+    /* windows */
+    femu_query_window(qts, 0, 5, 5, 5);
+    femu_query_window(qts, 5, 5, 5, 10);
+    femu_query_window(qts, 15, 10, 4, 0);
+    femu_query_window(qts, 18, 1, 1, 0);
+    femu_query_window(qts, 0, 4096, 19, 0);
+    femu_query_fails(qts, "'kind':'lines','offset':19", "past its last line");
+    femu_query_check_blocks(qts);
+    femu_query_fails(qts, "'kind':'blocks','offset':4000000",
+                     "past its last block");
+    femu_query_fails(qts, "'kind':'lines','limit':0", "limit must be");
+    femu_query_fails(qts, "'kind':'lines','limit':4097", "limit must be");
+    femu_query_fails(qts, "'offset':1", "only to kind");
+    femu_query_fails(qts, "'limit':1", "only to kind");
+
+    /* selectors */
+    femu_query_fails(qts, "'nsid':2", "not attached");
+    femu_query_fails(qts, "'nsid':0", "not attached");
+    femu_query_fails(qts, "'kind':'zones'", "only to znssd");
+    femu_query_fails(qts, "'kind':'reclaim-units'",
+                     "only with flexible data placement");
+    femu_query_fails(qts, "'path':'/machine'", "not a femu device");
+    femu_query_fails(qts, "'path':'/machine/peripheral/none'",
+                     "not a femu device");
+    ns = femu_query_ns(qts, "'nsid':1,'kind':'summary'", &rsp);
+    g_assert_cmpuint(qdict_get_int(ns, "nsid"), ==, 1);
+    qobject_unref(rsp);
+
+    /*
+     * Queries while writes are in flight: the queue is filled, every query
+     * must return within a second, and every write must then complete.
+     */
+    for (int round = 0; round < 4; round++) {
+        for (i = 0; i < FEMU_QSIZE - 1; i++) {
+            NvmeRwCmd rw;
+
+            memset(&rw, 0, sizeof(rw));
+            rw.opcode = NVME_CMD_WRITE;
+            rw.nsid = cpu_to_le32(1);
+            rw.dptr.prp1 = cpu_to_le64(buf);
+            rw.slba = cpu_to_le64((uint64_t)((round * 31 + i * 7) % pages) *
+                                  (4096 / c.lba_size));
+            rw.nlb = cpu_to_le16(4096 / c.lba_size - 1);
+            femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        }
+        for (i = 0; i < 8; i++) {
+            int64_t start = g_get_monotonic_time();
+
+            ns = femu_query_ns(qts, i % 2 ? "'kind':'lines'" : "", &rsp);
+            qobject_unref(rsp);
+            slowest = MAX(slowest, g_get_monotonic_time() - start);
+            g_assert_cmpint(slowest, <, G_USEC_PER_SEC);
+        }
+        for (i = 0; i < FEMU_QSIZE - 1; i++) {
+            g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    g_test_message("slowest query with writes in flight: %" PRId64 " us",
+                   slowest);
+    femu_query_matches_c0h(&c, log);
+    femu_query_check_lines(qts, path, pages);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    femu_query_fails(qts, "", "not enabled");
+}
+
+/*
+ * A controller with a bbssd and a kvssd namespace and the ONFI profile:
+ * one reply, both entries with the same media timing, and kind lines
+ * refused on the kvssd one.
+ */
+void femu_test_query_media_mixed(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const FemuMediaWant *kv = femu_media_want("kvssd-m26");
+    QDict *rsp;
+    QList *nss;
+
+    femu_enable(&c, &femu->dev, alloc);
+    rsp = femu_query(qts, "");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    nss = qdict_get_qlist(qdict_get_qdict(rsp, "return"), "namespaces");
+    g_assert_cmpuint(qlist_size(nss), ==, 2);
+    femu_media_check(qobject_to(QDict, qlist_entry_obj(qlist_first(nss))),
+                     femu_media_want("m26-2lun"));
+    femu_media_check(qobject_to(QDict, qlist_entry_obj(
+                         qlist_next(qlist_first(nss)))), kv);
+    qobject_unref(rsp);
+    femu_query_fails(qts, "'nsid':2,'kind':'lines'", "does not apply");
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A worn-out block raises a SMART event when the host enabled its kind in
+ * Asynchronous Event Configuration (@data): bit 0, the spare falling below
+ * its threshold, reports information 02h; bit 2, reliability, reports 00h.
+ * With neither enabled the request stays outstanding. This device crosses
+ * both: a line retires, using up the spare, and blocks stay overworn.
+ */
+void femu_test_wear_aer(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    uint32_t aec = g_ascii_strtoull(data, NULL, 0);
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    NvmeCqe cqe;
+    NvmeCmd cmd;
+    uint32_t result;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    g_assert_cmpint(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF, false,
+                                     0, aec, NULL), ==, NVME_SUCCESS);
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ASYNC_EV_REQ;
+    femu_submit(&c, &c.admin, &cmd);
+
+    femu_wear_workload(&c, buf, list);
+
+    if (!aec) {
+        /* the event bottom half has had the whole workload to run */
+        qtest_memread(qts, c.admin.cq_addr +
+                      c.admin.cq_head * sizeof(NvmeCqe), &cqe, sizeof(cqe));
+        g_assert_cmpint(le16_to_cpu(cqe.status) & 1, !=, c.admin.phase);
+    } else {
+        g_assert_cmpint(femu_complete(&c, &c.admin, NULL, &result), ==,
+                        NVME_SUCCESS);
+        g_test_message("AER result 0x%x", result);
+        g_assert_cmphex(result & 0x7, ==, NVME_AER_TYPE_SMART);
+        g_assert_cmphex((result >> 8) & 0xff, ==,
+                        aec & NVME_SMART_SPARE ?
+                        NVME_AER_INFO_SMART_SPARE_THRESH :
+                        NVME_AER_INFO_SMART_RELIABILITY);
+        g_assert_cmphex((result >> 16) & 0xff, ==, NVME_LOG_SMART_INFO);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    /* each warning is raised once: the next test needs a new device */
+    qos_invalidate_command_line();
+}
+
+/*
+ * query-femu names retired and spare lines, counts them, and finds no valid
+ * page in them, while every mapped page stays where the map says. This
+ * device retires 5 lines and keeps 8 spare lines.
+ */
+void femu_test_wear_query(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    QDict *rsp;
+    QDict *cnt;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    femu_wear_workload(&c, buf, list);
+
+    femu_query_check_lines(qts, "/machine/peripheral/gc-test", 256);
+    cnt = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "line-counts");
+    g_assert_cmpuint(qdict_get_int(cnt, "retired"), ==, 5);
+    g_assert_cmpuint(qdict_get_int(cnt, "spare"), ==, 8);
+    qobject_unref(rsp);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    /* the device is worn out now: the next test must not inherit it */
+    qos_invalidate_command_line();
+}
+
+/*
+ * Static wear levelling. 16 lines of cold data are written once, then one
+ * hot logical line is rewritten 400 times. Without levelling, the lines the
+ * hot data cycles through take every erase and the cold lines none. With it,
+ * cold lines move into worn free lines and the young ones rejoin the
+ * rotation. @data pins the erase spread over lines in service at the end
+ * (most erases of any block, less fewest) and the number of moves. Every move
+ * copies one full line, levelling copies at most a quarter of the host pages,
+ * and the mapping stays exact.
+ */
+void femu_test_wear_level(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t want_spread, want_moves, moves, pages, host;
+    g_autofree char *args = g_strdup(
+        "'path':'/machine/peripheral/gc-test','kind':'lines','limit':4096");
+    uint8_t page[512];
+    uint64_t lo = UINT64_MAX, hi = 0;
+    QListEntry *e;
+    QDict *rsp;
+    QDict *ns;
+    int i;
+
+    bool wz = g_str_has_prefix(data, "wz ");
+    bool cb = g_str_has_prefix(data, "cb ");
+
+    g_assert_cmpint(sscanf(wz || cb ? data + 3 : data,
+                           "%" SCNu64 " %" SCNu64,
+                           &want_spread, &want_moves), ==, 2);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    for (i = 0; i < 256; i += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 400; i++) {
+        /* Write Zeroes programs the pages too, so it must level the same */
+        g_assert_cmphex(wz ? femu_write_zeroes(&c, 240 * 8, 128) :
+                        FEMU_SC(femu_write_pages(&c, 240, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    host = ldq_le_p(page + 8);
+    moves = ldq_le_p(page + 136);
+    pages = ldq_le_p(page + 144);
+
+    ns = femu_query_ns(qts, args, &rsp);
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(ns, "lines"), e) {
+        QDict *l = qobject_to(QDict, qlist_entry_obj(e));
+
+        lo = MIN(lo, (uint64_t)qdict_get_int(l, "erase-max"));
+        hi = MAX(hi, (uint64_t)qdict_get_int(l, "erase-max"));
+    }
+    qobject_unref(rsp);
+    g_test_message("spread %" PRIu64 ", %" PRIu64 " moves, %" PRIu64
+                   " pages, %" PRIu64 " host pages", hi - lo, moves, pages,
+                   host);
+    g_assert_cmpuint(pages, ==, moves * 16);
+    g_assert_cmpuint(pages * 4, <=, host);
+    g_assert_cmpuint(hi - lo, ==, want_spread);
+    g_assert_cmpuint(moves, ==, want_moves);
+    if (cb) {
+        /*
+         * A full line is valid on every die, so each of its moves matches,
+         * and this workload leaves collection nothing else to move.
+         */
+        g_test_message("%" PRIu64 " pages by copyback", ldq_le_p(page + 248));
+        g_assert_cmpuint(ldq_le_p(page + 248), ==, pages);
+    }
+    femu_query_check_lines(qts, "/machine/peripheral/gc-test", 256);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* the state and valid pages of line @id, from query-femu */
+static char *femu_line_state(QTestState *qts, const char *path, int id,
+                             uint64_t *vpc)
+{
+    g_autofree char *args = g_strdup_printf(
+        "'path':'%s','kind':'lines','offset':%d,'limit':1", path, id);
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, args, &rsp);
+    QDict *l = qobject_to(QDict,
+                          qlist_peek(qdict_get_qlist(ns, "lines")));
+    char *st = g_strdup(qdict_get_str(l, "state"));
+
+    *vpc = qdict_get_int(l, "vpc");
+    qobject_unref(rsp);
+    return st;
+}
+
+/*
+ * Fill line 0 with 128 pages and deallocate @dealloc of them, write @skew
+ * more pages, then fill other lines until collection takes line 0. Returns
+ * the state of line 0 then; @lpn is the next unwritten page and @vpc the
+ * valid pages left in line 0.
+ */
+static char *femu_pace_setup(FemuCtrlState *c, const char *path, uint64_t buf,
+                             uint64_t list, uint32_t dealloc, uint32_t skew,
+                             uint64_t *lpn, uint64_t *vpc)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    char *st = NULL;
+    int n;
+
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+    for (*lpn = 0; *lpn < 128; *lpn += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, *lpn, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_dealloc_pages(c, 0, dealloc, list), ==,
+                    NVME_SUCCESS);
+    if (skew) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, *lpn, skew, buf, list)),
+                        ==, NVME_SUCCESS);
+        *lpn += skew;
+    }
+    /* at most up to the end of the 14 MiB namespace */
+    for (n = 0; n < 216; n++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, *lpn, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+        *lpn += 16;
+        g_free(st);
+        st = femu_line_state(qts, path, 0, vpc);
+        if (strcmp(st, "victim")) {
+            break;
+        }
+    }
+    g_test_message("line 0 %s with %" PRIu64 " valid pages after %" PRIu64
+                   " host pages", st, *vpc, *lpn);
+    return st;
+}
+
+/*
+ * Paced collection on one LUN with 128-page lines. Line 0 is filled, then
+ * half of it is deallocated, so V0 = 64 and it frees R = 64 pages. Other
+ * lines fill until the free lines reach the background threshold and line 0
+ * is chosen. From then on each 1-page host write copies exactly one of its
+ * pages, and the 64th frees it, with no forced pass. "trim" empties the victim
+ * with a deallocation instead; "off" is the whole-line pass for contrast.
+ * "format" formats the namespace after 5 copies, so the next write finishes
+ * the empty victim; "reset" resets the controller after 5 copies, which keeps
+ * the FTL, so pacing goes on to 64.
+ */
+void femu_test_gc_pace(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *path = "/machine/peripheral/gc-test";
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t lpn = 0;
+    uint64_t vpc = 0;
+    char *st;
+    int n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    st = femu_pace_setup(&c, path, buf, list, 64, 0, &lpn, &vpc);
+
+    if (!strcmp(mode, "off")) {
+        /* the background pass moves all 64 pages in one request */
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 0);
+    } else if (!strcmp(mode, "takeover")) {
+        /*
+         * Both thresholds are three lines, so the next write starts at the
+         * forced threshold: its forced pass finishes the paced line.
+         */
+        g_assert_cmpstr(st, ==, "reclaiming");
+        /* the namespace is full: overwrite a page of another line */
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 1000, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 240), ==, 1);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 200), >=, 1);
+    } else if (!strcmp(mode, "format")) {
+        g_assert_cmpstr(st, ==, "reclaiming");
+        for (n = 1; n <= 5; n++) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+        g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 5);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+        /* only the page written after the format is mapped */
+        lpn = 1 + 64;
+    } else if (!strcmp(mode, "reset")) {
+        g_assert_cmpstr(st, ==, "reclaiming");
+        for (n = 1; n <= 64; n++) {
+            if (n == 6) {
+                femu_disable(&c);
+                femu_enable(&c, &femu->dev, alloc);
+                femu_create_io_queues(&c);
+                g_free(st);
+                st = femu_line_state(qts, path, 0, &vpc);
+                g_assert_cmpstr(st, ==, "reclaiming");
+                g_assert_cmpuint(vpc, ==, 59);
+            }
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 64);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+    } else if (!strcmp(mode, "trim")) {
+        g_assert_cmpstr(st, ==, "reclaiming");
+        g_assert_cmpuint(vpc, ==, 64);
+        /* nothing left to copy: the end of this request frees the line */
+        g_assert_cmphex(femu_dealloc_pages(&c, 64, 64, list), ==,
+                        NVME_SUCCESS);
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+    } else {
+        g_assert_cmpstr(st, ==, "reclaiming");
+        g_assert_cmpuint(vpc, ==, 64);
+        for (n = 1; n <= 64; n++) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)),
+                            ==, NVME_SUCCESS);
+            g_free(st);
+            st = femu_line_state(qts, path, 0, &vpc);
+            if (n < 64) {
+                g_assert_cmpstr(st, ==, "reclaiming");
+                g_assert_cmpuint(vpc, ==, 64 - n);
+            }
+        }
+        g_assert_cmpstr(st, ==, "free");
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 64);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+    }
+    g_assert_cmpuint(femu_c0h_field(&c, log, 240), ==,
+                     !strcmp(mode, "takeover"));
+    /* 64 pages were deallocated, and "trim" deallocates 64 more */
+    femu_query_check_lines(qts, path,
+                           lpn - 64 - (strcmp(mode, "trim") ? 0 : 64));
+
+    g_free(st);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The budget. Line 0 keeps 32 valid pages, so it frees R = 96 and the
+ * nominal rate is one copy per three host pages: 96 host pages and 32 copies,
+ * 128 allocations. The 8 skew pages leave the data line 8 pages in when the
+ * free lines reach the background threshold, which is the forced threshold
+ * plus one, so only 120 allocations remain before a forced pass. The budget
+ * check copies ceil(8 * 32 / 96) = 3 pages at once, and the line is free
+ * before the forced threshold, with no takeover.
+ */
+void femu_test_gc_pace_budget(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *path = "/machine/peripheral/gc-test";
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t lpn, vpc;
+    char *st;
+    int n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    st = femu_pace_setup(&c, path, buf, list, 96, 8, &lpn, &vpc);
+    g_assert_cmpstr(st, ==, "reclaiming");
+    g_assert_cmpuint(vpc, ==, 29);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 3);
+
+    /* the nominal rate: one copy per three host pages */
+    for (n = 1; n <= 3; n++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    g_free(st);
+    st = femu_line_state(qts, path, 0, &vpc);
+    g_assert_cmpuint(vpc, ==, 28);
+
+    for (n = 0; n < 200 && strcmp(st, "free"); n++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+    }
+    g_test_message("line 0 %s after %d more host pages", st, n + 3);
+    g_assert_cmpstr(st, ==, "free");
+    g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 32);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 240), ==, 0);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 200), ==, 0);
+    femu_query_check_lines(qts, path, lpn - 96);
+
+    g_free(st);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The latency a whole-line pass puts on the next writes, against paced
+ * collection, on one LUN so the copies queue behind each other. With 0.2 ms
+ * reads, 4 ms programs and a 1 ms erase, one pass over 64 valid pages books
+ * about 270 ms; a paced write waits for one copy, about 4 ms, before its own
+ * 4 ms program. The off bound is half the pass, so a host delay of up to
+ * 135 ms before the first timed write still leaves it red.
+ */
+void femu_test_gc_pace_timing(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    const char *path = "/machine/peripheral/gc-test";
+    bool on = !strcmp(data, "on");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t lpn, vpc;
+    int64_t max_ms = 0;
+    char *st;
+    int n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    st = femu_pace_setup(&c, path, buf, list, 64, 0, &lpn, &vpc);
+    g_assert_cmpstr(st, ==, on ? "reclaiming" : "free");
+    for (n = 0; n < 80; n++) {
+        int64_t t0 = g_get_monotonic_time();
+        int64_t ms;
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn++, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        ms = (g_get_monotonic_time() - t0) / 1000;
+        max_ms = MAX(max_ms, ms);
+    }
+    g_test_message("gc_pace %s: slowest of 80 writes %" PRId64 " ms",
+                   on ? "on" : "off", max_ms);
+    if (on) {
+        /* the same work was done: every page copied, the line freed */
+        g_assert_cmpint(max_ms, <, 60);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 224), ==, 64);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 232), ==, 1);
+    } else {
+        g_assert_cmpint(max_ms, >, 135);
+    }
+
+    g_free(st);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Copyback on 2 channels x 2 LUNs, 32-page blocks, so a line is 128 pages and
+ * page k of line 0 sits on channel k % 2, LUN (k / 2) % 2. A transfer takes
+ * 2 ms and every array step 0.1 ms. Line 0 is filled, then:
+ *   "on", "off": pages 0-63 are deallocated, so each die keeps 16 valid
+ *     pages. Collection moves 64 pages. Off, each move puts two transfers
+ *     on the channels, about 128 ms per channel, and the write that waits
+ *     for them is slow. On, every move finds its destination die and goes
+ *     by copyback, with no transfer.
+ *   "oneddie": only pages with k % 4 == 0 stay, all 32 on channel 0 LUN 0.
+ *     The destination steps through the four dies, so a quarter of the 32
+ *     moves land on that die and go by copyback; the rest go off-chip.
+ */
+void femu_test_gc_copyback(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *path = "/machine/peripheral/gc-test";
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t lpn, vpc = 0, gc0, cb, gc;
+    uint64_t mapped, lost, orphans, dealloc;
+    int64_t max_ms = 0;
+    char *st = NULL;
+    int n;
+
+    if (femu_cb_page && !strcmp(mode, "parity")) {
+        unlink(femu_cb_page);
+        g_clear_pointer(&femu_cb_page, g_free);
+    }
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 16 * 4096);
+    for (lpn = 0; lpn < 128; lpn += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    if (!strcmp(mode, "oneddie")) {
+        for (n = 0; n < 128; n++) {
+            if (n % 4) {
+                g_assert_cmphex(femu_dealloc_pages(&c, n, 1, list), ==,
+                                NVME_SUCCESS);
+            }
+        }
+    } else {
+        g_assert_cmphex(femu_dealloc_pages(&c, 0, 64, list), ==,
+                        NVME_SUCCESS);
+    }
+    /*
+     * One more page on each of the 4 LUNs moves every write pointer by
+     * one page, so source and destination pages differ in parity.
+     */
+    if (!strcmp(mode, "parity")) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn, 4, buf, list)), ==,
+                        NVME_SUCCESS);
+        lpn += 4;
+    }
+    gc0 = femu_c0h_field(&c, log, 16);
+    for (n = 0; n < 216; n++) {
+        int64_t t0 = g_get_monotonic_time();
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+        max_ms = MAX(max_ms, (g_get_monotonic_time() - t0) / 1000);
+        lpn += 16;
+        g_free(st);
+        st = femu_line_state(qts, path, 0, &vpc);
+        if (strcmp(st, "victim")) {
+            break;
+        }
+    }
+    /* the write after collection waits for whatever it left on the media */
+    {
+        int64_t t0 = g_get_monotonic_time();
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+        max_ms = MAX(max_ms, (g_get_monotonic_time() - t0) / 1000);
+    }
+    g_assert_cmpstr(st, ==, "free");
+    /* every live page still maps to the one copy that holds it */
+    dealloc = strcmp(mode, "oneddie") ? 64 : 96;
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, lpn + 16 - dealloc);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_query_check_lines(qts, path, mapped);
+    gc = femu_c0h_field(&c, log, 16) - gc0;
+    cb = femu_c0h_field(&c, log, 248);
+    g_test_message("gc_copyback %s: %" PRIu64 " moved, %" PRIu64
+                   " by copyback, slowest write %" PRId64 " ms",
+                   mode, gc, cb, max_ms);
+    if (!strcmp(mode, "off")) {
+        /* a device that does not ask for copyback has it off */
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                               "'path':'/machine/peripheral/gc-test',"
+                               "'property':'gc_copyback'}}");
+
+        g_assert_false(qdict_get_bool(rsp, "return"));
+        qobject_unref(rsp);
+        g_assert_cmpuint(gc, ==, 64);
+        g_assert_cmpuint(cb, ==, 0);
+        g_assert_cmpint(max_ms, >, 100);
+    } else if (!strcmp(mode, "on")) {
+        g_assert_cmpuint(gc, ==, 64);
+        g_assert_cmpuint(cb, ==, 64);
+        g_assert_cmpint(max_ms, <, 60);
+    } else if (!strcmp(mode, "pd")) {
+        /* pages 16-19 of each block are edge wordlines with an ECC cost */
+        g_assert_cmpuint(gc, ==, 64);
+        g_assert_cmpuint(cb, ==, 48);
+    } else if (!strcmp(mode, "parity")) {
+        /*
+         * A parameter page without odd to even copyback (bytes 6-7 bit 4):
+         * a move between pages of other parity goes off the die, and the
+         * extra page above puts every move there.
+         */
+        g_assert_cmpuint(gc, ==, 64);
+        g_assert_cmpuint(cb, ==, 0);
+    } else {
+        g_assert_cmpuint(gc, ==, 32);
+        g_assert_cmpuint(cb, ==, 8);
+    }
+
+    g_free(st);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* read_prio refuses the bus phases it would leave behind */
+void femu_test_read_prio_refused(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const char *const phases[] = {
+        "cmd_addr_lat", "pg_xfer_lat", "ch_xfer_lat", "status_lat",
+    };
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(phases); i++) {
+        g_autofree char *args = g_strdup_printf(
+            "{'driver':'femu','id':'rp-refused','addr':'5','devsz_mb':16,"
+            "'femu_mode':1,'read_prio':1,'%s':1000}", phases[i]);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                               qobject_from_json(args, &error_abort));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", phases[i], desc);
+        g_assert_nonnull(strstr(desc, "read_prio needs the plain channel"));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/* prog_pass2_ns refuses the program paths that skip the fine pass */
+void femu_test_prog_pass2_refused(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const char *const extra[] = {
+        "'prog_pass2_ns':-1",
+        "'prog_pass2_lag':2",
+        "'prog_pass2_ns':1000,'prog_pass2_lag':17",
+        "'prog_pass2_ns':1000,'mp_program':1",
+        "'prog_pass2_ns':1000,'gc_copyback':true",
+        "'prog_pass2_ns':1000,'mapping':'hybrid'",
+    };
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(extra); i++) {
+        g_autofree char *args = g_strdup_printf(
+            "{'driver':'femu','id':'p2-refused','addr':'5','devsz_mb':16,"
+            "'femu_mode':1,%s}", extra[i]);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                               qobject_from_json(args, &error_abort));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", extra[i], desc);
+        g_assert_nonnull(strstr(desc, "prog_pass2"));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/*
+ * The thermal model on the virtual clock, which only the test moves. With
+ * ambient 300 K, 10 K per W and a 1 s time constant:
+ *   "idle": 1 W gives T(t) = 300 + 10 (1 - e^-t), so 301 K at 0.1 s, 304 at
+ *     0.5 s, 305 at 0.6 s, 306 at 1 s and 309 at 2 s;
+ *   "pulse": 1000 plane programs of 1 mJ each are 1 J in the first 0.1 s
+ *     step, 10 W, so 300 + 100 (1 - e^-0.1) = 309.5 -> 310 K, then with no
+ *     power 300 + 9.516 e^-0.9 = 303.9 -> 304 K at 1 s;
+ *   "off": no model, so 300 K whatever the load and the clock.
+ */
+void femu_test_thermal(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t progs;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 300);
+
+    if (!strcmp(mode, "idle")) {
+        qtest_clock_step(qts, 100 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 301);
+        qtest_clock_step(qts, 400 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 304);
+        qtest_clock_step(qts, 100 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 305);
+        qtest_clock_step(qts, 400 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 306);
+        qtest_clock_step(qts, 1000 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==, 309);
+    } else {
+        /* 1000 pages, each one plane program, with the clock stopped */
+        progs = femu_c0h_field(&c, log, 168);
+        qtest_memset(qts, buf, 0x6b, 16 * 4096);
+        for (i = 0; i < 1000; i += 8) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 8, buf, list)), ==,
+                            NVME_SUCCESS);
+        }
+        g_assert_cmpuint(femu_c0h_field(&c, log, 168) - progs, ==, 1000);
+        qtest_clock_step(qts, 100 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==,
+                         strcmp(mode, "off") ? 310 : 300);
+        qtest_clock_step(qts, 900 * SCALE_MS);
+        g_assert_cmpuint(femu_smart_temp(&c, log, NULL), ==,
+                         strcmp(mode, "off") ? 304 : 300);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The temperature event. With the idle trace above and an over threshold of
+ * 305 K, the temperature reaches 305 K at the 0.6 s step: an outstanding
+ * Asynchronous Event Request completes then (SMART, temperature, log 02h:
+ * 0x00020101), not at 0.5 s, and SMART sets critical warning bit 1. After
+ * the host reads the log, a device that stays hot raises no second event.
+ */
+void femu_test_thermal_event(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t log = guest_alloc(alloc, 512);
+    uint32_t result;
+    uint16_t want, got;
+    uint8_t warning;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, NVME_SMART_TEMPERATURE,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_TEMPERATURE_THRESHOLD,
+                                             false, 0, 305, NULL)), ==,
+                    NVME_SUCCESS);
+    want = femu_aer(&c);
+
+    qtest_clock_step(qts, 500 * SCALE_MS);
+    g_usleep(50 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    qtest_clock_step(qts, 100 * SCALE_MS);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.admin, &got, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, want);
+    g_assert_cmphex(result, ==, 0x00020101);
+    g_assert_cmpuint(femu_smart_temp(&c, log, &warning), ==, 305);
+    g_assert_cmphex(warning & NVME_SMART_TEMPERATURE, ==,
+                    NVME_SMART_TEMPERATURE);
+
+    /*
+     * The log was read; still hot, and the same event setting written again,
+     * so the next request stays outstanding.
+     */
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, NVME_SMART_TEMPERATURE,
+                                             NULL)), ==, NVME_SUCCESS);
+    femu_aer(&c);
+    qtest_clock_step(qts, 1000 * SCALE_MS);
+    g_usleep(50 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+
+    guest_free(alloc, log);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+void femu_test_thermal_refused(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'thermal_tau_ms':1000", "thermal_tau_ms needs thermal_r" },
+        { "'thermal_tau_ms':1000,'thermal_r':10,'thermal_step_ms':0",
+          "thermal_step_ms must be 1 to 60000" },
+        { "'thermal_tau_ms':1000,'thermal_r':10,'thermal_step_ms':60001",
+          "thermal_step_ms must be 1 to 60000" },
+        { "'thermal_tau_ms':1000,'thermal_r':10,'ns_mgmt':true",
+          "namespace management" },
+    };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'thermal','addr':'5','devsz_mb':1,"
+            "'femu_mode':1,%s}}", cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+#define FEMU_PM_TS              0x100000000ULL
+#define FEMU_PM_MS              ((1ULL << 48) - 1)
+
+/* the Power Measurement log page (Figure 297), 64 bytes */
+static void femu_pmeas_read(FemuCtrlState *c, uint64_t log, uint8_t *page)
+{
+    g_assert_cmphex(FEMU_SC(femu_get_log(c, FEMU_LOG_POWER_MEAS, log, 64, 0)),
+                    ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, log, page, 64);
+}
+
+/* Get Log Page 25h with @nsid */
+static uint16_t femu_pmeas_log_ns(FemuCtrlState *c, uint32_t nsid,
+                                  uint64_t buf)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_POWER_MEAS | (64 / 4 - 1) << 16);
+    return femu_admin(c, &cmd);
+}
+
+/*
+ * Power Measurement with power_meas=on, idle_mw 500 and 1 mJ per plane
+ * program. 1000 programs booked before the first tick give 1 J in that
+ * interval: 1.5 W (15000 at 0.0001 W, scale 01b). The next two intervals
+ * are 0.5 W, so after 3 s the average is 0.8333 W (8333). Start with SMT 1
+ * stops after 60 intervals; the log stays across a controller reset.
+ */
+void femu_test_pmeas(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint8_t page[64];
+    uint32_t result;
+    uint64_t smts;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* a host Timestamp, so the log's timestamps have a known floor */
+    qtest_writeq(qts, buf, FEMU_PM_TS);
+    g_assert_cmphex(femu_timestamp(&c, true, 0, 0, buf), ==, NVME_SUCCESS);
+
+    /* CTRATT.PMS, IPMSR 1 s (SRS 5h, SRV 100), MSMT 0 */
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, log), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, log + 96) & (1u << 21), ==, 1u << 21);
+    g_assert_cmphex(qtest_readw(qts, log + 392), ==, 0x0564);
+    g_assert_cmphex(qtest_readw(qts, log + 394), ==, 0);
+
+    /* nothing measured yet: MIPWRTS and EPF only */
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(page[0], ==, 0);
+    g_assert_cmpuint(page[1], ==, 0);
+    g_assert_cmphex(lduw_le_p(page + 2), ==, 0x000c);
+    g_assert_cmpuint(ldl_le_p(page + 4), ==, 64);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 0);
+    g_assert_cmpuint(ldq_le_p(page + 16), ==, 0);
+    g_assert_cmpuint(lduw_le_p(page + 24), ==, 8);
+    g_assert_cmpuint(lduw_le_p(page + 26), ==, 250);
+    g_assert_cmpuint(lduw_le_p(page + 28), ==, 0);
+    g_assert_cmphex(ldl_le_p(page + 40), ==, 1u << 16);
+    g_assert_cmphex(ldl_le_p(page + 44), ==, 1u << 16);
+    g_assert_cmpuint(ldq_le_p(page + 48), ==, 0);
+    g_assert_cmpuint(page[56], ==, 255);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_POWER_MEAS, 0, 0, 0,
+                                             &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0);
+
+    /* only type 0h; only actions 0h and 1h; not saveable */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 0,
+                                             0x11, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 0,
+                                             0x2, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, true, 0,
+                                             0x1, NULL)), ==,
+                    NVME_FID_NOT_SAVEABLE);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_POWER_MEAS, 3, 0, 0,
+                                             &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0x4);
+
+    /*
+     * Feature 25h takes NSID 0 only, log 25h 0 or FFFFFFFFh; a refused
+     * Start changes nothing.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 1,
+                                             0x1, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false,
+                                             NVME_NSID_BROADCAST, 0x1,
+                                             NULL)), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_POWER_MEAS, 0, 1, 0,
+                                             NULL)), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_pmeas_log_ns(&c, 1, log)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_pmeas_log_ns(&c, 0, log)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, log + 1), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, log + 2), ==, 0x000c);
+
+    /* Start: PMGN 1, PME 1, still no interval */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 0,
+                                             0x1, &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0x101);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 0);
+    g_assert_cmphex(ldl_le_p(page + 40), ==, 1u << 16);
+    g_assert_cmphex(ldl_le_p(page + 44), ==, 1u << 16);
+    qtest_memset(qts, buf, 0x5d, 16 * 4096);
+    for (i = 0; i < 1000; i += 8) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 8, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    qtest_clock_step(qts, NANOSECONDS_PER_SECOND);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmphex(lduw_le_p(page + 2), ==, 0x000d);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 1);
+    g_assert_cmphex(ldl_le_p(page + 40), ==, 1u << 16 | 15000);
+    g_assert_cmphex(ldl_le_p(page + 44), ==, 1u << 16 | 15000);
+    g_assert_cmpuint(ldq_le_p(page + 48) & FEMU_PM_MS, >=, FEMU_PM_TS);
+
+    qtest_clock_step(qts, 2 * NANOSECONDS_PER_SECOND);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 3);
+    g_assert_cmphex(ldl_le_p(page + 40), ==, 1u << 16 | 8333);
+    g_assert_cmphex(ldl_le_p(page + 44), ==, 1u << 16 | 15000);
+
+    /* Stop: PME 0, SMTS set, the counts kept */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 0,
+                                             0x0, &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0x100);
+    qtest_clock_step(qts, 2 * NANOSECONDS_PER_SECOND);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmphex(lduw_le_p(page + 2), ==, 0x000c);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 3);
+    smts = ldq_le_p(page + 16);
+    g_assert_cmpuint(smts & FEMU_PM_MS, >=, FEMU_PM_TS);
+
+    /* a controller reset keeps the log and the feature state */
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    qtest_writeq(qts, buf, 2 * FEMU_PM_TS);
+    g_assert_cmphex(femu_timestamp(&c, true, 0, 0, buf), ==, NVME_SUCCESS);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(page[1], ==, 1);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 3);
+    g_assert_cmpuint(ldq_le_p(page + 16), ==, smts);
+
+    /* Start with SMT 1 minute: SMTR 1, then a stop after 60 intervals */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_POWER_MEAS, false, 0,
+                                             1u << 16 | 0x1, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0x10201);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 0);
+    g_assert_cmpuint(lduw_le_p(page + 14), ==, 1);
+    qtest_clock_step(qts, 59 * NANOSECONDS_PER_SECOND);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 59);
+    g_assert_cmphex(lduw_le_p(page + 2), ==, 0x000d);
+    g_assert_cmpuint(lduw_le_p(page + 14), ==, 1);
+    qtest_clock_step(qts, 6 * NANOSECONDS_PER_SECOND);
+    femu_pmeas_read(&c, log, page);
+    g_assert_cmpuint(ldl_le_p(page + 8), ==, 60);
+    g_assert_cmphex(lduw_le_p(page + 2), ==, 0x000c);
+    g_assert_cmpuint(lduw_le_p(page + 14), ==, 0);
+    g_assert_cmphex(ldl_le_p(page + 40), ==, 1u << 16 | 5000);
+    g_assert_cmpuint(ldq_le_p(page + 16) & FEMU_PM_MS, >=, 2 * FEMU_PM_TS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_POWER_MEAS, 0, 0, 0,
+                                             &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, 0x200);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * power_meas refusals at realize. The main device is in nssub with
+ * power_meas on, so a second controller there is refused.
+ */
+void femu_test_pmeas_refused(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'power_meas':true,'persist_file':'pmeas.img'",
+          "power_meas is not supported with persist_file" },
+        { "'power_meas':true,'ns_mgmt':true",
+          "power_meas is not supported with namespace management" },
+        { "'subsys':'nssub'", "a power_meas subsystem takes a single" },
+    };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'pmeas','addr':'5','devsz_mb':1,"
+            "'femu_mode':1,%s}}", cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/*
+ * Log page C0h counts the NAND pages a host write covers only in part. With
+ * 512-byte blocks and 4 KiB pages: one block inside a page is one; a whole
+ * page is none; 16 blocks from the middle of one page end in the middle of
+ * the third, two; 4 blocks from the start of a page end inside it, one.
+ */
+void femu_test_partial_writes(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        uint64_t slba;
+        uint16_t nlb;
+        uint64_t partial;
+    } cases[] = {
+        { 1, 1, 1 }, { 0, 8, 0 }, { 4, 16, 2 }, { 8, 4, 1 },
+    };
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 512);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint8_t page[512];
+    uint64_t before = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5c, 16 * 512);
+    qtest_writeq(qts, list, buf + 4096);
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        NvmeRwCmd rw;
+        uint16_t got;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.dptr.prp2 = cpu_to_le64(buf + 4096);
+        rw.slba = cpu_to_le64(cases[i].slba);
+        rw.nlb = cpu_to_le16(cases[i].nlb - 1);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+
+        g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                             sizeof(page), 0)), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, log, page, sizeof(page));
+        g_assert_cmpuint(ldq_le_p(page + 152) - before, ==, cases[i].partial);
+        before = ldq_le_p(page + 152);
+    }
+
+    /* Write Zeroes programs its pages, so a partial one counts the same */
+    g_assert_cmpint(femu_write_zeroes(&c, 1, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_write_zeroes(&c, 4, 16), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpuint(ldq_le_p(page + 152) - before, ==, 3);
+
+    guest_free(alloc, list);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Namespaces after the first start wherever the one before ended, which
+ * need not be on a NAND page. On a 1 MiB device split in three with 512-byte
+ * blocks, namespace 2 starts 1 KiB into a page, so 4 KiB from its block 0
+ * covers two pages in part.
+ */
+void femu_test_partial_writes_ns2(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint8_t page[512];
+    NvmeRwCmd rw;
+    uint16_t got;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(2);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpuint(ldq_le_p(page + 152), ==, 2);
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Log page C0h counts the planes each NAND operation used and prices them
+ * with energy_read_nj, energy_prog_nj and energy_erase_nj. On a workload with
+ * collection the counts must match the FTL's own: one program per page
+ * written or relocated, one erase per block erased. With multi-plane
+ * commands on (@data "mp") one command covers several planes, so there are
+ * fewer commands than plane programs.
+ */
+void femu_test_plane_energy(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool mp = g_str_equal(data, "mp");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t rd, prog, er, uj;
+    uint8_t page[512];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    femu_wear_workload(&c, buf, list);
+    for (i = 0; i < 16; i++) {
+        g_assert_cmphex(femu_read_pages(&c, i * 16, 16, buf, list), ==,
+                        NVME_SUCCESS);
+    }
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    rd = ldq_le_p(page + 160);
+    prog = ldq_le_p(page + 168);
+    er = ldq_le_p(page + 176);
+    uj = ldq_le_p(page + 184);
+    g_test_message("plane reads %" PRIu64 " programs %" PRIu64 " erases %"
+                   PRIu64 ", %" PRIu64 " uJ", rd, prog, er, uj);
+
+    g_assert_cmpuint(prog, ==, femu_ftl_trace_field(qts, 3) +
+                               femu_ftl_trace_field(qts, 4));
+    g_assert_cmpuint(er, ==, femu_ftl_trace_field(qts, 5));
+    g_assert_cmpuint(rd, >=, 256);
+    g_assert_cmpuint(uj, ==, (rd * 100 + prog * 1000 + er * 10000) / 1000);
+    if (mp) {
+        g_assert_cmpuint(femu_ftl_trace_field(qts, 7), <, prog);
+    } else {
+        g_assert_cmpuint(femu_ftl_trace_field(qts, 7), ==, prog);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A reclaim unit that collection frees and a handle then reopens holds new
+ * data, so its age starts again. Three passes over the namespace recycle
+ * every unit; eight more pages then sit in an open unit. At age_scale 10^6
+ * a stale close time would add the four age tiers (40 ms) to each read.
+ * A read can also wait behind a collection pass that reads aged data on
+ * the same die, so the check counts the reads that pay no age.
+ */
+void femu_test_age_fdp_reuse(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t before;
+    int fresh = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 64 * 4096);
+    for (i = 0; i < 3 * 256; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i % 256, 64, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_usleep(10 * 1000);
+
+    for (i = 0; i < 8; i++) {
+        before = femu_ftl_trace_field(qts, 1);
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, i * 8, buf), ==,
+                        NVME_SUCCESS);
+        if (femu_ftl_trace_field(qts, 1) - before < 1000000ULL) {
+            fresh++;
+        }
+    }
+    g_test_message("%d of 8 reads of open-unit data paid no age", fresh);
+    g_assert_cmpint(fresh, >=, 6);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+#define FEMU_PD_STEP_NS         10000000ULL
+
+/* modelled time of a read of 4 KiB page @page */
+static uint64_t femu_pd_read_ns(FemuCtrlState *c, QTestState *qts,
+                                uint64_t page, uint64_t buf)
+{
+    uint64_t before = femu_ftl_trace_field(qts, 1);
+
+    g_assert_cmphex(femu_rw(c, NVME_CMD_READ, page * (4096 / c->lba_size),
+                            buf), ==, NVME_SUCCESS);
+    return femu_ftl_trace_field(qts, 1) - before;
+}
+
+/* modelled time of a write of @npages pages from @page */
+static uint64_t femu_pd_write_ns(FemuCtrlState *c, QTestState *qts,
+                                 uint64_t page, uint32_t npages,
+                                 uint64_t buf, uint64_t list)
+{
+    uint64_t before = femu_ftl_trace_field(qts, 1);
+
+    g_assert_cmphex(FEMU_SC(femu_write_pages(c, page, npages, buf, list)), ==,
+                    NVME_SUCCESS);
+    return femu_ftl_trace_field(qts, 1) - before;
+}
+
+/*
+ * @data selects the case; each one names what a broken model would show.
+ *   "off":   ECC timing on and every pd_* term off. Open data 20 ms old at
+ *            age_scale 10^6 pays nothing, as on master.
+ *   "edge":  pd_edge_wls=1, pd_edge_tiers=2 and cell_pages=2: pages 0 and 1
+ *            share wordline 0 and pay 2 tiers; page 2 and page 4 pay none.
+ *   "cap":   the same block, aged 50 ms at age_scale 10^6: the age alone
+ *            reaches the cap of 4 tiers, so page 0 pays no more than page 4.
+ *   "open":  two channels, so a line holds two blocks. 31 pages fill the
+ *            channel 0 block and leave the channel 1 block one page short:
+ *            only a read of the short block pays pd_open_tiers. A 32nd page
+ *            fills it and the term goes.
+ *   "age":   pd_open_age with one age tier per 100 ms of wall time: data
+ *            in an open line reaches the cap of 4 tiers in 500 ms. A read
+ *            right after the line closes still pays them; an age that the
+ *            close started again would show less than one tier.
+ */
+void femu_test_pd(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 32 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t t0, t1, t2, t4;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3d, 32 * 4096);
+
+    if (!strcmp(mode, "off")) {
+        femu_pd_write_ns(&c, qts, 0, 8, buf, list);
+        g_usleep(20 * 1000);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        g_test_message("pd off: page 0 of an open block %" PRIu64 " ns", t0);
+        g_assert_cmpuint(t0, <, FEMU_PD_STEP_NS);
+    } else if (!strcmp(mode, "edge")) {
+        femu_pd_write_ns(&c, qts, 0, 16, buf, list);
+        g_usleep(10 * 1000);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        t1 = femu_pd_read_ns(&c, qts, 1, buf);
+        t2 = femu_pd_read_ns(&c, qts, 2, buf);
+        t4 = femu_pd_read_ns(&c, qts, 4, buf);
+        g_test_message("pd edge: pages 0 1 2 4 took %" PRIu64 " %" PRIu64
+                       " %" PRIu64 " %" PRIu64 " ns", t0, t1, t2, t4);
+        g_assert_cmpuint(t4, <, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t2, <, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t0 - t4, >=, 2 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t0 - t4, <, 3 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1 - t4, >=, 2 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1 - t4, <, 3 * FEMU_PD_STEP_NS);
+    } else if (!strcmp(mode, "cap")) {
+        femu_pd_write_ns(&c, qts, 0, 16, buf, list);
+        g_usleep(50 * 1000);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        t4 = femu_pd_read_ns(&c, qts, 4, buf);
+        g_test_message("pd cap: pages 0 4 took %" PRIu64 " %" PRIu64 " ns",
+                       t0, t4);
+        g_assert_cmpuint(t4, >=, 4 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t0, <, 5 * FEMU_PD_STEP_NS);
+    } else if (!strcmp(mode, "open")) {
+        femu_pd_write_ns(&c, qts, 0, 31, buf, list);
+        g_usleep(10 * 1000);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        t1 = femu_pd_read_ns(&c, qts, 1, buf);
+        femu_pd_write_ns(&c, qts, 31, 1, buf, list);
+        g_usleep(10 * 1000);
+        t2 = femu_pd_read_ns(&c, qts, 1, buf);
+        g_test_message("pd open: full block %" PRIu64 ", short block %" PRIu64
+                       ", then full %" PRIu64 " ns", t0, t1, t2);
+        g_assert_cmpuint(t0, <, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, >=, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, <, 2 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t2, <, FEMU_PD_STEP_NS);
+    } else if (!strcmp(mode, "age")) {
+        femu_pd_write_ns(&c, qts, 0, 8, buf, list);
+        g_usleep(500 * 1000);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        femu_pd_write_ns(&c, qts, 8, 8, buf, list);
+        t1 = femu_pd_read_ns(&c, qts, 0, buf);
+        g_test_message("pd age: open %" PRIu64 ", just closed %" PRIu64 " ns",
+                       t0, t1);
+        g_assert_cmpuint(t0, >=, 4 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, >=, 4 * FEMU_PD_STEP_NS);
+    } else {
+        g_assert_not_reached();
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Releasing a stream seals the free pages of its line as invalid, with no
+ * program. The block stays part programmed, so its reads still pay
+ * pd_open_tiers.
+ */
+void femu_test_pd_stream(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t t0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4e, 4096);
+    g_assert_cmphex(femu_directive(&c, false, 0xffffffff, 1, 0x101,
+                                   0, 0, NULL), ==, NVME_SUCCESS);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmphex(femu_stream_write(&c, 1, i * (4096 / c.lba_size),
+                                          buf, 1, 7), ==, NVME_SUCCESS);
+    }
+    /* release stream 7: DSPEC 7, DTYPE 1 (Streams), DOPER 1 */
+    g_assert_cmphex(femu_directive(&c, false, 1, 0x070101, 0, 0, 0, NULL),
+                    ==, NVME_SUCCESS);
+    g_usleep(10 * 1000);
+    t0 = femu_pd_read_ns(&c, qts, 0, buf);
+    g_test_message("pd stream: sealed block read %" PRIu64 " ns", t0);
+    g_assert_cmpuint(t0, >=, FEMU_PD_STEP_NS);
+    g_assert_cmpuint(t0, <, 2 * FEMU_PD_STEP_NS);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * FDP, two cases. A Reclaim Unit Handle Update retires the unit part
+ * written, and neither term may change at that point.
+ *   "open": pd_open_tiers only. Two pages leave the unit's blocks part
+ *           programmed, so a read pays 1 tier before and after the update.
+ *   "age":  pd_open_age only, one age tier per 100 ms of wall time. 500 ms
+ *           after the first program a read pays the cap of 4 tiers, and it
+ *           still does right after the update.
+ */
+void femu_test_pd_fdp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool age = g_str_equal(data, "age");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t t0, t1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5e, 4096);
+    femu_pd_write_ns(&c, qts, 0, 1, buf, list);
+    femu_pd_write_ns(&c, qts, 1, 1, buf, list);
+    g_usleep((age ? 500 : 10) * 1000);
+    t0 = femu_pd_read_ns(&c, qts, 0, buf);
+    qtest_writew(qts, list, 0);
+    g_assert_cmphex(femu_ruh_update(&c, list, 1), ==, NVME_SUCCESS);
+    t1 = femu_pd_read_ns(&c, qts, 0, buf);
+    g_test_message("pd fdp %s: before %" PRIu64 ", after handle update %"
+                   PRIu64 " ns", age ? "age" : "open", t0, t1);
+    if (age) {
+        g_assert_cmpuint(t0, >=, 4 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, >=, 4 * FEMU_PD_STEP_NS);
+    } else {
+        g_assert_cmpuint(t0, >=, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t0, <, 2 * FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, >=, FEMU_PD_STEP_NS);
+        g_assert_cmpuint(t1, <, 2 * FEMU_PD_STEP_NS);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A translation page (TP) read with every pd_* term on, one age tier per
+ * 0.1 ms. The CMT holds one TP, and a TP holds 512 pages.
+ *   - Pages 0 to 2 load TP 0. A write of page 600 loads TP 1 and evicts
+ *     TP 0 to page 0 of an open TP line: an edge wordline of an open block.
+ *   - 50 ms later a write of page 3 reads TP 0 back. A TP is a real page:
+ *     the edge, open and open-age terms reach the cap of 4 tiers. A
+ *     placeholder read, as under FDP, would pay none.
+ */
+void femu_test_pd_map(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t t;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x7a, 16 * 4096);
+    femu_pd_write_ns(&c, qts, 0, 3, buf, list);
+    femu_pd_write_ns(&c, qts, 600, 1, buf, list);
+    g_usleep(50 * 1000);
+    t = femu_pd_write_ns(&c, qts, 3, 1, buf, list);
+    g_test_message("pd map: a TP read from an open TP line %" PRIu64 " ns",
+                   t);
+    g_assert_cmpuint(t, >=, 4 * FEMU_PD_STEP_NS);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A reused line: three passes over the namespace recycle every line, then
+ * eight pages open a recycled one and everything else is deallocated, so
+ * collection only erases. Age is one tier per 500 ms of wall time, and the
+ * new line opens 2.5 s after the passes. A fresh line pays pd_open_tiers and
+ * no age (10 ms) for the 500 ms after its first program; a block count left
+ * from the last generation drops the open term, and a first-program time
+ * left from it adds the 4 age tiers. A read can also wait behind an erase,
+ * so the check counts reads.
+ */
+void femu_test_pd_reuse(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int fresh = 0;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2c, 64 * 4096);
+    for (i = 0; i < 3 * 256; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i % 256, 64, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    g_usleep(2500 * 1000);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_dealloc_pages(&c, 8, 248, list), ==, NVME_SUCCESS);
+    g_usleep(20 * 1000);
+    for (i = 0; i < 8; i++) {
+        uint64_t t = femu_pd_read_ns(&c, qts, i, buf);
+
+        g_test_message("pd reuse: page %d took %" PRIu64 " ns", i, t);
+        if (t >= FEMU_PD_STEP_NS && t < 2 * FEMU_PD_STEP_NS) {
+            fresh++;
+        }
+    }
+    g_assert_cmpint(fresh, >=, 6);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * mp_read with two planes: page k goes to plane k % 2. After 31 pages the
+ * plane 0 block is full and the plane 1 block one page short, so a two-page
+ * read of pages 0 and 1 pays one open tier, the larger of the two planes.
+ * After a 32nd page it pays none.
+ */
+void femu_test_pd_mp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 32 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t before, a, b;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x1d, 32 * 4096);
+    femu_pd_write_ns(&c, qts, 0, 31, buf, list);
+    g_usleep(10 * 1000);
+    before = femu_ftl_trace_field(qts, 1);
+    g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 2, buf, list)), ==,
+                    NVME_SUCCESS);
+    a = femu_ftl_trace_field(qts, 1) - before;
+    femu_pd_write_ns(&c, qts, 31, 1, buf, list);
+    g_usleep(10 * 1000);
+    before = femu_ftl_trace_field(qts, 1);
+    g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 2, buf, list)), ==,
+                    NVME_SUCCESS);
+    b = femu_ftl_trace_field(qts, 1) - before;
+    g_test_message("pd mp: short plane %" PRIu64 ", full %" PRIu64 " ns",
+                   a, b);
+    g_assert_cmpuint(b, <, FEMU_PD_STEP_NS);
+    g_assert_cmpuint(a - b, >=, FEMU_PD_STEP_NS);
+    g_assert_cmpuint(a - b, <, 2 * FEMU_PD_STEP_NS);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The ONFI profile sets the channel bus phases from a timing mode. A read or
+ * a write of one 4 KiB page on an idle device pays, in ns (Tables 4-34,
+ * 4-36 and 4-38; tR 40000 and tPROG 200000, the defaults):
+ *   "m26":      one LUN, mode 26: read 275 + 40000 + 246 + (50 + 855 + 115),
+ *               write 562 + (57 + 855 + 125) + 200000 + 246; a read sends
+ *               its status before its data out, and a write ends at its
+ *               status
+ *   "m26-2lun": two LUNs, mode 26: read 275 + 40000 + 321 + (200 + 855 + 115),
+ *               write ends at a 78h status of 321
+ *   "m0":       one LUN, mode 0: read 275 + 40000 + (50 + 61440 + 115) + 275
+ *   "mts":      one LUN, mode 26 at 3200 MT/s: page 1280, read 41966
+ *   "spare":    one LUN, mode 26, 512 spare bytes: page 961, read 41647
+ *   "sca-2lun": two LUNs, mode 26, SCA: read 184 + 40000 + 277 + 84 +
+ *               (168 + 855); write 84 + 313 + (149 + 855) + 112 + 200000 +
+ *               277
+ *   "off":      the profile off with cmd_addr_lat 1000, pg_xfer_lat 10000
+ *               and status_lat 500: read 51500, write 211000, as on master
+ */
+void femu_test_onfi(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t rd, wr, want_rd, want_wr = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x0f, 4096);
+    wr = femu_pd_write_ns(&c, qts, 0, 1, buf, list);
+    g_usleep(10 * 1000);
+    rd = femu_pd_read_ns(&c, qts, 0, buf);
+    g_test_message("onfi %s: write %" PRIu64 ", read %" PRIu64 " ns", mode,
+                   wr, rd);
+
+    if (!strcmp(mode, "m26")) {
+        want_rd = 275 + 40000 + 50 + 855 + 115 + 246;
+        want_wr = 562 + 57 + 855 + 125 + 200000 + 246;
+    } else if (!strcmp(mode, "m26-2lun")) {
+        want_rd = 275 + 40000 + 200 + 855 + 115 + 321;
+        want_wr = 562 + 57 + 855 + 125 + 200000 + 321;
+    } else if (!strcmp(mode, "m0")) {
+        want_rd = 275 + 40000 + 50 + 61440 + 115 + 275;
+        want_wr = 562 + 57 + 61440 + 125 + 200000 + 275;
+    } else if (!strcmp(mode, "mts")) {
+        want_rd = 275 + 40000 + 50 + 1280 + 115 + 246;
+        want_wr = 562 + 57 + 1280 + 125 + 200000 + 246;
+    } else if (!strcmp(mode, "spare")) {
+        want_rd = 275 + 40000 + 50 + 961 + 115 + 246;
+        want_wr = 562 + 57 + 961 + 125 + 200000 + 246;
+    } else if (!strcmp(mode, "sca-2lun")) {
+        want_rd = 184 + 40000 + 277 + 84 + 168 + 855;
+        want_wr = 84 + 313 + 149 + 855 + 112 + 200000 + 277;
+    } else if (!strcmp(mode, "off")) {
+        want_rd = 1000 + 40000 + 10000 + 500;
+        want_wr = 1000 + 10000 + 200000;
+    } else {
+        g_assert_not_reached();
+    }
+    g_assert_cmpuint(rd, ==, want_rd);
+    if (want_wr) {
+        g_assert_cmpuint(wr, ==, want_wr);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * onfi_cache_read: one command reads 8 pages that a fresh one-LUN device
+ * put on pages 0 to 7 of one block. Mode 0, 4 KiB: a plain read is
+ * 275 + 40000 + 275 + (50 + 61440 + 115) = 102155, and the held page
+ * register makes 8 of them 817240. As a cache sequence the bus paces it:
+ * page 0 ends at 105555, then one page per 3Fh/31h 125 + tRCBSY 3000 +
+ * status 275 + data out 61605 = 65005, so page 7 ends at 560590.
+ * Mode 26 ("m26"): a plain read is 41541, and a sequence would take
+ * 345912 for the 8 pages, so the FTL reads them plain, 332328, with the
+ * cache read on or off.
+ */
+void femu_test_onfi_cache(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = g_str_has_prefix(data, "on");
+    bool m26 = g_str_has_suffix(data, "m26");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t before, rd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_usleep(50 * 1000);
+    before = femu_ftl_trace_field(qts, 1);
+    g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+    rd = femu_ftl_trace_field(qts, 1) - before;
+    g_test_message("onfi cache %s: 8-page read %" PRIu64 " ns",
+                   (const char *)data, rd);
+    g_assert_cmpuint(rd, ==, m26 ? 332328 : on ? 560590 : 817240);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* onfi_cache_read is refused with settings that delay or serve a page */
+void femu_test_onfi_cache_refused(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'pls_per_lun':2,'blks_per_pl':40,'mp_read':1",
+          "refused with mp_read" },
+        { "'pls_per_lun':1,'blks_per_pl':80,'mapping':'dftl'",
+          "refused with mapping=dftl" },
+        { "'pls_per_lun':1,'blks_per_pl':80,'read_cache_mb':1",
+          "refused with read_cache_mb" },
+        { "'pls_per_lun':1,'blks_per_pl':80,'trcbsy':-1",
+          "trcbsy must not be negative" },
+    };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'onfi-cache','addr':'5','devsz_mb':4,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+            "'luns_per_ch':1,'nchs':1,'onfi_mode':26,'onfi_cache_read':1,"
+            "%s}}", cases[i].opts);
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("onfi cache refused %s: %s", cases[i].opts,
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/*
+ * trim_lat_ns charges each Deallocate range, with or without FDP. One
+ * Deallocate with three ranges of 1, 2 and 3 pages, at 1 ms a range, adds
+ * 3 ms of modelled time: a charge per command or per page gives 1 or 6 ms.
+ * @data "off" leaves the knob unset and adds none.
+ */
+void femu_test_trim_cost(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = !g_str_equal(data, "off");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint8_t ranges[3 * 16] = { 0 };
+    NvmeCmd cmd = { 0 };
+    uint64_t before, spent;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 8 * 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+
+    for (i = 0; i < 3; i++) {
+        /* range i: i + 1 pages from page 3 * i */
+        stl_le_p(ranges + 16 * i + 4, (i + 1) * (4096 / c.lba_size));
+        stq_le_p(ranges + 16 * i + 8, 3 * i * (4096 / c.lba_size));
+    }
+    qtest_memwrite(qts, list, ranges, sizeof(ranges));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(list);
+    cmd.cdw10 = cpu_to_le32(2);                 /* NR is 0's based */
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+
+    before = femu_ftl_trace_field(qts, 1);
+    femu_submit(&c, &c.io, &cmd);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    spent = femu_ftl_trace_field(qts, 1) - before;
+    g_test_message("a 3-range deallocate took %" PRIu64 " ns", spent);
+    if (on) {
+        g_assert_cmpuint(spent, >=, 3 * 1000000ULL);
+        g_assert_cmpuint(spent, <, 4 * 1000000ULL);
+    } else {
+        g_assert_cmpuint(spent, <, 1000000ULL);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * age_scale ages data faster than wall time, for the two models of charge
+ * leaking out over time and for nothing else. Lines filled and then left
+ * 50 ms: with @data "warp" (age_scale 10^6) that is 50000 s of age, so a read
+ * pays the four ECC tiers age can add (1 ms each here) and the read queues a
+ * retention refresh, which the next write performs. Without it the same reads
+ * pay no age tier and nothing is refreshed. With @data "fdp" the units of a
+ * placement handle age the same way, but FDP refuses the refresh knob.
+ */
+void femu_test_age_scale(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool fdp = g_str_equal(data, "fdp");
+    bool warp = fdp || g_str_equal(data, "warp");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint8_t page[512];
+    uint64_t before, spent, refreshes;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    for (i = 0; i < 256; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    g_usleep(50 * 1000);
+
+    before = femu_ftl_trace_field(qts, 1);
+    for (i = 0; i < 10; i++) {
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, i * 8, buf), ==,
+                        NVME_SUCCESS);
+    }
+    spent = femu_ftl_trace_field(qts, 1) - before;
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    refreshes = ldq_le_p(page + 48);
+    g_test_message("10 reads took %" PRIu64 " ns, %" PRIu64 " refreshes",
+                   spent, refreshes);
+    if (fdp) {
+        /* FDP has no retention refresh, so only the read tiers show */
+        g_assert_cmpuint(spent, >=, 10 * 4 * 1000000ULL);
+        g_assert_cmpuint(refreshes, ==, 0);
+    } else if (warp) {
+        g_assert_cmpuint(spent, >=, 10 * 4 * 1000000ULL);
+        g_assert_cmpuint(refreshes, >=, 1);
+    } else {
+        g_assert_cmpuint(spent, <, 10 * 1000000ULL);
+        g_assert_cmpuint(refreshes, ==, 0);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Flush drains the write buffer whether or not a volatile write cache is
+ * advertised: vwc only decides whether the host can turn the buffer off.
+ */
+void femu_test_flush_without_vwc(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t page[512];
+    uint16_t got;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        i * (4096 / c.lba_size), buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    /* held in the buffer, not yet programmed */
+    g_assert_cmpuint(ldq_le_p(page + 24), ==, 0);
+
+    femu_submit(&c, &c.io, &flush);
+    g_assert_cmphex(femu_complete(&c, &c.io, &got, NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    g_assert_cmpuint(ldq_le_p(page + 24), ==, 4);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Delete a submission queue while its commands are still in flight.
+ *
+ * The controller frees the queue's request array as part of the delete. A
+ * request from that queue can still be sitting in a poller's completion
+ * priority queue or in the ring between the poller and the FTL, so the next
+ * sweep pops a pointer into freed memory. The test does not assert on the
+ * outcome of the outstanding commands -- they are allowed to be lost -- only
+ * that the controller survives, which under a sanitizer build means the freed
+ * memory was never touched again.
+ */
+void femu_test_delete_sq_in_flight(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    NvmeRwCmd rw;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(c.pdev->bus->qts, buf, 0x5a, FEMU_DATA_SIZE);
+
+    /*
+     * Fill the queue without collecting any completion, so the commands are
+     * still outstanding when the delete arrives.
+     */
+    for (i = 0; i < FEMU_QSIZE - 2; i++) {
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(8 * i);
+        rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+
+    g_assert_cmpint(FEMU_SC(femu_delete_sq(&c, c.io.qid)), ==, NVME_SUCCESS);
+
+    /*
+     * Give the pollers a chance to sweep after the free. Without the drain
+     * this is where the freed request array is read.
+     */
+    g_usleep(200000);
+
+    /* the controller is still answering, which is the whole point */
+    {
+        NvmeCmd cmd;
+        uint64_t idbuf = guest_alloc(alloc, 4096);
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+        cmd.dptr.prp1 = cpu_to_le64(idbuf);
+        cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        guest_free(alloc, idbuf);
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_wide_lba(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const FemuWideLba *w = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, log;
+    uint64_t ruamw = 0;
+    uint32_t nlb = 8192 >> w->lbads;
+    uint8_t page[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    buf = guest_alloc(alloc, 2 * 4096);
+    log = guest_alloc(alloc, sizeof(page));
+    if (w->fdp) {
+        ruamw = femu_ruh0_ruamw(&c, log);
+        /* a unit is one superblock: 16 LUNs of 16 pages of 4 KiB */
+        g_assert_cmpint(ruamw, ==, (16ull * 16 * 4096) >> w->lbads);
+    }
+
+    /* 8 KiB at block 1, so the first page of the device is not touched */
+    qtest_memset(qts, buf, 0x5a, 2 * 4096);
+    g_assert_cmpint(femu_write_8k(&c, buf, 1, nlb), ==, NVME_SUCCESS);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpint(ldq_le_p(page + 8), ==, 2);
+    g_assert_cmpint(ldq_le_p(page + 24), ==, 2);
+
+    if (w->fdp) {
+        g_assert_cmpint(femu_ruh0_ruamw(&c, log), ==, ruamw - nlb);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * mapping=dftl keeps lines for its translation pages: the TPs of the
+ * namespace rounded up to whole lines, the TP pointer's line, and at least
+ * two forced free lines. 9 MiB is 72 lines of 32 pages. With 77 lines page
+ * mapping keeps 3 + 1 and fits; dftl keeps 3 + 1 + 2 and is refused.
+ */
+void femu_test_dftl_capacity(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                           "'driver':'femu','id':'cap','addr':'5',"
+                           "'devsz_mb':9,'secsz':512,'secs_per_pg':8,"
+                           "'pgs_per_blk':8,'blks_per_pl':77,'luns_per_ch':2,"
+                           "'nchs':2,'femu_mode':1,'mapping':'dftl'}}");
+    const char *desc;
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+    g_test_message("%s", desc);
+    g_assert_nonnull(strstr(desc, "translation pages"));
+    g_assert_nonnull(strstr(desc, "expose at most 8 MiB"));
+    qobject_unref(rsp);
+}
+
+/*
+ * The smallest geometry dftl accepts for 9 MiB (78 lines), a CMT of one
+ * TP, and five passes of random single-page writes: every write succeeds,
+ * and the mapping, the TPs and the GTD agree at the end.
+ */
+void femu_test_dftl_tp_min(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 9 * 256;
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[7];
+    uint32_t seed = 11;
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 64 * 4096);
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 5 * pages; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (seed >> 8) % pages, 1,
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_tp_check(qts, "/machine/peripheral/tp", v);
+    g_assert_cmpuint(v[0], ==, pages);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[5], >, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* free lines of the only namespace, from query-femu */
+static uint32_t femu_free_lines(QTestState *qts)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    uint32_t n = qdict_get_int(qdict_get_qdict(ns, "line-counts"), "free");
+
+    qobject_unref(rsp);
+    return n;
+}
+
+/* x-tp-hold of the device at @path: keep pending TPs pending, or not */
+static void femu_tp_hold(QTestState *qts, const char *path, bool hold)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':%s,'property':'x-tp-hold','value':%i}}",
+                           path, hold);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* deallocate the one logical block @lba, with @buf for the range */
+static uint16_t femu_dealloc_lba(FemuCtrlState *c, uint64_t lba, uint64_t buf)
+{
+    uint8_t range[16] = { 0 };
+    NvmeCmd cmd = { 0 };
+
+    stl_le_p(range + 4, 1);
+    stq_le_p(range + 8, lba);
+    qtest_memwrite(c->pdev->bus->qts, buf, range, sizeof(range));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    femu_submit(c, &c->io, &cmd);
+    return FEMU_SC(femu_complete(c, &c->io, NULL, NULL));
+}
+
+/*
+ * The set-up of the tests of the TP reserve rules. Pages are 512 bytes,
+ * so a TP holds 64 mappings and the 2 MiB namespace has 64 TPs; a line
+ * is 4 pages, and the CMT holds one TP.
+ *   - A sequential fill programs TPs 0 to 62 in turn, 4 to a TP line, and
+ *     leaves @free lines free. TP 63 stays dirty in the CMT.
+ *   - Under x-tp-hold, a deallocate of block 0 of TPs 1, 2, 3, 5, 6, 7 and
+ *     so on makes 47 TPs pending. Each old TP line keeps its first TP
+ *     valid, so publication empties no line.
+ * The hold is still on at return.
+ */
+static void femu_dftl_tp_pending(FemuCtrlState *c, const char *path,
+                                 uint64_t buf, uint64_t list, uint32_t free)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t v[7];
+    uint32_t tp, i;
+
+    qtest_memset(qts, buf, 0x5a, 4 * 4096);
+    /* 16 KiB per write, the MDTS of a device with read-only end of life */
+    for (i = 0; i < 64 * 64 / 8; i += 4) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, i, 4, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_tp_check(qts, path, v);
+    g_assert_cmpuint(v[3], ==, 63);
+    g_assert_cmpuint(femu_free_lines(qts), ==, free);
+
+    femu_tp_hold(qts, path, true);
+    for (tp = 1; tp < 63; tp++) {
+        if (tp % 4) {
+            g_assert_cmphex(femu_dealloc_lba(c, tp * 64, list), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    femu_tp_check(qts, path, v);
+    g_assert_cmpuint(v[0], ==, 64 * 64 - 47);
+    g_assert_cmpuint(v[6], ==, 47);
+    g_assert_cmpuint(femu_free_lines(qts), ==, free);
+}
+
+/*
+ * Forced collection keeps 2 free lines with dftl, and only the move of a
+ * TP line may take them (tp_wp_ready()). After the set-up above, with 5
+ * free lines:
+ *   - The hold ends, and a deallocate publishes the 47 TPs. They want 12
+ *     lines, and the TP pointer stops at the 2 lines of the reserve.
+ *   - Overwrites need collection. Its first victims are the old TP lines,
+ *     and each moves its one valid TP into the reserve.
+ * Every write succeeds, and the map, the TPs and the GTD agree. If TP
+ * traffic could take the reserve, the publication would leave no free
+ * line, no victim could move its TP, and the overwrites would fail.
+ */
+void femu_test_dftl_tp_reserve(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = "/machine/peripheral/tp";
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 64 * 64 / 8;
+    g_autofree bool *rewritten = g_new0(bool, pages);
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t want = 64 * 64;
+    uint64_t v[7];
+    uint32_t free_lines, tp, i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_dftl_tp_pending(&c, id, buf, list, 5);
+
+    femu_tp_hold(qts, id, false);
+    /* block 64 has no mapping now: the deallocate only publishes */
+    g_assert_cmphex(femu_dealloc_lba(&c, 64, list), ==, NVME_SUCCESS);
+    free_lines = femu_free_lines(qts);
+    femu_tp_check(qts, id, v);
+    g_test_message("published: %u free lines, %" PRIu64 " TPs pending",
+                   free_lines, v[6]);
+
+    for (i = 0; i < 400; i++) {
+        uint32_t page = i * 37 % pages;
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, page, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        rewritten[page] = true;
+    }
+    g_assert_cmpuint(free_lines, ==, 2);
+    g_assert_cmpuint(v[6], >, 0);
+
+    for (tp = 1; tp < 63; tp++) {
+        want -= tp % 4 && !rewritten[tp * 8];
+    }
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[0], ==, want);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[5], >, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A read waits for its translation. Pages 0 to 63 are in TP 0 and pages
+ * 512 to 575 in TP 1; the CMT holds one TP, so writing TP 1 evicts TP 0
+ * to page 0 of a TP line, on channel 0 LUN 0. Once the media is idle, a
+ * read of page 2 (channel 0 LUN 1) misses: it reads TP 0 (40 us), then
+ * the page (40 us) on the other LUN. The eviction of TP 1 that the miss
+ * makes goes to channel 1 LUN 0 and adds nothing. A read of page 3 then
+ * hits the CMT and pays the page read alone.
+ */
+void femu_test_dftl_ready(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t miss, hit;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4e, 64 * 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 64, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 512, 64, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_usleep(100 * 1000);
+    miss = femu_pd_read_ns(&c, qts, 2, buf);
+    g_usleep(100 * 1000);
+    hit = femu_pd_read_ns(&c, qts, 3, buf);
+    g_test_message("read with a TP miss %" PRIu64 " ns, with a hit %" PRIu64
+                   " ns", miss, hit);
+    g_assert_cmpuint(miss, >=, 80000);
+    g_assert_cmpuint(miss, <, 120000);
+    g_assert_cmpuint(hit, >=, 40000);
+    g_assert_cmpuint(hit, <, 60000);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A Flush with pe_suspend and a write buffer: its data is on the media
+ * when it completes. One LUN, a 200 ms program, a 20 ms read, 10 us to
+ * suspend. Page 0 goes to the media by a first Flush. Page 1 then waits in
+ * the buffer. One doorbell ring sends a second Flush and a read of page 0.
+ * The Flush has time T and books the program of page 1 from T to C = T +
+ * 200 ms. The read has time t, with T < t < C.
+ *
+ *   no seal  [p][rd][prog page 1   ]    the program ends at C + 20.01 ms:
+ *            read: t + 10 us to t + 20.01 ms; the Flush completed at C
+ *   seal     [prog page 1   ]|[rd]      the program ends at C; the read
+ *            runs from C to C + 20 ms; the Flush completes first
+ *
+ * x-flush-check gives the end of the newest program and of the newest
+ * Flush in model time, so a slow host does not change them. A host that
+ * stalls 200 ms between the two commands makes the read arrive after C:
+ * the order and the times then hold too. @data is "on" when the device
+ * has suspend turned on; "off" is the control, with no seal and no state.
+ */
+void femu_test_pe_suspend_flush(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = g_str_equal(data, "on");
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    NvmeCmd flush;
+    NvmeRwCmd rw;
+    uint64_t v[FLUSH_FIELDS];
+    uint64_t done0;
+    uint64_t buf;
+    uint16_t cid[2];
+    uint16_t first;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q, 1);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+    memset(&flush, 0, sizeof(flush));
+    flush.opcode = NVME_CMD_FLUSH;
+    flush.nsid = cpu_to_le32(1);
+
+    /* page 0: into the buffer, then to the media */
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_WRITE, 0);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_SEALS], ==, 0);
+    g_assert_cmpuint(v[FLUSH_PE_END], ==, 0);
+    femu_zap_queue(&c, &q, &flush);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_SEALS], ==, on ? 1 : 0);
+    g_assert_cmpuint(v[FLUSH_PE_END] != 0, ==, on);
+    g_assert_cmpuint(v[FLUSH_PE_END], <=, v[FLUSH_DONE]);
+    g_assert_cmpuint(v[FLUSH_SEAL_WAITS], ==, 0);
+    done0 = v[FLUSH_DONE];
+
+    /* page 1 waits in the buffer; the Flush and the read go in one ring */
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_WRITE, 1);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    first = c.cid;
+    femu_zap_queue(&c, &q, &flush);
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_READ, 0);
+    femu_zap_ring(&c, &q);
+    for (i = 0; i < 2; i++) {
+        uint64_t slot = q.cq_addr + q.cq_head * sizeof(NvmeCqe);
+        NvmeCqe cqe;
+
+        g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+        qtest_memread(qts, slot, &cqe, sizeof(cqe));
+        cid[i] = le16_to_cpu(cqe.cid);
+    }
+    g_test_message("flush, suspend %s: cid %u completed before cid %u",
+                   on ? "on" : "off", cid[0], cid[1]);
+    /* the read waits for the program of page 1, sealed or not suspended */
+    g_assert_cmpuint(cid[0], ==, first);
+    g_assert_cmpuint(cid[1], ==, (uint16_t)(first + 1));
+
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_SEALS], ==, on ? 2 : 0);
+    /* no read moved the program past the time the Flush completed */
+    g_assert_cmpuint(v[FLUSH_PE_END], <=, v[FLUSH_DONE]);
+    if (on) {
+        g_assert_cmpuint(v[FLUSH_DONE], >, done0);
+        g_assert_cmpuint(v[FLUSH_SEAL_WAITS], <=, 1);
+    } else {
+        g_assert_cmpuint(v[FLUSH_DONE], ==, 0);
+        g_assert_cmpuint(v[FLUSH_SEAL_WAITS], ==, 0);
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A direct program that takes a buffered page. One LBA of page 0 waits in
+ * the buffer. An FUA write of the next LBA programs page 0 at once, with
+ * both LBAs, and drops the buffered entry. The next Flush finds an empty
+ * buffer. A read can still move that program, so the Flush must seal it:
+ * one seal, and no program ends after the Flush. Without the mark on the
+ * direct program the Flush seals nothing.
+ */
+void femu_test_pe_suspend_flush_fua(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    NvmeCmd flush;
+    NvmeRwCmd rw;
+    uint64_t v[FLUSH_FIELDS];
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpuint(c.lba_size, <, FEMU_DATA_SIZE);
+    femu_zap_create_queue(&c, &q, 1);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    femu_zap_queue(&c, &q, (NvmeCmd *)&rw);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_PE_END], ==, 0);
+
+    rw.slba = cpu_to_le64(1);
+    rw.control = cpu_to_le16(NVME_RW_FUA);
+    femu_zap_queue(&c, &q, (NvmeCmd *)&rw);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_SEALS], ==, 0);
+    g_assert_cmpuint(v[FLUSH_PE_END], >, 0);
+
+    memset(&flush, 0, sizeof(flush));
+    flush.opcode = NVME_CMD_FLUSH;
+    flush.nsid = cpu_to_le32(1);
+    femu_zap_queue(&c, &q, &flush);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+    femu_flush_check(qts, v);
+    g_assert_cmpuint(v[FLUSH_SEALS], ==, 1);
+    g_assert_cmpuint(v[FLUSH_PE_END], <=, v[FLUSH_DONE]);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Read priority, end to end. On one LUN, two writes that each program NAND
+ * and a read of a page written before go in one doorbell ring. Off, the
+ * read waits for both programs and completes last; on, it waits only for
+ * the program that runs and completes between the two writes. @data is
+ * "on" when the device has read_prio turned on.
+ */
+void femu_test_read_prio(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = g_str_equal(data, "on");
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    NvmeRwCmd rw;
+    uint64_t buf;
+    uint16_t cid[3];
+    uint16_t first;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q, 1);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_WRITE, 0);
+    femu_zap_ring(&c, &q);
+    g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+
+    first = c.cid;
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_WRITE, 1);
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_WRITE, 2);
+    femu_pe_suspend_rw(&c, &q, &rw, false, NVME_CMD_READ, 0);
+    femu_zap_ring(&c, &q);
+    for (i = 0; i < 3; i++) {
+        uint64_t slot = q.cq_addr + q.cq_head * sizeof(NvmeCqe);
+        NvmeCqe cqe;
+
+        g_assert_cmpint(femu_zap_complete(&c, &q, NULL), ==, NVME_SUCCESS);
+        qtest_memread(qts, slot, &cqe, sizeof(cqe));
+        cid[i] = le16_to_cpu(cqe.cid);
+    }
+    g_test_message("read_prio %s: cids %u %u %u", on ? "on" : "off",
+                   cid[0], cid[1], cid[2]);
+    /* the writes took cids first and first + 1, the read first + 2 */
+    g_assert_cmpuint(cid[0], ==, first);
+    g_assert_cmpuint(cid[1], ==, on ? first + 2 : first + 1);
+    g_assert_cmpuint(cid[2], ==, on ? first + 1 : first + 2);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q);
+    femu_disable(&c);
+}
+
+/* one command on @q, and how long it took in microseconds */
+static int64_t femu_timed_rw(FemuCtrlState *c, FemuQueue *q, NvmeRwCmd *rw,
+                             uint8_t opcode, uint64_t page)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    femu_pe_suspend_rw(c, q, rw, false, opcode, page);
+    femu_zap_ring(c, q);
+    g_assert_cmpint(femu_zap_complete(c, q, NULL), ==, NVME_SUCCESS);
+    return g_get_monotonic_time() - t0;
+}
+
+/*
+ * Two-pass program, end to end, one LUN, one page per wordline, 1 ms
+ * programs, 50 ms fine passes and a 100 ms page read.
+ *
+ *   lag 1:  w0 w1 [f0] w2 waits for f0      lag 2:  w0 w1 w2 [f0] w3 waits
+ *
+ * An untimed first write takes wordline 0, so host page pg is wordline
+ * pg + 1.
+ * The first write whose program queues behind a fine pass takes 50 ms;
+ * the writes before it do not. With lag 1, a read of page 0 before its
+ * fine pass comes from the buffer at once and after it pays the array
+ * read. Off, no write waits and every read pays the array read.
+ */
+void femu_test_prog_pass2(void *obj, void *data,
+                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool off = g_str_equal(data, "off");
+    int lag = g_str_equal(data, "lag2") ? 2 : 1;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    NvmeRwCmd rw;
+    uint64_t buf;
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q, 1);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+
+    memset(&rw, 0, sizeof(rw));
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+
+    /* the first I/O pays a start cost: an untimed write takes wordline 0 */
+    femu_timed_rw(&c, &q, &rw, NVME_CMD_WRITE, 7);
+    for (int pg = 0; pg <= 3; pg++) {
+        us = femu_timed_rw(&c, &q, &rw, NVME_CMD_WRITE, pg);
+        g_test_message("prog_pass2 %s: write %d took %" PRId64 " us",
+                       (char *)data, pg, us);
+        /* page pg sits on wordline pg + 1; wordline lag completes first */
+        if (!off && pg == lag) {
+            g_assert_cmpint(us, >=, 40000);
+        } else if (off || pg < lag) {
+            g_assert_cmpint(us, <, 40000);
+        }
+        if (pg == 0 && lag == 1) {
+            us = femu_timed_rw(&c, &q, &rw, NVME_CMD_READ, 0);
+            g_test_message("prog_pass2 %s: read before the fine pass %"
+                           PRId64 " us", (char *)data, us);
+            if (off) {
+                g_assert_cmpint(us, >=, 100000);
+            } else {
+                g_assert_cmpint(us, <, 50000);
+            }
+        }
+    }
+    us = femu_timed_rw(&c, &q, &rw, NVME_CMD_READ, 0);
+    g_test_message("prog_pass2 %s: read after the fine pass %" PRId64 " us",
+                   (char *)data, us);
+    g_assert_cmpint(us, >=, 100000);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &q);
+    femu_disable(&c);
+}
+
+/* the die parity counters of the device's only namespace */
+static void femu_parity_counters(QTestState *qts, uint64_t *parity,
+                                 uint64_t *degraded, double *waf)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *ctr = qdict_get_qdict(ns, "counters");
+
+    *parity = qdict_get_int(ctr, "parity-write-pages");
+    *degraded = qdict_get_int(ctr, "degraded-reads");
+    *waf = qdict_get_double(ctr, "waf");
+    qobject_unref(rsp);
+}
+
+/*
+ * Die parity, one plane. On two dies ("waf") every stripe is two pages and
+ * takes one parity program: a fill of distinct pages reads WAF 1.5 in log
+ * C0h and in query-femu, with 32 parity programs for 64 pages. On three
+ * dies with die 1 failed ("degraded"), 100 ms reads and a 50 ms XOR time,
+ * a read on die 1 reads dies 0 and 2 at once: 150 ms, below the 250 ms a
+ * serial pair would take, and one degraded read. A read on die 0 is not.
+ */
+void femu_test_die_parity(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool degraded = g_str_equal(data, "degraded");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t parity, nread;
+    double waf;
+    int64_t t0, us;
+    int pages = degraded ? 3 : 64;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 4096);
+    for (int i = 0; i < pages; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    if (!degraded) {
+        g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                             512, 0)), ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readl(qts, buf), ==, 1500);
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, 32);
+        g_assert_cmpuint(nread, ==, 0);
+        g_assert_cmpfloat(waf, ==, 1.5);
+    } else {
+        /* LBA page 1 went to channel 1, die 1 */
+        t0 = g_get_monotonic_time();
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 8, buf)), ==,
+                        NVME_SUCCESS);
+        us = g_get_monotonic_time() - t0;
+        g_test_message("die_parity: failed-die read %" PRId64 " us", us);
+        g_assert_cmpint(us, >=, 150000);
+        g_assert_cmpint(us, <, 230000);
+        t0 = g_get_monotonic_time();
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+        us = g_get_monotonic_time() - t0;
+        g_test_message("die_parity: healthy read %" PRId64 " us", us);
+        g_assert_cmpint(us, <, 140000);
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, 1);
+        g_assert_cmpuint(nread, ==, 1);
+    }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* exactly @nfull lines are full: @vpc valid pages, no invalid one */
+static void femu_rain_full_lines(QTestState *qts, uint64_t vpc, int nfull)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "'kind':'lines','limit':4096", &rsp);
+    QDict *cnt = qdict_get_qdict(ns, "line-counts");
+    QList *lines = qdict_get_qlist(ns, "lines");
+    QListEntry *e;
+    int full = 0;
+
+    g_assert_cmpuint(qdict_get_int(cnt, "full"), ==, nfull);
+    QLIST_FOREACH_ENTRY(lines, e) {
+        QDict *l = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (!strcmp(qdict_get_str(l, "state"), "full")) {
+            g_assert_cmpuint(qdict_get_int(l, "vpc"), ==, vpc);
+            g_assert_cmpuint(qdict_get_int(l, "ipc"), ==, 0);
+            full++;
+        }
+    }
+    g_assert_cmpint(full, ==, nfull);
+    qobject_unref(rsp);
+}
+
+/*
+ * rain_parity on 4 dies (2 channels, 2 LUNs), 8-page blocks. @data names
+ * the case:
+ *   "line":  one plane. One line holds 24 data pages: 32 pages less one
+ *            parity page per row. 24 writes fill it with no write left
+ *            over, map no page on a parity member (x-ftl-check counts that
+ *            as lost), and book 8 parity programs: WAF 32 / 24.
+ *   "pf":    the same with two planes and plane_first: 48 data pages,
+ *            16 parity programs.
+ *   "gc":    one plane, 16 lines: 2048 random writes over 256 pages make
+ *            collection move pages; the mapping stays clean and every
+ *            page reads its last pattern.
+ *   "seal":  pd_open_read_limit=4. Two pages in row 0, four reads of
+ *            page 0, then one write: the FTL seals the open line, which
+ *            books the parity of row 0 (two of three data pages), and
+ *            rewrites the two pages with the new one into a fresh row 0,
+ *            which books it again: 2 parity programs.
+ *   "seal2": the same on two planes with plane_first: the two pages
+ *            open rows 0 and 1, the seal books both (2), and the three
+ *            rewritten pages fill no row: 2 in all.
+ *   "seal5": five pages fill row 0 (1) and leave row 1 with two; the seal
+ *            books row 1 only (2), and the six rewritten pages fill both
+ *            rows of the fresh line (4).
+ *
+ *          t0  t1  t2  t3          t = lun * nchs + ch
+ *   row 0:  D   D   D   P
+ *   row 1:  D   D   P   D
+ */
+void femu_test_rain(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint64_t parity, nread;
+    double waf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    if (g_str_equal(mode, "line") || g_str_equal(mode, "pf")) {
+        int pages = g_str_equal(mode, "pf") ? 48 : 24;
+
+        qtest_memset(qts, buf, 0x3c, 4096);
+        for (int i = 0; i < pages; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)),
+                            ==, NVME_SUCCESS);
+        }
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, pages);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, pages / 3);
+        g_assert_cmpfloat(waf, >, 1.32);
+        g_assert_cmpfloat(waf, <, 1.34);
+        /* the last data page closed the line: full, and no longer open */
+        femu_rain_full_lines(qts, pages, 1);
+    } else if (g_str_equal(mode, "gc")) {
+        uint8_t last[256] = { 0 };
+        uint32_t x = 12345;
+
+        for (int i = 0; i < 2048; i++) {
+            int lba;
+
+            x = x * 1103515245u + 12345u;
+            lba = (x >> 8) % 256;
+            last[lba] = (uint8_t)(i | 1);
+            qtest_memset(qts, buf, last[lba], 4096);
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lba * 8,
+                                            buf)), ==, NVME_SUCCESS);
+        }
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, 256);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+        for (int lba = 0; lba < 256; lba++) {
+            if (!last[lba]) {
+                continue;
+            }
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, lba * 8,
+                                            buf)), ==, NVME_SUCCESS);
+            g_assert_cmphex(qtest_readb(qts, buf), ==, last[lba]);
+        }
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_test_message("rain gc: %" PRIu64 " parity programs, WAF %.3f",
+                       parity, waf);
+        g_assert_cmpfloat(waf, >, 4.0 / 3.0);
+    } else {
+        /* seal: 2 pages, 1 plane; seal2: 2 pages, seal5: 5, two planes */
+        int n = g_str_equal(mode, "seal5") ? 5 : 2;
+        uint64_t want = g_str_equal(mode, "seal5") ? 4 : 2;
+        uint64_t before = g_str_equal(mode, "seal5") ? 1 : 0;
+
+        qtest_memset(qts, buf, 0x7e, 4096);
+        for (int i = 0; i < n; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)),
+                            ==, NVME_SUCCESS);
+        }
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, before);
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                            NVME_SUCCESS);
+        }
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, n * 8, buf)), ==,
+                        NVME_SUCCESS);
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, want);
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, n + 1);
+        g_assert_cmpuint(lost, ==, 0);
+    }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* x-rain-fail: die @die of device gc-test fails; false on an error */
+static bool femu_rain_fail(QTestState *qts, int die)
+{
+    g_autofree char *v = g_strdup_printf("%d", die);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-rain-fail','value':%s}}", v);
+    bool ok = !qdict_haskey(rsp, "error");
+
+    qobject_unref(rsp);
+    return ok;
+}
+
+/*
+ * field @i of x-ftl-trace on device gc-test: 2 host pages, 3 NAND pages,
+ * 4 GC pages, 5 erases, 6 media reads
+ */
+static uint64_t femu_rain_trace(QTestState *qts, int i)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-ftl-trace'}}");
+    uint64_t f[10];
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64
+                           " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64
+                           " %" SCNu64 " %" SCNu64, &f[0], &f[1], &f[2],
+                           &f[3], &f[4], &f[5], &f[6], &f[7], &f[8], &f[9]),
+                    ==, 10);
+    qobject_unref(rsp);
+    return f[i];
+}
+
+/* SMART Critical Warning bit 2 (reliability degraded) */
+static bool femu_rain_degraded(FemuCtrlState *c, uint64_t buf)
+{
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, NVME_LOG_SMART_INFO, buf, 512,
+                                         0)), ==, NVME_SUCCESS);
+    return qtest_readb(c->pdev->bus->qts, buf) & 0x04;
+}
+
+/* SMART Available Spare (byte 3) and Critical Warning (byte 0) */
+static uint8_t femu_rain_spare(FemuCtrlState *c, uint64_t buf, uint8_t *cw)
+{
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, NVME_LOG_SMART_INFO, buf, 512,
+                                         0)), ==, NVME_SUCCESS);
+    *cw = qtest_readb(c->pdev->bus->qts, buf);
+    return qtest_readb(c->pdev->bus->qts, buf + 3);
+}
+
+/*
+ * rain_parity with one failed die, 4 dies (2 channels, 2 LUNs), one
+ * plane, 8-page blocks. Die numbers are ch * luns_per_ch + lun; in
+ * pointer order t = lun * 2 + ch, die 0 is t0, die 1 is t2, die 3 is t3.
+ *   "start":   failed_die=1. Every line leaves t2 out: 3 members, 16 data
+ *              pages a line. 16 writes fill one line, none on t2
+ *              (x-ftl-check counts data there as lost), 8 parity programs.
+ *   "first":   failed_die=0 (t0): each line starts on t1. 32 writes fill
+ *              two lines across the rollover: 16 parity programs.
+ *   "run":     12 writes fill rows 0 to 3 (4 parity); die 1 fails, which
+ *              sets SMART Critical Warning bit 2; a read
+ *              of LBA page 2 (on t2) is one degraded read; 16 writes fill
+ *              a line without t2 (8 more). A second die cannot fail, and
+ *              the refusal changes nothing; the same die is a no-op.
+ *   "partial": 13 writes: rows 0 to 3, and t0 of row 4. Die 0 fails; the
+ *              close books row 4's parity on t3 (5 in all). A read of page
+ *              12 (t0, row 4) reads only that parity page; a read of page
+ *              0 (t0, row 0) reads t1, t2 and t3.
+ *   "refuse":  gc_thres_pcent_high=100 keeps no lines for forced GC, so
+ *              a failure could stall it: x-rain-fail fails, and 24 writes
+ *              still fill one line of all four dies.
+ *
+ *            t0 t1 t2 t3              t0 t1 t2 t3
+ *   row 0:    D  D  D  P   -->        D  D  x  P     (die 1 failed)
+ *   row 1:    D  D  P  D              D  P  x  D
+ */
+void femu_test_rain_fail(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint64_t parity, nread, r0;
+    uint32_t result = 0;
+    uint16_t want = 0;
+    uint16_t cid = 0;
+    int pages = 16;
+    int nfull = 1;
+    int vpc = 16;
+    double waf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4d, 4096);
+    /*
+     * A die failed from the start: enabling the reliability event later
+     * sends it at once (Base 2.3, 5.2.26.1.5). With "run" the event is on
+     * before the failure, and the failure completes the request.
+     */
+    if (g_str_equal(mode, "start") || g_str_equal(mode, "run")) {
+        want = femu_aer(&c);
+        g_assert_cmpint(FEMU_SC(femu_set_feature(&c,
+                                                 NVME_ASYNCHRONOUS_EVENT_CONF,
+                                                 false, 0, 0x04, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    if (g_str_equal(mode, "start")) {
+        g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &result), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(cid, ==, want);
+        g_assert_cmphex(result & 0xffffff, ==, 0x020001);
+    }
+    if (g_str_equal(mode, "first")) {
+        pages = 32;
+        nfull = 2;
+    } else if (g_str_equal(mode, "run")) {
+        pages = 12;
+    } else if (g_str_equal(mode, "partial")) {
+        pages = 13;
+    } else if (g_str_equal(mode, "refuse")) {
+        g_assert_false(femu_rain_fail(qts, 1));
+        pages = 24;
+        vpc = 24;
+    }
+    for (int i = 0; i < pages; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_parity_counters(qts, &parity, &nread, &waf);
+    if (g_str_equal(mode, "run")) {
+        g_assert_cmpuint(parity, ==, 4);
+        g_assert_false(femu_rain_degraded(&c, buf));
+        g_assert_true(femu_rain_fail(qts, 1));
+        g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &result), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(cid, ==, want);
+        g_assert_cmphex(result & 0xffffff, ==, 0x020001);
+        g_assert_true(femu_rain_degraded(&c, buf));
+        g_assert_true(femu_rain_fail(qts, 1));
+        g_assert_false(femu_rain_fail(qts, 3));
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, 4);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 2 * 8, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, 0x4d);
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(nread, ==, 1);
+        for (int i = 0; i < 16; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                            (pages + i) * 8, buf)), ==,
+                            NVME_SUCCESS);
+        }
+        pages += 16;
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, 12);
+    } else if (g_str_equal(mode, "partial")) {
+        g_assert_true(femu_rain_fail(qts, 0));
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(parity, ==, 5);
+        r0 = femu_rain_trace(qts, 6);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 12 * 8, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(femu_rain_trace(qts, 6) - r0, ==, 1);
+        r0 = femu_rain_trace(qts, 6);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(femu_rain_trace(qts, 6) - r0, ==, 3);
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(nread, ==, 2);
+        nfull = 0;
+    } else {
+        g_assert_cmpuint(parity, ==, pages / (vpc == 24 ? 3 : 2));
+        /* a die failed from the start reads as degraded at once */
+        g_assert_true(femu_rain_degraded(&c, buf) == (vpc == 16));
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, pages);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_rain_full_lines(qts, vpc, nfull);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* the erase counts of die @die (ch * luns_per_ch + lun), summed */
+static uint64_t femu_die_erases(QTestState *qts, int die, int luns_per_ch)
+{
+    uint64_t sum = 0;
+    uint32_t offset = 0;
+    bool more = true;
+
+    while (more) {
+        g_autofree char *args = g_strdup_printf(
+            "'kind':'blocks','offset':%u,'limit':4096", offset);
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, args, &rsp);
+        QListEntry *e;
+
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(ns, "blocks"), e) {
+            QDict *b = qobject_to(QDict, qlist_entry_obj(e));
+
+            if (qdict_get_int(b, "channel") * luns_per_ch +
+                qdict_get_int(b, "lun") == die) {
+                sum += qdict_get_int(b, "erase-count");
+            }
+        }
+        more = qdict_haskey(ns, "next-offset");
+        if (more) {
+            offset = qdict_get_int(ns, "next-offset");
+        }
+        qobject_unref(rsp);
+    }
+    return sum;
+}
+
+/*
+ * rain_parity with or without the wear model: die 1 of 2 x 2 fails after
+ * the fill. A failed die takes no erase, so its erase counts stay; the
+ * live dies erase. With wear (blk_pe_limit), blocks wear out on the live
+ * dies only, and no data is lost. The C0h counters and the spare are
+ * printed for the record.
+ */
+void femu_test_rain_wear(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans;
+    uint64_t d1, e0, e2, e3;
+    uint32_t seed = 1;
+    uint8_t page[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    for (int i = 0; i < 256; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 64, buf, list,
+                                                        -1)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_true(femu_rain_fail(qts, 1));
+    d1 = femu_die_erases(qts, 1, 2);
+    e0 = femu_die_erases(qts, 0, 2);
+    e2 = femu_die_erases(qts, 2, 2);
+    e3 = femu_die_erases(qts, 3, 2);
+    for (int i = 0; i < 600; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, (seed >> 8) %
+                                                        (256 - npages + 1),
+                                                        npages, buf, list,
+                                                        -1)), ==,
+                        NVME_SUCCESS);
+    }
+
+    g_assert_cmpuint(femu_die_erases(qts, 1, 2), ==, d1);
+    g_assert_cmpuint(femu_die_erases(qts, 0, 2), >, e0);
+    g_assert_cmpuint(femu_die_erases(qts, 2, 2), >, e2);
+    g_assert_cmpuint(femu_die_erases(qts, 3, 2), >, e3);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_test_message("overworn %" PRIu64 " grown bad %" PRIu64 " retired lines %"
+                   PRIu64, ldq_le_p(page + 112), ldq_le_p(page + 120),
+                   ldq_le_p(page + 128));
+    if (data) {
+        g_assert_cmpuint(ldq_le_p(page + 120), >, 0);
+    }
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_test_message("available spare %u percentage used %u", page[3], page[5]);
+    g_assert_cmpuint(page[3], <=, 100);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Fixture W: 2 x 2 dies, 64 lines, a 1 MiB namespace, wear EOL. One die
+ * failure and no retirement: the wear floor goes 27 --> 32, so the wear
+ * spare is 29 of 34 lines (85); the RAIN spare is 56. SMART reports the
+ * minimum, and the media stays writable.
+ *
+ *   spare = min(wear 85, RAIN 56) = 56
+ */
+void femu_test_rain_wear_spare(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t log = guest_alloc(alloc, 512);
+    uint8_t page[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_test_message("available spare before the failure %u", page[3]);
+    g_assert_true(femu_rain_fail(qts, 1));
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpuint(page[3], ==, 56);
+    g_assert_cmpuint(page[0] & NVME_SMART_MEDIA_READ_ONLY, ==, 0);
+    guest_free(alloc, log);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Fixture W with blk_pe_limit=20 (spread 50, so lines retire one by one)
+ * and wear EOL: die 1 fails after the fill,
+ * then one-page writes wear the 3 live dies out. The media goes read-only
+ * with the spare at 0, writes fail with Write to RO, and no data is lost.
+ *
+ *   fill --> fail die 1 --> writes ... --> Write to RO
+ *   then: SMART read-only bit, spare 0, 256 pages mapped, none lost
+ */
+void femu_test_rain_wear_eol(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans;
+    uint32_t seed = 7;
+    uint16_t st = NVME_SUCCESS;
+    uint8_t page[512];
+    uint64_t r = 0;
+    int seen = 0;
+    int n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 64 * 4096);
+    /* mdts=4: 16 pages a write at most */
+    for (int i = 0; i < 256; i += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 16, buf, list,
+                                                        -1)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_true(femu_rain_fail(qts, 1));
+    for (n = 0; n < 200000 && st == NVME_SUCCESS; n++) {
+        seed = seed * 1103515245 + 12345;
+        st = FEMU_SC(femu_write_pages_placed(&c, (seed >> 8) % 256, 1, buf,
+                                             list, -1));
+        /*
+         * The wear spare against the room at start (34 lines), with 29
+         * after the failure: 27 retired --> 2/34 = 5, 28 --> 1/34 = 2.
+         * The RAIN spare is higher there, so SMART shows the wear part.
+         */
+        /* every 8th write, then every write from 26 retired lines */
+        if (st == NVME_SUCCESS && (n % 8 == 0 || r >= 26)) {
+            uint64_t was = r;
+
+            r = femu_c0h_field(&c, log, 128);
+            if (r != was && r >= 26) {
+                g_test_message("write %d: %" PRIu64 " retired lines", n, r);
+            }
+
+            if (r == 27 || r == 28) {
+                g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO,
+                                                     log, sizeof(page), 0)),
+                                ==, NVME_SUCCESS);
+                qtest_memread(qts, log, page, sizeof(page));
+                g_assert_cmpuint(page[3], ==, r == 27 ? 5 : 2);
+                seen++;
+            }
+        }
+    }
+    g_assert_cmphex(st, ==, NVME_WRITE_TO_RO);
+    g_assert_cmpint(seen, >, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_test_message("read-only after %d writes: overworn %" PRIu64
+                   " grown bad %" PRIu64 " retired lines %" PRIu64, n,
+                   ldq_le_p(page + 112), ldq_le_p(page + 120),
+                   ldq_le_p(page + 128));
+    /*
+     * Floor 32, room 34 at start, 29 after the failure: retirement 29
+     * leaves a wear spare of 0, so read-only comes with it, not later.
+     */
+    g_assert_cmpuint(ldq_le_p(page + 128), ==, 29);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmphex(page[0] & NVME_SMART_MEDIA_READ_ONLY, ==,
+                    NVME_SMART_MEDIA_READ_ONLY);
+    g_assert_cmpuint(page[3], ==, 0);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * rain_parity, 3 dies, FIFO GC, 40 lines, forced reserve 2. Old lines hold
+ * 16 data pages, lines after die 1 fails hold 8. Lines 0 to 2 are the
+ * first FIFO victims with 15 live pages each, 32 empty victims follow,
+ * line 35 is full, line 36 is open with 3 pages, 3 lines are free.
+ *
+ *   victim 0 (15) fits, victim 1 (15) fits, victim 2 (15) does not:
+ *   it goes back and an empty victim goes first, then 2 fits
+ *
+ * Without that, the write after the failure fails: victim 2 keeps the
+ * head of the FIFO queue with no room left.
+ */
+void femu_test_rain_fifo_fit(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint64_t gc0, er0;
+    uint8_t last[65] = { 0 };
+    int op = 0;
+    QDict *rsp;
+    QDict *ns;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int k = 0; k < 1 + 33 + 1; k++) {
+        int lo = k == 0 ? 0 : 48;
+        int hi = k == 0 ? 48 : 64;
+
+        for (int lpn = lo; lpn < hi; lpn++) {
+            if (k == 34 && lpn > 50) {
+                break;
+            }
+            /* the last pass overwrites 15, 31 and 47 */
+            int l = k == 34 ? 15 + 16 * (lpn - 48) : lpn;
+
+            last[l] = (uint8_t)(++op | 1);
+            qtest_memset(qts, buf, last[l], 4096);
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, l * 8, buf)),
+                            ==, NVME_SUCCESS);
+        }
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 64);
+    g_assert_cmpuint(femu_rain_trace(qts, 4), ==, 0);
+    gc0 = femu_rain_trace(qts, 4);
+    er0 = femu_rain_trace(qts, 5);
+
+    g_assert_true(femu_rain_fail(qts, 1));
+    last[64] = 0x5b;
+    qtest_memset(qts, buf, last[64], 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 64 * 8, buf)), ==,
+                    NVME_SUCCESS);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 65);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(femu_rain_trace(qts, 4) - gc0, ==, 45);
+    /* a failed die takes no erase: 2 live dies, not 3 */
+    g_assert_cmpuint(femu_rain_trace(qts, 5) - er0, ==, 12);
+    ns = femu_query_ns(qts, "'kind':'lines','limit':4096", &rsp);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "line-counts"),
+                                   "free"), ==, 3);
+    qobject_unref(rsp);
+    for (int l = 0; l <= 64; l++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l * 8, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, last[l]);
+    }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* x-rain-check of device gc-test: failures, old lines with data, moved */
+static void femu_rain_check(QTestState *qts, uint64_t *nfail, uint64_t *left,
+                            uint64_t *moved)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-rain-check'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           nfail, left, moved), ==, 3);
+    qobject_unref(rsp);
+}
+
+/*
+ * rain_parity with rain_rebuild, 4 dies (2 channels, 2 LUNs), one plane,
+ * 8-page blocks: lines hold 24 data pages, 16 after one failure, 8 after
+ * two.
+ *
+ *   40 pages: one full old line, one open --fail die 1 (t2)--> 2 old lines
+ *   a second failure now could lose data: refused
+ *   unrelated writes, one old line each: 40 pages moved, 0 old lines left
+ *   fail die 0 (t0): accepted; the 40 pages read back at once, those on
+ *   t0 through their stripes (degraded reads)
+ *   the second rebuild moves the epoch 1 lines to S = 2 lines
+ *   16 writes at S = 2: one parity each
+ *   a third failure would leave one member: refused
+ */
+void femu_test_rain_rebuild(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint64_t nfail, left, moved;
+    uint64_t parity, nread, p0, d0;
+    uint32_t result = 0;
+    uint16_t want = 0;
+    uint16_t cid = 0;
+    uint8_t cw;
+    double waf;
+    int w2 = 0;
+    int w = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int l = 0; l < 40; l++) {
+        qtest_memset(qts, buf, 0x80 | l, 4096);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, l * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_true(femu_rain_fail(qts, 1));
+    /*
+     * 45 lines past the GC reserve and the open line, 256 pages taken:
+     * spare (45 * 8 * 2 - 256) / (45 * 8 * 3 - 256) = 56 %
+     */
+    g_assert_cmpuint(femu_rain_spare(&c, buf, &cw), ==, 56);
+    g_assert_cmphex(cw & 0x05, ==, 0x04);
+    femu_rain_check(qts, &nfail, &left, &moved);
+    g_assert_cmpuint(nfail, ==, 1);
+    g_assert_cmpuint(left, ==, 2);
+    g_assert_cmpuint(moved, ==, 0);
+    g_assert_false(femu_rain_fail(qts, 0));
+
+    qtest_memset(qts, buf, 0x11, 4096);
+    while (left && w < 20) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, (100 + w) * 8,
+                                        buf)), ==, NVME_SUCCESS);
+        w++;
+        femu_rain_check(qts, &nfail, &left, &moved);
+    }
+    g_assert_cmpuint(left, ==, 0);
+    g_assert_cmpuint(moved, ==, 40);
+    g_assert_cmpint(w, <=, 2);
+    /* query-femu reports the same */
+    {
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, "", &rsp);
+        QDict *ctr = qdict_get_qdict(ns, "counters");
+
+        g_assert_cmpuint(qdict_get_int(ctr, "failed-dies"), ==, 1);
+        g_assert_cmpuint(qdict_get_int(ctr, "rebuild-lines-left"), ==, 0);
+        g_assert_cmpuint(qdict_get_int(ctr, "rebuild-pages"), ==, 40);
+        qobject_unref(rsp);
+    }
+
+    /* the spare event is on: the second failure crosses the threshold */
+    want = femu_aer(&c);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c,
+                                             NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0, 0x01, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_true(femu_rain_fail(qts, 0));
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &result), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(result & 0xffffff, ==, 0x020201);
+    /* (45 * 8 - 256) / 824 = 12 %, below the threshold of 20: bit 0 */
+    g_assert_cmpuint(femu_rain_spare(&c, buf, &cw), ==, 12);
+    g_assert_cmphex(cw & 0x05, ==, 0x05);
+    /* before any write: the pages now on t0 read through their stripes */
+    femu_parity_counters(qts, &p0, &d0, &waf);
+    for (int l = 0; l < 40; l++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l * 8, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, 0x80 | l);
+    }
+    femu_parity_counters(qts, &parity, &nread, &waf);
+    g_assert_cmpuint(nread, >, d0);
+
+    /* the second rebuild: the epoch 1 lines move to S = 2 lines */
+    femu_rain_check(qts, &nfail, &left, &moved);
+    g_assert_cmpuint(nfail, ==, 2);
+    g_assert_cmpuint(left, >, 0);
+    while (left && w2 < 20) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, (230 + w2) * 8,
+                                        buf)), ==, NVME_SUCCESS);
+        w2++;
+        femu_rain_check(qts, &nfail, &left, &moved);
+    }
+    g_assert_cmpuint(left, ==, 0);
+
+    /* at S = 2 a row is one data page and its parity */
+    femu_parity_counters(qts, &p0, &nread, &waf);
+    for (int i = 0; i < 16; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, (200 + i) * 8,
+                                        buf)), ==, NVME_SUCCESS);
+    }
+    femu_parity_counters(qts, &parity, &nread, &waf);
+    g_assert_cmpuint(parity - p0, ==, 16);
+    g_assert_false(femu_rain_fail(qts, 3));
+
+    for (int l = 0; l < 40; l++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l * 8, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf), ==, 0x80 | l);
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 40 + w + w2 + 16);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* Set Features 0Dh: @ehm, @hsize pages, a descriptor list at @list */
+static uint16_t femu_hmb_set(FemuCtrlState *c, bool ehm, uint32_t hsize,
+                             uint64_t list, uint32_t entries)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(0x0d);
+    cmd.cdw11 = cpu_to_le32(ehm ? 1 : 0);
+    cmd.cdw12 = cpu_to_le32(hsize);
+    cmd.cdw13 = cpu_to_le32((uint32_t)list);
+    cmd.cdw14 = cpu_to_le32((uint32_t)(list >> 32));
+    cmd.cdw15 = cpu_to_le32(entries);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* Get Features 0Dh into @buf: Dword 0 (EHM) and the attributes */
+static uint32_t femu_hmb_get(FemuCtrlState *c, uint64_t buf)
+{
+    NvmeCmd cmd = { 0 };
+    uint32_t res = 0xdead;
+
+    cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(0x0d);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    g_assert_cmphex(FEMU_SC(femu_admin_result(c, &cmd, &res)), ==,
+                    NVME_SUCCESS);
+    return res;
+}
+
+/* one timed 4 KiB read of LBA page @page, in microseconds */
+static int64_t femu_timed_read(FemuCtrlState *c, uint64_t page, uint64_t buf)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, page * 8, buf)), ==,
+                    NVME_SUCCESS);
+    return g_get_monotonic_time() - t0;
+}
+
+/*
+ * Host Memory Buffer (hmb_mb=1, DFTL with a one-page mapping cache, 50 ms
+ * page reads, 1 ms HMB lookups). Identify asks for 256 pages. Without the
+ * HMB a read whose translation page is not cached reads it first (100 ms
+ * or more); with the HMB enabled the same read takes the 1 ms lookup and
+ * the data read only. Set Features checks the descriptors, refuses a
+ * second enable, and Get Features and a reset report the state.
+ */
+void femu_test_hmb(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mem = guest_alloc(alloc, 2u << 20);
+    uint64_t base = QEMU_ALIGN_UP(mem, 4096);
+    uint32_t res = 0;
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 272), ==, 256);    /* HMPRE */
+    g_assert_cmpuint(qtest_readl(qts, buf + 276), ==, 256);    /* HMMIN */
+
+    qtest_memset(qts, buf, 0x3c, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 2048 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    /* the cache holds the translation page of 2048: page 0 misses */
+    us = femu_timed_read(&c, 0, buf);
+    g_test_message("hmb off: read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 100000);
+
+    /* 128 pages, matching HSIZE but short of HMMIN, are refused */
+    qtest_memset(qts, list, 0, 32);
+    qtest_writeq(qts, list, base);
+    qtest_writel(qts, list + 8, 128);
+    g_assert_cmphex(femu_hmb_set(&c, true, 128, list, 1), ==,
+                    NVME_INVALID_FIELD);
+    /* 256 pages, then a size-0 entry whose address does not matter */
+    qtest_writel(qts, list + 8, 256);
+    qtest_writeq(qts, list + 16, 1);
+    g_assert_cmphex(femu_hmb_set(&c, true, 256, list, 0), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_hmb_set(&c, true, 255, list, 2), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_hmb_set(&c, true, 256, list, 2), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_hmb_set(&c, true, 256, list, 1), ==,
+                    NVME_CMD_SEQ_ERROR);
+    res = femu_hmb_get(&c, buf);
+    g_assert_cmpuint(res & 1, ==, 1);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 256);   /* HSIZE */
+    g_assert_cmpuint(qtest_readl(qts, buf + 12), ==, 2); /* HMDLEC */
+
+    us = femu_timed_read(&c, 2048, buf);
+    g_test_message("hmb on: read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 51000);                /* lookup and data read */
+    g_assert_cmpint(us, <, 90000);
+    /* writes under the HMB move no translation page */
+    {
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, "", &rsp);
+        int64_t tp0 = qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                    "map-write-pages");
+
+        qobject_unref(rsp);
+        qtest_memset(qts, buf, 0x3c, 4096);
+        /* pages in three other translation pages of 512 mappings */
+        for (int i = 1; i <= 3; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                            (i * 1024 + 1) * 8, buf)), ==,
+                            NVME_SUCCESS);
+        }
+        ns = femu_query_ns(qts, "", &rsp);
+        g_assert_cmpint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                      "map-write-pages"), ==, tp0);
+        qobject_unref(rsp);
+    }
+
+    g_assert_cmphex(femu_hmb_set(&c, false, 0, 0, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_hmb_set(&c, false, 0, 0, 0), ==, NVME_SUCCESS);
+    /*
+     * The HMB is off: the three translation pages changed under it are the
+     * controller's again. The next request writes them, and none is left
+     * with a version that is neither dirty nor pending.
+     */
+    {
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, "", &rsp);
+        int64_t tp0 = qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                    "map-write-pages");
+        uint64_t tv[7];
+
+        qobject_unref(rsp);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                        NVME_SUCCESS);
+        ns = femu_query_ns(qts, "", &rsp);
+        g_assert_cmpint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                      "map-write-pages"), >=, tp0 + 3);
+        qobject_unref(rsp);
+        femu_tp_check(qts, "/machine/peripheral/hmb", tv);
+        g_assert_cmpuint(tv[4], ==, 0);
+        g_assert_cmpuint(tv[6], ==, 0);
+    }
+    g_assert_cmphex(femu_hmb_set(&c, true, 256, list, 1), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    res = femu_hmb_get(&c, buf);
+    g_assert_cmpuint(res & 1, ==, 0);                  /* a reset disables */
+    femu_disable(&c);
+    guest_free(alloc, mem);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+void femu_test_stalls(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+
+    if (g_str_equal(mode, "gc")) {
+        uint64_t writes, passes;
+
+        femu_create_io_queues(&c);
+        femu_wear_workload(&c, buf, list);
+        writes = femu_c0h_field(&c, log, 192);
+        passes = femu_c0h_field(&c, log, 200);
+        g_test_message("%" PRIu64 " stalled writes, %" PRIu64 " passes",
+                       writes, passes);
+        g_assert_cmpuint(writes, >, 0);
+        g_assert_cmpuint(passes, >=, writes);
+        g_assert_cmpuint(writes, <=, 604);
+    } else if (g_str_equal(mode, "buffer")) {
+        femu_create_io_queues(&c);
+        for (i = 0; i < 32; i++) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i * 4, 4, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+        /* writes, not the batches they destaged */
+        g_assert_cmpuint(femu_c0h_field(&c, log, 208), >, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 208), <=, 32);
+    } else if (g_str_equal(mode, "buffer-gc") || g_str_equal(mode, "fdp")) {
+        uint64_t writes, passes;
+
+        /* buffered or placed writes that collect count like direct ones */
+        femu_create_io_queues(&c);
+        for (i = 0; i < 40; i++) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (i * 64) % 192, 64,
+                                                     buf, list)), ==,
+                            NVME_SUCCESS);
+        }
+        writes = femu_c0h_field(&c, log, 192);
+        passes = femu_c0h_field(&c, log, 200);
+        g_test_message("%s: %" PRIu64 " stalled writes, %" PRIu64 " passes",
+                       mode, writes, passes);
+        g_assert_cmpuint(writes, >, 0);
+        g_assert_cmpuint(passes, >=, writes);
+        g_assert_cmpuint(writes, <=, 40);
+    } else {
+        FemuQueue q = { .qid = 1, .phase = 1 };
+        NvmeCmd cmd;
+        int head = 0;
+
+        q.sq_addr = guest_alloc(alloc, 16 * sizeof(NvmeCmd));
+        q.cq_addr = guest_alloc(alloc, 2 * sizeof(NvmeCqe));
+        qtest_memset(qts, q.cq_addr, 0, 2 * sizeof(NvmeCqe));
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+        cmd.dptr.prp1 = cpu_to_le64(q.cq_addr);
+        cmd.cdw10 = cpu_to_le32((1 << 16) | 1);
+        cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+        g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+        cmd.dptr.prp1 = cpu_to_le64(q.sq_addr);
+        cmd.cdw10 = cpu_to_le32((15 << 16) | 1);
+        cmd.cdw11 = cpu_to_le32((1 << 16) | NVME_SQ_PC);
+        g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+        for (i = 0; i < 6; i++) {
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.opcode = NVME_CMD_READ;
+            cmd.cid = cpu_to_le16(c.cid++);
+            cmd.nsid = cpu_to_le32(1);
+            cmd.dptr.prp1 = cpu_to_le64(buf);
+            cmd.cdw12 = cpu_to_le32(7);
+            qtest_memwrite(qts, q.sq_addr + i * sizeof(NvmeCmd), &cmd,
+                           sizeof(cmd));
+        }
+        qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 1), 6);
+        /* let the device fill the queue before reaping anything */
+        g_usleep(200 * 1000);
+        for (i = 0; i < 6; i++) {
+            uint64_t slot = q.cq_addr + head * sizeof(NvmeCqe);
+            NvmeCqe cqe;
+            int waited = 0;
+
+            for (;;) {
+                qtest_memread(qts, slot, &cqe, sizeof(cqe));
+                if ((le16_to_cpu(cqe.status) & 1) == q.phase) {
+                    break;
+                }
+                g_assert_cmpint(waited++, <, FEMU_POLL_LIMIT_MS);
+                g_usleep(1000);
+            }
+            head = (head + 1) % 2;
+            if (!head) {
+                q.phase ^= 1;
+            }
+            qpci_io_writel(c.pdev, c.bar, femu_cq_doorbell(&c, 1), head);
+        }
+        g_assert_cmpuint(femu_c0h_field(&c, log, 216), >, 0);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* x-stage-hold-ms of device stage-test */
+static void femu_stage_hold(QTestState *qts, uint32_t ms)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/stage-test',"
+                             "'property':'x-stage-hold-ms','value':%u}}", ms);
+}
+
+/*
+ * A query copies a poller's stages and bands between two commands. Here a
+ * poller stops inside the update of one read (x-stage-hold-ms), after its
+ * histograms and before its band. A query sent during that stop must wait
+ * for the update to end, and its copy must agree: one TOTAL command and one
+ * band command. A copy taken without the sequence check shows the read in
+ * TOTAL and in no band.
+ */
+void femu_test_io_stages_overlap(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeRwCmd rw;
+    QDict *rsp, *ret;
+    gint64 t0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                    "'arguments':{'reset':true}}");
+    qobject_unref(rsp);
+
+    femu_stage_hold(qts, 400);
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(4096 / c.lba_size - 1);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_usleep(100 * 1000);
+
+    t0 = g_get_monotonic_time();
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+    g_test_message("the query took %" PRId64 " us",
+                   g_get_monotonic_time() - t0);
+    ret = qdict_get_qdict(rsp, "return");
+    g_assert_cmpuint(qdict_get_int(femu_stage(ret, "total"), "count"), ==, 1);
+    g_assert_cmpuint(qlist_size(qdict_get_qlist(ret, "bands")), ==, 1);
+    femu_stages_check_bands(ret);
+    qobject_unref(rsp);
+
+    femu_stage_hold(qts, 0);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Write Zeroes and a buffer write-back each program one full row: the same
+ * page on both planes of every LUN of a 2 x 2 x 2 device. With mp_program
+ * (data non-zero) that is one program command per LUN, without it one per
+ * page.
+ */
+void femu_test_mp_program_scopes(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t want = data ? 4 : 8;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t before;
+    NvmeRwCmd rw;
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    before = femu_ftl_trace_field(qts, 7);
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE_ZEROES;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(0);
+    rw.nlb = cpu_to_le16(8 * (4096 / c.lba_size) - 1);
+    g_assert_cmpint(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 7) - before, ==, want);
+
+    /* the buffer holds the eight pages; Flush writes them back */
+    before = femu_ftl_trace_field(qts, 7);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 8, 8, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 7), ==, before);
+    g_assert_cmpint(femu_io(&c, &flush), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ftl_trace_field(qts, 7) - before, ==, want);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Two-page writes on a 2 x 2 x 2 device with mp_program. The default order
+ * puts the two pages on two channels, so each write is two programs. With
+ * plane_first they fill both planes of one LUN and form one multi-plane
+ * program. Random overwrites then run garbage collection, which steps its
+ * own pointer the same way, and the FTL must still hold every page once.
+ */
+void femu_test_plane_first(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t want = data ? 1 : 2;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint32_t seed = 3;
+    QDict *rsp;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 4096);
+
+    for (i = 0; i < 8; i++) {
+        uint64_t before = femu_ftl_trace_field(qts, 7);
+
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 2 * i, 2, buf, list)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(femu_ftl_trace_field(qts, 7) - before, ==, want);
+    }
+
+    for (i = 16; i < pages; i += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 600; i++) {
+        uint32_t npages = i % 4 == 3 ? 16 : 1 + (i & 1);
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, page, npages, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(
+                         femu_query_ns(qts, "", &rsp), "counters"),
+                         "gc-write-pages"), >, 0);
+    qobject_unref(rsp);
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/trace',"
+                    "'property':'x-ftl-check'}}");
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           &mapped, &lost, &orphans), ==, 3);
+    qobject_unref(rsp);
+    g_test_message("%" PRIu64 " mapped, %" PRIu64 " lost, %" PRIu64
+                   " orphans", mapped, lost, orphans);
+    g_assert_cmpuint(mapped, ==, pages);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * An abrupt shutdown (CC.SHN 10b) that completes leaves nothing the host
+ * was told is written in the write buffer: after SHST reads 10b, a power
+ * cut keeps the new data. Before, only a normal shutdown flushed.
+ */
+void femu_test_shutdown_abrupt(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0xab, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qpci_io_writel(c.pdev, c.bar, 0x14, FEMU_CC_ENABLE | (2 << 14));
+    g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(c.pdev, c.bar, 0x1c)), ==,
+                    2);
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/power',"
+                    "'property':'simulate-power-loss','value':true}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, c.pdev, c.alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0xab);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A system reset ends a completed shutdown, with or without ocp, and
+ * with CC.EN already 0: SHST reads 00b after it.
+ */
+void femu_test_shutdown_sysreset(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=sr,addr=5,devsz_mb=16,"
+        "femu_mode=1");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+
+    femu_enable(&c, pdev, &qs->alloc);
+    qpci_io_writel(pdev, c.bar, 0x14, (FEMU_CC_ENABLE & ~1) |
+                   FEMU_CC_SHN_NORMAL);
+    g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(pdev, c.bar, 0x1c)), ==, 2);
+    qtest_qmp_assert_success(qts, "{'execute':'system_reset'}");
+    qtest_qmp_eventwait(qts, "RESET");
+    qpci_device_enable(pdev);
+    c.bar = qpci_iomap(pdev, 0, NULL);
+    g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(pdev, c.bar, 0x1c)), ==, 0);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+/* CSTS of the controller of @c */
+static uint32_t femu_csts(FemuCtrlState *c)
+{
+    return qpci_io_readl(c->pdev, c->bar, 0x1c);
+}
+
+/*
+ * shutdown_ms=200. A normal shutdown with CC.EN still 1 reads SHST 01b
+ * until 200 ms of guest time pass, then 10b; RDY stays and nothing else
+ * in CSTS changes. A second notification keeps the first deadline. A
+ * reset during the 01b time ends the shutdown: SHST 00b, also past the
+ * old deadline.
+ */
+void femu_test_shutdown_delay(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    qpci_io_writel(c.pdev, c.bar, 0x14, FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
+    g_assert_cmphex(femu_csts(&c), ==, NVME_CSTS_READY | (1 << 2));
+    qtest_clock_step(qts, 100 * 1000000LL);
+    /* an abrupt notification now changes CC only */
+    qpci_io_writel(c.pdev, c.bar, 0x14, FEMU_CC_ENABLE | (2 << 14));
+    g_assert_cmphex(qpci_io_readl(c.pdev, c.bar, 0x14), ==,
+                    FEMU_CC_ENABLE | (2 << 14));
+    qtest_clock_step(qts, 100 * 1000000LL - 1);
+    g_assert_cmphex(femu_csts(&c), ==, NVME_CSTS_READY | (1 << 2));
+    qtest_clock_step(qts, 1);
+    g_assert_cmphex(femu_csts(&c), ==, NVME_CSTS_READY | (2 << 2));
+    femu_disable(&c);
+
+    /* a reset during 01b ends the shutdown for good */
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, &femu->dev, alloc);
+    qpci_io_writel(c.pdev, c.bar, 0x14, FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
+    qtest_clock_step(qts, 100 * 1000000LL);
+    qpci_io_writel(c.pdev, c.bar, 0x14, 0);
+    g_assert_cmphex(femu_csts(&c), ==, 0);
+    qtest_clock_step(qts, 200 * 1000000LL);
+    g_assert_cmphex(femu_csts(&c), ==, 0);
+    femu_queue_free(&c, &c.admin);
+    qpci_iounmap(c.pdev, c.bar);
+}
+
+/* a shutdown_ms a Linux host would time out on is refused */
+void femu_test_shutdown_bad(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                           "'driver':'femu','id':'sdb','addr':'6',"
+                           "'devsz_mb':16,'femu_mode':1,"
+                           "'shutdown_ms':5000}}");
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "shutdown_ms"));
+    qobject_unref(rsp);
+}
+#define FEMU_CNS_ENDGRP_LIST    0x19
+
+/*
+ * Commands Supported and Effects lists every I/O command the controller
+ * dispatches (Base 2.3, 5.2.12.1.6): Write Uncorrectable when ONCS offers it,
+ * and I/O Management Receive and Send while placement is on.
+ */
+void femu_test_log_contents_fdp(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_CMD_EFFECTS, 0, buf, 4096),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf + 1024 + 4 * 0x04) & 1, ==, 1);
+    g_assert_cmpint(qtest_readl(qts, buf + 1024 + 4 * 0x12) & 1, ==, 1);
+    g_assert_cmpint(qtest_readl(qts, buf + 1024 + 4 * 0x1d) & 1, ==, 1);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* @rus records from @offset, and where the listing continues (0 = end) */
+static void femu_query_ru_window(QTestState *qts, uint32_t offset,
+                                 uint32_t limit, uint32_t want, uint32_t next)
+{
+    g_autofree char *args = g_strdup_printf(
+        "'kind':'reclaim-units','offset':%u,'limit':%u", offset, limit);
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, args, &rsp);
+    QList *rus = qdict_get_qlist(qdict_get_qdict(ns, "fdp"), "reclaim-units");
+
+    g_assert_cmpuint(qlist_size(rus), ==, want);
+    g_assert_cmpuint(qdict_get_int(ns, "offset"), ==, offset);
+    g_assert_cmpuint(qdict_get_int(qobject_to(QDict, qlist_peek(rus)),
+                                   "unit"), ==, offset);
+    if (next) {
+        g_assert_cmpuint(qdict_get_int(ns, "next-offset"), ==, next);
+    } else {
+        g_assert_false(qdict_haskey(ns, "next-offset"));
+    }
+    qobject_unref(rsp);
+}
+
+/*
+ * query-femu on an FDP namespace with four handles: writes through two
+ * handles show up on those handles only, the counters agree with the FDP
+ * Statistics log before and after collection, and the reclaim unit listing
+ * accounts for every valid page.
+ */
+void femu_test_query_fdp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t host[4] = { 0 };
+    uint64_t gc;
+    uint32_t total;
+    uint32_t seed = 7;
+    QDict *rsp;
+    QDict *ns;
+    QDict *fdp;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+
+    ns = femu_query_ns(qts, "", &rsp);
+    g_assert_cmpstr(qdict_get_str(ns, "mode"), ==, "bbssd");
+    g_assert_false(qdict_haskey(ns, "line-counts"));
+    fdp = qdict_get_qdict(ns, "fdp");
+    g_assert_false(qdict_haskey(fdp, "reclaim-units"));
+    g_assert_cmpuint(qdict_get_int(fdp, "reclaim-groups"), ==, 1);
+    g_assert_cmpuint(qlist_size(qdict_get_qlist(fdp, "handles")), ==, 4);
+    total = qdict_get_int(qdict_get_qdict(fdp, "unit-counts"), "total");
+    g_assert_cmpuint(total, ==, 25);
+    g_assert_cmpuint(total, ==, qdict_get_int(fdp, "units-per-group"));
+    g_assert_cmpuint(qdict_get_int(fdp, "pages-per-unit"), ==, 16);
+    /* each handle starts with a unit open: units 0 to 3, the rest free */
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(fdp, "unit-counts"),
+                                   "open"), ==, 4);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(fdp, "unit-counts"),
+                                   "free"), ==, 21);
+    qobject_unref(rsp);
+    ns = femu_query_ns(qts, "'kind':'reclaim-units','limit':1", &rsp);
+    fdp = qdict_get_qdict(ns, "fdp");
+    {
+        QDict *u = qobject_to(QDict, qlist_peek(qdict_get_qlist(
+                                  fdp, "reclaim-units")));
+        QDict *h = qobject_to(QDict, qlist_peek(qdict_get_qlist(
+                                  fdp, "handles")));
+
+        g_assert_cmpstr(qdict_get_str(u, "state"), ==, "open");
+        g_assert_cmpuint(qdict_get_int(u, "handle"), ==, 0);
+        g_assert_cmpstr(qdict_get_str(h, "type"), ==, "persistently-isolated");
+    }
+    g_assert_cmpuint(qdict_get_int(ns, "next-offset"), ==, 1);
+    qobject_unref(rsp);
+    femu_query_check_fdp(&c, log, 0, host);
+
+    /* placement 1 then 2 */
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 64, buf, list, 1)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 64, 32, buf, list, 2)),
+                    ==, NVME_SUCCESS);
+    femu_query_check_fdp(&c, log, 96, host);
+    g_assert_cmpuint(host[0], ==, 0);
+    g_assert_cmpuint(host[1], ==, 64 * 4096);
+    g_assert_cmpuint(host[2], ==, 32 * 4096);
+    g_assert_cmpuint(host[3], ==, 0);
+
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 64, buf, list,
+                                                        (i / 64) % 4)),
+                        ==, NVME_SUCCESS);
+    }
+    for (i = 0; i < 1200; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, page, npages, buf,
+                                                        list,
+                                                        (seed >> 4) % 4)),
+                        ==, NVME_SUCCESS);
+    }
+    ns = femu_query_ns(qts, "", &rsp);
+    gc = qdict_get_int(qdict_get_qdict(ns, "counters"), "gc-write-pages");
+    g_test_message("collection moved %" PRIu64 " pages", gc);
+    g_assert_cmpuint(gc, >, 0);
+    qobject_unref(rsp);
+    femu_query_check_fdp(&c, log, pages, host);
+
+    /* windows */
+    femu_query_ru_window(qts, 0, 5, 5, 5);
+    femu_query_ru_window(qts, 5, 5, 5, 10);
+    femu_query_ru_window(qts, total - 1, 10, 1, 0);
+    femu_query_ru_window(qts, 0, 4096, total, 0);
+    {
+        g_autofree char *past = g_strdup_printf(
+            "'kind':'reclaim-units','offset':%u", total);
+
+        femu_query_fails(qts, past, "past its last reclaim unit");
+    }
+    femu_query_fails(qts, "'kind':'reclaim-units','limit':0", "limit must be");
+    femu_query_fails(qts, "'kind':'lines'", "use 'reclaim-units'");
+    femu_query_fails(qts, "'kind':'zones'", "only to znssd");
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* the state, valid and invalid pages of unit @unit of group 0 */
+static void femu_query_ru(QTestState *qts, uint32_t unit, const char **state,
+                          uint32_t *vpc, uint32_t *ipc, QDict **rsp)
+{
+    g_autofree char *args = g_strdup_printf(
+        "'kind':'reclaim-units','offset':%u,'limit':1", unit);
+    QDict *ns = femu_query_ns(qts, args, rsp);
+    QDict *u = qobject_to(QDict, qlist_peek(qdict_get_qlist(
+                              qdict_get_qdict(ns, "fdp"), "reclaim-units")));
+
+    *state = qdict_get_str(u, "state");
+    *vpc = qdict_get_int(u, "vpc");
+    *ipc = qdict_get_int(u, "ipc");
+}
+
+/*
+ * A Reclaim Unit Handle Update closes the open unit of handle 0 after one
+ * page. The unit is a garbage collection candidate with no invalid page.
+ */
+void femu_test_query_fdp_update(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t pids = guest_alloc(alloc, 4096);
+    const char *state;
+    uint32_t vpc, ipc;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 1, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    femu_query_ru(qts, 0, &state, &vpc, &ipc, &rsp);
+    g_assert_cmpstr(state, ==, "open");
+    g_assert_cmpuint(vpc, ==, 1);
+    qobject_unref(rsp);
+
+    qtest_writew(qts, pids, 0);
+    g_assert_cmpint(femu_ruh_update(&c, pids, 1), ==, NVME_SUCCESS);
+    femu_query_ru(qts, 0, &state, &vpc, &ipc, &rsp);
+    g_assert_cmpstr(state, ==, "victim");
+    g_assert_cmpuint(vpc, ==, 1);
+    g_assert_cmpuint(ipc, ==, 0);
+    qobject_unref(rsp);
+
+    guest_free(alloc, pids);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* host bytes of handle 0 from query-femu, and HBMW from log page 22h */
+static void femu_query_fdp_hbmw(FemuCtrlState *c, uint64_t log,
+                                uint64_t *handle0, uint64_t *hbmw)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *h = qobject_to(QDict, qlist_peek(qdict_get_qlist(
+                              qdict_get_qdict(ns, "fdp"), "handles")));
+
+    *handle0 = qdict_get_int(h, "host-bytes");
+    qobject_unref(rsp);
+    *hbmw = femu_fdp_hbmw(c, log);
+}
+
+/*
+ * A controller replaces another on the same FDP subsystem. The log keeps
+ * the bytes the old controller wrote, and query-femu must report the same.
+ */
+void femu_test_query_fdp_replace(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuCtrlState c2 = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t handle0, hbmw;
+    QPCIDevice *pdev;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 8, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    femu_query_fdp_hbmw(&c, log, &handle0, &hbmw);
+    g_assert_cmpuint(hbmw, ==, 8 * 4096);
+    g_assert_cmpuint(handle0, ==, hbmw);
+    femu_disable(&c);
+
+    qtest_qmp_device_del_send(qts, "qr");
+    qtest_outl(qts, 0xae00 + 8, 1 << 4);    /* ACPI PCI hotplug: eject slot 4 */
+    qtest_qmp_eventwait(qts, "DEVICE_DELETED");
+
+    rsp = qtest_qmp(qts,
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'qr2',"
+        "'addr':'4','devsz_mb':1,'femu_mode':1,'secsz':512,"
+        "'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':25,"
+        "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,'subsys':'fdpsub'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(4, 0));
+    g_assert_nonnull(pdev);
+    femu_enable(&c2, pdev, alloc);
+    femu_query_fdp_hbmw(&c2, log, &handle0, &hbmw);
+    g_test_message("after the replacement: handle 0 %" PRIu64 " B, log %"
+                   PRIu64 " B", handle0, hbmw);
+    g_assert_cmpuint(hbmw, ==, 8 * 4096);
+    g_assert_cmpuint(handle0, ==, hbmw);
+    femu_disable(&c2);
+    g_free(pdev);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The most erases of a block of each reclaim unit, by group and then by unit,
+ * into @erase, or -1 for a unit not retired. Returns the retired units. With
+ * @idle set, no unit of a group above 0 may have been erased.
+ */
+static int femu_fdp_retired_erases(QTestState *qts, int64_t *erase, int max,
+                                   bool idle)
+{
+    QListEntry *e;
+    QDict *rsp;
+    QDict *fdp = qdict_get_qdict(femu_query_ns(qts, "'kind':'reclaim-units',"
+                                               "'limit':4096", &rsp), "fdp");
+    int i = 0;
+    int n = 0;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "reclaim-units"), e) {
+        QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+        bool r = !strcmp(qdict_get_str(u, "state"), "retired");
+
+        g_assert_cmpint(i, <, max);
+        erase[i++] = r ? qdict_get_int(u, "erase-max") : -1;
+        n += r;
+        if (idle && qdict_get_int(u, "group")) {
+            g_assert_cmpuint(qdict_get_int(u, "erase-max"), ==, 0);
+        }
+    }
+    qobject_unref(rsp);
+    return n;
+}
+
+/*
+ * Block wear-out under FDP (blk_pe_limit, eol_read_only=off). The wear
+ * workload erases every reclaim unit many times. @data pins blocks in
+ * service past their limit, worn-out blocks out of service and retired
+ * units from log page C0h, then SMART Available Spare and Percentage Used.
+ * Every write must succeed: a unit retires only while its group keeps the
+ * units the namespace and placement need. SMART and the Endurance Group
+ * Information log agree, the units hold every mapped page, and query-femu
+ * lists the retired units with no data and no handle.
+ */
+void femu_test_wear_fdp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    /* "rg0": every write names reclaim group 0, handle 0 */
+    bool rg0 = strstr(data, "rg0");
+    /* "handles": the writes take handles 0 to 3 in turn */
+    int pid = strstr(data, "handles") ? -2 : rg0 ? 0 : -1;
+    /* "format": Format NVM after the wear, then the workload again */
+    bool format = strstr(data, "format");
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    uint64_t want[5];
+    uint64_t mapped, lost, orphans;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint8_t smart[512];
+    uint8_t eg[512];
+    uint64_t got[3];
+    uint32_t retired = 0;
+    uint64_t nsze;
+    QListEntry *e;
+    QDict *rsp;
+    QDict *fdp;
+    NvmeCmd cmd;
+    int i;
+
+    g_assert_cmpint(sscanf(data, "%" SCNu64 " %" SCNu64 " %" SCNu64
+                           " %" SCNu64 " %" SCNu64, &want[0], &want[1],
+                           &want[2], &want[3], &want[4]), ==, 5);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* two reclaim groups take 4 KiB blocks (lba_index=3) */
+    femu_identify_ns(&c, &nsze, &c.lba_size);
+    qtest_memset(qts, buf, 0x3c, 64 * 4096);
+    femu_wear_workload_placed(&c, buf, list, pid);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(smart), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, smart, sizeof(smart));
+    for (i = 0; i < 3; i++) {
+        got[i] = ldq_le_p(smart + 112 + 8 * i);
+    }
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(smart), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, smart, sizeof(smart));
+    g_test_message("overworn %" PRIu64 " grown bad %" PRIu64 " retired %"
+                   PRIu64 "; critical warning 0x%x available spare %u "
+                   "percentage used %u", got[0], got[1], got[2], smart[0],
+                   smart[3], smart[5]);
+    for (i = 0; i < 3; i++) {
+        g_assert_cmpuint(got[i], ==, want[i]);
+    }
+    g_assert_cmpuint(smart[0] & NVME_SMART_RELIABILITY, ==,
+                     want[0] ? NVME_SMART_RELIABILITY : 0);
+    g_assert_cmpuint(smart[3], ==, want[3]);
+    g_assert_cmpuint(smart[5], ==, want[4]);
+    g_assert_cmpuint(smart[0] & NVME_SMART_SPARE, ==,
+                     want[3] < FEMU_SPARE_THRESHOLD ? NVME_SMART_SPARE : 0);
+    /* the one endurance group holds all the media: EGCWS repeats it */
+    g_assert_cmpuint(smart[6], ==,
+                     smart[0] & (NVME_SMART_SPARE | NVME_SMART_RELIABILITY));
+
+    /* Endurance Group 1: critical warning, spare and used as in SMART */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(log);
+    cmd.cdw10 = cpu_to_le32(NVME_LOG_ENDGRP | ((sizeof(eg) / 4 - 1) << 16));
+    cmd.cdw11 = cpu_to_le32(1 << 16);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, eg, sizeof(eg));
+    g_assert_cmpuint(eg[0], ==, smart[6]);
+    g_assert_cmpuint(eg[3], ==, smart[3]);
+    g_assert_cmpuint(eg[5], ==, smart[5]);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    fdp = qdict_get_qdict(femu_query_ns(qts, "'kind':'reclaim-units',"
+                                        "'limit':4096", &rsp), "fdp");
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "reclaim-units"), e) {
+        QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (strcmp(qdict_get_str(u, "state"), "retired")) {
+            continue;
+        }
+        retired++;
+        g_assert_false(qdict_haskey(u, "handle"));
+        g_assert_cmpuint(qdict_get_int(u, "vpc"), ==, 0);
+        g_assert_cmpuint(qdict_get_int(u, "ipc"), ==, 0);
+        /* data placed in one group wears that group alone */
+        if (rg0) {
+            g_assert_cmpuint(qdict_get_int(u, "group"), ==, 0);
+        }
+    }
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "reclaim-units"), e) {
+        QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (rg0 && qdict_get_int(u, "group")) {
+            g_assert_cmpuint(qdict_get_int(u, "erase-max"), ==, 0);
+        }
+    }
+    g_assert_cmpuint(retired, ==, want[2]);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(fdp, "unit-counts"),
+                                   "retired"), ==, want[2]);
+    /* eol_read_only=off holds no reserve */
+    g_assert_false(qdict_haskey(qdict_get_qdict(fdp, "unit-counts"),
+                                "reserve"));
+    qobject_unref(rsp);
+
+    /*
+     * Format deallocates the data but keeps the media: retired units stay
+     * retired, and the namespace takes the whole workload again.
+     */
+    if (format) {
+        g_autofree int64_t *before = g_new0(int64_t, 4096);
+        g_autofree int64_t *after = g_new0(int64_t, 4096);
+        int units;
+
+        units = femu_fdp_retired_erases(qts, before, 4096, rg0);
+        g_assert_cmpint(units, ==, want[2]);
+        g_assert_cmphex(FEMU_SC(femu_format(&c, 1, c.lba_size == 4096 ? 3 : 0,
+                                            0)), ==, NVME_SUCCESS);
+        g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+        /* the same units stay retired, and none is erased again */
+        g_assert_cmpint(femu_fdp_retired_erases(qts, after, 4096, rg0), ==,
+                        units);
+        for (i = 0; i < 4096; i++) {
+            g_assert_cmpint(after[i], ==, before[i]);
+        }
+        femu_wear_workload_placed(&c, buf, list, pid);
+        femu_fdp_retired_erases(qts, after, 4096, rg0);
+        for (i = 0; i < 4096; i++) {
+            if (before[i] >= 0) {
+                g_assert_cmpint(after[i], ==, before[i]);
+            }
+        }
+        g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                             sizeof(smart), 0)), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, log, smart, sizeof(smart));
+        g_test_message("after format: retired %" PRIu64,
+                       ldq_le_p(smart + 128));
+        g_assert_cmpuint(ldq_le_p(smart + 128), >=, want[2]);
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, 256);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+        g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    /* the device is worn out now: the next test must not inherit it */
+    qos_invalidate_command_line();
+}
+
+/*
+ * FDP takes blk_pe_limit with eol_read_only=off, also with planes and
+ * namespaces the line FTL refuses. It refuses the read-only end of life,
+ * spare lines, the whole-device trim, levelling and pacing.
+ */
+void femu_test_wear_fdp_props(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    /* a placement subsystem takes one controller: each success has its own */
+    const struct {
+        const char *opts;
+        const char *msg;        /* NULL: realize succeeds */
+    } tc[] = {
+        { "'blk_pe_limit':8", "the eol_read_only reserve (lower mdts)" },
+        { "'blk_pe_limit':8,'eol_read_only':true,'mdts':0",
+          "eol_read_only needs mdts" },
+        { "'blk_pe_limit':8,'eol_read_only':false,'spare_lines':2",
+          "spare_lines is not supported with FDP" },
+        { "'blk_pe_limit':8,'eol_read_only':false,'fdp_trim_erase_all':1",
+          "fdp_trim_erase_all is not supported with FDP" },
+        { "'wl_spread':4", "wl_spread is not supported with FDP" },
+        { "'blk_pe_limit':8,'eol_read_only':false,'gc_pace':true",
+          "gc_pace is not supported with FDP" },
+        { "'blk_pe_limit':8,'erase_fail_ppm':10",
+          "erase_fail_ppm is not supported with FDP" },
+        { "'blk_pe_limit':8,'eol_read_only':false,'subsys':'fdpsub'", NULL },
+        { "'blk_pe_limit':8,'eol_read_only':false,'pls_per_lun':2,"
+          "'subsys':'fdpsub-ii'", NULL },
+        { "'blk_pe_limit':8,'eol_read_only':false,'namespaces':2,"
+          "'subsys':'fdpsub-runs'", NULL },
+    };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(tc); i++) {
+        /* a device that realizes keeps its slot: each case has its own */
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'wear%d','addr':'%d','devsz_mb':1,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':4,"
+            "'blks_per_pl':40,'luns_per_ch':2,'nchs':2,%s%s}}", i, 8 + i,
+            tc[i].opts, tc[i].msg ? ",'subsys':'fdpsub'" : "");
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        if (!tc[i].msg) {
+            if (qdict_haskey(rsp, "error")) {
+                g_test_message("%s: %s", tc[i].opts,
+                               qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                             "desc"));
+            }
+            g_assert_false(qdict_haskey(rsp, "error"));
+            qobject_unref(rsp);
+            continue;
+        }
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("%s: %s", tc[i].opts,
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                             "desc"), tc[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+#define FEMU_FMT_NS_PAGES       4096        /* 16 MiB of 4 KiB pages */
+
+/*
+ * A Format erases the namespace, so the FTL has to let go of the old pages.
+ * Kept mapped, garbage collection goes on relocating data nobody can read.
+ *
+ * Fill the namespace with the two halves interleaved, so every line holds
+ * both. Format, then rewrite only the first half until collection runs: the
+ * lines it picks held nothing but erased data, so it should move nothing.
+ */
+void femu_test_format_ftl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint32_t spp = 4096 / 512;
+    uint64_t buf;
+    uint8_t page[512];
+    uint64_t gc;
+    int pass;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    for (i = 0; i < FEMU_FMT_NS_PAGES / 2; i++) {
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, i * spp, buf), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE,
+                                (i + FEMU_FMT_NS_PAGES / 2) * spp, buf), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_format_dw10(&c, 0), ==, NVME_SUCCESS);
+
+    for (pass = 0; pass < 8; pass++) {
+        for (i = 0; i < FEMU_FMT_NS_PAGES / 2; i++) {
+            g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, i * spp, buf), ==,
+                            NVME_SUCCESS);
+        }
+    }
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    gc = ldq_le_p(page + 16);
+    g_assert_cmpint(ldq_le_p(page + 8), >, 0);
+    g_assert_cmpint(gc, ==, 0);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+#define FEMU_LOG_SANITIZE       0x81
+
+/* Sanitize with CDW11 (OVRPAT) */
+static uint16_t femu_sanitize2(FemuCtrlState *c, uint32_t dw10, uint32_t dw11)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = FEMU_ADM_SANITIZE;
+    cmd.cdw10 = cpu_to_le32(dw10);
+    cmd.cdw11 = cpu_to_le32(dw11);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/*
+ * Sanitize in the background (sanitize_ms=300) with Crypto Erase and
+ * Overwrite (sanitize_ops): SANICAP, the in-progress state (SSTAT 010b,
+ * SPROG below FFFFh), I/O and Format refused with 1Dh while Identify runs,
+ * the completion event (type 6, info 01h, log 81h), a reset that does not
+ * stop it, and the data each action leaves with and without NDAS.
+ */
+void femu_test_sanitize_bg(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t io = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint32_t res = 0;
+    uint16_t cid, want, sprog = 0;
+    NvmeCmd fmt = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 328), ==, 0x7);    /* SANICAP */
+
+    qtest_memset(qts, io, 0x77, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_sstat(&c, buf, &sprog) & 0x7, ==, 0x2);
+    g_assert_cmpuint(sprog, <, 0xffff);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==, 0x01d);
+    fmt.opcode = 0x80;
+    fmt.nsid = cpu_to_le32(1);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &fmt)), ==, 0x01d);
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, 0x01d);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    want = femu_aer(&c);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x810106);
+    g_assert_cmphex(femu_sstat(&c, buf, &sprog), ==, 0x101);
+    g_assert_cmphex(sprog, ==, 0xffff);
+    qtest_memset(qts, io, 0xee, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, io), ==, 0);
+
+    /* a reset does not stop it */
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL) & 0x7, ==, 0x2);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL) & 0x7, ==, 0x1);
+
+    /* Overwrite, one pass, NDAS: the pattern reads back */
+    qtest_memset(qts, io, 0x77, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_sanitize2(&c, 1u << 9 | 1u << 4 | 0x3, 0xdeadbeef),
+                    ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL), ==, 0x109);  /* OPC 1 */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, io), ==, 0xdeadbeef);
+    g_assert_cmphex(qtest_readl(qts, io + 512), ==, 0xdeadbeef);
+    /*
+     * Two passes with OIPBP: the first pass is inverted, so the last one
+     * is OVRPAT again (Figure 705); OWPASS 0 counts as 16 passes.
+     */
+    g_assert_cmphex(femu_sanitize2(&c, 1u << 9 | 1u << 8 | 2u << 4 | 0x3,
+                                   0x12345678), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL), ==, 0x111);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, io), ==, 0x12345678);
+    g_assert_cmphex(femu_sanitize2(&c, 1u << 9 | 0x3, 0xdeadbeef), ==,
+                    NVME_SUCCESS);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL), ==, 0x181);   /* OPC 16 */
+
+    /* Crypto Erase with NDAS: completed (001b), not the old data */
+    g_assert_cmphex(femu_sanitize(&c, 1u << 9 | 0x4), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL), ==, 0x101);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, io), !=, 0xdeadbeef);
+    g_assert_cmphex(qtest_readl(qts, io), !=, 0);
+    g_assert_cmphex(femu_sanitize(&c, 0x4), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf, NULL), ==, 0x101);
+    qtest_memset(qts, io, 0xee, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, io), ==, 0);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, io);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Sanitize block erase (Base 2.3, 5.2.24) on a device of block namespaces:
+ * SANICAP offers it, Global Data Erased holds until a write and again after
+ * an erase, the data reads back as zeros, and the operations not offered are
+ * refused.
+ */
+void femu_test_sanitize(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t log;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    log = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 328) & 0x2, ==, 0x2);
+
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_SANITIZE, 0, log, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, log + 2), ==, 0x100);     /* GDE, never */
+
+    qtest_memset(qts, buf, 0x3c, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_SANITIZE, 0, log, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, log + 2) & 0x100, ==, 0);
+
+    g_assert_cmpint(femu_sanitize(&c, 0x2 | (1 << 10)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_sanitize(&c, 0x3), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+
+    g_assert_cmpint(femu_log_cmd(&c, 0, FEMU_LOG_SANITIZE, 0, log, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, log), ==, 0xffff);        /* SPROG */
+    g_assert_cmphex(qtest_readw(qts, log + 2), ==, 0x101);     /* GDE, done */
+    g_assert_cmphex(qtest_readl(qts, log + 4), ==, 0x2);       /* SCDW10 */
+
+    qtest_memset(qts, buf, 0xff, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf), ==, 0);
+    g_assert_cmpint(femu_sanitize(&c, 0x1), ==, NVME_SUCCESS);
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+#define FEMU_CMD_SIZE_LIMIT     0x183
+
+/*
+ * Copy (NVM 1.2, 3.3.2): the limits Identify reports, two ranges landing back
+ * to back at the destination and read back intact, the FTL charging the
+ * programmed pages as a write would, and the refusals for an overlap, a range
+ * or a command past the limits, and a descriptor format not offered.
+ */
+void femu_test_copy(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, list, log;
+    uint64_t slba[2] = { 0, 64 };
+    uint16_t nlb[2] = { 8, 8 };
+    uint64_t host_before;
+    uint8_t page[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+    list = guest_alloc(alloc, 4096);
+    log = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + 534) & 1, ==, 1);    /* OCFS */
+    g_assert_cmpint(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readw(qts, buf + 74), ==, 128);       /* MSSRL */
+    g_assert_cmpint(qtest_readl(qts, buf + 76), ==, 1024);      /* MCL */
+    g_assert_cmpint(qtest_readb(qts, buf + 80), ==, 127);       /* MSRC */
+
+    qtest_memset(qts, buf, 0xa1, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0xb2, 4096);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 64, buf), ==, NVME_SUCCESS);
+
+    g_assert_cmpint(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log, sizeof(page),
+                                 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    host_before = ldq_le_p(page + 8);
+
+    g_assert_cmpint(femu_copy(&c, list, 256, slba, nlb, 2, 2, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 256, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf), ==, 0xa1);
+    g_assert_cmphex(qtest_readb(qts, buf + 4095), ==, 0xa1);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_READ, 264, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf), ==, 0xb2);
+
+    /* the destination was programmed through the FTL: two 4 KiB pages */
+    g_assert_cmpint(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log, sizeof(page),
+                                 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpint(ldq_le_p(page + 8) - host_before, ==, 2);
+
+    /* a source that runs into the destination */
+    slba[0] = 256;
+    g_assert_cmpint(femu_copy(&c, list, 260, slba, nlb, 1, 1, 0), ==,
+                    FEMU_OVERLAP_IO_RANGE);
+    /* one range past MSSRL, more ranges than MSRC allows */
+    slba[0] = 0;
+    nlb[0] = 129;
+    g_assert_cmpint(femu_copy(&c, list, 512, slba, nlb, 1, 1, 0), ==,
+                    FEMU_CMD_SIZE_LIMIT);
+    nlb[0] = 8;
+    g_assert_cmpint(femu_copy(&c, list, 512, slba, nlb, 1, 256, 0), ==,
+                    FEMU_CMD_SIZE_LIMIT);
+    /* descriptor format 1 is not offered */
+    g_assert_cmpint(femu_copy(&c, list, 512, slba, nlb, 1, 1, 1 << 8), ==,
+                    NVME_INVALID_FIELD);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+#define FEMU_LOG_TELEMETRY_CTRL 0x08
+
+/*
+ * Telemetry Host-Initiated (07h) and Controller-Initiated (08h) logs (Base
+ * 2.3, 5.2.12.1.8-9): both advertised, a 512-byte header that is always
+ * there, a capture on request whose data stays fixed until the next capture,
+ * and whole blocks only. Data Area 1 carries the emulator's media counters,
+ * the same bytes as the vendor page C0h at the moment of capture.
+ */
+void femu_test_telemetry(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t hdr[512];
+    uint8_t blk[512];
+    uint8_t c0[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 261) & (1 << 3), !=, 0); /* LPA */
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, 0x00, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readl(qts, buf + 4 * FEMU_LOG_TELEMETRY_HOST) & 1,
+                    ==, 1);
+    g_assert_cmpint(qtest_readl(qts, buf + 4 * FEMU_LOG_TELEMETRY_CTRL) & 1,
+                    ==, 1);
+
+    /* before any capture: a header and no data */
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, hdr, sizeof(hdr));
+    g_assert_cmpint(hdr[0], ==, FEMU_LOG_TELEMETRY_HOST);
+    g_assert_cmpint(lduw_le_p(hdr + 8), ==, 0);
+    g_assert_cmpint(hdr[380], ==, 1);                   /* controller scope */
+    g_assert_cmpint(hdr[381], ==, 0);
+
+    /* something to count, then a capture */
+    femu_round_trip(&c, 3);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, true,
+                                       buf, 1024, 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, hdr, sizeof(hdr));
+    qtest_memread(qts, buf + 512, blk, sizeof(blk));
+    g_assert_cmpint(lduw_le_p(hdr + 8), ==, 1);         /* area 1: block 1 */
+    g_assert_cmpint(lduw_le_p(hdr + 10), >=, lduw_le_p(hdr + 8));
+    g_assert_cmpint(lduw_le_p(hdr + 12), >=, lduw_le_p(hdr + 10));
+    g_assert_cmpint(hdr[381], ==, 1);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf, 512,
+                                         0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, c0, sizeof(c0));
+    g_assert_cmpint(memcmp(blk, c0, sizeof(blk)), ==, 0);
+    g_assert_cmpuint(ldq_le_p(blk + 8), >, 0);          /* host pages */
+
+    /* more traffic changes the vendor page but not the captured data */
+    femu_round_trip(&c, 5);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 512, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, c0, sizeof(c0));
+    g_assert_cmpint(memcmp(blk, c0, sizeof(blk)), ==, 0);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, true,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 381), ==, 2);
+
+    /* only whole blocks */
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 256, 0), ==, NVME_INVALID_FIELD);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 512, 256), ==, NVME_INVALID_FIELD);
+
+    /* no controller trigger has run in this test */
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_CTRL, false,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, hdr, sizeof(hdr));
+    g_assert_cmpint(hdr[0], ==, FEMU_LOG_TELEMETRY_CTRL);
+    g_assert_cmpint(hdr[380], ==, 0);                   /* reserved */
+    g_assert_cmpint(hdr[381], ==, 1);                   /* TCS: controller */
+    g_assert_cmpint(hdr[382], ==, 0);                   /* no data available */
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* a host capture of log 07h with Maximum Created Data Area @mcda */
+static uint16_t femu_tel_mcda(FemuCtrlState *c, uint64_t buf, uint8_t mcda)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_LOG_TELEMETRY_HOST | 1u << 8 |
+                            (uint32_t)mcda << 9 | ((512 >> 2) - 1) << 16);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static uint16_t femu_tel_ctrl(FemuCtrlState *c, uint64_t buf, uint32_t len,
+                              bool rae);
+static void femu_tel_trigger(QTestState *qts);
+
+/*
+ * Telemetry Data Area 4 (telemetry_da4=on): LPA bit 6 and MCDAS in log
+ * 00h. Without ETDAS a capture has no Data Area 4 beyond Data Area 3.
+ * With ETDAS, Data Area 4 ends at block 1 + NN and block 1 + nsid holds
+ * the counters of that namespace; with one namespace they equal the
+ * controller block. MCDA 1 to 3 creates no Data Area 4, and 5 is refused.
+ */
+void femu_test_telemetry_da4(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t blk[512];
+    uint8_t ns1[512];
+    uint32_t nn;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    g_assert_cmpint(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf + 261) & (1 << 6), !=, 0);
+    nn = qtest_readl(qts, buf + 516);
+    g_assert_cmpuint(nn, >=, 1);
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, 0x00, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4 * FEMU_LOG_TELEMETRY_HOST),
+                     ==, 1u | 1u << 16);
+
+    /* ETDAS clear: Data Area 4 ends with Data Area 3 */
+    femu_round_trip(&c, 3);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, true,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 1);
+
+    /* ETDAS set: one block per namespace slot */
+    qtest_memset(qts, buf, 0, 512);
+    qtest_writeb(qts, buf + 1, 1);
+    g_assert_cmpint(femu_hbs(&c, true, buf), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, true,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 1 + nn);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 1024, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, blk, sizeof(blk));
+    qtest_memread(qts, buf + 512, ns1, sizeof(ns1));
+    g_assert_cmpuint(ldq_le_p(ns1 + 8), >, 0);          /* host pages */
+    g_assert_cmpint(memcmp(blk, ns1, sizeof(blk)), ==, 0);
+
+    /* MCDA: up to Data Area 3 creates none; a reserved value is refused */
+    g_assert_cmpint(femu_tel_mcda(&c, buf, 3), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 1);
+    g_assert_cmpint(femu_tel_mcda(&c, buf, 4), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 1 + nn);
+    g_assert_cmpint(femu_tel_mcda(&c, buf, 5), ==, NVME_INVALID_FIELD);
+
+    /*
+     * Log 08h: a trigger captures Data Area 4 too; RAE keeps it, a read
+     * without RAE hands it over, and the next trigger captures again.
+     */
+    {
+        uint32_t res = 0;
+        uint16_t cid, want;
+
+        g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0,
+                                                 1u << 10, NULL)), ==,
+                        NVME_SUCCESS);
+        for (int round = 0; round < 2; round++) {
+            want = femu_aer(&c);
+            femu_tel_trigger(qts);
+            g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                            NVME_SUCCESS);
+            g_assert_cmpint(cid, ==, want);
+            /* header, controller block, namespace 1 */
+            g_assert_cmphex(femu_tel_ctrl(&c, buf, 1536, true), ==,
+                            NVME_SUCCESS);
+            g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 1 + nn);
+            qtest_memread(qts, buf + 1024, ns1, sizeof(ns1));
+            g_assert_cmpuint(ldq_le_p(ns1 + 8), >, 0);  /* host pages */
+            g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, false), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, true), ==,
+                            NVME_SUCCESS);
+            g_assert_cmpuint(qtest_readb(qts, buf + 382), ==, 0);
+            g_assert_cmpuint(qtest_readl(qts, buf + 16), ==, 0);
+            femu_round_trip(&c, 7);
+        }
+    }
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* Get Log 08h with RAE set or clear, @len bytes from 0 (one PRP page) */
+static uint16_t femu_tel_ctrl(FemuCtrlState *c, uint64_t buf, uint32_t len,
+                              bool rae)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x08 | (rae ? 1u << 15 : 0) |
+                            (((len >> 2) - 1) << 16));
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static void femu_tel_trigger(QTestState *qts)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/telc',"
+                             "'property':'x-telemetry-trigger',"
+                             "'value':true}}");
+}
+
+/*
+ * Controller-initiated telemetry (log 08h, Base 2.3 Figure 220): empty
+ * at first; a trigger captures once (TCDA 1, TCDGN 1, reason, data
+ * areas) and sends Telemetry Log Changed when AEC bit 10 is on; both logs
+ * show TCDA and TCDGN at 382 and 383; RAE keeps the capture, a read
+ * without RAE hands it over; a held capture is not overwritten; a reset
+ * keeps it; enabling bit 10 later sends the notice for a held capture.
+ * The capture holds the statistics of its moment. Turning bit 10 off and on
+ * does not resend a notice the host has not acknowledged. A temperature
+ * threshold crossed without the thermal model triggers too, also after a
+ * reset that moved the threshold back.
+ */
+void femu_test_telemetry_ctrl(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t buf = femu_alloc_64k(alloc, &raw);
+    uint8_t h[1024];
+    uint8_t snap[512];
+    uint64_t hw1;
+    uint32_t res = 0;
+    uint16_t cid, want;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8,
+                                        buf + 32768)), ==, NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 512);
+    g_assert_cmpuint(h[381], ==, 1);
+    g_assert_cmpuint(h[382], ==, 0);
+    g_assert_cmpuint(h[383], ==, 0);
+    g_assert_cmpuint(lduw_le_p(&h[8]), ==, 0);
+
+    /* AEC bit 10 on, an AER out, then a trigger: the notice comes */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 10,
+                                             NULL)), ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    femu_tel_trigger(qts);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x080202);
+    /* the host log shows the same state */
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, 512, 0), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 382), ==, 1);
+    g_assert_cmpuint(qtest_readb(qts, buf + 383), ==, 1);
+    /* RAE keeps it: header, reason, data areas */
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 1024, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 1024);
+    g_assert_cmpuint(h[382], ==, 1);
+    g_assert_cmpuint(h[383], ==, 1);
+    g_assert_cmpuint(lduw_le_p(&h[8]), ==, 1);
+    g_assert_cmpmem(&h[384], 9, "FEMU test", 9);
+    /* data area 1: the statistics, as a host capture of now shows them */
+    g_assert_cmpuint(ldq_le_p(&h[512 + 8]), >, 0);  /* host_write_pages */
+    memcpy(snap, &h[512], sizeof(snap));
+    hw1 = ldq_le_p(&snap[8]);
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, true,
+                                       buf, 1024, 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 512, h, 512);
+    g_assert_cmpmem(h, 512, snap, 512);
+    /* later writes and a second trigger leave the held capture as it was */
+    for (i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 64 + i * 8,
+                                        buf + 32768)), ==, NVME_SUCCESS);
+    }
+    femu_tel_trigger(qts);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 1024, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 1024);
+    g_assert_cmpuint(h[382], ==, 1);
+    g_assert_cmpuint(h[383], ==, 1);
+    g_assert_cmpmem(&h[512], 512, snap, 512);
+    /*
+     * The notice went out and is not acknowledged: bit 10 off and on again
+     * sends nothing, so the next completion is this command's own.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 10,
+                                             NULL)), ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, true), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 382), ==, 1);
+    /* without RAE the capture goes; the log is header only */
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 1024, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 1024);
+    g_assert_cmpuint(h[382], ==, 0);
+    g_assert_cmpuint(h[383], ==, 1);
+    g_assert_cmpuint(lduw_le_p(&h[8]), ==, 0);
+
+    /* the next capture is generation 2; a held one is not overwritten */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_tel_trigger(qts);
+    femu_tel_trigger(qts);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 1024, true), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 382), ==, 1);
+    g_assert_cmpuint(qtest_readb(qts, buf + 383), ==, 2);
+    qtest_memread(qts, buf + 512, snap, sizeof(snap));
+    g_assert_cmpuint(ldq_le_p(&snap[8]), >, hw1);
+
+    /* a reset keeps it, data included; enabling bit 10 sends the notice */
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 1024, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 1024);
+    g_assert_cmpuint(h[382], ==, 1);
+    g_assert_cmpuint(h[383], ==, 2);
+    g_assert_cmpmem(&h[512], 512, snap, 512);
+    want = femu_aer(&c);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 10,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x080202);
+
+    /*
+     * No thermal model: a threshold below the temperature is a trigger.
+     * The reset restores the threshold, so lowering it again is a new one.
+     */
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x04, false, 0, 200,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, h, 512);
+    g_assert_cmpuint(h[383], ==, 3);
+    g_assert_cmpmem(&h[384], 16, "FEMU temperature", 16);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x04, false, 0, 200,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_tel_ctrl(&c, buf, 512, true), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 382), ==, 1);
+    g_assert_cmpuint(qtest_readb(qts, buf + 383), ==, 4);
+
+    guest_free(alloc, raw);
+    femu_disable(&c);
+}
+
+/* an I/O command of @nlb blocks at @slba with data at @prp; as above */
+static uint16_t femu_opal_cmd(FemuCtrlState *c, uint8_t opc, uint64_t slba,
+                              uint32_t nlb, uint32_t dw11, uint64_t prp)
+{
+    NvmeCmd cmd = { 0 };
+    uint16_t sc;
+
+    cmd.opcode = opc;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(prp);
+    cmd.cdw10 = cpu_to_le32((uint32_t)slba);
+    cmd.cdw11 = cpu_to_le32(dw11 ? dw11 : (uint32_t)(slba >> 32));
+    cmd.cdw12 = cpu_to_le32(nlb - 1);
+    sc = femu_io(c, &cmd);
+    if (sc == NVME_ACCESS_DENIED) {
+        g_assert_cmphex(femu_io_status & NVME_DNR, ==, NVME_DNR);
+    }
+    return sc;
+}
+
+/*
+ * x-opal on a 256 MiB bbssd namespace, so the 128 MiB MBR (LBAs below
+ * 262144) ends inside it: the shadow end, zeros outside the shadow,
+ * Compare and a Copy source in the shadow, DSM, Write Zeroes and Write
+ * Uncorrectable on a locked range, the Copy formats, and a system reset,
+ * which is a TCG Hardware Reset.
+ */
+void femu_test_opal_shadow(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    static const char pin[] = "FEMU-MSID-opal-mbr";
+    static const char mbr[] = "SHADOW-AT-LBA-8";
+    static const int range[] = { 3, 4, 5, 6, 7, 8, -1 };
+    static const uint64_t locked[] = { 262144, 64, 1, 1, 1, 1 };
+    static const int rw[] = { 7, 8, -1 };
+    static const uint64_t open[] = { 0, 0 };
+    static const int en[] = { 1, -1 };
+    static const int done[] = { 2, -1 };
+    static const uint64_t one[] = { 1 };
+    const uint64_t far = 300000;
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=om,addr=5,devsz_mb=256,"
+        "femu_mode=1,oncs=415,x-opal=on,serial=opal-mbr");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint64_t io;
+    uint64_t desc;
+    uint8_t got[FEMU_DATA_SIZE];
+    uint8_t want[FEMU_DATA_SIZE];
+    uint8_t d[32] = { 0 };
+    uint8_t r[256];
+    uint8_t hw[2] = { 1, 0 };
+    FemuTb t = { .n = 0 };
+    uint32_t tsn = 0;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(&qs->alloc, 8192);
+    io = guest_alloc(&qs->alloc, FEMU_DATA_SIZE);
+    desc = guest_alloc(&qs->alloc, 4096);
+
+    /* data in and out of the shadow before any lock */
+    memset(want, 0x3C, sizeof(want));
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 8, io), ==, 0);
+    memset(want, 0xC3, sizeof(want));
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 262144, io), ==, 0);
+
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, 0x0000020500000001ull,
+                                    0x0000000900000006ull, pin, &tsn), ==, 0);
+    femu_tb_call(&t, FEMU_OPAL_LOCKING_SP, 0x0000000600000203ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    femu_opal_eos(&c, qts, buf, tsn);
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
+                                    0x0000000900010001ull, pin, &tsn), ==, 0);
+    /* Range1 is the 64 LBAs just past the shadow; MBR bytes at LBA 8 */
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    range, locked), ==, 0);
+    t.n = 0;
+    femu_tb_call(&t, 0x0000080400000000ull, 0x0000000600000017ull);
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 0;
+    femu_tb_u(&t, 8 * 512);
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 1;
+    femu_tb_bytes(&t, (const uint8_t *)mbr, strlen(mbr));
+    t.b[t.n++] = 0xF3;
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_MBRCTL,
+                                    en, one), ==, 0);
+
+    /* inside: the MBR bytes of that LBA, not the media */
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 8, io), ==, 0);
+    qtest_memread(qts, io, got, sizeof(got));
+    memset(want, 0, sizeof(want));
+    memcpy(want, mbr, strlen(mbr));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    /* Compare against the MBR bytes: equal, then one byte off */
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_COMPARE, 8, 8, 0, io), ==, 0);
+    want[0] ^= 1;
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_COMPARE, 8, 8, 0, io), ==,
+                    NVME_CMP_FAILURE);
+    want[0] ^= 1;
+    /* across the shadow end: refused; past it, read locked: zeros */
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 262140, io), ==,
+                    NVME_ACCESS_DENIED);
+    qtest_memset(qts, io, 0xFF, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 262144, io), ==, 0);
+    qtest_memread(qts, io, got, sizeof(got));
+    memset(want, 0, sizeof(want));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_VERIFY, 262144, 8, 0, 0), ==,
+                    NVME_ACCESS_DENIED);
+    /* every write class on the locked range is refused */
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 262144, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_WRITE_ZEROES, 262150, 1, 0,
+                                  0), ==, NVME_ACCESS_DENIED);
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_WRITE_UNCOR, 262150, 1, 0,
+                                  0), ==, NVME_ACCESS_DENIED);
+    memset(d, 0, sizeof(d));
+    stl_le_p(d + 4, 4);
+    stq_le_p(d + 8, 262200);
+    qtest_memwrite(qts, desc, d, 16);
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_DSM, 0, 1, 1 << 2, desc), ==,
+                    NVME_ACCESS_DENIED);
+
+    /* Copy: format 2 refused; a shadow source copies the MBR bytes */
+    memset(d, 0, sizeof(d));
+    stq_le_p(d + 8, 8);
+    stw_le_p(d + 16, 7);
+    qtest_memwrite(qts, desc, d, 32);
+    /* CDW12 holds NR - 1 and the format in bits 11:8 */
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_COPY, far, (2 << 8) + 1, 0,
+                                  desc), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_COPY, 262144, 1, 0, desc),
+                    ==, NVME_ACCESS_DENIED);
+    g_assert_cmphex(femu_opal_cmd(&c, NVME_CMD_COPY, far, 1, 0, desc), ==, 0);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_MBRCTL,
+                                    done, one), ==, 0);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, far, io), ==, 0);
+    qtest_memread(qts, io, got, sizeof(got));
+    memcpy(want, mbr, strlen(mbr));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    /* Done: LBA 8 is the media again */
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 8, io), ==, 0);
+    qtest_memread(qts, io, got, sizeof(got));
+    memset(want, 0x3C, sizeof(want));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+
+    /* unlock, then Block SID asks to clear on a Hardware Reset */
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    rw, open), ==, 0);
+    memset(want, 0x77, sizeof(want));
+    qtest_memwrite(qts, io, want, sizeof(want));
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 262144, io), ==, 0);
+    qtest_memwrite(qts, buf, hw, sizeof(hw));
+    g_assert_cmphex(femu_sec(&c, true, 2, 0x0005, buf, 512), ==, 0);
+    qtest_memset(qts, buf, 0, 2048);
+    g_assert_cmphex(femu_sec(&c, false, 1, 1, buf, 2048), ==, 0);
+    qtest_memread(qts, buf, r, sizeof(r));
+    g_assert_cmphex(r[152], ==, 0x02);
+
+    /* system reset: Block SID clears; LockOnReset {0} does not lock */
+    qtest_qmp_assert_success(qts, "{'execute':'system_reset'}");
+    qtest_qmp_eventwait(qts, "RESET");
+    qpci_device_enable(pdev);
+    c.bar = qpci_iomap(pdev, 0, NULL);
+    qtest_memset(qts, buf, 0, 2048);
+    g_assert_cmphex(femu_sec(&c, false, 1, 1, buf, 2048), ==, 0);
+    qtest_memread(qts, buf, r, sizeof(r));
+    g_assert_cmphex(r[152], ==, 0);
+    /* no lock and no shadow came back: the media, not zeros */
+    qtest_memset(qts, io, 0, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 262144, io), ==, 0);
+    qtest_memread(qts, io, got, sizeof(got));
+    g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    /* the old session is gone: a new one opens */
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
+                                    0x0000000900010001ull, pin, &tsn), ==, 0);
+    femu_opal_eos(&c, qts, buf, tsn);
+
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+static uint64_t femu_opal_gkey(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/ocf',"
+                           "'property':'x-opal-gkey'}}");
+    uint64_t value = qdict_get_int(rsp, "return");
+
+    qobject_unref(rsp);
+    return value;
+}
+
+/*
+ * x-opal models encryption, so FNA has CRYES and Format SES 010b is a
+ * cryptographic erase: the data goes and every range gets a new key. SES
+ * 000b and 001b keep the keys, and a write-locked LBA refuses the Format
+ * (SIIS 6.7.3). An open transaction stays true: its commit erases nothing
+ * written after the Format. A crypto Sanitize also changes the keys.
+ */
+void femu_test_opal_crypto_format(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    static const char pin[] = "FEMU-MSID-opal-cry";
+    static const int range[] = { 3, 4, 5, 6, 7, 8, -1 };
+    static const uint64_t wlock[] = { 64, 64, 1, 1, 0, 1 };
+    static const int rw[] = { 7, 8, -1 };
+    static const uint64_t open[] = { 0, 0 };
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ocf,addr=5,devsz_mb=256,"
+        "femu_mode=1,sanitize_ops=on,x-opal=on,serial=opal-cry");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    NvmeCmd cmd = { 0 };
+    FemuTb t = { .n = 0 };
+    uint8_t r[2048];
+    uint32_t tsn = 0;
+    uint64_t buf;
+    uint64_t io;
+    uint64_t g;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(&qs->alloc, 8192);
+    io = guest_alloc(&qs->alloc, FEMU_DATA_SIZE);
+
+    g_assert_cmphex(FEMU_SC(femu_identify(&c, 0, 1, 0, buf)), ==, 0);
+    g_assert_cmphex(qtest_readb(qts, buf + FEMU_ID_FNA), ==, FEMU_FNA_CRYES);
+
+    /* SES 010b: the data and the keys go */
+    femu_opal_fill(&c, qts, 1, 64, io, 0x5A);
+    g = femu_opal_gkey(qts);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 2)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_opal_gkey(qts), !=, g);
+    femu_opal_expect(&c, qts, 1, 64, io, 0);
+    /* SES 000b and 001b keep the keys; 011b is reserved */
+    g = femu_opal_gkey(qts);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 1)), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 3)), ==, NVME_INVALID_FIELD);
+    g_assert_cmpuint(femu_opal_gkey(qts), ==, g);
+    /* a crypto Sanitize changes the keys too; a Block Erase does not */
+    cmd.opcode = FEMU_ADM_SANITIZE;
+    cmd.cdw10 = cpu_to_le32(2);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_opal_gkey(qts), ==, g);
+    cmd.cdw10 = cpu_to_le32(4);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_opal_gkey(qts), !=, g);
+
+    /* owned: a write-locked LBA refuses the Format and keeps the keys */
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, 0x0000020500000001ull,
+                                    0x0000000900000006ull, pin, &tsn), ==, 0);
+    femu_tb_call(&t, FEMU_OPAL_LOCKING_SP, 0x0000000600000203ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    femu_opal_eos(&c, qts, buf, tsn);
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
+                                    0x0000000900010001ull, pin, &tsn), ==, 0);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    range, wlock), ==, 0);
+    g = femu_opal_gkey(qts);
+    g_assert_cmphex(femu_format(&c, 1, 0, 2), ==,
+                    NVME_INVALID_FORMAT | NVME_DNR);
+    g_assert_cmpuint(femu_opal_gkey(qts), ==, g);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    rw, open), ==, 0);
+
+    /* a Format in an open transaction; its commit keeps the new data */
+    t.n = 0;
+    t.b[t.n++] = 0xFB;
+    t.b[t.n++] = 0;
+    femu_tb_call(&t, 0x0000080400000000ull, 0x0000000600000017ull);
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 0;
+    t.b[t.n++] = 0;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 1;
+    femu_tb_bytes(&t, (const uint8_t *)"T", 1);
+    t.b[t.n++] = 0xF3;
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 2)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_opal_gkey(qts), !=, g);
+    femu_opal_fill(&c, qts, 1, 64, io, 0x6B);
+    t.n = 0;
+    t.b[t.n++] = 0xFC;
+    t.b[t.n++] = 0;
+    g_assert_cmpuint(femu_opal_xfer(&c, qts, buf, &t, tsn, r), ==, 2);
+    g_assert_cmphex(r[57], ==, 0);
+    femu_opal_expect(&c, qts, 1, 64, io, 0x6B);
+    femu_opal_eos(&c, qts, buf, tsn);
+
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+/* ---- x-opal-mpa: MEK Multiparty Authorization over NVMe ---- */
+
+#define FEMU_MPA_AC(x)          (0x0000170100000000ull + (x))
+#define FEMU_MPA_CERT(c)        (0x0000000A00000400ull + (c))
+#define FEMU_MPA_CERTDATA(c)    (0x0000180000000000ull + ((uint64_t)(c) << 32))
+#define FEMU_MPA_M(m)           (0x0000000600000B00ull + (m))
+#define FEMU_MPA_KAES1          0x0000080600030001ull
+#define FEMU_MPA_LSP_ADMIN1     0x0000000900010001ull
+
+/* a uint atom at @p (tiny or short); *len gets its length */
+static uint64_t femu_mpa_uint(const uint8_t *p, uint32_t *len)
+{
+    uint64_t v = 0;
+    uint32_t i;
+
+    if (p[0] < 0x40) {
+        *len = 1;
+        return p[0];
+    }
+    g_assert_cmphex(p[0] & 0xF0, ==, 0x80);
+    for (i = 0; i < (p[0] & 0x0F); i++) {
+        v = v << 8 | p[1 + i];
+    }
+    *len = 1 + (p[0] & 0x0F);
+    return v;
+}
+
+/* read Certificate @cn: its CertSize, then its CertificateData bytes */
+static uint32_t femu_mpa_cert(FemuCtrlState *c, QTestState *qts,
+                              uint64_t buf, uint32_t tsn, int cn,
+                              uint8_t *der)
+{
+    FemuTb t = { .n = 0 };
+    uint8_t r[2048];
+    uint32_t len;
+    uint32_t al;
+    uint64_t size;
+
+    femu_tb_call(&t, FEMU_MPA_CERT(cn), 0x0000000600000016ull);
+    t.b[t.n++] = 0xF0;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 3;                     /* startColumn 3 */
+    t.b[t.n++] = 3;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 4;
+    t.b[t.n++] = 4;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF1;
+    femu_tb_end(&t);
+    g_assert_cmpuint(femu_opal_xfer(c, qts, buf, &t, tsn, r), >, 0);
+    /* SL SL SN 3 CertificateData-UID EN SN 4 size EN EL EL */
+    g_assert_cmphex(r[59], ==, 3);
+    g_assert_cmphex(r[60], ==, 0xA8);
+    g_assert_cmphex(r[71], ==, 4);
+    size = femu_mpa_uint(r + 72, &al);
+    g_assert_cmpuint(size, >, 100);
+    g_assert_cmpuint(size, <, 512);
+    t.n = 0;
+    femu_tb_call(&t, FEMU_MPA_CERTDATA(cn), 0x0000000600000016ull);
+    t.b[t.n++] = 0xF0;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 1;
+    t.b[t.n++] = 0;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 2;
+    femu_tb_u(&t, size - 1);
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF1;
+    femu_tb_end(&t);
+    g_assert_cmpuint(femu_opal_xfer(c, qts, buf, &t, tsn, r), >, size);
+    /* SL, a medium atom of @size bytes */
+    g_assert_cmphex(r[56], ==, 0xF0);
+    g_assert_cmphex(r[57] & 0xF8, ==, 0xD0);
+    len = (r[57] & 0x07) << 8 | r[58];
+    g_assert_cmpuint(len, ==, size);
+    memcpy(der, r + 59, size);
+    return size;
+}
+
+/* the key after the SubjectPublicKeyInfo header with OID 1.3.101.@alg */
+static void femu_mpa_spki(const uint8_t *der, uint32_t len, uint8_t alg,
+                          uint8_t pk[32])
+{
+    const uint8_t pat[] = { 0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65,
+                            alg, 0x03, 0x21, 0x00 };
+    uint32_t i;
+
+    for (i = 0; i + sizeof(pat) + 32 <= len; i++) {
+        if (!memcmp(der + i, pat, sizeof(pat))) {
+            memcpy(pk, der + i + sizeof(pat), 32);
+            return;
+        }
+    }
+    g_assert_not_reached();
+}
+
+/* the Ed25519 signature of @der: the TBS is its first item */
+static bool femu_mpa_signed(const uint8_t *der, uint32_t len,
+                            const uint8_t pk[32])
+{
+    uint32_t h = der[1] == 0x82 ? 4 : der[1] == 0x81 ? 3 : 2;
+    uint32_t th = der[h + 1] == 0x82 ? 4 : der[h + 1] == 0x81 ? 3 : 2;
+    uint32_t tl = th == 4 ? (der[h + 2] << 8 | der[h + 3]) :
+                  th == 3 ? der[h + 2] : der[h + 1];
+
+    return femu_ed25519_verify(der + len - 64, der + h, th + tl, pk);
+}
+
+/*
+ * MPA method @m on AC @x, the access keys sealed on a host HPKE context
+ * to @pk with info = method UID || AC UID. @ak2 is the new key of
+ * ChangeAccessKey. @txn starts a transaction first. Returns the status.
+ */
+static uint8_t femu_mpa_call_t(FemuCtrlState *c, QTestState *qts,
+                               uint64_t buf, uint32_t tsn, int m, int x,
+                               const uint8_t *pk, const uint8_t *ak,
+                               const uint8_t *ak2, bool txn)
+{
+    FemuTb t = { .n = 0 };
+    FemuHpkeCtx h;
+    uint8_t info[16];
+    uint8_t ske[32];
+    uint8_t enc[32];
+    uint8_t ct[48];
+    int i;
+
+    stq_be_p(info, FEMU_MPA_M(m));
+    stq_be_p(info + 8, FEMU_MPA_AC(x));
+    for (i = 0; i < 32; i++) {
+        ske[i] = g_test_rand_int();
+    }
+    g_assert_true(femu_hpke_setup_s(&h, enc, ske, pk, info, 16));
+    if (txn) {
+        t.b[t.n++] = 0xFB;
+        t.b[t.n++] = 0;
+    }
+    femu_tb_call(&t, FEMU_MPA_AC(x), FEMU_MPA_M(m));
+    if (ak) {
+        femu_tb_bytes(&t, enc, 32);
+        g_assert_true(femu_hpke_seal(&h, ct, NULL, 0, ak, 32));
+        femu_tb_bytes(&t, ct, 48);
+    }
+    if (ak2) {
+        g_assert_true(femu_hpke_seal(&h, ct, NULL, 0, ak2, 32));
+        femu_tb_bytes(&t, ct, 48);
+    }
+    return femu_opal_run(c, qts, buf, &t, tsn);
+}
+
+static uint8_t femu_mpa_call(FemuCtrlState *c, QTestState *qts, uint64_t buf,
+                             uint32_t tsn, int m, int x, const uint8_t *pk,
+                             const uint8_t *ak, const uint8_t *ak2)
+{
+    return femu_mpa_call_t(c, qts, buf, tsn, m, x, pk, ak, ak2, false);
+}
+
+/* Set column @col of @obj to a list of AC references; @acs ends with 0 */
+static uint8_t femu_mpa_list(FemuCtrlState *c, QTestState *qts, uint64_t buf,
+                             uint32_t tsn, uint64_t obj, int col,
+                             const int *acs)
+{
+    FemuTb t = { .n = 0 };
+    int i;
+
+    femu_tb_call(&t, obj, 0x0000000600000017ull);
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 1;
+    t.b[t.n++] = 0xF0;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = col;
+    t.b[t.n++] = 0xF0;
+    for (i = 0; acs[i]; i++) {
+        femu_tb_uid(&t, FEMU_MPA_AC(acs[i]));
+    }
+    t.b[t.n++] = 0xF1;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF1;
+    t.b[t.n++] = 0xF3;
+    return femu_opal_run(c, qts, buf, &t, tsn);
+}
+
+/* the AC count of list column @col of K_AES_256 Range1 */
+static int femu_mpa_list_len(FemuCtrlState *c, QTestState *qts, uint64_t buf,
+                             uint32_t tsn, int col)
+{
+    FemuTb t = { .n = 0 };
+    uint8_t r[2048];
+    int k = 0;
+    int i;
+
+    femu_tb_call(&t, FEMU_MPA_KAES1, 0x0000000600000016ull);
+    t.b[t.n++] = 0xF0;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 3;
+    t.b[t.n++] = col;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF2;
+    t.b[t.n++] = 4;
+    t.b[t.n++] = col;
+    t.b[t.n++] = 0xF3;
+    t.b[t.n++] = 0xF1;
+    femu_tb_end(&t);
+    g_assert_cmpuint(femu_opal_xfer(c, qts, buf, &t, tsn, r), >, 0);
+    /* SL SL SN col SL {A8 uid} EL EN EL EL */
+    g_assert_cmphex(r[59], ==, col);
+    g_assert_cmphex(r[60], ==, 0xF0);
+    for (i = 61; r[i] == 0xA8; i += 9) {
+        k++;
+    }
+    g_assert_cmphex(r[i], ==, 0xF1);
+    return k;
+}
+
+static void femu_mpa_power_cycle(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/mpa',"
+                           "'property':'x-opal-power-cycle','value':true}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/*
+ * x-opal-mpa over NVMe: Certificate1 is signed by Certificate2 and names
+ * the HPKE suite; a Range1 key bound to two ACs reads and writes only
+ * while both are enabled; DisableAccess locks it and EnableAccess does not
+ * unlock it; an aborted transaction undoes an Initialize; a TCG power
+ * cycle disables every AC and makes a new KEM key, and the old access key
+ * still works; a Format crypto erase keeps the lists.
+ */
+void femu_test_opal_mpa(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const char pin[] = "FEMU-MSID-opal-mpa";
+    static const uint8_t hpke[] = { 0x06, 0x06, 0x67, 0x81, 0x05, 0x15, 0x01,
+                                    0x01, 0x04, 0x0B, 0x30, 0x09, 0x02, 0x01,
+                                    0x20, 0x02, 0x01, 0x01, 0x02, 0x01, 0x03 };
+    static const uint8_t ak1[32] = "party one access key, 32 bytes.";
+    static const uint8_t ak2[32] = "party two access key, 32 bytes.";
+    static const uint8_t ak3[32] = "party three access key, 32 byte";
+    static const int range[] = { 3, 4, 5, 6, 7, 8, -1 };
+    static const uint64_t open_r[] = { 64, 64, 1, 1, 0, 0 };
+    static const int rw[] = { 7, 8, -1 };
+    static const uint64_t unlock[] = { 0, 0 };
+    static const int both[] = { 1, 2, 0 };
+    static const int one[] = { 1, 0 };
+    static const int two[] = { 2, 0 };
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=mpa,addr=5,devsz_mb=256,"
+        "femu_mode=1,x-opal=on,x-opal-mpa=on,serial=opal-mpa");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    FemuTb t = { .n = 0 };
+    uint8_t c1[512];
+    uint8_t c2[512];
+    uint8_t id_pk[32];
+    uint8_t kem[32];
+    uint8_t kem0[32];
+    uint8_t r[2048];
+    uint32_t l1;
+    uint32_t l2;
+    uint32_t tsn = 0;
+    uint32_t i;
+    uint64_t buf;
+    uint64_t io;
+    bool found = false;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(&qs->alloc, 8192);
+    io = guest_alloc(&qs->alloc, FEMU_DATA_SIZE);
+
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, 0x0000020500000001ull,
+                                    0x0000000900000006ull, pin, &tsn), ==, 0);
+    femu_tb_call(&t, FEMU_OPAL_LOCKING_SP, 0x0000000600000203ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    femu_opal_eos(&c, qts, buf, tsn);
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
+                                    FEMU_MPA_LSP_ADMIN1, pin, &tsn), ==, 0);
+
+    /* the certificates: Certificate2 signs Certificate1 and itself */
+    l1 = femu_mpa_cert(&c, qts, buf, tsn, 1, c1);
+    l2 = femu_mpa_cert(&c, qts, buf, tsn, 2, c2);
+    femu_mpa_spki(c2, l2, 0x70, id_pk);
+    femu_mpa_spki(c1, l1, 0x6E, kem);
+    g_assert_true(femu_mpa_signed(c2, l2, id_pk));
+    g_assert_true(femu_mpa_signed(c1, l1, id_pk));
+    for (i = 0; i + sizeof(hpke) <= l1; i++) {
+        found |= !memcmp(c1 + i, hpke, sizeof(hpke));
+    }
+    g_assert_true(found);
+
+    /* Range1 at LBA 64, unlocked, bound to AC1 and AC2 */
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1,
+                                    range, open_r), ==, 0);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 1, 1, kem, ak1, NULL),
+                     ==, 0);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 1, 2, kem, ak2, NULL),
+                     ==, 0);
+    g_assert_cmpuint(femu_mpa_list(&c, qts, buf, tsn, FEMU_MPA_KAES1, 6,
+                                   both), ==, 0);
+    femu_opal_fill(&c, qts, 1, 64, io, 0x5A);
+    t.n = 0;
+    femu_tb_call(&t, FEMU_MPA_KAES1, 0x0000000600000010ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    g_assert_cmpint(femu_mpa_list_len(&c, qts, buf, tsn, 5), ==, 2);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 1, kem, ak2, NULL),
+                     ==, 0x3F);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 1, kem, ak1, NULL),
+                     ==, 0);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_WRITE, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 2, kem, ak2, NULL),
+                     ==, 0);
+    /* both enabled: the GenKey erased the old data, the range works */
+    femu_opal_expect(&c, qts, 1, 64, io, 0);
+    femu_opal_fill(&c, qts, 1, 64, io, 0x6B);
+    /* DisableAccess locks, EnableAccess does not unlock */
+    t.n = 0;
+    femu_tb_call(&t, FEMU_MPA_AC(2), FEMU_MPA_M(5));
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1, rw,
+                                    unlock), ==, 0x01);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 2, kem, ak2, NULL),
+                     ==, 0);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1, rw,
+                                    unlock), ==, 0);
+    femu_opal_expect(&c, qts, 1, 64, io, 0x6B);
+
+    /* an aborted transaction undoes the Initialize of AC3 */
+    g_assert_cmpuint(femu_mpa_call_t(&c, qts, buf, tsn, 1, 3, kem, ak3, NULL,
+                                     true), ==, 0);
+    t.n = 0;
+    t.b[t.n++] = 0xFC;
+    t.b[t.n++] = 1;
+    g_assert_cmpuint(femu_opal_xfer(&c, qts, buf, &t, tsn, r), ==, 2);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 3, kem, ak3, NULL),
+                     ==, 0x0C);
+
+    /* a TCG power cycle: the ACs go disabled and Range1 locks */
+    femu_opal_eos(&c, qts, buf, tsn);
+    femu_mpa_power_cycle(qts);
+    g_assert_cmphex(femu_opal_rw(&c, NVME_CMD_READ, 64, io), ==,
+                    NVME_ACCESS_DENIED);
+    g_assert_cmpuint(femu_opal_open(&c, qts, buf, FEMU_OPAL_LOCKING_SP,
+                                    FEMU_MPA_LSP_ADMIN1, pin, &tsn), ==, 0);
+    memcpy(kem0, kem, 32);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 1, kem0, ak1, NULL),
+                     ==, 0x0C);
+    l1 = femu_mpa_cert(&c, qts, buf, tsn, 1, c1);
+    femu_mpa_spki(c1, l1, 0x6E, kem);
+    g_assert_cmpint(memcmp(kem, kem0, 32), !=, 0);
+    g_assert_true(femu_mpa_signed(c1, l1, id_pk));
+    /* the seals stay: the same access keys enable the ACs again */
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 1, kem, ak1, NULL),
+                     ==, 0);
+    g_assert_cmpuint(femu_mpa_call(&c, qts, buf, tsn, 4, 2, kem, ak2, NULL),
+                     ==, 0);
+    g_assert_cmpuint(femu_opal_lset(&c, qts, buf, tsn, FEMU_OPAL_LOCK1, rw,
+                                    unlock), ==, 0);
+    femu_opal_expect(&c, qts, 1, 64, io, 0x6B);
+
+    /* Format crypto erase with Active [AC1] and Pending [AC2] */
+    g_assert_cmpuint(femu_mpa_list(&c, qts, buf, tsn, FEMU_MPA_KAES1, 6, one),
+                     ==, 0);
+    t.n = 0;
+    femu_tb_call(&t, FEMU_MPA_KAES1, 0x0000000600000010ull);
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    g_assert_cmpuint(femu_mpa_list(&c, qts, buf, tsn, FEMU_MPA_KAES1, 6, two),
+                     ==, 0);
+    t.n = 0;
+    femu_tb_call(&t, FEMU_MPA_AC(2), FEMU_MPA_M(5));
+    g_assert_cmpuint(femu_opal_run(&c, qts, buf, &t, tsn), ==, 0);
+    femu_opal_fill(&c, qts, 1, 64, io, 0x7C);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 2)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_mpa_list_len(&c, qts, buf, tsn, 5), ==, 1);
+    g_assert_cmpint(femu_mpa_list_len(&c, qts, buf, tsn, 6), ==, 1);
+    femu_opal_expect(&c, qts, 1, 64, io, 0);
+    femu_opal_eos(&c, qts, buf, tsn);
+
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+/* Reservation Report into @buf: 4 KiB, extended layout if @eds */
+static uint16_t femu_resv_report(FemuCtrlState *c, uint64_t buf, bool eds)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = 0x0e;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(1023);
+    cmd.cdw11 = cpu_to_le32(eds);
+    return femu_io(c, &cmd);
+}
+
+/*
+ * Reservations (Base 2.3, 8.1.24) on one controller. Host Identifier 0
+ * makes the controller host X. X registers key A and holds Write
+ * Exclusive. A non-zero Host Identifier then makes the same controller a
+ * new host Y, which does not hold it: writes conflict, reads do not. Y
+ * registers B and preempts A as Write Exclusive - Registrants Only; X's
+ * controller gets a Registration Preempted page in log 80h. Release,
+ * clear, the generation count, PTPL, the mask and the reset of the Host
+ * Identifier follow.
+ */
+void femu_test_resv(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t io = guest_alloc(alloc, FEMU_DATA_SIZE);
+    const uint64_t ka = 0xa1, kb = 0xb2;
+    uint8_t r[128];
+    uint32_t res = 0;
+    uint16_t cntlid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 520) & (1 << 5), ==, 1 << 5);
+    g_assert_cmphex(qtest_readl(qts, buf + 96) & 1, ==, 1);
+    cntlid = qtest_readw(qts, buf + 78);
+    g_assert_cmphex(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 31), ==, 0xff);
+
+    /* nothing yet */
+    g_assert_cmphex(femu_resv_report(&c, buf, false), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 0);
+    g_assert_cmpuint(qtest_readb(qts, buf + 4), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 5), ==, 0);
+
+    /* register A twice; B from the same host conflicts */
+    g_assert_cmphex(femu_resv(&c, 0x0d, 0, 0, buf, 0, ka), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x0d, 0, 0, buf, 0, ka), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x0d, 0, 0, buf, 0, kb), ==, 0x083);
+
+    /* acquire WE; again the same type works, another type conflicts */
+    g_assert_cmphex(femu_resv(&c, 0x11, 1 << 8, 0, buf, ka, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x11, 1 << 8, 0, buf, ka, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x11, 2 << 8, 0, buf, ka, 0), ==, 0x083);
+    g_assert_cmphex(femu_resv(&c, 0x11, 1 << 8, 0, buf, kb, 0), ==, 0x083);
+    g_assert_cmphex(femu_resv(&c, 0x11, 1 << 8 | 1 << 3, 0, buf, ka, 0), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_resv_report(&c, buf, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, r, 48);
+    g_assert_cmpuint(ldl_le_p(r), ==, 2);               /* GEN */
+    g_assert_cmpuint(r[4], ==, 1);                      /* RTYPE: WE */
+    g_assert_cmpuint(lduw_le_p(r + 5), ==, 1);
+    g_assert_cmpuint(lduw_le_p(r + 24), ==, cntlid);
+    g_assert_cmpuint(r[26], ==, 1);                     /* holds it */
+    g_assert_cmphex(ldq_le_p(r + 40), ==, ka);
+    /* the holder writes */
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+
+    /* a 128-bit Host Identifier: the controller is now host Y */
+    qtest_memset(qts, buf, 0x5a, 16);
+    {
+        NvmeCmd cmd = { 0 };
+
+        cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(0x81);
+        cmd.cdw11 = cpu_to_le32(1);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, 0x00c);
+    }
+    g_assert_cmphex(femu_resv_report(&c, buf, false), ==, 0x018);
+    g_assert_cmphex(femu_resv_report(&c, buf, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, r, 128);
+    g_assert_cmpuint(lduw_le_p(r + 5), ==, 1);
+    g_assert_cmphex(lduw_le_p(r + 64), ==, 0xffff);     /* X: no controller */
+    g_assert_cmpuint(r[66], ==, 1);
+
+    /* Y holds nothing: a write conflicts, a read does not */
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==, 0x083);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x0d, 0, 0, buf, 0, kb), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==, 0x083);
+
+    /*
+     * Y preempts A as WERO and X goes. X's controller is now host Y, the
+     * issuer, so no notice is made: log 80h reads empty.
+     */
+    g_assert_cmphex(femu_resv(&c, 0x11, 3 << 8 | 1, 0, buf, kb, ka), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x80, buf, 64, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf), ==, 0);     /* empty */
+    g_assert_cmphex(femu_resv_report(&c, buf, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, r, 128);
+    g_assert_cmpuint(r[4], ==, 3);
+    g_assert_cmpuint(lduw_le_p(r + 5), ==, 1);
+    g_assert_cmpuint(lduw_le_p(r + 64), ==, cntlid);
+    g_assert_cmphex(ldq_le_p(r + 72), ==, kb);
+    g_assert_cmphex(r[80], ==, 0x5a);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+
+    /* release: the type must match; then nothing is held */
+    g_assert_cmphex(femu_resv(&c, 0x15, 1 << 8, 0, buf, kb, 0), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_resv(&c, 0x15, 3 << 8, 0, buf, kb, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x15, 3 << 8, 0, buf, kb, 0), ==,
+                    NVME_SUCCESS);
+    /* PTPL by Set Features and by Register; then clear */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x83, false, 1, 1, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x83, 0, 1, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 1);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x83, 0, 0xffffffff, 0,
+                                             NULL)), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_resv(&c, 0x0d, 2u << 30 | 2, 0, buf, kb, kb), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_resv(&c, 0x15, 1, 0, buf, kb, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_resv_report(&c, buf, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, r, 64);
+    /* register A, A, B, preempt, replace, clear */
+    g_assert_cmpuint(ldl_le_p(r), ==, 6);
+    g_assert_cmpuint(r[4], ==, 0);
+    g_assert_cmpuint(lduw_le_p(r + 5), ==, 0);
+    g_assert_cmpuint(r[9], ==, 0);                      /* PTPL cleared */
+
+    /* the mask is namespace state; a reset clears the Host Identifier */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x82, false, 1, 0x2, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x82, 0, 1, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0x2);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_resv_report(&c, buf, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x82, 0, 1, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0x2);              /* namespace state stays */
+    /* a Controller Level Reset clears the Host Identifier */
+    {
+        NvmeCmd cmd = { 0 };
+        uint8_t hid[16];
+        static const uint8_t zero[16];
+
+        qtest_memset(qts, buf, 0xff, 16);
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(0x81);
+        cmd.cdw11 = cpu_to_le32(1);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, hid, sizeof(hid));
+        g_assert_cmpmem(hid, sizeof(hid), zero, sizeof(zero));
+    }
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, io);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Delete and create NSID 1 again while a RAE=1 page holds the old
+ * namespace. The RAE=0 read of that page installs nothing for the new
+ * namespace, so its block 10 is new and steps LSGC.
+ */
+void femu_test_lsi_recreate(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint64_t ibuf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+    uint16_t cntlid;
+    uint8_t flbas;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, ibuf), ==, NVME_SUCCESS);
+    cntlid = qtest_readw(qts, ibuf + 78);
+    g_assert_cmpint(femu_identify(&c, 1, 0, 0, ibuf), ==, NVME_SUCCESS);
+    flbas = qtest_readb(qts, ibuf + 26);
+    femu_create_io_queues(&c);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, true), ==, 1);
+
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, ibuf, 64, flbas, &nsid), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 1);
+    g_assert_cmpint(femu_ns_attach(&c, ibuf, 1, cntlid, true), ==,
+                    NVME_SUCCESS);
+    femu_mark_uncor(&c, 10, 1);
+    /* the held page of the old namespace */
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 2);
+
+    guest_free(alloc, ibuf);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+#define FEMU_LSI_PERSIST_DEV \
+    "'driver':'femu','id':'lsi-test','addr':'5','devsz_mb':16," \
+    "'femu_mode':1,'oncs':415,'persist_file':%s"
+
+/* unplug (a save of persist_file), plug again (a load), enable */
+static QPCIDevice *femu_lsi_replug(QOSState *qs, FemuCtrlState *c,
+                                   QPCIDevice *pdev, const char *path)
+{
+    QDict *rsp;
+
+    femu_disable(c);
+    femu_queue_free(c, &c->io);
+    qpci_unplug_acpi_device_test(qs->qts, "lsi-test", 5);
+    g_free(pdev);
+    rsp = qtest_qmp(qs->qts, "{'execute':'device_add','arguments':{"
+                    FEMU_LSI_PERSIST_DEV "}}", path);
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    memset(c, 0, sizeof(*c));
+    femu_enable(c, pdev, &qs->alloc);
+    femu_create_io_queues(c);
+    return pdev;
+}
+
+/*
+ * persist_file keeps the LBA status state (design 15), with a sentinel
+ * R whose add_ver differs from the live one at the save:
+ *   1: alert gen 1, read gen 1; a new block read at gen 2 before its
+ *      alert; one more new block, not read
+ *   2: the gen 3 alert comes one LSIRI after enable; read gen 3; a new
+ *      block steps; a component failure with AEC off stays pending
+ *   3: the pending component alert goes out at once; read gen 4
+ *   4: everything acknowledged: no alert
+ */
+void femu_test_lsi_persist(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-lsi-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "data", NULL);
+    g_autofree char *lock = g_strconcat(path, ".lock", NULL);
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=lsi-test,addr=5,"
+        "devsz_mb=16,femu_mode=1,oncs=415,persist_file=%s", path);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 8192);
+    uint16_t want;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    want = femu_aer(&c);
+    for (int i = 0; i < 257; i++) {
+        femu_mark_uncor(&c, 2 * i, 1);
+    }
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 1);
+    femu_mark_uncor(&c, 1000, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 2);
+    femu_mark_uncor(&c, 1001, 1);
+
+    pdev = femu_lsi_replug(qs, &c, pdev, path);
+    femu_lsi_aec(&c, true);
+    want = femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC - 1));
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 3);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 3);
+    femu_mark_uncor(&c, 1002, 1);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 4);
+    femu_lsi_aec(&c, false);
+    femu_lsi_cmd(qts, "component:1");
+
+    pdev = femu_lsi_replug(qs, &c, pdev, path);
+    g_assert_cmpint(femu_lsi_state(qts, "comp"), ==, 1);
+    want = femu_aer(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_true(femu_lsi_after(&c, 1000));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 32, false), ==, 4);
+
+    pdev = femu_lsi_replug(qs, &c, pdev, path);
+    femu_lsi_aec(&c, true);
+    femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, 3 * FEMU_LSI_SEC));
+    g_assert_cmpint(femu_lsi_state(qts, "alert"), ==, 0);
+    g_assert_cmpint(femu_lsi_state(qts, "g_r"), ==, 4);
+
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    guest_free(&qs->alloc, buf);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(lock);
+    unlink(path);
+    rmdir(dir);
+}
+
+/*
+ * persist_file keeps G_pub: generation 2 was announced for blocks 10 and
+ * 20, then 20 was repaired. Only G_pub holds 2 after the load, so the
+ * unread alert comes back at 2.
+ */
+void femu_test_lsi_persist_pub(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-lsi-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "data", NULL);
+    g_autofree char *lock = g_strconcat(path, ".lock", NULL);
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=lsi-test,addr=5,"
+        "devsz_mb=16,femu_mode=1,oncs=415,persist_file=%s", path);
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 8192);
+    uint64_t dbuf = guest_alloc(&qs->alloc, 4096);
+    uint16_t want;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 16, false), ==, 0);
+    want = femu_aer(&c);
+    femu_mark_uncor(&c, 10, 1);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 1);
+    want = femu_aer(&c);
+    femu_mark_uncor(&c, 20, 1);
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC * 11 / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_rw(&c, NVME_CMD_WRITE, 20, dbuf), ==, NVME_SUCCESS);
+
+    pdev = femu_lsi_replug(qs, &c, pdev, path);
+    femu_lsi_aec(&c, true);
+    want = femu_aer(&c);
+    g_assert_false(femu_lsi_after(&c, FEMU_LSI_SEC - 1));
+    g_assert_true(femu_lsi_after(&c, FEMU_LSI_SEC / 10));
+    femu_lsi_alert(&c, want);
+    g_assert_cmpint(femu_lsi_gen(&c, buf, 48, false), ==, 2);
+
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    guest_free(&qs->alloc, dbuf);
+    guest_free(&qs->alloc, buf);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(lock);
+    unlink(path);
+    rmdir(dir);
+}
+
+/*
+ * Past the end of the data, RUH Status sends zeroes (Base 2.3, 7.3.1.1), and
+ * so does telemetry, which sends every block asked for. The host's buffer is
+ * filled with a pattern first so that bytes left untouched show up.
+ */
+void femu_test_report_zero_tail(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint8_t page[4096], zero[4096] = { 0 };
+    uint64_t mem, buf;
+    NvmeCmd cmd = { 0 };
+    uint32_t used;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    mem = guest_alloc(alloc, 2 * 4096);
+    buf = (mem + 4095) & ~4095ULL;
+
+    memset(page, 0xa5, sizeof(page));
+    qtest_memwrite(qts, buf, page, sizeof(page));
+    cmd.opcode = FEMU_CMD_IO_MGMT_RECV;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMR_RUH_STATUS);
+    cmd.cdw11 = cpu_to_le32(sizeof(page) / 4 - 1);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    used = 16 + 32 * lduw_le_p(page + 14);
+    g_assert_cmpuint(used, <, sizeof(page));
+    g_assert_cmpint(memcmp(page + used, zero, sizeof(page) - used), ==, 0);
+
+    memset(page, 0xa5, sizeof(page));
+    qtest_memwrite(qts, buf, page, sizeof(page));
+    g_assert_cmpint(femu_get_telemetry(&c, FEMU_LOG_TELEMETRY_HOST, false,
+                                       buf, sizeof(page), 0), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, page, sizeof(page));
+    g_assert_cmpint(page[0], ==, FEMU_LOG_TELEMETRY_HOST);
+    g_assert_cmpint(memcmp(page + 512, zero, sizeof(page) - 512), ==, 0);
+
+    guest_free(alloc, mem);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_ns_mgmt_bbssd_cap(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+    int limit = data ? GPOINTER_TO_INT(data) : 4;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    for (i = 1; i <= limit; i++) {
+        g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==,
+                       NVME_SUCCESS);
+        g_assert_cmpuint(nsid, ==, i);
+    }
+    /* Detached allocations consume FTL resources too. */
+    g_assert_cmphex(femu_ns_create(&c, buf, 8, 0, &nsid), ==, 0x116);
+    g_assert_cmpint(femu_ns_delete(&c, 2), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 2);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+void femu_test_ns_mgmt_bbssd_boot_cap(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp;
+
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'rejected','addr':'5',"
+                    "'devsz_mb':5,'femu_mode':1,'ns_mgmt':true,"
+                    "'namespaces':5,'secsz':512,'secs_per_pg':8,"
+                    "'pgs_per_blk':16,'blks_per_pl':40,'pls_per_lun':1,"
+                    "'luns_per_ch':1,'nchs':1}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                         "desc"), "bbssd_ns_limit"));
+    qobject_unref(rsp);
+
+    /* The cap must not constrain fixed boot configurations. */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'fixed','addr':'5',"
+                    "'devsz_mb':5,'femu_mode':1,'ns_mgmt':false,"
+                    "'namespaces':5,'secsz':512,'secs_per_pg':8,"
+                    "'pgs_per_blk':16,'blks_per_pl':40,'pls_per_lun':1,"
+                    "'luns_per_ch':1,'nchs':1}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qpci_unplug_acpi_device_test(qts, "fixed", 5);
+    qos_invalidate_command_line();
+}
+
+void femu_test_ns_mgmt_bbssd_capacity(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    /* The pool fits this size; one FTL needs part of it for GC reserves. */
+    g_assert_cmphex(femu_ns_create(&c, buf, 8192, 0, &nsid), ==, 0x115);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf + 296), ==, 4 * 1024 * 1024);
+    g_assert_cmpint(femu_identify(&c, 0, 0x10, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 0);
+    g_assert_cmpint(femu_ns_create(&c, buf, 4096, 0, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 1);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+void femu_test_ns_mgmt_bbssd_isolation(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t nsid;
+    uint16_t cntlid;
+    int pass;
+    int i;
+    int ns;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    cntlid = qtest_readw(qts, buf + 78);
+    g_assert_cmpint(femu_ns_delete(&c, 0xffffffff), ==, NVME_SUCCESS);
+    for (ns = 1; ns <= 2; ns++) {
+        g_assert_cmpint(femu_ns_create(&c, buf, 4096, 0, &nsid), ==,
+                       NVME_SUCCESS);
+        g_assert_cmpuint(nsid, ==, ns);
+        g_assert_cmpint(femu_ns_attach(&c, buf, nsid, cntlid, true), ==,
+                       NVME_SUCCESS);
+    }
+    femu_create_io_queues(&c);
+    for (ns = 1; ns <= 2; ns++) {
+        for (i = 0; i < 512; i++) {
+            femu_ns_page(&c, buf, ns, i, ns * 32 + i % 17, true);
+        }
+    }
+    for (ns = 1; ns <= 2; ns++) {
+        for (i = 0; i < 512; i++) {
+            femu_ns_page(&c, buf, ns, i, ns * 32 + i % 17, false);
+        }
+    }
+    /* Every original line mixes cold pages with pages invalidated below. */
+    for (pass = 0; pass < 8; pass++) {
+        for (ns = 1; ns <= 2; ns++) {
+            for (i = 0; i < 512; i += 2) {
+                femu_ns_page(&c, buf, ns, i, ns * 64 + pass, true);
+            }
+        }
+    }
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf,
+                                         512, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(qts, buf + 16), >, 0);
+    for (ns = 1; ns <= 2; ns++) {
+        for (i = 0; i < 512; i++) {
+            femu_ns_page(&c, buf, ns, i,
+                         i % 2 ? ns * 32 + i % 17 : ns * 64 + 7, false);
+        }
+    }
+    g_assert_cmpint(femu_format(&c, 1, 0, 1), ==, NVME_SUCCESS);
+    for (i = 0; i < 512; i++) {
+        femu_ns_page(&c, buf, 1, i, 0, false);
+        femu_ns_page(&c, buf, 2, i,
+                     i % 2 ? 64 + i % 17 : 135, false);
+    }
+    femu_ns_page(&c, buf, 1, 0, 0xa5, true);
+    femu_ns_page(&c, buf, 1, 0, 0xa5, false);
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_create(&c, buf, 4096, 0, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpuint(nsid, ==, 1);
+    g_assert_cmpint(femu_ns_attach(&c, buf, 1, cntlid, true), ==, NVME_SUCCESS);
+    femu_ns_page(&c, buf, 1, 0, 0, false);
+    femu_ns_page(&c, buf, 2, 0, 135, false);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qpci_unplug_acpi_device_test(qts, "ns-test", 4);
+}
+
+/*
+ * Shared namespaces are NoSSD or bbssd, so a controller that joins them
+ * refuses the KV timing knobs, the second one as well as the first.
+ */
+void femu_test_kv_model_shared(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    int i;
+
+    for (i = 0; i < 2; i++) {
+        QDict *rsp = qtest_qmp(qts,
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'kv-shared','addr':'6','subsys':'shared','devsz_mb':4,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+            "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,'nchs':1,"
+            "'kv_timing':'model'}}");
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s", desc);
+        g_assert_nonnull(strstr(desc, "need a key-value namespace"));
+        qobject_unref(rsp);
+        /* then a plain first controller, so the next one joins it */
+        if (i == 0) {
+            femu_shared_add(qts, "shared-plain", 5, 1);
+        }
+    }
+    qos_invalidate_command_line();
+}
+
+/*
+ * A joining controller runs the FTL of the owner, so gc_erase_order must
+ * match it. The owner keeps the default, on: a joiner with it off is
+ * refused, and the control, a joiner with the default, is accepted.
+ */
+void femu_test_gc_erase_order_shared(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp;
+    const char *desc;
+
+    femu_shared_add(qts, "order-owner", 5, 1);
+    rsp = qtest_qmp(qts,
+        "{'execute':'device_add','arguments':{'driver':'femu',"
+        "'id':'order-join','addr':'6','subsys':'shared','devsz_mb':4,"
+        "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+        "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,'nchs':1,"
+        "'gc_erase_order':false}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+    g_test_message("%s", desc);
+    g_assert_nonnull(strstr(desc, "gc_erase_order must match"));
+    qobject_unref(rsp);
+
+    femu_shared_add(qts, "order-join", 6, 1);
+    qos_invalidate_command_line();
+}
+
+void femu_test_namespace_failed_identity(void *obj, void *data,
+                                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    QPCIDevice *pdev;
+    QDict *rsp;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    char serial[21] = { 0 };
+    char nqn[256];
+
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'rejected','addr':'5',"
+                    "'devsz_mb':64,'femu_mode':1,'secsz':0}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'rejected-mixed','addr':'5',"
+                    "'devsz_mb':64,'femu_mode':1,'namespaces':2,"
+                    "'namespace_modes':'bbssd,csd',"
+                    "'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+                    "'pls_per_lun':1,'luns_per_ch':4,'nchs':4}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'accepted','addr':'5',"
+                    "'devsz_mb':64,'femu_mode':1,'namespaces':2,"
+                    "'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+                    "'pls_per_lun':1,'luns_per_ch':4,'nchs':4}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    g_assert_nonnull(pdev);
+    femu_enable(&c, pdev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 4, serial, 20);
+    g_strchomp(serial);
+    g_assert_cmpstr(serial, ==, "vSSD2");
+    qtest_memread(qts, buf + 768, nqn, sizeof(nqn));
+    g_assert_cmpstr(nqn, ==, "nqn.2021-05.org.femu:vSSD2");
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    g_free(pdev);
+    qos_invalidate_command_line();
+}
+
+static void femu_power_cut(FemuCtrlState *c)
+{
+    QDict *response = qtest_qmp(c->pdev->bus->qts,
+        "{'execute':'qom-set', 'arguments':{'path':'/machine/peripheral/power',"
+        "'property':'simulate-power-loss', 'value':true}}");
+
+    g_assert_true(qdict_haskey(response, "return"));
+    qobject_unref(response);
+    femu_queue_free(c, &c->io);
+    femu_disable(c);
+    femu_enable(c, c->pdev, c->alloc);
+    femu_create_io_queues(c);
+}
+
+static void femu_power_write(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                              uint64_t lba, uint16_t nlb, uint8_t pattern,
+                              bool fua)
+{
+    NvmeRwCmd rw = { 0 };
+
+    qtest_memset(c->pdev->bus->qts, buf, pattern, nlb * 512);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(nsid);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(lba);
+    rw.nlb = cpu_to_le16(nlb - 1);
+    rw.control = cpu_to_le16(fua ? NVME_RW_FUA : 0);
+    g_assert_cmpint(femu_io(c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+}
+
+static void femu_power_flush(FemuCtrlState *c, uint32_t nsid)
+{
+    NvmeCmd cmd = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(nsid) };
+
+    g_assert_cmpint(femu_io(c, &cmd), ==, NVME_SUCCESS);
+}
+
+/*
+ * power_loss: an FUA write whose page finds no place leaves the buffered
+ * copy and its undo record. A is durable, B is buffered over it, and C
+ * (FUA) fails. A cut then restores A. Had the FUA dropped B first, the
+ * page would read C, which no command made durable.
+ */
+void femu_test_power_fua_place_fail(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    NvmeRwCmd rw = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, true);
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    femu_place_fail_id(c.pdev->bus->qts, "power", 1);
+    qtest_memset(c.pdev->bus->qts, buf, 0xc3, 4096);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    rw.control = cpu_to_le16(NVME_RW_FUA);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                    NVME_CAP_EXCEEDED);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* Bound the QMP wait even if the device holds up the main loop. */
+typedef struct FemuPowerDeadline {
+    GMutex lock;
+    GCond cond;
+    bool done;
+} FemuPowerDeadline;
+
+static void *femu_power_deadline(void *opaque)
+{
+    FemuPowerDeadline *d = opaque;
+    gint64 end = g_get_monotonic_time() + 10 * G_TIME_SPAN_SECOND;
+
+    g_mutex_lock(&d->lock);
+    while (!d->done) {
+        if (!g_cond_wait_until(&d->cond, &d->lock, end)) {
+            g_error("power cut did not return within ten seconds");
+        }
+    }
+    g_mutex_unlock(&d->lock);
+    return NULL;
+}
+
+void femu_test_power_mmio_cut(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeRwCmd rw = { .opcode = NVME_CMD_WRITE, .nsid = cpu_to_le32(1),
+                     .nlb = cpu_to_le16(7),
+                     .dptr.prp1 = cpu_to_le64(0xfed00000) };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int cut = 0; cut < 16; cut++) {
+        FemuPowerDeadline d = { 0 };
+        GThread *watchdog;
+
+        femu_power_read(&c, buf, 1, 0, 0);
+        g_mutex_init(&d.lock);
+        g_cond_init(&d.cond);
+        watchdog = g_thread_new("power-cut-timeout", femu_power_deadline, &d);
+        for (int i = 0; i < 14; i++) {
+            femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        }
+        femu_power_cut(&c);
+        g_mutex_lock(&d.lock);
+        d.done = true;
+        g_cond_signal(&d.cond);
+        g_mutex_unlock(&d.lock);
+        g_thread_join(watchdog);
+        g_cond_clear(&d.cond);
+        g_mutex_clear(&d.lock);
+        femu_power_read(&c, buf, 1, 0, 0);
+    }
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                   NVME_DATA_TRAS_ERROR);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_dma_pointers(void *obj, void *data,
+                                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 12288);
+    uint64_t list = guest_alloc(alloc, 4096);
+    const uint8_t ops[] = { NVME_CMD_WRITE, NVME_CMD_READ, NVME_CMD_COMPARE };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int op = 0; op < ARRAY_SIZE(ops); op++) {
+        for (int kind = 0; kind < 8; kind++) {
+            NvmeRwCmd rw = { .opcode = ops[op], .nsid = cpu_to_le32(1) };
+            NvmeSglDescriptor desc[2] = { 0 };
+            NvmeSglDescriptor seg = { 0 };
+
+            qtest_memset(qts, buf, 0xa5, 12288);
+            rw.dptr.prp1 = cpu_to_le64(0xfed00000);
+            if (kind == 1) {
+                /* A valid first page must not move before PRP2 is checked. */
+                rw.nlb = cpu_to_le16(15);
+                rw.dptr.prp1 = cpu_to_le64(buf);
+                rw.dptr.prp2 = cpu_to_le64(0xfed00000);
+            } else if (kind == 2 || kind == 3) {
+                rw.nlb = cpu_to_le16(23);
+                rw.dptr.prp1 = cpu_to_le64(buf);
+                rw.dptr.prp2 = cpu_to_le64(0xfed00000);
+                if (kind == 3) {
+                    /* The last entry chains to an MMIO-resident list. */
+                    qtest_writeq(qts, list + 4088, 0xfed00000);
+                    rw.dptr.prp2 = cpu_to_le64(list + 4088);
+                }
+            } else if (kind >= 4) {
+                rw.flags = 1 << 6;
+                seg.addr = cpu_to_le64(0xfed00000);
+                seg.len = cpu_to_le32(512);
+                if (kind == 5) {
+                    rw.nlb = cpu_to_le16(1);
+                    desc[0].addr = cpu_to_le64(buf);
+                    desc[0].len = cpu_to_le32(512);
+                    desc[1] = seg;
+                    qtest_memwrite(qts, list, desc, sizeof(desc));
+                    seg.addr = cpu_to_le64(list);
+                    seg.len = cpu_to_le32(sizeof(desc));
+                    seg.type = NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4;
+                } else if (kind == 6) {
+                    seg.len = cpu_to_le32(sizeof(desc));
+                    seg.type = NVME_SGL_DESCR_TYPE_LAST_SEGMENT << 4;
+                } else if (kind == 7) {
+                    /* A single descriptor crosses from RAM into VGA MMIO. */
+                    rw.nlb = cpu_to_le16(1);
+                    seg.addr = cpu_to_le64(0x9fe00);
+                    seg.len = cpu_to_le32(1024);
+                }
+                memcpy(&rw.dptr.sgl, &seg, sizeof(seg));
+            }
+            g_test_message("opcode 0x%x, pointer case %d", ops[op], kind);
+            g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                           NVME_DATA_TRAS_ERROR);
+            if (ops[op] == NVME_CMD_READ) {
+                uint8_t bytes[4096];
+
+                qtest_memread(qts, buf, bytes, sizeof(bytes));
+                for (int i = 0; i < sizeof(bytes); i++) {
+                    g_assert_cmphex(bytes[i], ==, 0xa5);
+                }
+            }
+        }
+    }
+    for (int op = 0; op < 2; op++) {
+        NvmeCmd cmd = { .opcode = op ? FEMU_CMD_COPY : NVME_CMD_DSM,
+                       .nsid = cpu_to_le32(1),
+                       .dptr.prp1 = cpu_to_le64(0xfed00000),
+                       .cdw11 = cpu_to_le32(op ? 0 : FEMU_DSM_AD) };
+
+        g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_DATA_TRAS_ERROR);
+    }
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_cmb(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    QPCIBar cmb;
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    cmb = qpci_iomap(&femu->dev, 2, NULL);
+    femu_power_write(&c, cmb.addr, 1, 0, 8, 0x5a, false);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_COMPARE, 0, cmb.addr), ==,
+                   NVME_SUCCESS);
+    femu_power_read(&c, cmb.addr, 1, 0, 0x5a);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+    femu_power_write(&c, cmb.addr, 1, 0, 8, 0x6b, true);
+    femu_power_cut(&c);
+    femu_power_read(&c, cmb.addr, 1, 0, 0x6b);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_no_drain(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int action = GPOINTER_TO_INT(data);
+    uint16_t status;
+    uint16_t expected = NVME_SUCCESS;
+    NvmeDsmRange ranges[2] = {
+        { .nlb = cpu_to_le32(1), .slba = cpu_to_le64(8) },
+        { .nlb = cpu_to_le32(1), .slba = cpu_to_le64(UINT64_MAX) },
+    };
+    NvmeCmd cmd = { .nsid = cpu_to_le32(1),
+                    .dptr.prp1 = cpu_to_le64(list) };
+    uint64_t src = 0;
+    uint16_t nlb = 1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x5a, false);
+    switch (action) {
+    case 0:
+        cmd.opcode = 0x7f;
+        expected = NVME_INVALID_OPCODE;
+        status = femu_io(&c, &cmd);
+        break;
+    case 1:
+        status = femu_lba_cmd(&c, NVME_CMD_VERIFY, 0, 8);
+        break;
+    case 2:
+    case 3:
+    case 6:
+    case 9:
+        cmd.opcode = NVME_CMD_DSM;
+        if (action != 2) {
+            cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+        }
+        if (action == 3) {
+            ranges[0].nlb = 0;
+        } else if (action == 6) {
+            cmd.cdw10 = cpu_to_le32(1);
+            expected = NVME_LBA_RANGE;
+        } else if (action == 9) {
+            cmd.dptr.prp1 = cpu_to_le64(0xfed00000);
+            expected = NVME_DATA_TRAS_ERROR;
+        }
+        qtest_memwrite(c.pdev->bus->qts, list, ranges, sizeof(ranges));
+        status = femu_io(&c, &cmd);
+        break;
+    case 4:
+    case 5:
+        status = femu_lba_cmd(&c, action == 4 ? NVME_CMD_WRITE_ZEROES :
+                             NVME_CMD_WRITE_UNCOR, UINT64_MAX, 1);
+        expected = NVME_LBA_RANGE;
+        break;
+    case 7:
+    case 8:
+        if (action == 8) {
+            src = UINT64_MAX;
+        }
+        status = femu_copy(&c, list, 0, &src, &nlb, 1, 1, 0);
+        expected = action == 7 ? FEMU_OVERLAP_IO_RANGE : NVME_LBA_RANGE;
+        break;
+    case 10:
+        status = femu_format(&c, 1, 0, 2);
+        expected = NVME_INVALID_FIELD;
+        break;
+    case 11:
+    case 12:
+        status = femu_sanitize(&c, action == 11 ? 1 : 0);
+        expected = action == 11 ? NVME_SUCCESS : NVME_INVALID_FIELD;
+        break;
+    case 13:
+        status = femu_rw(&c, NVME_CMD_COMPARE, 0, buf);
+        /* a miscompare fails the same way if retried */
+        qtest_writeb(c.pdev->bus->qts, buf,
+                     qtest_readb(c.pdev->bus->qts, buf) ^ 0xff);
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_COMPARE, 0, buf), ==,
+                        NVME_CMP_FAILURE | NVME_DNR);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    g_assert_cmphex(FEMU_SC(status), ==, expected);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_mutation(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int action = GPOINTER_TO_INT(data);
+    NvmeRwCmd rw = { .opcode = NVME_CMD_WRITE_ZEROES,
+                     .nsid = cpu_to_le32(1), .slba = cpu_to_le64(8) };
+    NvmeDsmRange range = { .nlb = cpu_to_le32(1), .slba = cpu_to_le64(8) };
+    NvmeCmd cmd = { .opcode = NVME_CMD_DSM, .nsid = cpu_to_le32(1),
+                    .cdw11 = cpu_to_le32(FEMU_DSM_AD),
+                    .dptr.prp1 = cpu_to_le64(list) };
+    uint64_t src = 0;
+    uint16_t nlb = 1;
+    uint64_t programmed;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x5a, false);
+    femu_power_write(&c, buf, 2, 0, 8, 0x6b, false);
+    g_assert_cmpint(femu_get_log(&c, FEMU_LOG_FEMU_STATS, list, 512, 0), ==,
+                   NVME_SUCCESS);
+    programmed = qtest_readq(c.pdev->bus->qts, list + 24);
+    switch (action) {
+    case 0:
+    case 1:
+    case 2:
+        if (action == 1) {
+            rw.control = cpu_to_le16(1 << 9);
+        } else if (action == 2) {
+            rw.opcode = NVME_CMD_WRITE_UNCOR;
+        }
+        g_assert_cmphex(femu_io(&c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+        break;
+    case 3:
+        qtest_memwrite(c.pdev->bus->qts, list, &range, sizeof(range));
+        g_assert_cmphex(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+        break;
+    case 4:
+        g_assert_cmphex(femu_copy(&c, list, 8, &src, &nlb, 1, 1, 0), ==,
+                       NVME_SUCCESS);
+        break;
+    case 5:
+        g_assert_cmphex(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+        break;
+    case 6:
+        g_assert_cmphex(femu_sanitize(&c, 2), ==, NVME_SUCCESS);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+    /* Erase hides the drained bytes; the media counter still proves a drain. */
+    g_assert_cmpint(femu_get_log(&c, FEMU_LOG_FEMU_STATS, list, 512, 0), ==,
+                   NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readq(c.pdev->bus->qts, list + 24), >, programmed);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, action >= 5 ? 0 : 0x5a);
+    femu_power_read(&c, buf, 2, 0, 0);
+    if (action == 2) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 8, buf)), ==,
+                       NVME_UNRECOVERED_READ);
+    } else {
+        femu_power_read(&c, buf, 1, 8, action == 4 ? 0x5a : 0);
+    }
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_loss(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* Old bytes and untouched neighbors must survive partial overwrites. */
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, true);
+    femu_power_write(&c, buf, 1, 2, 1, 0x5a, false);
+    femu_power_write(&c, buf, 1, 4, 1, 0x6b, false);
+    femu_power_write(&c, buf, 1, 8, 1, 0x7c, false);
+    femu_power_read(&c, buf, 1, 2, 0x5a);
+    femu_power_read(&c, buf, 1, 4, 0x6b);
+    femu_power_cut(&c);
+    for (int i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 1, i, 0x31);
+    }
+    femu_power_read(&c, buf, 1, 8, 0);
+    femu_power_read(&c, buf, 1, 9, 0);
+    /* Recovery may accept another dirty write to the same page. */
+    femu_power_write(&c, buf, 1, 2, 1, 0x8d, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 2, 0x31);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_durable(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    bool fua = GPOINTER_TO_INT(data);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0x42, fua);
+    if (!fua) {
+        femu_power_flush(&c, 1);
+    }
+    /* A write after the durability command must remain independently dirty. */
+    femu_power_write(&c, buf, 1, 9, 1, 0x53, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, fua ? 0 : 0x31);
+    femu_power_read(&c, buf, 1, 8, 0x42);
+    femu_power_read(&c, buf, 1, 9, 0x42);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_destage(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* A one-page cache must program its old page to admit a new page. */
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0x42, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0x31);
+    femu_power_read(&c, buf, 1, 8, 0);
+    guest_free(alloc, buf);
+    buf = guest_alloc(alloc, 8192);
+    qtest_memset(c.pdev->bus->qts, buf, 0x53, 8192);
+    /* Admission must also work within a request larger than the cache. */
+    g_assert_cmpint(femu_write_8k(&c, buf, 16, 16), ==, NVME_SUCCESS);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 16, 0x53);
+    femu_power_read(&c, buf, 1, 23, 0x53);
+    femu_power_read(&c, buf, 1, 24, 0);
+    femu_power_read(&c, buf, 1, 31, 0);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_cache_off(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    if (data) {
+        QDict *response = qtest_qmp(c.pdev->bus->qts,
+            "{'execute':'qom-set', 'arguments':{'path':'/machine/peripheral/power',"
+            "'property':'simulate-power-loss', 'value':true}}");
+
+        g_assert_true(qdict_haskey(response, "error"));
+        qobject_unref(response);
+    } else {
+        femu_power_cut(&c);
+    }
+    femu_power_read(&c, buf, 1, 0, 0x31);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_namespaces(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    femu_power_write(&c, buf, 2, 0, 8, 0x42, false);
+    femu_power_flush(&c, 2);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+    femu_power_read(&c, buf, 2, 0, 0x42);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_lifecycle(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int action = GPOINTER_TO_INT(data);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    if (action == 0) {
+        g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_VOLATILE_WRITE_CACHE,
+                                               false, 0, 0, NULL)), ==,
+                       NVME_SUCCESS);
+        /* Disabling the cache must also commit earlier writes. */
+    } else if (action == 1) {
+        uint32_t cc = qpci_io_readl(c.pdev, c.bar, 0x14);
+
+        qpci_io_writel(c.pdev, c.bar, 0x14, cc | (1 << 14));
+        g_assert_cmphex(qpci_io_readl(c.pdev, c.bar, 0x1c) & (3 << 2), ==,
+                       NVME_CSTS_SHST_COMPLETE);
+    } else {
+        /* A controller reset alone neither loses nor commits dirty data. */
+        femu_queue_free(&c, &c.io);
+        femu_disable(&c);
+        femu_enable(&c, &femu->dev, alloc);
+        femu_create_io_queues(&c);
+        femu_power_read(&c, buf, 1, 0, 0x31);
+    }
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, action == 2 ? 0 : 0x31);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_validity(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeDsmRange range = { .nlb = cpu_to_le32(1), .slba = cpu_to_le64(2) };
+    NvmeCmd cmd = { .opcode = NVME_CMD_DSM, .nsid = cpu_to_le32(1),
+                   .cdw11 = cpu_to_le32(FEMU_DSM_AD) };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    qtest_memwrite(c.pdev->bus->qts, buf, &range, sizeof(range));
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    g_assert_cmpint(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 2, 1, 0x42, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 1, 0x31);
+    femu_power_read(&c, buf, 1, 2, 0);
+    femu_power_read(&c, buf, 1, 3, 0x31);
+
+    g_assert_cmpint(femu_lba_cmd(&c, NVME_CMD_WRITE_ZEROES, 0, 8), ==,
+                   NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0x53, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+
+    g_assert_cmpint(femu_lba_cmd(&c, NVME_CMD_WRITE_UNCOR, 0, 8), ==,
+                   NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0x64, false);
+    femu_power_cut(&c);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                   NVME_UNRECOVERED_READ);
+    femu_power_write(&c, buf, 1, 0, 8, 0x75, true);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0x75);
+
+    femu_power_write(&c, buf, 1, 8, 8, 0x86, false);
+    g_assert_cmpint(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+    femu_power_read(&c, buf, 1, 8, 0);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_flush_pending(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    NvmeRwCmd rw = { .opcode = NVME_CMD_WRITE, .nsid = cpu_to_le32(1) };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x31, false);
+    qtest_memset(c.pdev->bus->qts, buf, 0x42, 4096);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(&c, &c.io, &flush);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    for (int i = 0; i < 2; i++) {
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                       NVME_SUCCESS);
+    }
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0x31);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_power_log(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    QTestState *qts = femu->dev.bus->qts;
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int cut = 1; cut <= 2; cut++) {
+        femu_power_cut(&c);
+        if (!data) {
+            g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO,
+                                               buf, 512, 0)), ==, NVME_SUCCESS);
+            g_assert_cmpuint(qtest_readq(qts, buf + 144), ==, cut);
+            g_assert_cmpuint(qtest_readq(qts, buf + 152), ==, 0);
+        } else {
+            uint64_t e;
+
+            g_assert_cmpint(femu_pel(&c, 1, buf, 4096, 0), ==, NVME_SUCCESS);
+            g_assert_cmpint(femu_pel_count(qts, buf, 0x05, 0x08), ==, cut);
+            e = femu_pel_at(qts, buf, 0);
+            g_assert_cmphex(qtest_readb(qts, e), ==, 0x05);
+            g_assert_cmpint(qtest_readb(qts, e + 1), ==, 2);
+            g_assert_cmpint(qtest_readb(qts, e + 2), ==, 21);
+            g_assert_cmpint(qtest_readw(qts, e + 22), ==, 21);
+            g_assert_cmphex(qtest_readw(qts, e + 24), ==, 0x08);
+            g_assert_cmphex(qtest_readw(qts, e + 26), ==, 0);
+            g_assert_cmpuint(qtest_readq(qts, e + 28), ==, cut);
+            g_assert_cmpuint(qtest_readq(qts, e + 36), ==, 0);
+            g_assert_cmphex(qtest_readb(qts, e + 44), ==, 0);
+            g_assert_cmpint(femu_pel(&c, 2, 0, 4, 0), ==, NVME_SUCCESS);
+        }
+    }
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/* the field @key of event @i of device @id */
+static const char *femu_events_field(QTestState *qts, const char *id, int i,
+                                     const char *key, QDict **rsp)
+{
+    QDict *r = femu_events_q(qts, id, rsp);
+    QList *ev = qdict_get_qlist(r, "events");
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(ev, e) {
+        if (!i--) {
+            return qdict_get_str(qobject_to(QDict, qlist_entry_obj(e)), key);
+        }
+    }
+    g_assert_not_reached();
+}
+
+/* when event @i of device @id ran, in ms after the first enable */
+static int64_t femu_events_ran(QTestState *qts, const char *id, int i)
+{
+    QDict *rsp;
+    QDict *r = femu_events_q(qts, id, &rsp);
+    QListEntry *e;
+    int64_t ran = -1;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(r, "events"), e) {
+        if (!i--) {
+            ran = qdict_get_int(qobject_to(QDict, qlist_entry_obj(e)),
+                                "ran-ms");
+            break;
+        }
+    }
+    qobject_unref(rsp);
+    return ran;
+}
+
+static void femu_events_now(QTestState *qts, uint32_t ms)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/ev',"
+                           "'property':'x-events-now','value':%u}}", ms);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+static char *femu_ana_states(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/ev',"
+                           "'property':'ana-state'}}");
+    char *v = g_strdup(qdict_get_str(rsp, "return"));
+
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * events_file: ANA state 3 at 100 ms, back to 1 at 300 ms. The schedule
+ * waits until the first enable. x-events-now steps the time: at 150 ms the
+ * first event ran and the second waits. A controller reset keeps both the
+ * results and the epoch, and at 350 ms the second runs.
+ */
+void femu_test_events(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-events-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir,
+        "# ANA path change and back\n100 ana=1:3\n300 ana=1:1\n");
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+        "femu_mode=1,ana=on,events_file=%s", path);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    g_autofree char *ana = NULL;
+    QDict *rsp;
+
+    g_assert_cmpstr(qdict_get_str(femu_events_q(qts, "ev", &rsp), "state"),
+                    ==, "waiting");
+    qobject_unref(rsp);
+    /* the test clock from the start: no event runs on host time */
+    femu_events_now(qts, 0);
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_events_now(qts, 150);
+    g_assert_cmpstr(femu_events_field(qts, "ev", 0, "result", &rsp), ==,
+                    "done");
+    qobject_unref(rsp);
+    g_assert_cmpstr(femu_events_field(qts, "ev", 1, "result", &rsp), ==,
+                    "pending");
+    qobject_unref(rsp);
+    ana = femu_ana_states(qts);
+    g_assert_cmpstr(ana, ==, "1:3");
+
+    /* a reset keeps the epoch and what ran */
+    femu_disable(&c);
+    femu_enable(&c, pdev, &qs->alloc);
+    g_assert_cmpstr(qdict_get_str(femu_events_q(qts, "ev", &rsp), "state"),
+                    ==, "running");
+    qobject_unref(rsp);
+    femu_events_now(qts, 350);
+    g_assert_cmpstr(femu_events_field(qts, "ev", 1, "result", &rsp), ==,
+                    "done");
+    qobject_unref(rsp);
+    g_assert_cmpstr(qdict_get_str(femu_events_q(qts, "ev", &rsp), "state"),
+                    ==, "done");
+    qobject_unref(rsp);
+    /* each event ran once: the reset did not start the list again */
+    g_assert_cmpint(femu_events_ran(qts, "ev", 0), ==, 150);
+    g_assert_cmpint(femu_events_ran(qts, "ev", 1), ==, 350);
+    g_free(ana);
+    ana = femu_ana_states(qts);
+    g_assert_cmpstr(ana, ==, "1:1");
+
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(path);
+    rmdir(dir);
+}
+
+/* realize refuses a file it cannot run, and names the line */
+void femu_test_events_bad(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-events-XXXXXX", NULL);
+    QOSState *qs = qtest_pc_boot("-machine pc -nodefaults");
+    static const struct {
+        const char *text;
+        const char *msg;
+    } cases[] = {
+        { "abc ana=1:2\n", "line 1: a time in ms" },
+        { "# ok\n100 frob\n", "line 2: unknown action" },
+        { "100+0~1 ana=1:2\n", "line 1: a window" },
+        { "99999999999999999999 ana=1:2\n", "line 1: a time in ms" },
+        { "100 ana=1:4\n", "line 1: ana state must be 1, 2 or 3" },
+        { "100 ana=1:2 extra\n", "line 1: one action" },
+        { "100 ana=4294967297:3\n", "line 1: ana takes" },
+        { "100 power-loss\n", "needs power_loss=on" },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *path = femu_events_file(dir, cases[i].text);
+        QDict *rsp = qtest_qmp(qs->qts, "{'execute':'device_add','arguments':{"
+                               "'driver':'femu','id':'evbad','addr':'6',"
+                               "'devsz_mb':16,'femu_mode':1,'ana':true,"
+                               "'events_file':%s}}", path);
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("events refused: %s", desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+        unlink(path);
+    }
+    qtest_pc_shutdown(qs);
+    rmdir(dir);
+}
+
+/* the real timer runs an event after the enable, with no test clock */
+void femu_test_events_timer(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-events-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir, "50 ana=1:2\n");
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+        "femu_mode=1,ana=on,events_file=%s", path);
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    g_autofree char *state = NULL;
+    QDict *rsp;
+    int i;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    for (i = 0; i < 300; i++) {
+        g_free(state);
+        state = g_strdup(qdict_get_str(femu_events_q(qs->qts, "ev", &rsp),
+                                       "state"));
+        qobject_unref(rsp);
+        if (!strcmp(state, "done")) {
+            break;
+        }
+        g_usleep(10000);
+    }
+    g_assert_cmpstr(state, ==, "done");
+    g_assert_cmpstr(femu_events_field(qs->qts, "ev", 0, "result", &rsp), ==,
+                    "done");
+    qobject_unref(rsp);
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(path);
+    rmdir(dir);
+}
+
+/* CSTS.RDY of the controller of @c */
+static bool femu_rdy(FemuCtrlState *c)
+{
+    return qpci_io_readl(c->pdev, c->bar, 0x1c) & NVME_CSTS_READY;
+}
+
+/*
+ * ready_ms=200. CSTS.RDY stays 0 until 200 ms of guest time pass. An
+ * Identify sent before then posts nothing, and completes at ready with
+ * no new doorbell write. A reset before the time cancels the start: RDY
+ * stays 0 past the old time, and a new enable waits the whole 200 ms.
+ */
+void femu_test_ready_delay(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t cc = (6 << 16) | (4 << 20) | 1;
+    NvmeCmd cmd;
+    uint16_t got;
+
+    c.alloc = alloc;
+    c.pdev = &femu->dev;
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_start(&c, &femu->dev, alloc, cc);
+    g_assert_false(femu_rdy(&c));
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(1);
+    femu_submit(&c, &c.admin, &cmd);
+    qtest_clock_step(qts, 200 * 1000000LL - 1);
+    g_assert_false(femu_rdy(&c));
+    /* no completion yet: the phase bit of the first entry is still 0 */
+    g_assert_cmpint(qtest_readw(qts, c.admin.cq_addr + 14) & 1, ==, 0);
+    qtest_clock_step(qts, 1);
+    g_assert_true(femu_rdy(&c));
+    g_assert_cmpint(femu_complete(&c, &c.admin, &got, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, c.cid - 1);
+    femu_disable(&c);
+
+    /* a reset at 100 ms cancels the start */
+    memset(&c, 0, sizeof(c));
+    c.alloc = alloc;
+    c.pdev = &femu->dev;
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_start(&c, &femu->dev, alloc, cc);
+    qtest_clock_step(qts, 100 * 1000000LL);
+    qpci_io_writel(c.pdev, c.bar, 0x14, 0);
+    qtest_clock_step(qts, 200 * 1000000LL);
+    g_assert_false(femu_rdy(&c));
+    qpci_io_writel(c.pdev, c.bar, 0x14, cc);
+    qtest_clock_step(qts, 200 * 1000000LL - 1);
+    g_assert_false(femu_rdy(&c));
+    qtest_clock_step(qts, 1);
+    g_assert_true(femu_rdy(&c));
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* qom-set simulate-power-loss on device @id */
+static void femu_cut_power(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':%s,'property':'simulate-power-loss',"
+                           "'value':true}}", path);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* enable, then the guest time in ms until CSTS.RDY, stepped 1 ms a time */
+static int femu_ms_to_ready(FemuCtrlState *c, QGuestAllocator *alloc)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    int ms = 0;
+
+    femu_queue_init(c, &c->admin, 0);
+    femu_enable_start(c, c->pdev, alloc, (6 << 16) | (4 << 20) | 1);
+    while (!femu_rdy(c)) {
+        g_assert_cmpint(ms, <, 8000);
+        qtest_clock_step(qts, 1000000LL);
+        ms++;
+    }
+    return ms;
+}
+
+/*
+ * ready_ms=50, recovery_ms=300. A power cut makes the next start take
+ * 300 ms. A cut during that start ends it, and the start after it
+ * takes 300 ms again. Once ready, a plain reset takes 50 ms.
+ */
+void femu_test_recovery_delay(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+
+    c.alloc = alloc;
+    c.pdev = &femu->dev;
+    g_assert_cmpint(femu_ms_to_ready(&c, alloc), ==, 50);
+    femu_cut_power(qts, "rec");
+    femu_disable(&c);
+    g_assert_cmpint(femu_ms_to_ready(&c, alloc), ==, 300);
+    femu_disable(&c);
+    g_assert_cmpint(femu_ms_to_ready(&c, alloc), ==, 50);
+
+    /* a cut during recovery: the next start recovers again */
+    femu_cut_power(qts, "rec");
+    femu_disable(&c);
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_start(&c, c.pdev, alloc, (6 << 16) | (4 << 20) | 1);
+    qtest_clock_step(qts, 100 * 1000000LL);
+    g_assert_false(femu_rdy(&c));
+    femu_cut_power(qts, "rec");
+    /* the old start must not come ready */
+    qtest_clock_step(qts, 300 * 1000000LL);
+    g_assert_false(femu_rdy(&c));
+    femu_disable(&c);
+    g_assert_cmpint(femu_ms_to_ready(&c, alloc), ==, 300);
+
+    /* a reset ends a recovery, but only ready ends the need for it */
+    femu_cut_power(qts, "rec");
+    femu_disable(&c);
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_start(&c, c.pdev, alloc, (6 << 16) | (4 << 20) | 1);
+    qtest_clock_step(qts, 100 * 1000000LL);
+    femu_disable(&c);
+    g_assert_cmpint(femu_ms_to_ready(&c, alloc), ==, 300);
+    femu_disable(&c);
+}
+
+/*
+ * ready_ms=200 and no ocp. A system reset at 100 ms ends the start: the
+ * Identify queued before it never runs, its buffer and the completion
+ * queue keep their contents, and the controller is not ready after.
+ */
+void femu_test_ready_sysreset(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=rs,addr=5,devsz_mb=16,"
+        "femu_mode=1,ready_ms=200");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    NvmeCmd cmd;
+
+    c.alloc = &qs->alloc;
+    c.pdev = pdev;
+    qtest_memset(qts, buf, 0xa5, 4096);
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_start(&c, pdev, &qs->alloc, (6 << 16) | (4 << 20) | 1);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(1);
+    femu_submit(&c, &c.admin, &cmd);
+    qtest_clock_step(qts, 100 * 1000000LL);
+    qtest_qmp_assert_success(qts, "{'execute':'system_reset'}");
+    qtest_qmp_eventwait(qts, "RESET");
+    qtest_clock_step(qts, 300 * 1000000LL);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0xa5);
+    g_assert_cmpint(qtest_readw(qts, c.admin.cq_addr + 14) & 1, ==, 0);
+    qpci_device_enable(pdev);
+    c.bar = qpci_iomap(pdev, 0, NULL);
+    g_assert_false(femu_rdy(&c));
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+/* values the host could time out on, and recovery below ready, refuse */
+void femu_test_ready_bad(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const char *const bad[] = {
+        "'ready_ms':7500", "'recovery_ms':7500",
+        "'ready_ms':100,'recovery_ms':50",
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *json = g_strdup_printf(
+            "{'driver':'femu','id':'rdb','addr':'6','devsz_mb':16,"
+            "'femu_mode':1,%s}", bad[i]);
+        QObject *args = qobject_from_json(json, &error_abort);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add',"
+                               "'arguments':%p}", args);
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("ready-bad %s: %s", bad[i],
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), "_ms"));
+        qobject_unref(rsp);
+    }
+}
+
+/* the record of LUN @idx in a dies listing */
+static QDict *femu_die_at(QList *dies, uint32_t idx)
+{
+    const QListEntry *e;
+    uint32_t i = 0;
+
+    QLIST_FOREACH_ENTRY(dies, e) {
+        if (i++ == idx) {
+            return qobject_to(QDict, qlist_entry_obj(e));
+        }
+    }
+    g_assert_not_reached();
+}
+
+/*
+ * die_stats=on, 20 ms reads. Page 0 is on LUN 0:0, page 1 on LUN 1:0.
+ * Two reads of page 0 go in together: the second waits for the first.
+ * LUN 0:0 then has 3 bookings (a program, two reads), 1 wait of at most
+ * one read time, and the array time of a program and two reads; LUN 1:0
+ * has its program only. A window of one LUN continues at 1.
+ */
+void femu_test_die_stats(void *obj, void *data,
+                         QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    QDict *rsp;
+    QDict *ns;
+    QDict *md;
+    QDict *d;
+    QList *dies;
+    uint64_t rd;
+    uint64_t wr;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 8, buf)), ==,
+                    NVME_SUCCESS);
+    /* both reads are fetched in one sweep, so the second one waits */
+    femu_fetch_hold(qts, "dst", 1);
+    for (int i = 0; i < 2; i++) {
+        NvmeRwCmd rw = { 0 };
+
+        rw.opcode = NVME_CMD_READ;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c.lba_size - 1);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    femu_fetch_hold(qts, "dst", 0);
+    for (int i = 0; i < 2; i++) {
+        uint16_t cid;
+
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+
+    ns = femu_query_ns(qts, "'path':'/machine/peripheral/dst',"
+                       "'kind':'dies','nsid':1", &rsp);
+    md = qdict_get_qdict(ns, "media");
+    rd = qdict_get_int(md, "read-ns");
+    wr = qdict_get_int(md, "program-ns");
+    dies = qdict_get_qlist(ns, "dies");
+    g_assert_cmpuint(qlist_size(dies), ==, 64);
+    d = femu_die_at(dies, 0);
+    g_test_message("die 0:0: ops %" PRId64 " waits %" PRId64 " wait-ns %"
+                   PRId64 " array-ns %" PRId64, qdict_get_int(d, "ops"),
+                   qdict_get_int(d, "waits"), qdict_get_int(d, "wait-ns"),
+                   qdict_get_int(d, "array-ns"));
+    g_assert_cmpint(qdict_get_int(d, "ops"), ==, 3);
+    g_assert_cmpint(qdict_get_int(d, "waits"), ==, 1);
+    g_assert_cmpint(qdict_get_int(d, "wait-ns"), >, 0);
+    g_assert_cmpint(qdict_get_int(d, "wait-ns"), <=, rd);
+    g_assert_cmpint(qdict_get_int(d, "array-ns"), ==, wr + 2 * rd);
+    d = femu_die_at(dies, 8);
+    g_assert_cmpint(qdict_get_int(d, "channel"), ==, 1);
+    g_assert_cmpint(qdict_get_int(d, "lun"), ==, 0);
+    g_assert_cmpint(qdict_get_int(d, "ops"), ==, 1);
+    g_assert_cmpint(qdict_get_int(d, "waits"), ==, 0);
+    g_assert_cmpint(qdict_get_int(d, "array-ns"), ==, wr);
+    d = qdict_get_qdict(ns, "most-waited");
+    g_assert_cmpint(qdict_get_int(d, "channel"), ==, 0);
+    g_assert_cmpint(qdict_get_int(d, "lun"), ==, 0);
+    qobject_unref(rsp);
+
+    /* a window of one LUN at 8 continues at 9; the maximum is global */
+    ns = femu_query_ns(qts, "'path':'/machine/peripheral/dst',"
+                       "'kind':'dies','nsid':1,'offset':8,'limit':1", &rsp);
+    g_assert_cmpuint(qlist_size(qdict_get_qlist(ns, "dies")), ==, 1);
+    g_assert_cmpint(qdict_get_int(ns, "next-offset"), ==, 9);
+    d = qdict_get_qdict(ns, "most-waited");
+    g_assert_cmpint(qdict_get_int(d, "channel"), ==, 0);
+    g_assert_cmpint(qdict_get_int(d, "lun"), ==, 0);
+    g_assert_cmpint(qdict_get_int(d, "ops"), ==, 3);
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * die_stats is refused where it cannot count, and kind dies without it.
+ */
+void femu_test_die_stats_refused(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *want;
+    } bad[] = {
+        { "'femu_mode':2,'die_stats':true", "die_stats requires bbssd" },
+        { "'femu_mode':1,'die_stats':true,'plane_reads':true,"
+          "'pls_per_lun':2", "die_stats does not count" },
+        { "'femu_mode':1,'die_stats':true,'pe_suspend':1",
+          "die_stats does not count" },
+        { "'femu_mode':1,'die_stats':true,'read_prio':1",
+          "die_stats does not count" },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *json = g_strdup_printf(
+            "{'driver':'femu','id':'dsr','addr':'6','devsz_mb':16,%s}",
+            bad[i].opts);
+        QObject *args = qobject_from_json(json, &error_abort);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add',"
+                               "'arguments':%p}", args);
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_test_message("die-stats-refused %s: %s", bad[i].opts,
+                       qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), bad[i].want));
+        qobject_unref(rsp);
+    }
+    femu_query_fails(qts, "'path':'/machine/peripheral/dso','kind':'dies',"
+                     "'nsid':1", "needs die_stats=on");
+}
+
+/* qom-set die-slow of device @id; returns the error text or NULL */
+static char *femu_die_slow_set(QTestState *qts, const char *id,
+                               const char *v)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':%s,'property':'die-slow','value':%s}}",
+                           path, v);
+    char *err = NULL;
+
+    if (qdict_haskey(rsp, "error")) {
+        err = g_strdup(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                     "desc"));
+    }
+    qobject_unref(rsp);
+    return err;
+}
+
+static char *femu_die_slow_get(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'die-slow'}}", path);
+    char *v = g_strdup(qdict_get_str(rsp, "return"));
+
+    qobject_unref(rsp);
+    return v;
+}
+
+/* the one slow LUN query-femu of device @id reports, as "<ch>:<lun>:<pct>" */
+static char *femu_query_slow_luns(QTestState *qts, const char *id)
+{
+    g_autofree char *arg = g_strdup_printf("'path':'/machine/peripheral/%s'",
+                                           id);
+    QDict *rsp;
+    QDict *md = qdict_get_qdict(femu_query_ns(qts, arg, &rsp), "media");
+    QList *sl = qdict_haskey(md, "slow-luns") ?
+                qdict_get_qlist(md, "slow-luns") : NULL;
+    char *v;
+
+    if (!sl) {
+        v = g_strdup("");
+    } else {
+        QDict *e;
+
+        g_assert_cmpuint(qlist_size(sl), ==, 1);
+        e = qobject_to(QDict, qlist_peek(sl));
+        v = g_strdup_printf("%" PRId64 ":%" PRId64 ":%" PRId64,
+                            qdict_get_int(e, "channel"),
+                            qdict_get_int(e, "lun"),
+                            qdict_get_int(e, "percent"));
+    }
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * die_slow=on, 20 ms page reads. Page 0 is on LUN 0 of channel 0, page
+ * 1 on channel 1 and page 8 on LUN 1 of channel 0. At 500% LUN 0:0 reads
+ * take about 100 ms; channel 1 keeps 20 ms. Back at 100 both are nominal.
+ * Bad values are refused and change nothing. LUN 0:1 at 500% slows page
+ * 8 and leaves page 0 nominal.
+ */
+void femu_test_die_slow(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    static const char *const bad[] = {
+        "0:0:99", "0:0:10001", "8:0:500", "0:8:500", "0:0", "0:0:500x",
+        "x:0:500", "0:0:99999999999999999999",
+    };
+    g_autofree char *v = NULL;
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x78, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 8, buf)), ==,
+                    NVME_SUCCESS);
+    /* pages 2 to 8: the write pointer crosses 8 channels, then LUN 1 */
+    for (uint64_t pg = 2; pg <= 8; pg++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, pg * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    us = femu_timed_read(&c, 0, buf);
+    g_test_message("die_slow: LUN 0:0 nominal %" PRId64 " us", us);
+    g_assert_cmpint(us, <, 60000);
+
+    g_assert_null(femu_die_slow_set(qts, "ds", "0:0:500"));
+    v = femu_die_slow_get(qts, "ds");
+    g_assert_cmpstr(v, ==, "0:0:500");
+    g_free(v);
+    v = femu_query_slow_luns(qts, "ds");
+    g_assert_cmpstr(v, ==, "0:0:500");
+    us = femu_timed_read(&c, 0, buf);
+    g_test_message("die_slow: LUN 0:0 at 500%% %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 80000);
+    us = femu_timed_read(&c, 1, buf);
+    g_test_message("die_slow: channel 1 %" PRId64 " us", us);
+    g_assert_cmpint(us, <, 60000);
+
+    for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *err = femu_die_slow_set(qts, "ds", bad[i]);
+
+        g_assert_nonnull(err);
+        g_assert_nonnull(strstr(err, "die-slow takes"));
+    }
+    g_free(v);
+    v = femu_die_slow_get(qts, "ds");
+    g_assert_cmpstr(v, ==, "0:0:500");
+
+    g_assert_null(femu_die_slow_set(qts, "ds", "0:0:100"));
+    g_free(v);
+    v = femu_die_slow_get(qts, "ds");
+    g_assert_cmpstr(v, ==, "");
+    us = femu_timed_read(&c, 0, buf);
+    g_assert_cmpint(us, <, 60000);
+
+    /* LUN 1 of channel 0 is another die: LUN 0:0 keeps its time */
+    g_assert_null(femu_die_slow_set(qts, "ds", "0:1:500"));
+    g_free(v);
+    v = femu_query_slow_luns(qts, "ds");
+    g_assert_cmpstr(v, ==, "0:1:500");
+    us = femu_timed_read(&c, 0, buf);
+    g_test_message("die_slow: LUN 0:0 with 0:1 slow %" PRId64 " us", us);
+    g_assert_cmpint(us, <, 60000);
+    us = femu_timed_read(&c, 8, buf);
+    g_test_message("die_slow: LUN 0:1 at 500%% %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 80000);
+    g_assert_null(femu_die_slow_set(qts, "ds", "0:1:100"));
+    g_free(v);
+    v = femu_query_slow_luns(qts, "ds");
+    g_assert_cmpstr(v, ==, "");
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* without die_slow=on the property is refused */
+void femu_test_die_slow_off(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *err = femu_die_slow_set(qts, "ds", "0:0:500");
+    g_autofree char *v = NULL;
+    QDict *rsp;
+
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "die_slow=on"));
+    v = femu_die_slow_get(qts, "ds");
+    g_assert_cmpstr(v, ==, "");
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'dsz','addr':'6','devsz_mb':16,"
+                    "'femu_mode':3,'die_slow':true}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "die_slow requires"));
+    qobject_unref(rsp);
+    /* "<ch>:<lun>" names no namespace: two namespaces are refused */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'dsz','addr':'6','devsz_mb':16,"
+                    "'femu_mode':1,'namespaces':2,'die_slow':true}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "one namespace"));
+    qobject_unref(rsp);
+    /* a bad geometry is an error reply, not an abort when sizing the table */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'dsz','addr':'6','devsz_mb':16,"
+                    "'femu_mode':1,'nchs':-1,'die_slow':true}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+}
+
+/* an events_file slows a die at 100 ms and restores it at 300 ms */
+void femu_test_die_slow_events(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-events-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir,
+        "100 slow=0:1:300\n300 slow=0:1:100\n");
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+        "femu_mode=1,die_slow=on,events_file=%s", path);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    g_autofree char *v = NULL;
+
+    femu_events_now(qts, 0);
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_events_now(qts, 150);
+    v = femu_die_slow_get(qts, "ev");
+    g_assert_cmpstr(v, ==, "0:1:300");
+    femu_events_now(qts, 350);
+    g_free(v);
+    v = femu_die_slow_get(qts, "ev");
+    g_assert_cmpstr(v, ==, "");
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(path);
+    rmdir(dir);
+}
+
+#define FEMU_PFTL_OPTS \
+    "devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16," \
+    "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=2,persist_ftl=on"
+
+/*
+ * persist_ftl: run 1 writes 1024 pages and overwrites 640, so collection
+ * runs, then overwrites 11 more pages so victim lines wait in the heap,
+ * and quits. Run 2 starts with the same lines, blocks and counters,
+ * reads the data, and its next write lands on the open line of run 1. That
+ * write replaces a mapped page: the valid pages stay 1024, one per LPN, as
+ * the mapping came back. femu-save-data saves the live FTL. The file then
+ * refuses another gc_policy and read_cache_mb.
+ */
+void femu_test_persist_ftl(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-pftl-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "data", NULL);
+    g_autofree char *lock = g_strconcat(path, ".lock", NULL);
+    g_autofree char *lines = NULL;
+    g_autofree char *blocks = NULL;
+    g_autofree char *ctrs = NULL;
+    QDict *rsp;
+
+    for (int run = 1; run <= 2; run++) {
+        QOSState *qs = qtest_pc_boot(
+            "-machine pc -nodefaults -device femu,id=pd,addr=5,"
+            FEMU_PFTL_OPTS ",persist_file=%s", path);
+        QTestState *qts = qs->qts;
+        QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+        FemuCtrlState c = { 0 };
+        uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+        femu_enable(&c, pdev, &qs->alloc);
+        femu_create_io_queues(&c);
+        if (run == 1) {
+            for (int i = 0; i < 1024 + 640; i++) {
+                qtest_memset(qts, buf, (i % 1024) & 0xff, 4096);
+                g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                                (i % 1024) * 8, buf)), ==,
+                                NVME_SUCCESS);
+            }
+            /* a page in each of many full lines: victims to restore */
+            for (int i = 0; i < 1024; i += 97) {
+                qtest_memset(qts, buf, i & 0xff, 4096);
+                g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8,
+                                                buf)), ==, NVME_SUCCESS);
+            }
+            lines = femu_ftl_dump(qts, "lines", 40);
+            g_assert_nonnull(strstr(lines, "\"victim\""));
+            blocks = femu_ftl_dump(qts, "blocks", 80);
+            ctrs = femu_ftl_counters(qts);
+            g_test_message("persist_ftl: run 1 %s", ctrs);
+            g_assert_cmpuint(femu_ftl_vpc_sum(qts), ==, 1024);
+            g_assert_null(strstr(ctrs, "gc 0 "));
+            femu_disable(&c);
+            femu_queue_free(&c, &c.io);
+            qtest_qmp_send(qts, "{'execute':'quit'}");
+            qtest_set_expected_status(qts, 0);
+            qtest_wait_qemu(qts);
+        } else {
+            g_autofree char *l2 = femu_ftl_dump(qts, "lines", 40);
+            g_autofree char *b2 = femu_ftl_dump(qts, "blocks", 80);
+            g_autofree char *c2 = femu_ftl_counters(qts);
+            uint8_t got;
+            int open = -1;
+            uint64_t vpc, vpc2;
+
+            g_assert_cmpstr(l2, ==, lines);
+            g_assert_cmpstr(b2, ==, blocks);
+            g_assert_cmpstr(c2, ==, ctrs);
+            g_assert_cmpuint(femu_ftl_vpc_sum(qts), ==, 1024);
+            for (int i = 0; i < 1024; i += 97) {
+                g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, i * 8,
+                                                buf)), ==, NVME_SUCCESS);
+                got = qtest_readb(qts, buf);
+                g_assert_cmpuint(got, ==, i & 0xff);
+            }
+            /* the next program goes to the open line of run 1 */
+            for (int i = 0; i < 40 && open < 0; i++) {
+                g_autofree char *st = femu_line_state(
+                    qts, "/machine/peripheral/pd", i, &vpc);
+
+                if (!strcmp(st, "open")) {
+                    open = i;
+                }
+            }
+            g_assert_cmpint(open, >=, 0);
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 1023 * 8,
+                                            buf)), ==, NVME_SUCCESS);
+            g_free(femu_line_state(qts, "/machine/peripheral/pd", open,
+                                   &vpc2));
+            g_assert_true(vpc2 == vpc + 1 || vpc + 1 == 32);
+            g_assert_cmpuint(femu_ftl_vpc_sum(qts), ==, 1024);
+            {
+                g_autofree char *p2 = g_build_filename(dir, "ckpt", NULL);
+                g_autofree char *l2k = g_strconcat(p2, ".lock", NULL);
+                g_autofree char *err = femu_save_data(qts, "pd", p2);
+
+                g_assert_null(err);
+                unlink(p2);
+                unlink(l2k);
+            }
+            femu_disable(&c);
+            femu_queue_free(&c, &c.io);
+            qpci_unplug_acpi_device_test(qts, "pd", 5);
+            rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                            "'driver':'femu','id':'pe','addr':'6',"
+                            "'devsz_mb':4,'femu_mode':1,'secsz':512,"
+                            "'secs_per_pg':8,'pgs_per_blk':16,"
+                            "'blks_per_pl':40,'pls_per_lun':1,"
+                            "'luns_per_ch':1,'nchs':2,'persist_ftl':true,"
+                            "'gc_policy':'fifo','persist_file':%s}}", path);
+            g_assert_true(qdict_haskey(rsp, "error"));
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                             "error"), "desc"), "other FTL properties"));
+            qobject_unref(rsp);
+            rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                            "'driver':'femu','id':'pe','addr':'6',"
+                            "'devsz_mb':4,'femu_mode':1,'persist_ftl':true,"
+                            "'read_cache_mb':1,'persist_file':%s}}", path);
+            g_assert_true(qdict_haskey(rsp, "error"));
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                             "error"), "desc"), "read_cache_mb"));
+            qobject_unref(rsp);
+        }
+        guest_free(&qs->alloc, buf);
+        g_free(pdev);
+        qtest_pc_shutdown(qs);
+    }
+    unlink(lock);
+    unlink(path);
+    rmdir(dir);
+}
+
+/* the byte of retention_refreshes in the FEMU statistics log */
+#define FEMU_PA_REFRESH_OFF 48
+
+/*
+ * persist-retention: retention_limit_sec=3. Run 1 fills 32 lines and
+ * quits 2 s later. Run 2 reads page 1023 and writes at once: the last line
+ * closed with that page, so it is about 2 s old, below the limit, and no
+ * refresh runs. 2 s later the same read and write refresh it: the age came
+ * back. (Page 0 closed its line at the start of a long write loop.) QEMU
+ * stays down 2 s between the runs. A load that lost the age would see 2 s
+ * at the second read; one that aged the media by the downtime would see
+ * 4 s and refresh at the first read.
+ */
+void femu_test_persist_retention(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-pret-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "data", NULL);
+    g_autofree char *lock = g_strconcat(path, ".lock", NULL);
+    const char *opts;
+    FemuPa p = { .trace = g_string_new(NULL) };
+    uint8_t page[512];
+
+    opts = "devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16,"
+           "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=2,"
+           "retention_limit_sec=3";
+    femu_pa_boot(&p, opts, path);
+    for (int lpn = 0; lpn < 1024; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&p.c, NVME_CMD_WRITE, lpn * 8,
+                                        p.buf)), ==, NVME_SUCCESS);
+    }
+    g_usleep(2 * G_USEC_PER_SEC);
+    femu_pa_end(&p, true);
+    /* the downtime: 2 s more would take the line past the limit */
+    g_usleep(2 * G_USEC_PER_SEC);
+    femu_pa_boot(&p, opts, path);
+    for (int k = 0; k < 2; k++) {
+        if (k) {
+            g_usleep(2 * G_USEC_PER_SEC);
+        }
+        g_assert_cmpint(FEMU_SC(femu_rw(&p.c, NVME_CMD_READ, 1023 * 8,
+                                        p.buf)), ==, NVME_SUCCESS);
+        g_assert_cmpint(FEMU_SC(femu_rw(&p.c, NVME_CMD_WRITE, 0, p.buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(FEMU_SC(femu_get_log(&p.c, FEMU_LOG_FEMU_STATS,
+                                             p.log, 512, 0)), ==,
+                        NVME_SUCCESS);
+        qtest_memread(p.qts, p.log, page, 512);
+        g_test_message("retention refreshes after read %d: %" PRIu64, k,
+                       ldq_le_p(page + FEMU_PA_REFRESH_OFF));
+        g_assert_cmpuint(ldq_le_p(page + FEMU_PA_REFRESH_OFF), ==, k);
+    }
+    femu_pa_end(&p, false);
+    g_string_free(p.trace, true);
+    unlink(lock);
+    unlink(path);
+    rmdir(dir);
+}
+
+/* device_add a femu device at slot 6 with @members; its error text */
+static char *femu_mode_add(QTestState *qts, const char *members)
+{
+    g_autofree char *json = g_strdup_printf(
+        "{'driver':'femu','id':'mx','addr':'6','devsz_mb':16,%s}", members);
+    QObject *args = qobject_from_json(json, &error_abort);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                           args);
+    char *err = NULL;
+
+    if (qdict_haskey(rsp, "error")) {
+        err = g_strdup(qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+    }
+    qobject_unref(rsp);
+    return err;
+}
+
+/*
+ * mode=bbssd (the device line of this test) builds a bbssd device: its
+ * FTL answers query-femu. mode=bogus fails with the list of names, and
+ * mode=zns with femu_mode=1 fails as two modes. Through QMP, a matching
+ * pair in another letter case works, and femu_mode reads 1.
+ */
+void femu_test_mode_names(void *obj, void *data,
+                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    QDict *rsp;
+    QDict *ns;
+    g_autofree char *e1 = NULL;
+    g_autofree char *e2 = NULL;
+
+    /* query-femu answers an enabled controller */
+    femu_enable(&c, &femu->dev, alloc);
+    ns = femu_query_ns(qts, "'path':'/machine/peripheral/mode-test',"
+                       "'kind':'lines','offset':0,'limit':1", &rsp);
+    g_assert_nonnull(qdict_get_qlist(ns, "lines"));
+    qobject_unref(rsp);
+    femu_disable(&c);
+    e1 = femu_mode_add(qts, "'mode':'bogus'");
+    g_assert_nonnull(e1);
+    g_assert_nonnull(strstr(e1, "is not one of ocssd, bbssd"));
+    e2 = femu_mode_add(qts, "'mode':'zns','femu_mode':1");
+    g_assert_nonnull(e2);
+    g_assert_nonnull(strstr(e2, "name different modes"));
+    g_assert_null(femu_mode_add(qts, "'mode':'BBSSD','femu_mode':1"));
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/mx','property':'femu_mode'}}");
+    g_assert_cmpint(qdict_get_int(rsp, "return"), ==, 1);
+    qobject_unref(rsp);
+}
+
+/* the SHA-256 of @file */
+static char *femu_ckpt_sum(const char *file)
+{
+    g_autofree char *buf = NULL;
+    gsize len;
+
+    g_assert_true(g_file_get_contents(file, &buf, &len, NULL));
+    return g_compute_checksum_for_data(G_CHECKSUM_SHA256, (guchar *)buf, len);
+}
+
+/* @file has its bytes of @sum, and its inode is still @ino */
+static void femu_ckpt_same(const char *file, const char *sum, uint64_t ino)
+{
+    g_autofree char *now = femu_ckpt_sum(file);
+    struct stat st;
+
+    g_assert_cmpstr(now, ==, sum);
+    g_assert_cmpint(stat(file, &st), ==, 0);
+    g_assert_cmpuint(st.st_ino, ==, ino);
+}
+
+/* open @file and return its inode; the open keeps the inode in use */
+static uint64_t femu_ckpt_hold(const char *file, int *fd)
+{
+    struct stat st;
+
+    *fd = open(file, O_RDONLY);
+    g_assert_cmpint(*fd, >=, 0);
+    g_assert_cmpint(fstat(*fd, &st), ==, 0);
+    return st.st_ino;
+}
+
+void femu_test_checkpoint_reuse(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *dir = g_dir_make_tmp("femu-reuse-XXXXXX", NULL);
+    g_autofree char *b = g_build_filename(dir, "b", NULL);
+    g_autofree char *alias = g_build_filename(dir, "alias", NULL);
+    g_autofree char *c_file = g_build_filename(dir, "c", NULL);
+    g_autofree char *none = g_build_filename(dir, "none", NULL);
+    g_autofree char *pel = g_build_filename(dir, "x.lock", NULL);
+    g_autofree char *lock_b = g_strconcat(b, ".lock", NULL);
+    g_autofree char *lock_c = g_strconcat(c_file, ".lock", NULL);
+    g_autofree char *lock_n = g_strconcat(none, ".lock", NULL);
+    g_autofree char *rb = g_strdup_printf(",'femu_mode':1,'persist_file':"
+                                          "'%s','persist_load_only':true", b);
+    g_autofree char *rc = g_strdup_printf(",'femu_mode':1,'persist_file':"
+                                          "'%s','persist_load_only':true",
+                                          c_file);
+    g_autofree char *wb = g_strdup_printf(",'femu_mode':1,'persist_file':"
+                                          "'%s'", b);
+    g_autofree char *rn = g_strdup_printf(",'femu_mode':1,'persist_file':"
+                                          "'%s','persist_load_only':true",
+                                          none);
+    g_autofree char *pl = g_strdup_printf(",'femu_mode':1,'pel_file':'%s'",
+                                          pel);
+    g_autofree char *rbp = g_strdup_printf("%s,'pel_file':'%s'", rb, pel);
+    g_autofree char *sum_b = NULL;
+    g_autofree char *sum_c = NULL;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    FemuCtrlState c1 = { 0 };
+    FemuCtrlState c2 = { 0 };
+    QPCIDevice *p1;
+    QPCIDevice *p2;
+    QOSState *qs2;
+    uint64_t ino_b;
+    uint64_t ino_c;
+    int fd_b;
+    int fd_c;
+    char *err;
+
+    femu_ckpt_add(qts, "ck", 5, ",'femu_mode':1");
+    p1 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c1, p1, alloc);
+    femu_create_io_queues(&c1);
+    femu_ns_page(&c1, buf, 1, 2, 0x21, true);
+    g_assert_null(femu_save_data(qts, "ck", b));
+    femu_disable(&c1);
+    femu_queue_free(&c1, &c1.io);
+    qpci_unplug_acpi_device_test(qts, "ck", 5);
+    g_free(p1);
+    sum_b = femu_ckpt_sum(b);
+    ino_b = femu_ckpt_hold(b, &fd_b);
+    g_assert_cmpint(symlink(b, alias), ==, 0);
+
+    /* two readers of B, each with its own copy */
+    memset(&c1, 0, sizeof(c1));
+    femu_ckpt_add(qts, "r1", 5, rb);
+    femu_ckpt_add(qts, "r2", 6, rb);
+    p1 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    p2 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(6, 0));
+    femu_enable(&c1, p1, alloc);
+    femu_create_io_queues(&c1);
+    femu_enable(&c2, p2, alloc);
+    femu_create_io_queues(&c2);
+    femu_ns_page(&c1, buf, 1, 2, 0x21, false);
+    femu_ns_page(&c2, buf, 1, 2, 0x21, false);
+    femu_ns_page(&c1, buf, 1, 2, 0x31, true);
+    femu_ns_page(&c2, buf, 1, 2, 0x41, true);
+    femu_ns_page(&c1, buf, 1, 2, 0x31, false);
+    femu_ns_page(&c2, buf, 1, 2, 0x41, false);
+
+    /* a writer of B and a save to B fail while a reader holds B */
+    err = femu_ckpt_try_add(qts, "w", 7, wb);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    femu_ckpt_add(qts, "x", 7, ",'femu_mode':1");
+    err = femu_save_data(qts, "x", b);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    qpci_unplug_acpi_device_test(qts, "x", 7);
+    err = femu_save_data(qts, "r1", b);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "persist_load_only checkpoint"));
+    g_free(err);
+    g_assert_null(femu_save_data(qts, "r1", c_file));
+    femu_ckpt_same(b, sum_b, ino_b);
+    sum_c = femu_ckpt_sum(c_file);
+    ino_c = femu_ckpt_hold(c_file, &fd_c);
+
+    femu_disable(&c1);
+    femu_queue_free(&c1, &c1.io);
+    qpci_unplug_acpi_device_test(qts, "r1", 5);
+    g_free(p1);
+    femu_ckpt_same(b, sum_b, ino_b);
+    err = femu_ckpt_try_add(qts, "w", 7, wb);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    /* r2 is the only reader: it still cannot save B, also through a link */
+    err = femu_save_data(qts, "r2", b);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "persist_load_only checkpoint"));
+    g_free(err);
+    err = femu_save_data(qts, "r2", alias);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "persist_load_only checkpoint"));
+    g_free(err);
+    femu_disable(&c2);
+    femu_queue_free(&c2, &c2.io);
+    qpci_unplug_acpi_device_test(qts, "r2", 6);
+    g_free(p2);
+    femu_ckpt_same(b, sum_b, ino_b);
+
+    /* the PEL fails after the load: realize must release B */
+    err = femu_ckpt_try_add(qts, "rp", 5, rbp);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "ends in .lock"));
+    g_free(err);
+    /* a reader needs no write access to the directory of B */
+    g_assert_cmpint(chmod(dir, 0500), ==, 0);
+    femu_ckpt_add(qts, "r7", 5, rb);
+    qpci_unplug_acpi_device_test(qts, "r7", 5);
+    g_assert_cmpint(chmod(dir, 0700), ==, 0);
+    femu_ckpt_same(b, sum_b, ino_b);
+
+    /* the last reader left: a writer starts, and a reader cannot */
+    femu_ckpt_add(qts, "w", 7, wb);
+    err = femu_ckpt_try_add(qts, "r3", 5, rb);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    qpci_unplug_acpi_device_test(qts, "w", 7);
+
+    /*
+     * C holds the page of r1. While r4 holds C, a second QEMU loads it,
+     * writes the page and quits with the reader plugged.
+     */
+    memset(&c1, 0, sizeof(c1));
+    femu_ckpt_add(qts, "r4", 5, rc);
+    p1 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c1, p1, alloc);
+    femu_create_io_queues(&c1);
+    femu_ns_page(&c1, buf, 1, 2, 0x31, false);
+    qs2 = qtest_pc_boot("-machine pc -nodefaults -device femu,addr=5,id=q2,"
+                        "devsz_mb=16,femu_mode=1,persist_file=%s,"
+                        "persist_load_only=on", c_file);
+    {
+        QPCIDevice *pq = qpci_device_find(qs2->pcibus, QPCI_DEVFN(5, 0));
+        uint64_t buf2 = guest_alloc(&qs2->alloc, 4096);
+        FemuCtrlState cq = { 0 };
+
+        femu_enable(&cq, pq, &qs2->alloc);
+        femu_create_io_queues(&cq);
+        femu_ns_page(&cq, buf2, 1, 2, 0x31, false);
+        femu_ns_page(&cq, buf2, 1, 2, 0x71, true);
+        femu_ns_page(&cq, buf2, 1, 2, 0x71, false);
+        qtest_qmp_send(qs2->qts, "{'execute':'quit'}");
+        qtest_set_expected_status(qs2->qts, 0);
+        qtest_wait_qemu(qs2->qts);
+        guest_free(&qs2->alloc, buf2);
+        g_free(pq);
+        qtest_pc_shutdown(qs2);
+    }
+    femu_ckpt_same(c_file, sum_c, ino_c);
+    femu_disable(&c1);
+    femu_queue_free(&c1, &c1.io);
+    qpci_unplug_acpi_device_test(qts, "r4", 5);
+    g_free(p1);
+    femu_ckpt_same(c_file, sum_c, ino_c);
+
+    /* no checkpoint to load; a PEL file that names a lock file */
+    err = femu_ckpt_try_add(qts, "r5", 5, rn);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "needs an existing persist_file"));
+    g_free(err);
+    err = femu_ckpt_try_add(qts, "r6", 5, pl);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "ends in .lock"));
+    g_free(err);
+
+    close(fd_b);
+    close(fd_c);
+    guest_free(alloc, buf);
+    unlink(alias);
+    unlink(lock_b);
+    unlink(lock_c);
+    unlink(lock_n);
+    unlink(b);
+    unlink(c_file);
+    rmdir(dir);
+}
+
+/*
+ * persist_load_only in a read-only directory with no lock file: checkpoint
+ * B holds page 2 = 0x21. Two readers load B, make no lock file and leave
+ * the bytes and the inode of B. While a reader holds B, a writer of B and
+ * a save to B fail in the directory made writable again. After the readers
+ * leave, a save that cannot read B refuses, and the writer starts. The
+ * readers need a local file system. A new lock file has mode 0644, and
+ * the empty lock file of the writer stays after unplug. Root ignores the
+ * directory mode, so root skips the test.
+ */
+void femu_test_checkpoint_ro_dir(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *dir = NULL;
+    g_autofree char *b = NULL;
+    g_autofree char *lock_b = NULL;
+    g_autofree char *rb = NULL;
+    g_autofree char *wb = NULL;
+    g_autofree char *sum_b = NULL;
+    FemuCtrlState c1 = { 0 };
+    FemuCtrlState c2 = { 0 };
+    QPCIDevice *p1;
+    QPCIDevice *p2;
+    struct stat st;
+    uint64_t ino_b;
+    uint64_t buf;
+    int fd_b;
+    char *err;
+
+    if (geteuid() == 0) {
+        g_test_skip("root can write a read-only directory");
+        return;
+    }
+    dir = g_dir_make_tmp("femu-rodir-XXXXXX", NULL);
+    b = g_build_filename(dir, "b", NULL);
+    lock_b = g_strconcat(b, ".lock", NULL);
+    rb = g_strdup_printf(",'femu_mode':1,'persist_file':'%s',"
+                         "'persist_load_only':true", b);
+    wb = g_strdup_printf(",'femu_mode':1,'persist_file':'%s'", b);
+    buf = guest_alloc(alloc, 4096);
+
+    femu_ckpt_add(qts, "ck", 5, ",'femu_mode':1");
+    p1 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c1, p1, alloc);
+    femu_create_io_queues(&c1);
+    femu_ns_page(&c1, buf, 1, 2, 0x21, true);
+    g_assert_null(femu_save_data(qts, "ck", b));
+    femu_disable(&c1);
+    femu_queue_free(&c1, &c1.io);
+    qpci_unplug_acpi_device_test(qts, "ck", 5);
+    g_free(p1);
+    sum_b = femu_ckpt_sum(b);
+    ino_b = femu_ckpt_hold(b, &fd_b);
+
+    /* the save made the lock file for every user; the test removes it */
+    g_assert_cmpint(stat(lock_b, &st), ==, 0);
+    g_assert_cmpuint(st.st_mode & 0777, ==, 0644);
+    g_assert_cmpint(unlink(lock_b), ==, 0);
+    g_assert_cmpint(chmod(dir, 0500), ==, 0);
+
+    memset(&c1, 0, sizeof(c1));
+    femu_ckpt_add(qts, "r1", 5, rb);
+    femu_ckpt_add(qts, "r2", 6, rb);
+    p1 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    p2 = qpci_device_find(femu->dev.bus, QPCI_DEVFN(6, 0));
+    femu_enable(&c1, p1, alloc);
+    femu_create_io_queues(&c1);
+    femu_enable(&c2, p2, alloc);
+    femu_create_io_queues(&c2);
+    femu_ns_page(&c1, buf, 1, 2, 0x21, false);
+    femu_ns_page(&c2, buf, 1, 2, 0x21, false);
+    g_assert_false(g_file_test(lock_b, G_FILE_TEST_EXISTS));
+
+    /* the readers hold B itself: a writer and a save see them */
+    g_assert_cmpint(chmod(dir, 0700), ==, 0);
+    err = femu_ckpt_try_add(qts, "w", 7, wb);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    femu_ckpt_add(qts, "x", 7, ",'femu_mode':1");
+    err = femu_save_data(qts, "x", b);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    qpci_unplug_acpi_device_test(qts, "x", 7);
+    femu_ckpt_same(b, sum_b, ino_b);
+
+    /* one reader still holds B; with none, the writer starts */
+    femu_disable(&c1);
+    femu_queue_free(&c1, &c1.io);
+    qpci_unplug_acpi_device_test(qts, "r1", 5);
+    g_free(p1);
+    err = femu_ckpt_try_add(qts, "w", 7, wb);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "in use"));
+    g_free(err);
+    femu_disable(&c2);
+    femu_queue_free(&c2, &c2.io);
+    qpci_unplug_acpi_device_test(qts, "r2", 6);
+    g_free(p2);
+    femu_ckpt_same(b, sum_b, ino_b);
+
+    /* a save that cannot test B for a reader refuses, and keeps B */
+    g_assert_cmpint(chmod(b, 0), ==, 0);
+    femu_ckpt_add(qts, "x", 7, ",'femu_mode':1");
+    err = femu_save_data(qts, "x", b);
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, "cannot test"));
+    g_free(err);
+    qpci_unplug_acpi_device_test(qts, "x", 7);
+    g_assert_cmpint(chmod(b, 0644), ==, 0);
+    femu_ckpt_same(b, sum_b, ino_b);
+    femu_ckpt_add(qts, "w", 7, wb);
+    qpci_unplug_acpi_device_test(qts, "w", 7);
+    /* the writer made FILE.lock, and it stays after unplug */
+    g_assert_cmpint(stat(lock_b, &st), ==, 0);
+    g_assert_cmpuint(st.st_mode & 0777, ==, 0644);
+    g_assert_cmpint(st.st_size, ==, 0);
+
+    close(fd_b);
+    guest_free(alloc, buf);
+    unlink(lock_b);
+    unlink(b);
+    rmdir(dir);
+    qos_invalidate_command_line();
+}
+
+void femu_test_streams_gc(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    QDict *rsp;
+    gchar **fields;
+    unsigned i;
+    unsigned j;
+    uint64_t gc_pages;
+    uint32_t result;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x103, 2, 0, 0, &result),
+                   ==, NVME_SUCCESS);
+    for (i = 0; i < 1024; i++) {
+        unsigned lpn = i < 256 ? i : (i % 64 / 2) * 4 + i % 2;
+
+        qtest_memset(qts, buf, lpn % 128, 4096);
+        g_assert_cmphex(femu_stream_write(&c, 1, lpn * 8, buf,
+                                         1, lpn % 2 ? 99 : 7),
+                       ==, NVME_SUCCESS);
+    }
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/streams-test',"
+                    "'property':'x-stream-test'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    fields = g_strsplit(qdict_get_str(rsp, "return"), " ", -1);
+    g_assert_cmpuint(g_strv_length(fields), ==, 130);
+    gc_pages = g_ascii_strtoull(fields[1], NULL, 10);
+    g_assert_cmpuint(gc_pages, >, 0);
+    for (i = 0; i < 128; i += 2) {
+        for (j = 1; j < 128; j += 2) {
+            g_assert_cmpstr(fields[i + 2], !=, fields[j + 2]);
+        }
+    }
+    g_strfreev(fields);
+    qobject_unref(rsp);
+    for (i = 0; i < 128; i++) {
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, i * 8, buf),
+                       ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readb(qts, buf), ==, i);
+    }
+    g_assert_cmphex(femu_directive(&c, false, 1, 0x102, 0, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/streams-test',"
+                    "'property':'x-stream-test'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(qdict_get_str(rsp, "return")[0], ==, '0');
+    qobject_unref(rsp);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_streams_subpage(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    unsigned lines[2];
+    unsigned i;
+    unsigned j;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    /* Both LBAs share LPN 0, which follows the most recent stream write. */
+    for (i = 0; i < 2; i++) {
+        NvmeCmd cmd = { 0 };
+        QDict *rsp;
+        unsigned frontiers;
+        uint64_t gc_pages;
+
+        qtest_memset(qts, buf, i ? 0x22 : 0x11, 512);
+        cmd.opcode = NVME_CMD_WRITE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(i);
+        cmd.cdw12 = cpu_to_le32(1 << 20);
+        cmd.cdw13 = cpu_to_le32((i ? 99 : 7) << 16);
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)),
+                       ==, NVME_SUCCESS);
+        rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                        "'path':'/machine/peripheral/streams-test',"
+                        "'property':'x-stream-test'}}");
+        g_assert_true(qdict_haskey(rsp, "return"));
+        g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                              "%u %" SCNu64 " %u",
+                              &frontiers, &gc_pages, &lines[i]), ==, 3);
+        qobject_unref(rsp);
+    }
+    g_assert_cmpuint(lines[0], !=, lines[1]);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    for (j = 0; j < 512; j++) {
+        g_assert_cmphex(qtest_readb(qts, buf + j), ==, 0x11);
+        g_assert_cmphex(qtest_readb(qts, buf + 512 + j), ==, 0x22);
+    }
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_streams_sws(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    unsigned i;
+    QDict *rsp;
+    const QListEntry *entry;
+    bool found = false;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    for (i = 0; i < 2; i++) {
+        unsigned lba_bytes = i ? 4096 : 512;
+
+        g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0,
+                                     buf, 32, NULL), ==, NVME_SUCCESS);
+        /* This fixture has sixteen 512-byte sectors per FTL page. */
+        g_assert_cmpuint(qtest_readl(qts, buf + 16) * lba_bytes, ==, 8192);
+        if (!i) {
+            g_assert_cmphex(femu_format(&c, 1, 3, 0), ==, NVME_SUCCESS);
+        }
+    }
+    rsp = qtest_qmp(qts, "{'execute':'device-list-properties',"
+                    "'arguments':{'typename':'femu'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(rsp, "return"), entry) {
+        QDict *prop = qobject_to(QDict, qlist_entry_obj(entry));
+
+        if (!strcmp(qdict_get_str(prop, "name"), "streams")) {
+            const char *desc = qdict_get_try_str(prop, "description");
+
+            g_assert_nonnull(desc);
+            g_assert_nonnull(strstr(desc, "FTL page (SWS)"));
+            found = true;
+        }
+    }
+    g_assert_true(found);
+    qobject_unref(rsp);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+void femu_test_streams_churn(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint16_t status;
+    unsigned i;
+    bool retained[41] = { false };
+    bool exhausted = false;
+    uint8_t expected[4096];
+    uint8_t actual[4096];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    /* Preserve old data while repeatedly opening distinct stream lifetimes. */
+    for (i = 1; i <= 40; i++) {
+        qtest_memset(qts, buf, i, 4096);
+        status = femu_stream_write(&c, 1, i * 8, buf, 1, i);
+        if (i <= 8) {
+            g_assert_cmphex(status, ==, NVME_SUCCESS);
+        } else {
+            g_assert_true(status == NVME_SUCCESS ||
+                          status == NVME_CAP_EXCEEDED);
+        }
+        retained[i] = status == NVME_SUCCESS;
+        exhausted |= status == NVME_CAP_EXCEEDED;
+        g_assert_cmphex(femu_directive(&c, false, 1, (i << 16) | 0x101,
+                                     0, 0, 0, NULL), ==, NVME_SUCCESS);
+    }
+    g_assert_true(exhausted);
+    for (i = 1; i <= 40; i++) {
+        if (!retained[i]) {
+            continue;
+        }
+        memset(expected, i, sizeof(expected));
+        qtest_memset(qts, buf, 0, sizeof(actual));
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, i * 8, buf),
+                       ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, actual, sizeof(actual));
+        g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+    }
+    for (i = 0; i <= 16; i++) {
+        status = femu_stream_write(&c, 1, (64 + i) * 8, buf, 0, 0);
+        g_assert_cmphex(status, ==, i < 16 ? NVME_SUCCESS : NVME_CAP_EXCEEDED);
+    }
+    g_assert_cmphex(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0x5a, sizeof(expected));
+    g_assert_cmphex(femu_stream_write(&c, 1, 0, buf, 0, 0), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0, sizeof(actual));
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    memset(expected, 0x5a, sizeof(expected));
+    qtest_memread(qts, buf, actual, sizeof(actual));
+    g_assert_cmpmem(actual, sizeof(actual), expected, sizeof(expected));
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+void femu_test_streams_recovery(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint16_t status;
+    unsigned i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                   ==, NVME_SUCCESS);
+    for (i = 1; i <= 40; i++) {
+        status = femu_stream_write(&c, 1, i * 8, buf, 1, i);
+        g_assert_true(status == NVME_SUCCESS || status == NVME_CAP_EXCEEDED);
+        g_assert_cmphex(femu_directive(&c, false, 1, (i << 16) | 0x101,
+                                     0, 0, 0, NULL), ==, NVME_SUCCESS);
+    }
+    for (i = 0; i <= 16; i++) {
+        status = femu_stream_write(&c, 1, (64 + i) * 8, buf, 0, 0);
+        g_assert_cmphex(status, ==, i < 16 ? NVME_SUCCESS : NVME_CAP_EXCEEDED);
+    }
+    g_assert_cmphex(femu_format(&c, 1, 0, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_stream_write(&c, 1, 0, buf, 0, 0), ==, NVME_SUCCESS);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * A stream frontier on a device whose forced watermark would round to zero.
+ * Spread the data so every line keeps most of its pages valid, then rewrite
+ * it through a stream: the stream takes the last free lines, and collection,
+ * which refuses a victim with valid pages when no line is free, could then
+ * never run again.
+ */
+void femu_test_streams_gc_floor(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    QDict *rsp;
+    unsigned i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_directive(&c, false, 1, 1, 0x101, 0, 0, NULL),
+                    ==, NVME_SUCCESS);
+    for (i = 0; i < 256; i++) {
+        g_assert_cmphex(femu_stream_write(&c, 1, ((17 * i) % 256) * 8, buf,
+                                          0, 0), ==, NVME_SUCCESS);
+    }
+    /* 128 pages per command: no background collection in between */
+    for (i = 0; i < 128; i++) {
+        qtest_writeq(qts, list + i * 8, buf);
+    }
+    for (i = 0; i < 256; i += 128) {
+        NvmeCmd cmd = { 0 };
+
+        cmd.opcode = NVME_CMD_WRITE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.dptr.prp2 = cpu_to_le64(list);
+        cmd.cdw10 = cpu_to_le32(i * (4096 / c.lba_size));
+        cmd.cdw12 = cpu_to_le32((128 * (4096 / c.lba_size) - 1) | (1u << 20));
+        cmd.cdw13 = cpu_to_le32(1u << 16);
+        femu_submit(&c, &c.io, &cmd);
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-ftl-check'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           &mapped, &lost, &orphans), ==, 3);
+    qobject_unref(rsp);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * The limit applies to realize only. A Format and a namespace Create
+ * after realize allocate with no take, so x-mem-taken keeps its value.
+ * The reply drops after the Delete and grows after the Create, so the
+ * commands did free and allocate.
+ */
+void femu_test_mem_limit_commands(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t taken = femu_mem_taken(qts, "mlc");
+    uint64_t deleted;
+    uint32_t nsid;
+    uint16_t cntlid;
+
+    g_assert_cmpuint(taken, >, 0);
+    g_assert_cmpuint(taken, ==, femu_mem_total(qts, "mlc", NULL));
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    cntlid = qtest_readw(qts, buf + 78);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_mem_taken(qts, "mlc"), ==, taken);
+    g_assert_cmpint(femu_ns_delete(&c, 1), ==, NVME_SUCCESS);
+    /* the delete frees, and the create allocates: the commands ran */
+    deleted = femu_mem_total(qts, "mlc", NULL);
+    g_assert_cmpuint(deleted, <, taken);
+    g_assert_cmpint(femu_ns_create(&c, buf, 8, 0, &nsid), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_ns_attach(&c, buf, nsid, cntlid, true), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_format(&c, nsid, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_mem_total(qts, "mlc", NULL), >, deleted);
+    g_assert_cmpuint(femu_mem_taken(qts, "mlc"), ==, taken);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The tables per NAND page: 8 bytes of L2P, 8 of reverse map and 1 of
+ * page state. Twice the pages per block adds 384 pages to the geometry.
+ */
+void femu_test_memory_page_tables(void *obj, void *data,
+                                  QGuestAllocator *unused)
+{
+    uint64_t small[3];
+    uint64_t big[3];
+
+    femu_mem_ftl_bytes(FEMU_MEM_FTL, small);
+    femu_mem_ftl_bytes("femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8,"
+                       "pgs_per_blk=16,blks_per_pl=12,pls_per_lun=1,"
+                       "luns_per_ch=2,nchs=2", big);
+    g_assert_cmpuint(big[0] - small[0], ==, (8 + 8) * 384);
+    g_assert_cmpuint(big[1] - small[1], ==, 1 * 384);
+    g_assert_cmpuint(big[2], ==, small[2]);
+}
+
+/*
+ * Multi-plane settings warn wherever they change nothing: a busy time
+ * without its enable, one plane per LUN, a mode other than bbssd and CSD,
+ * and FDP. The full set on two-plane bbssd is quiet.
+ */
+#define FEMU_MP_BB ",femu_mode=1,devsz_mb=1,secsz=512,secs_per_pg=8," \
+                   "blks_per_pl=19,luns_per_ch=2,nchs=2"
+#define FEMU_MP_ALL ",mp_program=1,mp_read=1,tplpbsy=100,tplrbsy=100," \
+                    "plane_first=1"
+
+void femu_test_multiplane_warnings(void *obj, void *data,
+                                   QGuestAllocator *unused)
+{
+    g_autofree char *busy = femu_realize_stderr(
+        FEMU_MP_BB ",pgs_per_blk=2,pls_per_lun=2,tplpbsy=100,tplrbsy=100");
+    g_autofree char *one = femu_realize_stderr(
+        FEMU_MP_BB ",pgs_per_blk=4,pls_per_lun=1,mp_program=1");
+    g_autofree char *nossd = femu_realize_stderr(",pls_per_lun=2" FEMU_MP_ALL);
+    g_autofree char *fdp = femu_realize_stderr_after(
+        "-device femu-subsys,id=mpsub,nqn=mpsub,fdp=on,fdp.nruh=4",
+        FEMU_MP_BB ",pgs_per_blk=2,blks_per_pl=25,pls_per_lun=2,subsys=mpsub"
+        FEMU_MP_ALL);
+    g_autofree char *full = femu_realize_stderr(
+        FEMU_MP_BB ",pgs_per_blk=2,pls_per_lun=2" FEMU_MP_ALL);
+    g_autofree char *mixed = femu_realize_stderr(
+        ",femu_mode=1,devsz_mb=2,secsz=512,secs_per_pg=8,pgs_per_blk=4,"
+        "blks_per_pl=64,pls_per_lun=2,luns_per_ch=1,nchs=2,namespaces=2,"
+        "namespace_modes=bbssd,,kvssd,plane_first=1");
+    const char *prog = "femu: tplpbsy has no effect unless mp_program";
+    const char *read = "femu: tplrbsy has no effect unless mp_read";
+    const char *unsupported = "multi-plane program and read need bbssd";
+    const char *names[] = { "mp_program", "mp_read", "tplpbsy", "tplrbsy",
+                            "plane_first" };
+    int i;
+
+    g_assert_nonnull(strstr(busy, prog));
+    g_assert_nonnull(strstr(busy, read));
+    g_assert_null(strstr(busy, unsupported));
+    g_assert_nonnull(strstr(one, "femu: mp_program has no effect"));
+    g_assert_null(strstr(one, prog));
+    for (i = 0; i < ARRAY_SIZE(names); i++) {
+        g_autofree char *needle =
+            g_strdup_printf("femu: %s has no effect; multi-plane", names[i]);
+
+        g_assert_nonnull(strstr(nossd, needle));
+        g_assert_nonnull(strstr(fdp, needle));
+    }
+    g_assert_null(strstr(full, "no effect"));
+    g_assert_nonnull(strstr(mixed, "femu: plane_first has no effect on "
+                                   "namespace 2; only bbssd and CSD"));
+    g_assert_null(strstr(mixed, "namespace 1;"));
+}
+
+#define FEMU_CMD_ABORT_REQ      0x007
+#define FEMU_ACL_EXCEEDED       0x103
+#define FEMU_ID_ACL             258     /* Identify Controller byte offsets */
+
+/* queue an entry without ringing, so several are fetched in one go */
+static void femu_queue_only(FemuCtrlState *c, FemuQueue *q, NvmeCmd *cmd)
+{
+    cmd->cid = cpu_to_le16(c->cid++);
+    qtest_memwrite(c->pdev->bus->qts,
+                   q->sq_addr + q->sq_tail * sizeof(NvmeCmd), cmd,
+                   sizeof(*cmd));
+    q->sq_tail = (q->sq_tail + 1) % FEMU_QSIZE;
+}
+
+static void femu_queue_read(FemuCtrlState *c, FemuQueue *q, uint64_t buf)
+{
+    NvmeRwCmd rw;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    femu_queue_only(c, q, (NvmeCmd *)&rw);
+}
+
+/* the command in slot @slot of @q is still the one the host wrote */
+static void femu_check_sqe(FemuCtrlState *c, FemuQueue *q, uint16_t slot,
+                           uint8_t opcode, uint16_t cid)
+{
+    NvmeCmd back;
+
+    qtest_memread(c->pdev->bus->qts, q->sq_addr + slot * sizeof(NvmeCmd),
+                  &back, sizeof(back));
+    g_assert_cmphex(back.opcode, ==, opcode);
+    g_assert_cmpint(le16_to_cpu(back.cid), ==, cid);
+}
+
+/*
+ * Abort (Base 2.3, 5.2.1) marks a queued command in the controller: the host's
+ * submission queue is never written, and the command completes with Command
+ * Abort Requested when fetched, without running. ACL + 2 Aborts and their
+ * targets go into the admin queue under one doorbell, so all the Aborts are
+ * outstanding together and one is refused with Abort Command Limit Exceeded,
+ * while every target is still queued when the Abort naming it runs.
+ */
+void femu_test_abort(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint16_t abort_sc[FEMU_QSIZE], target_sc[FEMU_QSIZE];
+    uint32_t ianp[FEMU_QSIZE];
+    uint16_t first, start, cid, target, head;
+    uint8_t phase;
+    uint32_t result;
+    uint64_t buf;
+    NvmeCmd cmd;
+    NvmeCqe cqe;
+    int acl, nr, i, waited, aborted;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmpint(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    acl = qtest_readb(qts, buf + FEMU_ID_ACL);
+    nr = acl + 2;
+    g_assert_cmpint(2 * nr, <, FEMU_QSIZE);
+
+    start = c.admin.sq_tail;
+    first = c.cid;
+    for (i = 0; i < nr; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_ABORT;
+        cmd.cdw10 = cpu_to_le32((uint32_t)(first + nr + i) << 16);
+        femu_queue_only(&c, &c.admin, &cmd);
+    }
+    for (i = 0; i < nr; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.cdw10 = cpu_to_le32(NVME_NUMBER_OF_QUEUES);
+        femu_queue_only(&c, &c.admin, &cmd);
+    }
+    qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 0), c.admin.sq_tail);
+
+    for (i = 0; i < nr; i++) {
+        abort_sc[i] = FEMU_SC(femu_complete(&c, &c.admin, &cid, &ianp[i]));
+        g_assert_cmpint(cid, ==, first + i);
+    }
+    for (i = 0; i < nr; i++) {
+        target_sc[i] = FEMU_SC(femu_complete(&c, &c.admin, &cid, NULL));
+        g_assert_cmpint(cid, ==, first + nr + i);
+    }
+
+    /* the host's queue still holds exactly what the host wrote */
+    for (i = 0; i < nr; i++) {
+        femu_check_sqe(&c, &c.admin, (start + nr + i) % FEMU_QSIZE,
+                       NVME_ADM_CMD_GET_FEATURES, first + nr + i);
+    }
+
+    /*
+     * The first Abort ran with ACL + 1 more behind it, one more than the limit,
+     * so it is refused and its target runs. The rest abort theirs at once.
+     */
+    g_assert_cmphex(abort_sc[0], ==, FEMU_ACL_EXCEEDED);
+    g_assert_cmphex(target_sc[0], ==, NVME_SUCCESS);
+    for (i = 1; i < nr; i++) {
+        g_assert_cmphex(abort_sc[i], ==, NVME_SUCCESS);
+        g_assert_cmpint(ianp[i] & 1, ==, 0);
+        g_assert_cmphex(target_sc[i], ==, FEMU_CMD_ABORT_REQ);
+    }
+
+    /* one Abort at a time is never over the limit, however many are run */
+    for (i = 0; i < nr; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_ABORT;
+        cmd.cdw10 = cpu_to_le32((uint32_t)(c.cid + 1) << 16);
+        femu_queue_only(&c, &c.admin, &cmd);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.cdw10 = cpu_to_le32(NVME_NUMBER_OF_QUEUES);
+        femu_queue_only(&c, &c.admin, &cmd);
+        qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 0),
+                       c.admin.sq_tail);
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, NULL, &result)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpint(result & 1, ==, 0);
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, NULL, NULL)), ==,
+                        FEMU_CMD_ABORT_REQ);
+    }
+
+    /*
+     * An I/O queue. Its completion queue holds three entries, so once three
+     * reads have completed the rest wait for room, each holding one of the
+     * queue's requests, and when those run out the last reads stay queued.
+     */
+    femu_queue_init(&c, &c.io, 1);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_CQ;
+    cmd.dptr.prp1 = cpu_to_le64(c.io.cq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_SMALL_CQ - 1) << 16) | c.io.qid);
+    cmd.cdw11 = cpu_to_le32(NVME_CQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_CREATE_SQ;
+    cmd.dptr.prp1 = cpu_to_le64(c.io.sq_addr);
+    cmd.cdw10 = cpu_to_le32(((FEMU_QSIZE - 1) << 16) | c.io.qid);
+    cmd.cdw11 = cpu_to_le32((c.io.qid << 16) | NVME_SQ_PC);
+    g_assert_cmpint(femu_admin(&c, &cmd), ==, NVME_SUCCESS);
+
+    first = c.cid;
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        femu_queue_read(&c, &c.io, buf);
+    }
+    qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 1), c.io.sq_tail);
+    for (waited = 0;; waited++) {
+        qtest_memread(qts, c.io.cq_addr + (FEMU_SMALL_CQ - 2) * sizeof(cqe),
+                      &cqe, sizeof(cqe));
+        if (le16_to_cpu(cqe.status) & 1) {
+            break;
+        }
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+    /* let the poller take every request it can */
+    g_usleep(200 * 1000);
+    for (i = 0; i < 6; i++) {
+        femu_queue_read(&c, &c.io, buf);
+    }
+    qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, 1), c.io.sq_tail);
+    g_usleep(200 * 1000);
+
+    target = c.cid - 1;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ABORT;
+    cmd.cdw10 = cpu_to_le32(((uint32_t)target << 16) | c.io.qid);
+    g_assert_cmphex(FEMU_SC(femu_admin_result(&c, &cmd, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(result & 1, ==, 0);
+    femu_check_sqe(&c, &c.io, (c.io.sq_tail + FEMU_QSIZE - 1) % FEMU_QSIZE,
+                   NVME_CMD_READ, target);
+
+    /* return the slots one at a time; only the target is aborted */
+    head = 0;
+    phase = 1;
+    aborted = 0;
+    for (i = 0; i < FEMU_QSIZE - 1 + 6; i++) {
+        uint64_t slot = c.io.cq_addr + head * sizeof(cqe);
+
+        for (waited = 0;; waited++) {
+            qtest_memread(qts, slot, &cqe, sizeof(cqe));
+            if ((le16_to_cpu(cqe.status) & 1) == phase) {
+                break;
+            }
+            g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+            g_usleep(1000);
+        }
+        cid = le16_to_cpu(cqe.cid);
+        g_assert_cmpint(cid, >=, first);
+        g_assert_cmpint(cid, <=, target);
+        if (cid == target) {
+            g_assert_cmphex(FEMU_SC(le16_to_cpu(cqe.status) >> 1), ==,
+                            FEMU_CMD_ABORT_REQ);
+            aborted++;
+        } else {
+            g_assert_cmphex(le16_to_cpu(cqe.status) >> 1, ==, NVME_SUCCESS);
+        }
+        head = (head + 1) % FEMU_SMALL_CQ;
+        if (head == 0) {
+            phase ^= 1;
+        }
+        qpci_io_writel(c.pdev, c.bar, femu_cq_doorbell(&c, 1), head);
+    }
+    g_assert_cmpint(aborted, ==, 1);
+
+    /* a command not queued cannot be aborted at once */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ABORT;
+    cmd.cdw10 = cpu_to_le32(((uint32_t)target << 16) | c.io.qid);
+    g_assert_cmphex(FEMU_SC(femu_admin_result(&c, &cmd, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(result & 1, ==, 1);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+#define FEMU_FID_SCOPE_ENDGRP   0x8
+
+/*
+ * With an endurance group the placement features are listed: FDP with
+ * endurance group scope, FDP Events with none, as its scope (a reclaim unit
+ * handle) has no bit. Without one, neither is.
+ */
+void femu_test_fid_effects_fdp(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint32_t fis[256];
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_get_log_csi(&c, FEMU_LOG_FID_EFFECTS, 0, buf,
+                                     sizeof(fis), 0), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, fis, sizeof(fis));
+    femu_check_fid_effects(&c, fis);
+    g_assert_cmphex(le32_to_cpu(fis[FEMU_FEAT_FDP]), ==,
+                    1 | FEMU_FID_SCOPE_ENDGRP << 20);
+    g_assert_cmphex(le32_to_cpu(fis[FEMU_FEAT_FDP_EVENTS]), ==, 1);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * What a 2.x controller refuses (Base 2.3): a CC.AMS that CAP.AMS does not
+ * offer, Identify CNS 00h for a Key Value namespace (Invalid I/O Command Set,
+ * 5.2.13.2.1), a CSI-specific log page for a set the controller does not
+ * have (I/O Command Set Not Supported, Figure 321), and the CSI-specific
+ * namespace list for a set CC.CSS does not enable (5.2.13.2.7). A log page
+ * of one command set answers only for that set, and with CC.CSS 000b the
+ * logs ignore CDW14.CSI and serve NVM (Figure 205, 5.2.12.1.1).
+ */
+void femu_test_v2_refusals(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QPCIDevice *pdev = &femu->dev;
+    FemuCtrlState c = { .pdev = pdev, .alloc = alloc };
+    uint32_t cc_nvm = (6 << 16) | (4 << 20) | 1;
+    uint32_t cc_csi = cc_nvm | (FEMU_CC_CSS_CSI << 4);
+    uint32_t csts = 0;
+    uint64_t buf;
+    int waited;
+
+    /* round robin is the only arbitration offered */
+    femu_queue_init(&c, &c.admin, 0);
+    qpci_device_enable(pdev);
+    c.bar = qpci_iomap(pdev, 0, NULL);
+    qpci_io_writel(pdev, c.bar, 0x24, ((FEMU_QSIZE - 1) << 16) |
+                   (FEMU_QSIZE - 1));
+    qpci_io_writeq(pdev, c.bar, 0x28, c.admin.sq_addr);
+    qpci_io_writeq(pdev, c.bar, 0x30, c.admin.cq_addr);
+    qpci_io_writel(pdev, c.bar, 0x14, cc_csi | (1 << 11));
+    for (waited = 0; waited < FEMU_POLL_LIMIT_MS; waited++) {
+        csts = qpci_io_readl(pdev, c.bar, 0x1c);
+        if (csts & (NVME_CSTS_READY | NVME_CSTS_FAILED)) {
+            break;
+        }
+        g_usleep(1000);
+    }
+    g_assert_cmphex(csts & (NVME_CSTS_READY | NVME_CSTS_FAILED), ==,
+                    NVME_CSTS_FAILED);
+    femu_disable(&c);
+
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_cc(&c, pdev, alloc, cc_csi);
+    buf = guest_alloc(alloc, 4096);
+
+    /* namespaces 1, 2 and 3 run NVM, Zoned and Key Value */
+    g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_identify(&c, 2, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_identify(&c, 3, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_INVALID_IOCS);
+    g_assert_cmphex(femu_identify(&c, 3, FEMU_CNS_NS_CS_INDEP, 0, buf), ==,
+                    NVME_SUCCESS);
+
+    g_assert_cmphex(femu_get_log_csi(&c, FEMU_LOG_SUPPORTED, FEMU_CSI_KV,
+                                     buf, 1024, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_get_log_csi(&c, FEMU_LOG_SUPPORTED, 0x3, buf, 1024,
+                                     0), ==, NVME_IOCS_NOT_SUPPORTED);
+    g_assert_cmphex(femu_get_log_csi(&c, 0x05, 0x3, buf, 4096, 0), ==,
+                    NVME_IOCS_NOT_SUPPORTED);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CS_NS_ACTIVE_LIST,
+                                  (uint32_t)FEMU_CSI_KV << 24, buf), ==,
+                    NVME_SUCCESS);
+    /* the Changed Zone List is a zoned page; namespace 2 is zoned */
+    g_assert_cmphex(femu_log_cmd(&c, 2, 0xbf, (uint32_t)NVME_CSI_ZONED << 24,
+                                 buf, 512), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_log_cmd(&c, 2, 0xbf, (uint32_t)NVME_CSI_NVM << 24,
+                                 buf, 512), ==, NVME_INVALID_LOG_ID);
+    g_assert_cmphex(femu_log_cmd(&c, 2, 0xbf, 0x3 << 24, buf, 512), ==,
+                    NVME_IOCS_NOT_SUPPORTED);
+    g_assert_cmphex(femu_get_log_csi(&c, FEMU_LOG_SUPPORTED, NVME_CSI_ZONED,
+                                     buf, 1024, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(c.pdev->bus->qts, buf + 4 * 0xbf) & 1, ==, 1);
+    femu_disable(&c);
+
+    /* with CC.CSS 000b only the NVM Command Set is enabled */
+    femu_queue_init(&c, &c.admin, 0);
+    femu_enable_cc(&c, pdev, alloc, cc_nvm);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CS_NS_ACTIVE_LIST,
+                                  (uint32_t)FEMU_CSI_KV << 24, buf), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CS_NS_ACTIVE_LIST,
+                                  (uint32_t)NVME_CSI_NVM << 24, buf), ==,
+                    NVME_SUCCESS);
+    /* the allocated list (1Ah) asks only that the set be supported */
+    g_assert_cmphex(femu_identify(&c, 0, 0x1a, (uint32_t)FEMU_CSI_KV << 24,
+                                  buf), ==, NVME_SUCCESS);
+    /* the logs read NVM whatever CDW14.CSI names */
+    g_assert_cmphex(femu_log_cmd(&c, 2, 0xbf, (uint32_t)NVME_CSI_ZONED << 24,
+                                 buf, 512), ==, NVME_INVALID_LOG_ID);
+    g_assert_cmphex(femu_get_log_csi(&c, FEMU_LOG_SUPPORTED, NVME_CSI_ZONED,
+                                     buf, 1024, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(c.pdev->bus->qts, buf + 4 * 0xbf), ==, 0);
+    g_assert_cmphex(qtest_readl(c.pdev->bus->qts, buf + 4 * 0x02) & 1, ==, 1);
+
+    /* CNS 1Fh: CNS 08h for an allocated NSID, never the broadcast one */
+    qtest_memset(c.pdev->bus->qts, buf, 0, 4096);
+    g_assert_cmphex(femu_identify(&c, 3, 0x1f, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(c.pdev->bus->qts, buf + 14), ==, 0x1);
+    g_assert_cmphex(femu_identify(&c, 0xffffffff, 0x1f, 0, buf), ==,
+                    NVME_INVALID_NSID);
+    g_assert_cmphex(femu_identify(&c, 0, 0x1f, 0, buf), ==,
+                    NVME_INVALID_NSID);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * A subsystem has one endurance group, which log 09h reports whether or not
+ * FDP is on: Identify Controller and every namespace have to say so as well,
+ * a Key Value namespace in its own Identify structure too (KV 1.3, Figure 41).
+ * FDP is fixed at realize, so with it off the controller has no FDP
+ * capability: CTRATT.FDPS is clear, and the placement pages, features and
+ * I/O Management are neither listed nor answered.
+ */
+void femu_test_endgrp_reported(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    NvmeIdCtrl id;
+    NvmeIdNs ns;
+    NvmeCmd iom;
+    uint32_t result;
+    uint8_t indep[4096];
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &id, sizeof(id));
+    g_assert_cmphex(le32_to_cpu(id.ctratt) & NVME_CTRATT_ENDGRPS, ==,
+                    NVME_CTRATT_ENDGRPS);
+    g_assert_cmphex(le32_to_cpu(id.ctratt) & NVME_CTRATT_FDPS, ==, 0);
+    g_assert_cmpuint(le16_to_cpu(id.endgidmax), ==, 1);
+    g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &ns, sizeof(ns));
+    g_assert_cmpuint(le16_to_cpu(ns.endgid), ==, 1);
+    for (uint32_t nsid = 1; nsid <= 2; nsid++) {
+        g_assert_cmphex(femu_identify(&c, nsid, FEMU_CNS_NS_CS_INDEP, 0, buf),
+                        ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, indep, sizeof(indep));
+        g_assert_cmpuint(indep[12] | indep[13] << 8, ==, 1);
+    }
+    g_assert_cmphex(femu_identify(&c, 2, NVME_ID_CNS_CS_NS,
+                                  (uint32_t)FEMU_CSI_KV << 24, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 46), ==, 1);
+
+    /* Endurance Group List: identifiers at least CDW11 bits 15:0 */
+    for (uint32_t min = 0; min <= 2; min++) {
+        qtest_memset(qts, buf, 0xa5, 4096);
+        g_assert_cmphex(femu_identify(&c, 0, FEMU_CNS_ENDGRP_LIST, min, buf),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readw(qts, buf), ==, min <= 1 ? 1 : 0);
+        g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, min <= 1 ? 1 : 0);
+        g_assert_cmpuint(qtest_readw(qts, buf + 4), ==, 0);
+        g_assert_cmpuint(qtest_readw(qts, buf + 4094), ==, 0);
+    }
+    g_assert_cmphex(femu_identify(&c, 0, FEMU_CNS_ENDGRP_LIST, 0xffff, buf),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf), ==, 0);
+
+    g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_SUPPORTED, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    for (uint32_t lid = 0x20; lid <= 0x23; lid++) {
+        g_assert_cmphex(qtest_readl(qts, buf + 4 * lid), ==, 0);
+        g_assert_cmphex(femu_endgrp_log(&c, lid, 0, buf, 64), ==,
+                        NVME_INVALID_LOG_ID);
+    }
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, NVME_FDP_MODE,
+                            NVME_GETFEAT_SELECT_CURRENT, 0, 1, &result)),
+                    ==, NVME_INVALID_FIELD);
+    femu_create_io_queues(&c);
+    for (uint32_t nsid = 1; nsid <= 2; nsid++) {
+        memset(&iom, 0, sizeof(iom));
+        iom.opcode = FEMU_CMD_IO_MGMT_RECV;
+        iom.nsid = cpu_to_le32(nsid);
+        iom.dptr.prp1 = cpu_to_le64(buf);
+        g_assert_cmphex(FEMU_SC(femu_io(&c, &iom)), ==, NVME_INVALID_OPCODE);
+        iom.opcode = FEMU_CMD_IO_MGMT_SEND;
+        g_assert_cmphex(FEMU_SC(femu_io(&c, &iom)), ==, NVME_INVALID_OPCODE);
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+#define FEMU_LOG_ROTATIONAL     0x16
+#define FEMU_FEAT_SPINUP        0x1a
+#define FEMU_RMEDIA             (1 << 4)
+#define FEMU_VWCNP              (1 << 5)
+
+/*
+ * rotational on a femu-subsys (Base 2.1, 8.1.23). @data "on": endurance
+ * group 1 is rotational media. Its namespace sets NSFEAT.RMEDIA in CNS 08h
+ * and 1Fh next to VWCNP, log 09h sets EGRMEDIA, log 16h reports one
+ * actuator, one spinup and one load, LID 00h lists 16h with LSUPP only, and
+ * Spinup Control (FID 1Ah) is supported with NVM subsystem scope, fixed at
+ * zero. @data "on-vwc": the same with a write cache, so VWCNP is clear.
+ * @data "off": a subsystem without the property has none of that.
+ * Every buffer is poisoned first, so a missing transfer cannot pass.
+ */
+void femu_test_rotational(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    bool on = g_str_has_prefix(data, "on");
+    bool vwc = g_str_has_suffix(data, "vwc");
+    uint8_t log[512], indep[4096];
+    uint32_t result;
+    uint64_t buf;
+    NvmeIdCtrl id;
+    NvmeIdNs ns;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &id, sizeof(id));
+    g_assert_cmphex(le32_to_cpu(id.ctratt) & NVME_CTRATT_ENDGRPS, ==,
+                    NVME_CTRATT_ENDGRPS);
+    g_assert_cmpuint(le16_to_cpu(id.endgidmax), ==, 1);
+    g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &ns, sizeof(ns));
+    g_assert_cmpuint(le16_to_cpu(ns.endgid), ==, 1);
+    for (uint32_t cns = FEMU_CNS_NS_CS_INDEP; cns <= 0x1f; cns += 0x17) {
+        qtest_memset(qts, buf, on ? 0x00 : 0xff, 4096);
+        g_assert_cmphex(femu_identify(&c, 1, cns, 0, buf), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, indep, sizeof(indep));
+        g_assert_cmphex(indep[0] & FEMU_RMEDIA, ==, on ? FEMU_RMEDIA : 0);
+        g_assert_cmphex(indep[0] & FEMU_VWCNP, ==, vwc ? 0 : FEMU_VWCNP);
+        g_assert_cmpuint(indep[12] | indep[13] << 8, ==, 1);
+    }
+
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_SUPPORTED, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * FEMU_LOG_ROTATIONAL), ==,
+                    on ? 1 : 0);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * NVME_LOG_ENDGRP), ==, 1);
+
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(femu_endgrp_log(&c, NVME_LOG_ENDGRP, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 1), ==, on ? 1 : 0);
+    g_assert_cmphex(qtest_readb(qts, buf + 2), ==, 0);
+
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_FID_EFFECTS, 0, buf, 1024),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * FEMU_FEAT_SPINUP), ==,
+                    on ? 1 | 1u << 25 : 0);
+
+    if (!on) {
+        g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_ROTATIONAL, 0, buf, 512),
+                        ==, NVME_INVALID_LOG_ID);
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FEAT_SPINUP,
+                                NVME_GETFEAT_SELECT_CURRENT, 0, 0, &result)),
+                        ==, NVME_INVALID_FIELD);
+        for (int sv = 0; sv <= 1; sv++) {
+            g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_SPINUP, sv,
+                                                     0, 0, NULL)), ==,
+                            NVME_INVALID_FIELD);
+        }
+        goto out;
+    }
+
+    /* log 16h, twice: the counters do not move between reads */
+    for (int i = 0; i < 2; i++) {
+        qtest_memset(qts, buf, 0xa5, 4096);
+        g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_ROTATIONAL, 0, buf, 512),
+                        ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, log, sizeof(log));
+        g_assert_cmpuint(lduw_le_p(&log[0]), ==, 1);    /* ENDGID */
+        g_assert_cmpuint(lduw_le_p(&log[2]), ==, 1);    /* NUMA */
+        g_assert_cmpuint(lduw_le_p(&log[4]), ==, 0);    /* NRS */
+        g_assert_cmpuint(ldl_le_p(&log[8]), ==, 1);     /* SPINC */
+        g_assert_cmpuint(ldl_le_p(&log[12]), ==, 0);    /* FSPINC */
+        g_assert_cmpuint(ldl_le_p(&log[16]), ==, 1);    /* LDC */
+        g_assert_cmpuint(ldl_le_p(&log[20]), ==, 0);    /* FLDC */
+        g_assert_cmpuint(log[6] | log[7], ==, 0);
+        for (int b = 24; b < sizeof(log); b++) {
+            g_assert_cmpuint(log[b], ==, 0);
+        }
+    }
+    /* an offset read, and a group that does not exist */
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(femu_endgrp_log(&c, FEMU_LOG_ROTATIONAL, 16, buf, 4), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf), ==, 1);
+    {
+        NvmeCmd cmd;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+        cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(FEMU_LOG_ROTATIONAL | (127 << 16));
+        cmd.cdw11 = cpu_to_le32(2 << 16);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==,
+                        NVME_INVALID_FIELD);
+    }
+
+    /* Spinup Control: fixed off, not changeable, not saveable */
+    for (uint8_t sel = 0; sel <= 3; sel++) {
+        result = 0xdeadbeef;
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FEAT_SPINUP, sel,
+                                                 0, 0, &result)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(result, ==, 0);
+    }
+    for (uint32_t sce = 0; sce <= 1; sce++) {
+        g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_SPINUP, false,
+                                                 0, sce, NULL)), ==,
+                        NVME_FEAT_NOT_CHANGEABLE);
+    }
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FEAT_SPINUP, true, 0, 0,
+                                             NULL)), ==,
+                    NVME_FID_NOT_SAVEABLE);
+
+out:
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* Get Log Page @lid of @nsid with UUID index @uidx, @len bytes at @off */
+static uint16_t femu_ocp_log_ns(FemuCtrlState *c, uint8_t lid, uint8_t uidx,
+                                uint32_t nsid, uint32_t off, uint64_t buf,
+                                uint32_t len)
+{
+    NvmeCmd cmd;
+
+    qtest_memset(c->pdev->bus->qts, buf, 0xa5, len);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(lid | ((len / 4 - 1) << 16));
+    cmd.cdw12 = cpu_to_le32(off);
+    cmd.cdw14 = cpu_to_le32(uidx);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static uint16_t femu_ocp_log(FemuCtrlState *c, uint8_t lid, uint8_t uidx,
+                             uint32_t off, uint64_t buf, uint32_t len)
+{
+    return femu_ocp_log_ns(c, lid, uidx, NVME_NSID_BROADCAST, off, buf, len);
+}
+
+/* Get (or Set) Features @fid with UUID index @uidx; dword 0 into @result */
+static uint16_t femu_ocp_feat(FemuCtrlState *c, bool set, uint8_t fid,
+                              uint8_t sel_or_sv, uint8_t uidx, uint32_t dw11,
+                              uint32_t *result)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = set ? NVME_ADM_CMD_SET_FEATURES : NVME_ADM_CMD_GET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(fid | (set ? (uint32_t)sel_or_sv << 31 :
+                                         (uint32_t)sel_or_sv << 8));
+    cmd.cdw11 = cpu_to_le32(dw11);
+    cmd.cdw14 = cpu_to_le32(uidx);
+    return FEMU_SC(femu_admin_result(c, &cmd, result));
+}
+
+static const uint8_t femu_ocp_uuid[16] = {
+    0xc1, 0x94, 0xd5, 0x5b, 0xe0, 0x94, 0x47, 0x94,
+    0xa2, 0x1d, 0x29, 0x99, 0x8f, 0x56, 0xbe, 0x6f,
+};
+static const uint8_t femu_femu_uuid[16] = {
+    0x2f, 0xf9, 0x29, 0x65, 0x47, 0xbe, 0x4c, 0xe0,
+    0x92, 0x3d, 0x64, 0x9d, 0x30, 0x07, 0x92, 0x03,
+};
+static const uint8_t femu_ocp_c0_guid[16] = {
+    0xc5, 0xaf, 0x10, 0x28, 0xea, 0xbf, 0xf2, 0xa4,
+    0x9c, 0x4f, 0x6f, 0x7c, 0xc9, 0x14, 0xd5, 0xaf,
+};
+static const uint8_t femu_ocp_c1_guid[16] = {
+    0x44, 0xd9, 0x31, 0x21, 0xfe, 0x30, 0x34, 0xae,
+    0xab, 0x4d, 0xfd, 0x3d, 0xba, 0x83, 0x19, 0x5a,
+};
+
+/*
+ * Event Injection (Feature C0h) through the OCP UUID index; @buf is the
+ * 4 KiB data buffer of both Set and Get.
+ */
+static uint16_t femu_inj(FemuCtrlState *c, bool set, uint8_t sel_or_sv,
+                         uint32_t dw11, uint64_t buf, uint32_t *result)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = set ? NVME_ADM_CMD_SET_FEATURES : NVME_ADM_CMD_GET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(0xc0 | (set ? (uint32_t)sel_or_sv << 31 :
+                                          (uint32_t)sel_or_sv << 8));
+    cmd.cdw11 = cpu_to_le32(dw11);
+    cmd.cdw14 = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    return FEMU_SC(femu_admin_result(c, &cmd, result));
+}
+
+/* one Event Injection entry of @type at @buf, the rest of 4 KiB zero */
+static void femu_inj_entry(QTestState *qts, uint64_t buf, uint16_t type,
+                           uint16_t nrtde)
+{
+    uint8_t e[32] = { 0x3 };
+
+    stw_le_p(e + 2, type);
+    stw_le_p(e + 4, nrtde);
+    qtest_memset(qts, buf, 0, 4096);
+    qtest_memwrite(qts, buf, e, sizeof(e));
+}
+
+/* the 8-byte field at @off of OCP log C0h */
+static uint64_t femu_ocp_c0h_field(FemuCtrlState *c, uint64_t buf, int off)
+{
+    uint8_t page[512];
+
+    g_assert_cmphex(femu_ocp_log(c, 0xc0, 1, 0, buf, sizeof(page)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf, page, sizeof(page));
+    return ldq_le_p(page + off);
+}
+
+/* read page @lpn of femu_test_rain_inject(): each page has its own byte */
+static void femu_rain_read1(FemuCtrlState *c, uint64_t buf, int lpn)
+{
+    g_assert_cmphex(FEMU_SC(femu_rw(c, NVME_CMD_READ, lpn * 8, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(c->pdev->bus->qts, buf), ==, 0x40 + lpn);
+    g_assert_cmphex(qtest_readb(c->pdev->bus->qts, buf + 4095), ==,
+                    0x40 + lpn);
+}
+
+/* read the 24 pages of femu_test_rain_inject() */
+static void femu_rain_inject_reads(FemuCtrlState *c, uint64_t buf)
+{
+    for (int i = 0; i < 24; i++) {
+        femu_rain_read1(c, buf, i);
+    }
+}
+
+/* degraded reads and media reads (x-ftl-trace field 6) so far */
+static void femu_rain_counts(QTestState *qts, uint64_t *deg, uint64_t *rd)
+{
+    uint64_t parity;
+    double waf;
+
+    femu_parity_counters(qts, &parity, deg, &waf);
+    *rd = femu_ftl_trace_id(qts, "gc-test", 6);
+}
+
+/*
+ * Read page @lpn and check what it cost: @deg degraded reads and @rd
+ * media reads.
+ */
+static void femu_rain_read_cost(FemuCtrlState *c, uint64_t buf, int lpn,
+                                uint64_t deg, uint64_t rd)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t d0, d1, r0, r1;
+
+    femu_rain_counts(qts, &d0, &r0);
+    femu_rain_read1(c, buf, lpn);
+    femu_rain_counts(qts, &d1, &r1);
+    g_assert_cmpuint(d1 - d0, ==, deg);
+    g_assert_cmpuint(r1 - r0, ==, rd);
+}
+
+/*
+ * OCP event 0016h with rain_parity: inject_die goes offline for reads
+ * only, and each live stripe must keep one lost member at most. Four
+ * dies (two channels of two LUNs), 8-page blocks. A line holds 24 data
+ * pages, so 24 writes fill one line and every stripe has its parity on
+ * NAND. Page 2 is on die 1 (channel 0, LUN 1), page 1 on die 2. @data:
+ *   "base":    accepted at once; every page reads back; the 6 pages of
+ *              die 1 each read the 3 other dies (36 media reads); page 2
+ *              costs a reconstruction, page 1 does not; log C0h counts
+ *              each XOR; x-rain-fail of die 3 is refused; NUME 0 ends the
+ *              degraded reads, and then die 3 can fail
+ *   "pending": NRTDE 3: the die goes offline when the third read (page 2)
+ *              completes, so 5 reads are degraded, not 6; x-rain-fail of
+ *              die 3 is refused before and after, until NUME 0
+ *   "open":    inject_die=0 after one page: the stripe is open and its
+ *              parity is in controller RAM, so page 0 reads no NAND; after
+ *              page 1 is written, page 0 reads it
+ *   "old":     die 0 fails first and its old lines keep their data: the
+ *              event is refused (Invalid Field)
+ *   "same":    die 1 fails first: the event on the same die is accepted
+ *   "trim":    die 0 fails, then one LBA of each page is deallocated; the
+ *              pages stay mapped on the old lines, so the event is refused
+ */
+void femu_test_rain_inject(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *kind = data;
+    bool open = !strcmp(kind, "open");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t ibuf = guest_alloc(alloc, 4096);
+    uint64_t d0, d1, r0, r1, x0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int i = 0; i < (open ? 1 : 24); i++) {
+        qtest_memset(qts, buf, 0x40 + i, 4096);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    if (!strcmp(kind, "old") || !strcmp(kind, "trim")) {
+        g_assert_true(femu_rain_fail(qts, 0));
+    } else if (!strcmp(kind, "same")) {
+        g_assert_true(femu_rain_fail(qts, 1));
+    }
+    if (!strcmp(kind, "trim")) {
+        for (int i = 0; i < 24; i++) {
+            g_assert_cmphex(femu_dealloc_lba(&c, i * 8 + 1, ibuf), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    femu_inj_entry(qts, ibuf, 0x0016, !strcmp(kind, "pending") ? 3 : 0);
+    if (!strcmp(kind, "old") || !strcmp(kind, "trim")) {
+        g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==,
+                        NVME_INVALID_FIELD);
+        goto out;
+    }
+    g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==, NVME_SUCCESS);
+    if (!strcmp(kind, "same")) {
+        femu_rain_inject_reads(&c, buf);
+        goto out;
+    }
+    if (open) {
+        /* no other member and no parity on NAND yet */
+        femu_rain_read_cost(&c, buf, 0, 1, 0);
+        qtest_memset(qts, buf, 0x41, 4096);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 8, buf)), ==,
+                        NVME_SUCCESS);
+        femu_rain_read_cost(&c, buf, 0, 1, 1);
+        femu_rain_read_cost(&c, buf, 1, 0, 1);
+        goto out;
+    }
+    g_assert_false(femu_rain_fail(qts, 3));
+    x0 = femu_ocp_c0h_field(&c, buf, 48);
+    femu_rain_counts(qts, &d0, &r0);
+    femu_rain_inject_reads(&c, buf);
+    femu_rain_counts(qts, &d1, &r1);
+    g_test_message("%s: %" PRIu64 " degraded reads, %" PRIu64 " media reads",
+                   kind, d1 - d0, r1 - r0);
+    if (!strcmp(kind, "base")) {
+        /* 18 pages read once, the 6 of die 1 read the other 3 dies */
+        g_assert_cmpuint(d1 - d0, ==, 6);
+        g_assert_cmpuint(r1 - r0, ==, 36);
+    } else {
+        /* pages 0 to 2 read before the die went offline */
+        g_assert_cmpuint(d1 - d0, ==, 5);
+        g_assert_cmpuint(r1 - r0, ==, 34);
+    }
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 48) - x0, ==, d1 - d0);
+    femu_rain_read_cost(&c, buf, 2, 1, 3);
+    femu_rain_read_cost(&c, buf, 1, 0, 1);
+    g_assert_false(femu_rain_fail(qts, 3));
+    g_assert_cmphex(femu_inj(&c, true, 0, 0, ibuf, NULL), ==, NVME_SUCCESS);
+    femu_rain_counts(qts, &d0, &r0);
+    femu_rain_inject_reads(&c, buf);
+    femu_rain_counts(qts, &d1, &r1);
+    g_assert_cmpuint(d1, ==, d0);
+    g_assert_cmpuint(r1 - r0, ==, 24);
+    femu_rain_read_cost(&c, buf, 2, 0, 1);
+    g_assert_true(femu_rain_fail(qts, 3));
+out:
+    femu_disable(&c);
+    guest_free(alloc, ibuf);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* query-femu end-of-life state of gc-test and its reserve lines */
+static void femu_rain_ro_eol(QTestState *qts, bool *ro, uint64_t *cap,
+                             uint64_t *pages, uint64_t *reqs,
+                             uint64_t *reserve)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *eol = qdict_get_qdict(ns, "end-of-life");
+
+    g_assert_nonnull(eol);
+    *ro = qdict_get_bool(eol, "read-only");
+    *cap = qdict_get_int(eol, "credit-pages");
+    *pages = qdict_get_int(eol, "held-pages");
+    *reqs = qdict_get_int(eol, "held-requests");
+    *reserve = qdict_get_int(qdict_get_qdict(ns, "line-counts"), "reserve");
+    qobject_unref(rsp);
+}
+
+/* free lines of gc-test */
+static uint64_t femu_rain_ro_free(QTestState *qts)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    uint64_t n = qdict_get_int(qdict_get_qdict(ns, "line-counts"), "free");
+
+    qobject_unref(rsp);
+    return n;
+}
+
+/*
+ * Write @npages 4 KiB pages from @page, each from @data, and do not wait for
+ * the completion. Returns the command identifier.
+ */
+static uint16_t femu_rain_ro_submit(FemuCtrlState *c, uint64_t page,
+                                    uint32_t npages, uint64_t data,
+                                    uint64_t list)
+{
+    NvmeRwCmd rw;
+    uint16_t cid = c->cid;
+
+    for (uint32_t i = 0; i + 1 < npages; i++) {
+        qtest_writeq(c->pdev->bus->qts, list + i * 8, data);
+    }
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(data);
+    rw.dptr.prp2 = cpu_to_le64(npages > 2 ? list : npages == 2 ? data : 0);
+    rw.slba = cpu_to_le64(page * 8);
+    rw.nlb = cpu_to_le16(npages * 8 - 1);
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    return cid;
+}
+
+/*
+ * rain_read_only, 4 dies (2 channels, 2 LUNs), one plane, 8-page blocks:
+ * a line holds 24 data pages, 16 after one failure, 8 after two. mdts=4
+ * (64 KiB) costs 17 pages a write, so the reserve is 3 lines of 8 pages
+ * (a line of two dies) and the credit cap 24. Usable lines leave out the
+ * forced GC lines, the open line and the reserve. @data:
+ *   "base":  1 MiB (256 pages), 44 lines, high 78 (9 forced): 31 usable.
+ *            Die 1 fails: writable, spare 100 * 240 / 488 = 49 %; the
+ *            rebuild moves the old lines. Die 0 fails: cap 8 * 31 = 248 is
+ *            below 256, so read-only: Critical Warning 0Dh, spare 0, a write
+ *            fails with Write to Read Only Media, every page reads back
+ *   "off":   as "base" with rain_read_only=off and 41 lines (31 usable, no
+ *            reserve): the second failure is refused, the media stays
+ *            writable
+ *   "zero":  as "base" with high 80 (8 forced): 32 usable; the second
+ *            failure leaves cap 256, equal to the namespace: spare 0, so
+ *            read-only
+ *   "round": 16 MiB (4096 pages), 263 lines, high 99: 257 usable; the
+ *            first failure leaves cap 4112 but spare 100 * 16 / 2072 = 0 %:
+ *            read-only
+ *   "gc":    2 MiB (512 pages), 44 lines, high 100: no forced GC line, so
+ *            the first failure has no room for GC while the spare would be
+ *            100 * 128 / 448 = 28 %. On the empty device it goes read-only
+ *            with spare 0; die 3 then fails only because the media is
+ *            read-only; die 1 again is accepted
+ *   "held":  as "gc", with overwrites until at most one free line is left.
+ *            Two writes (17 and 6 credits) wait in the held FTL when die 1
+ *            fails: read-only, still 23 pages held. Let go, both complete,
+ *            21 host pages program, and the data reads back
+ */
+void femu_test_rain_ro(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *kind = data;
+    bool off = !strcmp(kind, "off");
+    bool second = off || !strcmp(kind, "base") || !strcmp(kind, "zero");
+    bool held = !strcmp(kind, "held");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t list2 = guest_alloc(alloc, 4096);
+    uint64_t nfail, left, moved, cap, pages, reqs, reserve, nsze;
+    uint64_t mapped, lost, orphans, host0;
+    uint8_t cw;
+    bool ro;
+    int w = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_identify_ns(&c, &nsze, &c.lba_size);
+    g_assert_cmpint(c.lba_size, ==, 512);
+    if (!off) {
+        femu_rain_ro_eol(qts, &ro, &cap, &pages, &reqs, &reserve);
+        g_assert_false(ro);
+        g_assert_cmpuint(reserve, ==, 3);
+        g_assert_cmpuint(cap, ==, 24);
+    }
+    if (second) {
+        for (int l = 0; l < 40; l++) {
+            qtest_memset(qts, buf, 0x80 | l, 4096);
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, l * 8, buf)),
+                            ==, NVME_SUCCESS);
+        }
+        g_assert_true(femu_rain_fail(qts, 1));
+        g_assert_cmpuint(femu_rain_spare(&c, buf, &cw), ==, off ? 49 :
+                         !strcmp(kind, "zero") ? 50 : 49);
+        g_assert_cmphex(cw & 0x0d, ==, 0x04);
+        qtest_memset(qts, buf, 0x11, 4096);
+        femu_rain_check(qts, &nfail, &left, &moved);
+        while (left && w < 20) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                            (100 + w) * 8, buf)), ==,
+                            NVME_SUCCESS);
+            w++;
+            femu_rain_check(qts, &nfail, &left, &moved);
+        }
+        g_assert_cmpuint(left, ==, 0);
+        if (off) {
+            g_assert_false(femu_rain_fail(qts, 0));
+            femu_rain_check(qts, &nfail, &left, &moved);
+            g_assert_cmpuint(nfail, ==, 1);
+            g_assert_cmpuint(femu_rain_spare(&c, buf, &cw), ==, 49);
+            g_assert_cmphex(cw & 0x08, ==, 0);
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 200 * 8,
+                                            buf)), ==, NVME_SUCCESS);
+            goto out;
+        }
+        g_assert_true(femu_rain_fail(qts, 0));
+    } else if (held) {
+        /* fill the namespace, then overwrite until the free lines run out */
+        qtest_memset(qts, buf, 0x33, 4096);
+        for (int p = 0; p < 512; p += 16) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, p, 16, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+        for (w = 0; w < 400 && femu_rain_ro_free(qts) > 1; w++) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (w * 16) % 512, 16,
+                                                     buf, list)), ==,
+                            NVME_SUCCESS);
+        }
+        g_assert_cmpuint(femu_rain_ro_free(qts), <=, 1);
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, 512);
+        /* field 3: NAND programs of host pages, not host accounting */
+        host0 = femu_rain_trace(qts, 3);
+        /* 16 pages cost 17 credits, 5 pages cost 6 */
+        femu_zns_ftl_hold(qts, true);
+        qtest_memset(qts, buf, 0x5c, 4096);
+        femu_rain_ro_submit(&c, 0, 16, buf, list);
+        femu_rain_ro_submit(&c, 32, 5, buf, list2);
+        for (w = 0; w < 2000; w++) {
+            femu_rain_ro_eol(qts, &ro, &cap, &pages, &reqs, &reserve);
+            if (reqs == 2) {
+                break;
+            }
+            g_usleep(1000);
+        }
+        g_assert_cmpuint(reqs, ==, 2);
+        g_assert_cmpuint(pages, ==, 23);
+        g_assert_true(femu_rain_fail(qts, 1));
+        femu_rain_ro_eol(qts, &ro, &cap, &pages, &reqs, &reserve);
+        g_assert_true(ro);
+        g_assert_cmpuint(pages, ==, 23);
+        femu_zns_ftl_hold(qts, false);
+        for (int i = 0; i < 2; i++) {
+            uint16_t cid;
+
+            g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)),
+                            ==, NVME_SUCCESS);
+        }
+        g_assert_cmpuint(femu_rain_trace(qts, 3) - host0, ==, 21);
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, 512);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+        femu_rain_ro_eol(qts, &ro, &cap, &pages, &reqs, &reserve);
+        g_assert_cmpuint(reqs, ==, 0);
+        g_assert_cmpuint(pages, ==, 0);
+        for (int p = 0; p < 37; p++) {
+            g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, p * 8, buf)),
+                            ==, NVME_SUCCESS);
+            g_assert_cmphex(qtest_readb(qts, buf + 4095), ==,
+                            p < 16 || (p >= 32 && p < 37) ? 0x5c : 0x33);
+        }
+    } else {
+        /* "round" and "gc": the first failure, on an empty device */
+        g_assert_true(femu_rain_fail(qts, 1));
+    }
+
+    femu_rain_ro_eol(qts, &ro, &cap, &pages, &reqs, &reserve);
+    g_assert_true(ro);
+    g_assert_cmpuint(femu_rain_spare(&c, buf, &cw), ==, 0);
+    g_assert_cmphex(cw, ==, 0x0d);
+    qtest_memset(qts, buf, 0x77, 4096);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 10 * 8, buf)), ==,
+                    NVME_WRITE_TO_RO);
+    if (second) {
+        for (int l = 0; l < 40; l++) {
+            g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l * 8, buf)),
+                            ==, NVME_SUCCESS);
+            g_assert_cmphex(qtest_readb(qts, buf), ==, 0x80 | l);
+            g_assert_cmphex(qtest_readb(qts, buf + 4095), ==, 0x80 | l);
+        }
+    }
+    if (!strcmp(kind, "gc")) {
+        /* three members and no old data: only read-only refuses die 3 */
+        g_assert_false(femu_rain_fail(qts, 3));
+        femu_rain_check(qts, &nfail, &left, &moved);
+        g_assert_cmpuint(nfail, ==, 1);
+        g_assert_true(femu_rain_fail(qts, 1));
+    }
+out:
+    femu_disable(&c);
+    guest_free(alloc, list2);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* the mapping of LPN @lpn of device gc-test (x-ftl-probe) */
+static char *femu_rain_probe(QTestState *qts, uint64_t lpn)
+{
+    g_autofree char *v = g_strdup_printf("%" PRIu64, lpn);
+    QDict *rsp;
+    char *s;
+
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/gc-test',"
+                             "'property':'x-ftl-probe','value':%s}}", v);
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-ftl-probe'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    s = g_strdup(qdict_get_str(rsp, "return"));
+    qobject_unref(rsp);
+    return s;
+}
+
+/* query-femu lost-pages and lost-blocks */
+static void femu_rain_lost(QTestState *qts, uint64_t *pages, uint64_t *blocks)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    QDict *ctr = qdict_get_qdict(ns, "counters");
+
+    *pages = qdict_get_int(ctr, "lost-pages");
+    *blocks = qdict_get_int(ctr, "lost-blocks");
+    qobject_unref(rsp);
+}
+
+/* SMART Media and Data Integrity Errors */
+static uint64_t femu_rain_media(FemuCtrlState *c, uint64_t log)
+{
+    g_assert_cmphex(FEMU_SC(femu_get_log(c, NVME_LOG_SMART_INFO, log, 512,
+                                         0)), ==, NVME_SUCCESS);
+    return qtest_readq(c->pdev->bus->qts, log + 160);
+}
+
+/* Get LBA Status 10h of namespace 1: blocks in 001b runs and in 011b runs */
+static void femu_rain_gls(FemuCtrlState *c, uint64_t buf, uint64_t *lost,
+                          uint64_t *wu)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint32_t nlsd;
+
+    g_assert_cmphex(femu_get_lba_status(c, buf, 0, 1023, 0x10, 0), ==,
+                    NVME_SUCCESS);
+    nlsd = qtest_readl(qts, buf);
+    g_assert_cmphex(qtest_readb(qts, buf + 4), ==, 0x2);
+    *lost = *wu = 0;
+    for (uint32_t i = 0; i < nlsd; i++) {
+        uint64_t d = buf + 8 + 16 * (uint64_t)i;
+        uint64_t nb = (uint64_t)qtest_readl(qts, d + 8) + 1;
+        uint8_t st = qtest_readb(qts, d + 13);
+
+        g_assert_true(st == 1 || st == 3);
+        *(st == 1 ? lost : wu) += nb;
+    }
+}
+
+/* a Read of one 512-byte block */
+static uint16_t femu_rain_read_blk(FemuCtrlState *c, uint64_t slba,
+                                   uint64_t buf)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(slba);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    return femu_io(c, (NvmeCmd *)&rw);
+}
+
+/* Dataset Management deallocate of @nlb blocks at @slba */
+static void femu_rain_trim(FemuCtrlState *c, uint64_t buf, uint64_t slba,
+                           uint32_t nlb)
+{
+    uint8_t range[16] = { 0 };
+    NvmeCmd cmd = { 0 };
+
+    stl_le_p(range + 4, nlb);
+    stq_le_p(range + 8, slba);
+    qtest_memwrite(c->pdev->bus->qts, buf, range, sizeof(range));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    g_assert_cmphex(femu_io(c, &cmd), ==, NVME_SUCCESS);
+}
+static void femu_eol_wait_held(QTestState *qts, uint64_t want);
+
+/*
+ * Set a mode-2 x-ftl-hold, then write page @p with @pat. The poller takes
+ * the write, and it holds credits in the FTL ring when this returns.
+ */
+static void femu_rain_held_write(FemuCtrlState *c, uint64_t buf, int p,
+                                 uint8_t pat)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeRwCmd rw = { 0 };
+    QDict *rsp;
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-ftl-hold','value':2}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    qtest_memset(qts, buf, pat, 4096);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(p * 8);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    femu_eol_wait_held(qts, 1);
+}
+
+/*
+ * A failure that the drain would refuse keeps a mode-2 x-ftl-hold, and
+ * the write held in front of the FTL stays there.
+ *
+ *   hold 2 --> write waits --> fail die 2: refused --> hold still 2,
+ *   same mapping, credits held --> hold 0 --> the write completes
+ */
+static void femu_rain_refuse_held(FemuCtrlState *c, uint64_t buf, int p)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    g_autofree char *was = femu_rain_probe(qts, p);
+    g_autofree char *now = NULL;
+    uint64_t cap, pages, reqs;
+    NvmeCqe cqe;
+    QDict *rsp;
+    bool ro;
+
+    femu_rain_held_write(c, buf, p, 0x33);
+    /* three members fail at most of four: refused before the drain */
+    g_assert_false(femu_rain_fail(qts, 2));
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-ftl-hold'}}");
+    g_assert_cmpint(qdict_get_int(rsp, "return"), ==, 2);
+    qobject_unref(rsp);
+    /* a drained write would have a new page and no credits */
+    now = femu_rain_probe(qts, p);
+    g_assert_cmpstr(now, ==, was);
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_cmpuint(reqs, ==, 1);
+    qtest_memread(qts, c->io.cq_addr + c->io.cq_head * sizeof(cqe), &cqe,
+                  sizeof(cqe));
+    g_assert_cmpint(le16_to_cpu(cqe.status) & 1, !=, c->io.phase);
+    femu_zns_ftl_hold(qts, false);
+    g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+}
+
+/*
+ * rain_loss (design R2b), 4 dies (2 channels, 2 LUNs), one plane, 8-page
+ * blocks, 64 lines, high 78: the second failure leaves the media
+ * writable. 48 page writes fill lines 0 and 1 at epoch 0. Die 1 fails
+ * (no rebuild, so the lines keep their data), then die 0. A full row has
+ * both dies programmed (data or parity), so every data page on die 0 or 1
+ * is lost: 12 of the 24 of a line. The oracle is x-ftl-probe before the
+ * failures. @data:
+ *   "base":    reads, SMART media errors, lost-pages and lost-blocks, GLS
+ *              (001b), Notice 05h, x-ftl-check; a rewrite repairs
+ *   "partial": one page: row 0 has one failed member programmed, so none
+ *   "wu":      WU before the scan on a lost and a kept page: 001b and 011b
+ *              runs; WU after it on a lost block: a read of that block
+ *              adds no media error, a read of its neighbour adds one
+ *   "trim":    half of a lost page deallocated first: only the other half
+ *   "hold":    x-ftl-hold=1 with a scan due: refused, no change; then the
+ *              failure goes through
+ *   "off":     rain_loss=off: refused, no change
+ */
+void femu_test_rain_loss(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *kind = data;
+    bool partial = !strcmp(kind, "partial");
+    bool hold = !strcmp(kind, "hold");
+    bool wu = !strcmp(kind, "wu");
+    bool trim = !strcmp(kind, "trim");
+    int np = partial ? 1 : 48;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    char *map[48] = { NULL };
+    bool gone[48] = { false };
+    uint64_t nfail, left, moved, lp, lb, glost, gwu;
+    uint64_t mapped, lost, orphans, media;
+    uint16_t want;
+    int nlost = 0;
+    int kept = -1;
+    int kept2 = -1;
+    int l0 = -1;
+    int l1 = -1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_lsi_aec(&c, true);
+    for (int p = 0; p < np; p++) {
+        qtest_memset(qts, buf, 0x80 | p, 4096);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, p * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    for (int p = 0; p < np; p++) {
+        int ch;
+        int lun;
+
+        map[p] = femu_rain_probe(qts, p);
+        g_assert_cmpint(sscanf(map[p], "%d %d", &ch, &lun), ==, 2);
+        gone[p] = !partial && ch * 2 + lun < 2;
+        nlost += gone[p];
+        if (!gone[p]) {
+            if (kept >= 0 && kept2 < 0) {
+                kept2 = p;
+            }
+            kept = kept < 0 ? p : kept;
+        } else if (l0 < 0) {
+            l0 = p;
+        } else if (l1 < 0) {
+            l1 = p;
+        }
+    }
+    g_assert_cmpint(nlost, ==, partial ? 0 : 24);
+    if (wu) {
+        femu_mark_uncor(&c, l0 * 8 + 2, 1);
+        femu_mark_uncor(&c, kept * 8 + 3, 1);
+    }
+    if (trim) {
+        femu_rain_trim(&c, buf, l0 * 8, 4);
+    }
+    g_assert_true(femu_rain_fail(qts, 1));
+    femu_rain_check(qts, &nfail, &left, &moved);
+    g_assert_cmpuint(nfail, ==, 1);
+    g_assert_cmpuint(left, ==, partial ? 1 : 2);
+    media = femu_rain_media(&c, log);
+
+    if (hold || !strcmp(kind, "off")) {
+        if (hold) {
+            femu_zns_ftl_hold(qts, true);
+        }
+        g_assert_false(femu_rain_fail(qts, 0));
+        femu_rain_check(qts, &nfail, &left, &moved);
+        g_assert_cmpuint(nfail, ==, 1);
+        for (int p = 0; p < np; p++) {
+            g_autofree char *now = femu_rain_probe(qts, p);
+
+            g_assert_cmpstr(now, ==, map[p]);
+        }
+        femu_rain_lost(qts, &lp, &lb);
+        g_assert_cmpuint(lp, ==, 0);
+        if (!hold) {
+            goto out;
+        }
+        /*
+         * Mode 2: the drain ends the hold and lands the held rewrite of
+         * page l0 before the scan. Its new page is on a live line, so it
+         * stays.
+         */
+        femu_zns_ftl_hold(qts, false);
+        femu_rain_held_write(&c, buf, l0, 0x44);
+        g_assert_true(femu_rain_fail(qts, 0));
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+        for (int p = 0; p < np; p++) {
+            g_autofree char *now = femu_rain_probe(qts, p);
+
+            if (p == l0) {
+                g_assert_cmpstr(now, !=, "unmapped");
+            } else {
+                g_assert_cmpstr(now, ==, gone[p] ? "unmapped" : map[p]);
+            }
+        }
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l0 * 8, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, buf + 7), ==, 0x44);
+        femu_rain_lost(qts, &lp, &lb);
+        g_assert_cmpuint(lp, ==, nlost - 1);
+        goto out;
+    }
+
+    want = femu_aer(&c);
+    g_assert_true(femu_rain_fail(qts, 0));
+    /* the component failure: Notice 05h at once */
+    g_assert_true(femu_lsi_after(&c, 1000));
+    femu_lsi_alert(&c, want);
+    femu_rain_check(qts, &nfail, &left, &moved);
+    g_assert_cmpuint(nfail, ==, 2);
+    for (int p = 0; p < np; p++) {
+        g_autofree char *now = femu_rain_probe(qts, p);
+        uint16_t st = FEMU_SC(femu_rw(&c, NVME_CMD_READ, p * 8, buf));
+
+        g_assert_cmpstr(now, ==, gone[p] ? "unmapped" : map[p]);
+        if (gone[p] || (wu && p == kept)) {
+            g_assert_cmphex(st, ==, NVME_UNRECOVERED_READ);
+        } else {
+            g_assert_cmphex(st, ==, NVME_SUCCESS);
+            g_assert_cmphex(qtest_readb(qts, buf), ==, 0x80 | p);
+            g_assert_cmphex(qtest_readb(qts, buf + 4095), ==, 0x80 | p);
+        }
+    }
+    /* a WU-only failure is the host's: no media error for page kept */
+    g_assert_cmpuint(femu_rain_media(&c, log), ==, media + nlost);
+    femu_rain_lost(qts, &lp, &lb);
+    g_assert_cmpuint(lp, ==, nlost);
+    g_assert_cmpuint(lb, ==, nlost * 8 - (trim ? 4 : 0));
+    femu_rain_gls(&c, buf, &glost, &gwu);
+    g_assert_cmpuint(glost, ==, lb);
+    g_assert_cmpuint(gwu, ==, wu ? 1 : 0);
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, np - nlost);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    if (partial) {
+        goto out;
+    }
+    if (!strcmp(kind, "sanitize")) {
+        /*
+         * A Block Erase Sanitize clears the lost map with the rest: GLS
+         * lists nothing, and a read of page l0 that fails on a new WU
+         * block 0 adds no media error.
+         *
+         *   sanitize --> wait for SSTAT done --> GLS 0 --> WU l0 --> +0
+         */
+        uint16_t sprog;
+        int i;
+
+        g_assert_cmphex(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+        for (i = 0; i < 100 && (femu_sstat(&c, log, &sprog) & 0x7) != 0x1;
+             i++) {
+            qtest_clock_step(qts, 100 * 1000 * 1000LL);
+        }
+        g_assert_cmpint(i, <, 100);
+        femu_rain_gls(&c, buf, &glost, &gwu);
+        g_assert_cmpuint(glost, ==, 0);
+        femu_mark_uncor(&c, l0 * 8, 1);
+        media = femu_rain_media(&c, log);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l0 * 8, buf)), ==,
+                        NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media);
+        goto out;
+    }
+    if (!strcmp(kind, "copy")) {
+        /*
+         * Copy stops at its first failing source range, so that range
+         * decides the media error count:
+         *
+         *   readable, lost  --> +1     WU only, lost --> 0
+         *   lost, lost      --> +1
+         */
+        uint64_t s[2];
+        /* MCL is 8 blocks: 64 KiB (mdts=4) at the 8 KiB format */
+        uint16_t nb[2] = { 4, 4 };
+
+        /* both destination pages hold a sentinel each Copy must keep */
+        for (int p = 200; p < 202; p++) {
+            qtest_memset(qts, buf, 0x66, 4096);
+            g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, p * 8, buf)),
+                            ==, NVME_SUCCESS);
+        }
+        s[0] = kept * 8;
+        s[1] = l0 * 8;
+        media = femu_rain_media(&c, log);
+        g_assert_cmphex(FEMU_SC(femu_copy(&c, list, 200 * 8, s, nb, 2, 2, 0)),
+                        ==, NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media + 1);
+        femu_mark_uncor(&c, kept2 * 8 + 1, 1);
+        s[0] = kept2 * 8;
+        s[1] = l1 * 8;
+        media = femu_rain_media(&c, log);
+        g_assert_cmphex(FEMU_SC(femu_copy(&c, list, 200 * 8, s, nb, 2, 2, 0)),
+                        ==, NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media);
+        s[0] = l0 * 8;
+        media = femu_rain_media(&c, log);
+        g_assert_cmphex(FEMU_SC(femu_copy(&c, list, 200 * 8, s, nb, 2, 2, 0)),
+                        ==, NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media + 1);
+        /* no Copy wrote its destination */
+        for (int p = 200; p < 202; p++) {
+            qtest_memset(qts, buf, 0, 4096);
+            g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, p * 8, buf)),
+                            ==, NVME_SUCCESS);
+            g_assert_cmphex(qtest_readb(qts, buf), ==, 0x66);
+            g_assert_cmphex(qtest_readb(qts, buf + 4095), ==, 0x66);
+        }
+        goto out;
+    }
+
+    /* a rewrite clears the mark and maps a new page */
+    qtest_memset(qts, buf, 0x55, 4096);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, l1 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l1 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 100), ==, 0x55);
+    femu_rain_gls(&c, buf, &glost, &gwu);
+    g_assert_cmpuint(glost, ==, lb - 8);
+    femu_rain_lost(qts, &lp, &lb);
+    g_assert_cmpuint(lp, ==, nlost);
+    if (!strcmp(kind, "base")) {
+        /*
+         * Subset rule: the rewrite cleared the lost bits of page l1. A
+         * read of the page that fails on a new WU block 0 adds no media
+         * error, as blocks 1 to 7 hold no stale lost bit.
+         */
+        femu_mark_uncor(&c, l1 * 8, 1);
+        media = femu_rain_media(&c, log);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l1 * 8, buf)), ==,
+                        NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media);
+    }
+    if (wu) {
+        int l2 = -1;
+
+        for (int p = l1 + 1; p < np && l2 < 0; p++) {
+            l2 = gone[p] ? p : -1;
+        }
+        /* the last write of block 0 is WU now; blocks 1 to 7 stay lost */
+        femu_mark_uncor(&c, l2 * 8, 1);
+        media = femu_rain_media(&c, log);
+        g_assert_cmphex(femu_rain_read_blk(&c, l2 * 8, buf), ==,
+                        NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media);
+        g_assert_cmphex(femu_rain_read_blk(&c, l2 * 8 + 1, buf), ==,
+                        NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media + 1);
+    }
+    if (!strcmp(kind, "base")) {
+        femu_rain_refuse_held(&c, buf, kept);
+        /*
+         * Format gives new maps: no lost block stays. A read of page l0
+         * that fails on a new WU block 0 adds no media error.
+         */
+        g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+        femu_rain_gls(&c, buf, &glost, &gwu);
+        g_assert_cmpuint(glost, ==, 0);
+        femu_mark_uncor(&c, l0 * 8, 1);
+        media = femu_rain_media(&c, log);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, l0 * 8, buf)), ==,
+                        NVME_UNRECOVERED_READ);
+        g_assert_cmpuint(femu_rain_media(&c, log), ==, media);
+    }
+
+out:
+    for (int p = 0; p < np; p++) {
+        g_free(map[p]);
+    }
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* rain_loss refusals, each against a device that realizes without it */
+void femu_test_rain_loss_props(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *dir = g_dir_make_tmp("femu-rl-XXXXXX", NULL);
+    g_autofree char *file = g_build_filename(dir, "data", NULL);
+    g_autofree char *lock = g_strconcat(file, ".lock", NULL);
+    g_autofree char *pf = g_strdup_printf(
+        "'rain_read_only':true,'persist_file':'%s'", file);
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'rain_read_only':true", NULL },
+        { "'rain_read_only':false", "rain_loss needs rain_read_only" },
+        { pf, "rain_loss is not supported with persist_file" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'rl%d','addr':'%d','devsz_mb':1,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':8,"
+            "'luns_per_ch':2,'nchs':2,'pls_per_lun':1,'rain_parity':1,"
+            "'mdts':4,'blks_per_pl':64,'rain_loss':true,%s}}", i, 5 + i,
+            cases[i].opts);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        if (!cases[i].msg) {
+            g_assert_false(qdict_haskey(rsp, "error"));
+        } else {
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("%s: %s", cases[i].opts, desc);
+            g_assert_nonnull(strstr(desc, cases[i].msg));
+        }
+        qobject_unref(rsp);
+    }
+    unlink(lock);
+    unlink(file);
+    rmdir(dir);
+    qos_invalidate_command_line();
+}
+
+/*
+ * OCP event 0016h, NAND Die Offline, takes die inject_die=3 offline. Four
+ * dies, two channels of two LUNs; LBA page 3 sits on channel 1, LUN 1,
+ * die 3. @data names the case. "parity": 100 ms page reads, die parity
+ * with 50 ms of XOR time; the event waits for two reads, then a read of
+ * page 3 reads the three other dies in parallel (about 150 ms, not 350)
+ * and counts in SMART-5 and degraded-reads; NUME 0 brings the die back.
+ * "noparity", with a read cache: a read of page 3 fails with Unrecovered
+ * Read Error, again on a retry, and counts in SMART-6; a failed Read
+ * counts toward NRTDE. "off": without ocp, Feature C0h does not exist.
+ */
+void femu_test_ocp_die_offline(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t ibuf = guest_alloc(alloc, 4096);
+    uint8_t got[32];
+    uint32_t res;
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_inj_entry(qts, ibuf, 0x0016, 0);
+    if (g_str_equal(mode, "off")) {
+        g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==,
+                        NVME_INVALID_FIELD);
+        femu_disable(&c);
+        guest_free(alloc, ibuf);
+        guest_free(alloc, buf);
+        return;
+    }
+    qtest_memset(qts, buf, 0x5a, 4096);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+
+    /* ERRI-5, SERRI-10, SERRI-14, UUID-3 */
+    femu_inj_entry(qts, ibuf, 0x0001, 0);
+    g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==,
+                    NVME_INVALID_FIELD);
+    femu_inj_entry(qts, ibuf, 0x0016, 0);
+    g_assert_cmphex(femu_inj(&c, true, 1, 1, ibuf, NULL), ==,
+                    NVME_FID_NOT_SAVEABLE);
+    g_assert_cmphex(femu_inj(&c, true, 0, 2, ibuf, NULL), ==,
+                    NVME_INVALID_FIELD);
+    {
+        NvmeCmd cmd = { 0 };
+
+        cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+        cmd.cdw10 = cpu_to_le32(0xc0);
+        cmd.cdw11 = cpu_to_le32(1);
+        cmd.cdw14 = cpu_to_le32(2);
+        cmd.dptr.prp1 = cpu_to_le64(ibuf);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    }
+    g_assert_cmphex(femu_inj(&c, false, 3, 0, ibuf, &res), ==, NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0x4);              /* changeable only */
+
+    if (g_str_equal(mode, "noparity")) {
+        g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==,
+                        NVME_SUCCESS);
+        for (int i = 0; i < 2; i++) {
+            g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 24, buf)), ==,
+                            NVME_UNRECOVERED_READ);
+        }
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 56), ==, 2);
+
+        /* a new injection waits; a failed Read counts toward NRTDE */
+        femu_inj_entry(qts, ibuf, 0x0016, 2);
+        g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(femu_inj(&c, false, 0, 0, ibuf, &res), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, 1);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 1ull << 40, buf)),
+                        !=, NVME_SUCCESS);
+        g_assert_cmphex(femu_inj(&c, false, 0, 0, ibuf, &res), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, 0);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 24, buf)), ==,
+                        NVME_UNRECOVERED_READ);
+        g_assert_cmphex(femu_inj(&c, true, 0, 0, ibuf, NULL), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 24, buf)), ==,
+                        NVME_SUCCESS);
+        femu_disable(&c);
+        guest_free(alloc, ibuf);
+        guest_free(alloc, buf);
+        return;
+    }
+
+    /* the event waits for two successful reads */
+    femu_inj_entry(qts, ibuf, 0x0016, 2);
+    g_assert_cmphex(femu_inj(&c, true, 0, 1, ibuf, NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_inj(&c, false, 0, 0, ibuf, &res), ==, NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 1);
+    us = femu_timed_read(&c, 3, buf);
+    g_test_message("die offline: read before the event %" PRId64 " us", us);
+    g_assert_cmpint(us, <, 140000);
+    femu_timed_read(&c, 0, buf);
+    g_assert_cmphex(femu_inj(&c, false, 0, 0, ibuf, &res), ==, NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 0);
+    qtest_memread(qts, ibuf, got, sizeof(got));
+    g_assert_cmphex(got[0], ==, 0x3);
+    g_assert_cmphex(lduw_le_p(got + 2), ==, 0x0016);
+    g_assert_cmphex(lduw_le_p(got + 4), ==, 2);
+
+    /* die 3 is offline: the three other dies answer, in parallel */
+    us = femu_timed_read(&c, 3, buf);
+    g_test_message("die offline: degraded read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 150000);
+    g_assert_cmpint(us, <, 230000);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 48), ==, 1);
+    {
+        uint64_t parity, nread;
+        double waf;
+
+        femu_parity_counters(qts, &parity, &nread, &waf);
+        g_assert_cmpuint(nread, ==, 1);
+    }
+
+    /* NUME 0 brings it back; default and current are empty again */
+    g_assert_cmphex(femu_inj(&c, true, 0, 0, ibuf, NULL), ==, NVME_SUCCESS);
+    us = femu_timed_read(&c, 3, buf);
+    g_test_message("die offline: read after the clear %" PRId64 " us", us);
+    g_assert_cmpint(us, <, 140000);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 48), ==, 1);
+    for (uint8_t sel = 0; sel < 2; sel++) {
+        qtest_memset(qts, ibuf, 0xa5, 4096);
+        g_assert_cmphex(femu_inj(&c, false, sel, 0, ibuf, &res), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, 0);
+        qtest_memread(qts, ibuf, got, sizeof(got));
+        for (size_t i = 0; i < sizeof(got); i++) {
+            g_assert_cmphex(got[i], ==, 0);
+        }
+    }
+    femu_disable(&c);
+    guest_free(alloc, ibuf);
+    guest_free(alloc, buf);
+}
+
+/* the 512-byte page at @buf is OCP C0h: version 4, its GUID, OCP 2.5 */
+static bool femu_is_ocp_c0(QTestState *qts, uint64_t buf)
+{
+    uint8_t p[512];
+
+    qtest_memread(qts, buf, p, sizeof(p));
+    return lduw_le_p(&p[494]) == 6 && !memcmp(&p[496], femu_ocp_c0_guid, 16);
+}
+
+/*
+ * ocp on a bbssd controller. @data "on": the UUID List names the OCP UUID
+ * (entry 1) and the FEMU one (entry 2); CTRATT bit 9 and Get Log Page USS
+ * are set. C0h at index 0 and 1 is the OCP page, at index 2 the FEMU page.
+ * C1h says no recovery is needed. Log 00h follows the index, and an index
+ * past 2, or a page the index does not have, is an invalid field. The media
+ * bytes written and read grow by whole pages with I/O. @data "off": none of
+ * that, and the UUID index is ignored.
+ */
+/*
+ * OCP PCIe extended capabilities (PCI-25, PCI-26), read through q35's
+ * ECAM window at B0000000h: with ocp, AER at 100h, then the Device Serial
+ * Number at 148h; off, no extended capability.
+ */
+void femu_test_ocp_extcaps(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    bool on = g_str_equal(data, "on");
+    QTestState *qts = qtest_initf("-machine q35 -m 128M "
+                                  "-device femu,addr=04.0,femu_mode=1,"
+                                  "devsz_mb=64%s -device femu,addr=05.0,"
+                                  "femu_mode=1,devsz_mb=64%s",
+                                  on ? ",ocp=on" : "", on ? ",ocp=on" : "");
+    uint64_t cfg = 0xb0000000ULL + (4 << 15);
+    uint32_t hdr;
+
+    /* turn on q35's ECAM window: PCIEXBAR (host bridge 60h), enable bit */
+    qtest_outl(qts, 0xcf8, 0x80000000 | 0x60);
+    qtest_outl(qts, 0xcfc, 0xb0000001);
+    g_assert_cmphex(qtest_readw(qts, 0xb0000000ULL), ==, 0x8086);
+    hdr = qtest_readl(qts, cfg + 0x100);
+    /* the device: its class code is NVMe (010802h) */
+    g_assert_cmphex(qtest_readl(qts, cfg + 8) >> 8, ==, 0x010802);
+    g_assert_cmphex(hdr & 0xffff, ==, on ? 0x0001 : 0);        /* AER */
+    if (on) {
+        uint64_t dsn;
+
+        g_assert_cmphex(hdr >> 20, ==, 0x148);
+        g_assert_cmphex(qtest_readl(qts, cfg + 0x148) & 0xffff, ==,
+                        0x0003);                               /* DSN */
+        dsn = qtest_readl(qts, cfg + 0x14c) |
+              (uint64_t)qtest_readl(qts, cfg + 0x150) << 32;
+        g_assert_cmphex(dsn, !=, 0);
+        /* a second device has its own number (PCI-25) */
+        {
+            uint64_t cfg2 = 0xb0000000ULL + (5 << 15);
+            uint64_t dsn2 = qtest_readl(qts, cfg2 + 0x14c) |
+                            (uint64_t)qtest_readl(qts, cfg2 + 0x150) << 32;
+
+            g_assert_cmphex(qtest_readl(qts, cfg2 + 0x148) & 0xffff, ==,
+                            0x0003);
+            g_assert_cmphex(dsn2, !=, dsn);
+        }
+        /* Device Control error enables are writable with AER */
+        qtest_writew(qts, cfg + 0x80 + 8,
+                     qtest_readw(qts, cfg + 0x80 + 8) | 0xf);
+        g_assert_cmphex(qtest_readw(qts, cfg + 0x80 + 8) & 0xf, ==, 0xf);
+    }
+    qtest_quit(qts);
+}
+
+/*
+ * OCP Function Level Reset (PCI-6): with ocp, FLR in Device Capabilities.
+ * An FLR of a running controller clears CC, CSTS and AQA, and the
+ * controller enables again. Off, Device Capabilities has no FLR.
+ */
+void femu_test_ocp_pcie(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QPCIDevice *pdev = &femu->dev;
+    bool on = g_str_equal(data, "on");
+    FemuCtrlState c = { 0 };
+
+    g_assert_cmpint(!!(qpci_config_readl(pdev, 0x80 + 4) & (1u << 28)), ==,
+                    on);                                       /* FLR */
+    if (!on) {
+        return;
+    }
+
+    femu_enable(&c, pdev, alloc);
+    g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x1c) & 1, ==, 1);
+    /* Device Control bit 15: Initiate Function Level Reset */
+    qpci_config_writew(pdev, 0x80 + 8,
+                       qpci_config_readw(pdev, 0x80 + 8) | 0x8000);
+    qpci_iounmap(pdev, c.bar);
+    femu_queue_free(&c, &c.admin);
+    qpci_device_enable(pdev);
+    c.bar = qpci_iomap(pdev, 0, NULL);
+    g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x14), ==, 0);   /* CC */
+    g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x1c), ==, 0);   /* CSTS */
+    g_assert_cmphex(qpci_io_readl(pdev, c.bar, 0x24), ==, 0);   /* AQA */
+    qpci_iounmap(pdev, c.bar);
+    femu_enable(&c, pdev, alloc);
+    femu_create_io_queues(&c);
+    femu_round_trip(&c, 0x2d);
+    femu_disable(&c);
+}
+
+void femu_test_ocp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    bool on = g_str_equal(data, "on");
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t w0, w1, r0, r1;
+    uint8_t p[512];
+    NvmeIdCtrl id;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &id, sizeof(id));
+    g_assert_cmphex(le32_to_cpu(id.ctratt) & (1 << 9), ==, on ? 1 << 9 : 0);
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(femu_identify(&c, 0, 0x17, 0, buf), ==,
+                    on ? NVME_SUCCESS : NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_log(&c, 0x05, 0, 0, buf, 4096), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * NVME_ADM_CMD_GET_LOG_PAGE),
+                    ==, on ? 1 | 1u << 19 : 1);
+
+    /*
+     * The values OCP 2.7 fixes where base NVMe leaves a choice: CAP.CSS
+     * bit 6, NSFEAT.DAE, LPA bit 0, WCTEMP and CCTEMP; then DULBE and SMART
+     * per namespace refused, and the Timestamp kept over a reset.
+     */
+    {
+        uint64_t cap = qpci_io_readq(c.pdev, c.bar, 0);
+        NvmeIdNs ns;
+        uint64_t ts = 0x123456789aULL;
+
+        g_assert_cmpuint((cap >> 37) & 0x40, ==, on ? 0 : 0x40);
+        g_assert_cmpuint(id.lpa & 1, ==, on ? 0 : 1);
+        /* PELS in 64 KiB units: 5 MiB with ocp (STD-LOG-22) */
+        g_assert_cmpuint(ldl_le_p((uint8_t *)&id + 352), ==, on ? 80 : 1);
+        g_assert_cmphex(le16_to_cpu(id.wctemp), ==, on ? 0x15e : FEMU_WCTEMP);
+        g_assert_cmphex(le16_to_cpu(id.cctemp), ==, on ? 0x166 : 0x175);
+        g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, &ns, sizeof(ns));
+        g_assert_cmphex(ns.nsfeat & 0x4, ==, on ? 0 : 0x4);
+        g_assert_cmphex(FEMU_SC(femu_set_feature(&c, NVME_ERROR_RECOVERY,
+                                                 false, 1, 1 << 16, NULL)),
+                        ==, on ? NVME_INVALID_FIELD : NVME_SUCCESS);
+        g_assert_cmphex(femu_ocp_log_ns(&c, 0x02, 0, 1, 0, buf, 512), ==,
+                        on ? NVME_INVALID_FIELD : NVME_SUCCESS);
+        qtest_writeq(qts, buf, ts);
+        g_assert_cmphex(femu_timestamp(&c, true, 0, 0, buf), ==,
+                        NVME_SUCCESS);
+        femu_disable(&c);
+        femu_enable(&c, &femu->dev, alloc);
+        qtest_memset(qts, buf, 0, 8);
+        g_assert_cmphex(femu_timestamp(&c, false, 0, 0, buf), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint((qtest_readq(qts, buf) & 0xffffffffffffULL) >= ts, ==,
+                        on);
+    }
+
+    /*
+     * OCP feature C9h, DSSD Asynchronous Event Configuration, through the
+     * UUID index (UUID-2, UUID-3): default 1 (error AENs), not saveable,
+     * bits 31:2 reserved, back to the default after a reset.
+     */
+    {
+        uint32_t r = 0xdead;
+
+        g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 0, 1, 0, &r), ==,
+                        on ? NVME_SUCCESS : NVME_INVALID_FIELD);
+        if (on) {
+            g_assert_cmphex(r, ==, 1);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc9, 0, 1, 0x2, NULL),
+                            ==, NVME_SUCCESS);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 0, 0, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 2);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc9, 0, 1, 0x4, NULL),
+                            ==, NVME_INVALID_FIELD);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc9, 1, 1, 0x1, NULL),
+                            ==, NVME_FID_NOT_SAVEABLE);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 1, 1, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 1);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 3, 1, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 0x4);            /* CHANG only */
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 0, 2, 0, &r), ==,
+                            NVME_INVALID_FIELD);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0x06 + 1, 0, 1, 0, &r),
+                            ==, NVME_INVALID_FIELD);
+            femu_disable(&c);
+            femu_enable(&c, &femu->dev, alloc);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 0, 1, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 1);
+            /*
+             * SDAEC-18: enabling Media Ready AENs reports the event once
+             * per reset (DSSD-AEN-2: type 7, information 01h, log 00h).
+             */
+            {
+                uint16_t want;
+                uint16_t cid;
+                uint32_t res = 0;
+
+                /* enabled before any AER: the event waits in the queue */
+                g_assert_cmphex(femu_ocp_feat(&c, true, 0xc9, 0, 1, 0x3,
+                                              NULL), ==, NVME_SUCCESS);
+                want = femu_aer(&c);
+                g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                                NVME_SUCCESS);
+                g_assert_cmpint(cid, ==, want);
+                g_assert_cmphex(res & 0xffffff, ==, 0x000107);
+                /* a second enable reports nothing: the AER stays open */
+                femu_aer(&c);
+                g_assert_cmphex(femu_ocp_feat(&c, true, 0xc9, 0, 1, 0x3,
+                                              NULL), ==, NVME_SUCCESS);
+                g_assert_cmphex(femu_ocp_feat(&c, false, 0xc9, 0, 1, 0, &r),
+                                ==, NVME_SUCCESS);
+                g_assert_cmphex(r, ==, 3);
+                femu_disable(&c);
+                femu_enable(&c, &femu->dev, alloc);
+            }
+        }
+        /*
+         * OCP value features C6h, C8h and CAh: the factory default, a set
+         * that a reset undoes unless saved, reserved bits refused. C8h is
+         * saved without SV (TEL-CFG-SF-10). C3h returns zero and takes
+         * only bit 31. Profile B disables C2h and prohibits CBh.
+         */
+        if (on) {
+            static const struct {
+                uint8_t fid;
+                uint32_t def;
+                uint32_t set;           /* Set Features CDW11 */
+                uint32_t got;           /* Get Features Dword 0 after it */
+                uint32_t bad;           /* a refused CDW11 */
+            } v[] = {
+                { 0xc6, 0, 15u << 16, 15, 1 },
+                { 0xc8, 0, 0x7, 0x7, 0x100 },
+                { 0xca, 0, 500, 500, 1u << 16 },
+            };
+
+            for (int i = 0; i < ARRAY_SIZE(v); i++) {
+                g_test_message("OCP feature %02xh", v[i].fid);
+                g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, 1, 1, 0,
+                                              &r), ==, NVME_SUCCESS);
+                g_assert_cmphex(r, ==, v[i].def);
+                g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, 3, 1, 0,
+                                              &r), ==, NVME_SUCCESS);
+                g_assert_cmphex(r, ==, 0x5);    /* CHANG and SAVE */
+                g_assert_cmphex(femu_ocp_feat(&c, true, v[i].fid, 0, 1,
+                                              v[i].bad, NULL), ==,
+                                NVME_INVALID_FIELD);
+                g_assert_cmphex(femu_ocp_feat(&c, true, v[i].fid, 0, 1,
+                                              v[i].set, NULL), ==,
+                                NVME_SUCCESS);
+                g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, 0, 1, 0,
+                                              &r), ==, NVME_SUCCESS);
+                g_assert_cmphex(r, ==, v[i].got);
+            }
+            /* a reset brings back the saved value: C8h's set, others' 0 */
+            femu_disable(&c);
+            femu_enable(&c, &femu->dev, alloc);
+            for (int i = 0; i < ARRAY_SIZE(v); i++) {
+                uint32_t want = v[i].fid == 0xc8 ? v[i].got : v[i].def;
+
+                for (uint8_t sel = 0; sel <= 2; sel += 2) {
+                    g_assert_cmphex(femu_ocp_feat(&c, false, v[i].fid, sel,
+                                                  1, 0, &r), ==,
+                                    NVME_SUCCESS);
+                    g_assert_cmphex(r, ==, want);
+                }
+            }
+            /* profile B: C2h disabled (DP-CFG-6), CBh prohibited (DP-CFG-13) */
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 0, 1, 0, &r), ==,
+                            NVME_INVALID_FIELD);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xcb, 0, 1, 0x2, NULL),
+                            ==, NVME_INVALID_FIELD);
+            /* a saved set stays across a reset */
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc6, 1, 1, 30u << 16,
+                                          NULL), ==, NVME_SUCCESS);
+            femu_disable(&c);
+            femu_enable(&c, &femu->dev, alloc);
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc6, 0, 1, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 30);
+            /* C3h: no value, bit 31 only, not saveable */
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc3, 0, 1, 1u << 31,
+                                          NULL), ==, NVME_SUCCESS);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc3, 0, 1, 1, NULL),
+                            ==, NVME_INVALID_FIELD);
+            g_assert_cmphex(femu_ocp_feat(&c, true, 0xc3, 1, 1, 1u << 31,
+                                          NULL), ==, NVME_FID_NOT_SAVEABLE);
+            r = 0xdead;
+            g_assert_cmphex(femu_ocp_feat(&c, false, 0xc3, 0, 1, 0, &r), ==,
+                            NVME_SUCCESS);
+            g_assert_cmphex(r, ==, 0);
+        }
+        /* Get and Set Features have USS with ocp (log 05h, bit 19) */
+        g_assert_cmphex(femu_ocp_log(&c, 0x05, 0, 0, buf, 4096), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x0a), ==,
+                        on ? 1 | 1u << 19 : 1);
+        g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x09), ==,
+                        on ? 1 | 1u << 19 : 1);
+    }
+
+    if (!on) {
+        /* no UUID selection: the index is ignored, C0h is the FEMU page */
+        for (uint8_t u = 0; u <= 1; u++) {
+            g_assert_cmphex(femu_ocp_log(&c, 0xc0, u, 0, buf, 512), ==,
+                            NVME_SUCCESS);
+            g_assert_false(femu_is_ocp_c0(qts, buf));
+        }
+        g_assert_cmphex(femu_ocp_log(&c, 0xc1, 0, 0, buf, 512), ==,
+                        NVME_INVALID_LOG_ID);
+        g_assert_cmphex(femu_ocp_log(&c, 0xc3, 0, 0, buf, 512), ==,
+                        NVME_INVALID_LOG_ID);
+        g_assert_cmphex(femu_ocp_log(&c, 0xc4, 0, 0, buf, 512), ==,
+                        NVME_INVALID_LOG_ID);
+        g_assert_cmphex(femu_ocp_feat(&c, false, 0xc5, 0, 0, 0, NULL), ==,
+                        NVME_INVALID_FIELD);
+        g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 0, 0, NULL), ==,
+                        NVME_INVALID_FIELD);
+        goto out;
+    }
+
+    g_assert_cmphex(femu_identify(&c, 0, 0x17, 0, buf), ==, NVME_SUCCESS);
+    {
+        uint8_t l[4096];
+
+        qtest_memread(qts, buf, l, sizeof(l));
+        for (int b = 0; b < 32; b++) {
+            g_assert_cmpuint(l[b], ==, 0);
+        }
+        g_assert_cmpuint(l[32], ==, 0);
+        g_assert_cmpmem(&l[48], 16, femu_ocp_uuid, 16);
+        g_assert_cmpuint(l[64], ==, 0);
+        g_assert_cmpmem(&l[80], 16, femu_femu_uuid, 16);
+        for (int b = 96; b < sizeof(l); b++) {
+            g_assert_cmpuint(l[b], ==, 0);
+        }
+    }
+
+    /* log 00h per index */
+    g_assert_cmphex(femu_ocp_log(&c, 0x00, 1, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    for (int lid = 0; lid < 256; lid++) {
+        uint32_t want = lid == 0 || lid == 0xc0 || lid == 0xc1 ||
+                        lid == 0xc3 || lid == 0xc4 || lid == 0xc6;
+
+        g_assert_cmphex(qtest_readl(qts, buf + 4 * lid), ==, want);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0x00, 2, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    for (int lid = 0; lid < 256; lid++) {
+        uint32_t want = lid == 0 || lid == 0xc0;
+
+        g_assert_cmphex(qtest_readl(qts, buf + 4 * lid), ==, want);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0x00, 0, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * 0xc1), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x02), ==, 1);
+
+    /* pages an index does not have, and an index past the list */
+    g_assert_cmphex(femu_ocp_log(&c, 0x02, 1, 0, buf, 512), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc1, 2, 0, buf, 512), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 3, 0, buf, 512), ==,
+                    NVME_INVALID_FIELD);
+    /* the Persistent Event early path checks the index too */
+    {
+        NvmeCmd pel;
+
+        memset(&pel, 0, sizeof(pel));
+        pel.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+        pel.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+        pel.dptr.prp1 = cpu_to_le64(buf);
+        pel.cdw10 = cpu_to_le32(0x0d | 2 << 8 | 127 << 16);
+        pel.cdw14 = cpu_to_le32(1);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &pel)), ==, NVME_INVALID_FIELD);
+    }
+    /* controller and subsystem scope: a namespace NSID is refused */
+    g_assert_cmphex(femu_ocp_log_ns(&c, 0xc0, 1, 1, 0, buf, 512), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_log_ns(&c, 0xc1, 0, 1, 0, buf, 512), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_log_ns(&c, 0xc0, 0, 0, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_true(femu_is_ocp_c0(qts, buf));
+    /* an offset reads the same bytes */
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 496, buf, 16), ==,
+                    NVME_SUCCESS);
+    {
+        uint8_t g[16];
+
+        qtest_memread(qts, buf, g, sizeof(g));
+        g_assert_cmpmem(g, 16, femu_ocp_c0_guid, 16);
+    }
+
+    /* C0h: OCP at 0 and 1, FEMU at 2 */
+    for (uint8_t u = 0; u <= 2; u++) {
+        g_assert_cmphex(femu_ocp_log(&c, 0xc0, u, 0, buf, 512), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(femu_is_ocp_c0(qts, buf), ==, u != 2);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint((uint32_t)ldl_le_p(&p[40]) |
+                     (uint64_t)lduw_le_p(&p[44]) << 32,
+                     ==, 0xffffffffffffULL);        /* system blocks: none */
+    g_assert_cmpuint(lduw_le_p(&p[46]), ==, 0xffff);
+    g_assert_cmpuint(ldq_le_p(&p[48]), ==, 0);      /* XOR recovery */
+    g_assert_cmpuint(p[98], ==, 0);
+    g_assert_cmpuint(lduw_le_p(&p[99]), ==, 0);
+    g_assert_cmpuint(lduw_le_p(&p[101]), ==, 7);    /* DSSD 2.7 */
+    g_assert_cmpuint(p[103], ==, 2);
+    g_assert_cmpuint(lduw_le_p(&p[128]), ==, 0xffff);
+    {
+        NvmeIdNs ns;
+
+        g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, &ns, sizeof(ns));
+        g_assert_cmpuint(ldq_le_p(&p[152]), ==, le64_to_cpu(ns.nuse));
+        g_assert_cmpuint(le64_to_cpu(ns.nuse), ==, 0);  /* nothing written */
+    }
+    /* 2.7 fields: dies, max temperature, average erases, then reserved */
+    g_assert_cmpuint(lduw_le_p(&p[216]), >, 0);
+    g_assert_cmpuint(p[222], >, 0);
+    g_assert_cmpuint(ldq_le_p(&p[224]), ==, 0);     /* a new device */
+    /* SMART-52: 6-byte raw count 0, normalized spare 100% from the factory */
+    g_assert_cmpuint(ldq_le_p(&p[358]) & 0xffffffffffffULL, ==, 0);
+    g_assert_cmpuint(lduw_le_p(&p[364]), ==, 100);
+    g_assert_cmpuint(ldq_le_p(&p[136]), ==, 0);     /* no unaligned write */
+    for (int b = 366; b < 494; b++) {
+        g_assert_cmpuint(p[b], ==, 0);
+    }
+    w0 = ldq_le_p(&p[0]);
+    r0 = ldq_le_p(&p[16]);
+
+    /* I/O moves the media bytes, in whole 4 KiB pages */
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+    for (int i = 0; i < 64; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        i * (4096 / c.lba_size), buf)), ==,
+                        NVME_SUCCESS);
+    }
+    for (int i = 0; i < 64; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ,
+                                        i * (4096 / c.lba_size), buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 0, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    w1 = ldq_le_p(&p[0]);
+    r1 = ldq_le_p(&p[16]);
+    g_test_message("media bytes written %" PRIu64 " -> %" PRIu64
+                   ", read %" PRIu64 " -> %" PRIu64, w0, w1, r0, r1);
+    /* one 4 KiB page per command, no buffer, no collection on a new device */
+    g_assert_cmpuint(w1 - w0, ==, 64 * 4096);
+    g_assert_cmpuint(r1 - r0, ==, 64 * 4096);
+    g_assert_cmpuint(ldq_le_p(&p[136]), ==, 0);     /* aligned writes only */
+    /* NUSE counts written blocks (NUSE-1), and C0h Total NUSE agrees */
+    {
+        NvmeIdNs ns;
+        uint64_t total = ldq_le_p(&p[152]);
+
+        g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, &ns, sizeof(ns));
+        g_assert_cmpuint(le64_to_cpu(ns.nuse), ==, 64 * 4096 / c.lba_size);
+        g_assert_cmpuint(total, ==, 64 * 4096 / c.lba_size);
+    }
+    /*
+     * SMART-21 counts by start address only: one write that starts one LBA
+     * into a page and ends inside the next counts once.
+     */
+    if (c.lba_size < 4096) {
+        NvmeRwCmd rw;
+        uint16_t cid;
+
+        /* one block at an aligned start ends inside the page: no count */
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(66 * 4096 / c.lba_size);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(femu_ocp_log(&c, 0xc0, 0, 0, buf, 512), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, p, sizeof(p));
+        g_assert_cmpuint(ldq_le_p(&p[136]), ==, 0);
+
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 64 * 4096 /
+                                        c.lba_size + 1, buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(femu_ocp_log(&c, 0xc0, 0, 0, buf, 512), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, p, sizeof(p));
+        g_assert_cmpuint(ldq_le_p(&p[136]), ==, 1);
+    }
+    femu_queue_free(&c, &c.io);
+
+    /* C1h at index 0 and 1: no recovery needed, nothing else */
+    for (uint8_t u = 0; u <= 1; u++) {
+        g_assert_cmphex(femu_ocp_log(&c, 0xc1, u, 0, buf, 512), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, p, sizeof(p));
+        for (int b = 0; b < 494; b++) {
+            g_assert_cmpuint(p[b], ==, b == 3 ? 1 : 0);
+        }
+        g_assert_cmpuint(lduw_le_p(&p[494]), ==, 3);
+        g_assert_cmpmem(&p[496], 16, femu_ocp_c1_guid, 16);
+    }
+
+out:
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* Set Features C5h with the 13 payload bytes @cfg; the rest is zero */
+static uint16_t femu_ocp_lat_set(FemuCtrlState *c, uint64_t buf,
+                                 const uint8_t *cfg)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd;
+
+    qtest_memset(qts, buf, 0, 4096);
+    qtest_memwrite(qts, buf, cfg, 13);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0xc5);
+    cmd.cdw14 = cpu_to_le32(1);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* x-ocp-lat-skew-ms of device lat-test */
+static void femu_ocp_lat_skew(QTestState *qts, uint32_t ms)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/lat-test',"
+                             "'property':'x-ocp-lat-skew-ms','value':%u}}",
+                             ms);
+}
+
+/*
+ * The OCP 2.7 latency monitor (log C3h, feature C5h) on a device whose page
+ * read takes 40 ms. Defaults: status 07h, timer threshold 07E0h, A to D
+ * 05h 13h 1Eh 2Eh (30, 100, 155, 235 ms), configuration 0FFFh, window 0Ah,
+ * stamps all ones. A read counts in bucket 0, a fast write nowhere. A new
+ * configuration clears the counts; thresholds must rise; discard (02h)
+ * changes nothing. After one 5-minute interval the active set moves to the
+ * static set; after the next, empty interval the static set is empty.
+ */
+void femu_test_ocp_latency(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t data_buf = guest_alloc(alloc, 4096);
+    static const uint8_t def[13] = {
+        0x07, 0x00, 0x00, 0x00, 0xe0, 0x07, 0x05, 0x13, 0x1e, 0x2e, 0xff,
+        0x0f, 0x0a,
+    };
+    /* timer 1 interval, A to D 5 10 15 20 ms, mode 0, no window, enabled */
+    const uint8_t cfg[13] = { 0x01, 0x00, 0x00, 0x01, 0x02, 0x03, 0, 0, 0,
+                              0, 0, 0, 0x01 };
+    uint8_t p[4096];
+    uint32_t r;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 4096), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpmem(p, 13, def, 13);
+    for (int b = 96; b < 192; b++) {
+        g_assert_cmphex(p[b], ==, 0xff);
+    }
+    g_assert_cmphex(lduw_le_p(&p[460]), ==, 0xca);
+    g_assert_cmphex(lduw_le_p(&p[494]), ==, 5);
+    g_assert_cmphex(p[496], ==, 0x92);
+    g_assert_cmphex(p[511], ==, 0x85);
+    for (int b = 512; b < 4096; b++) {
+        g_assert_cmphex(p[b], ==, 0);
+    }
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc5, 3, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 0x5);                    /* CHANG and SVBL */
+
+    /* a 40 ms read lands in bucket 0 (30 to 100 ms) */
+    qtest_memset(qts, data_buf, 0x5a, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, data_buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, data_buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 0, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmpuint(ldl_le_p(&p[44]), ==, 1);      /* bucket 0 Read */
+    /* a host thread can stall a write past 30 ms, so it is only reported */
+    g_test_message("bucket 0 write: count %u, latency %u ms",
+                   (unsigned)ldl_le_p(&p[40]), (unsigned)lduw_le_p(&p[212]));
+    g_assert_cmpuint(lduw_le_p(&p[214]), >=, 40);
+    g_assert_cmpuint(lduw_le_p(&p[214]), <, 100);
+    g_assert_cmphex(ldq_le_p(&p[184]), !=, UINT64_MAX);
+    /* the bucket 0 Write stamp is set exactly when that count is */
+    g_assert_cmpint(ldq_le_p(&p[176]) == UINT64_MAX, ==,
+                    ldl_le_p(&p[40]) == 0);
+
+    /* thresholds must rise, and the enable byte is 0 or 1 */
+    {
+        uint8_t bad[13];
+
+        memcpy(bad, cfg, 13);
+        bad[3] = 0x00;
+        g_assert_cmphex(femu_ocp_lat_set(&c, buf, bad), ==,
+                        NVME_INVALID_FIELD);
+        memcpy(bad, cfg, 13);
+        bad[12] = 0x02;
+        g_assert_cmphex(femu_ocp_lat_set(&c, buf, bad), ==,
+                        NVME_INVALID_FIELD);
+    }
+    /* with A at 1205 ms (F0h), a 40 ms read counts nowhere */
+    {
+        uint8_t hi[13];
+
+        memcpy(hi, cfg, 13);
+        hi[2] = 0xf0;
+        hi[3] = 0xf1;
+        hi[4] = 0xf2;
+        hi[5] = 0xf3;
+        g_assert_cmphex(femu_ocp_lat_set(&c, buf, hi), ==, NVME_SUCCESS);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, data_buf)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, p, 512);
+        for (int b = 32; b < 96; b += 4) {
+            g_assert_cmpuint(ldl_le_p(&p[b]), ==, 0);
+        }
+    }
+    /* a new configuration clears both sets; the read now hits bucket 3 */
+    g_assert_cmphex(femu_ocp_lat_set(&c, buf, cfg), ==, NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, data_buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmphex(lduw_le_p(&p[4]), ==, 1);
+    g_assert_cmpuint(ldl_le_p(&p[44]), ==, 0);
+    g_assert_cmpuint(ldl_le_p(&p[92]), ==, 1);      /* bucket 3 Read */
+    /* discard (02h) with an otherwise empty payload changes nothing */
+    {
+        const uint8_t discard[13] = { [11] = 0x02 };
+
+        g_assert_cmphex(femu_ocp_lat_set(&c, buf, discard), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmpuint(ldl_le_p(&p[92]), ==, 1);
+    g_assert_cmphex(p[0], ==, 0x07);
+
+    /* one interval later the count is static; one more, and static is empty */
+    femu_ocp_lat_skew(qts, 300 * 1000);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmpuint(ldl_le_p(&p[92]), ==, 0);
+    g_assert_cmpuint(ldl_le_p(&p[92 + 208]), ==, 1);
+    femu_ocp_lat_skew(qts, 600 * 1000);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmpuint(ldl_le_p(&p[92 + 208]), ==, 0);
+    /*
+     * A count in the active set, then a jump over two intervals with no
+     * read between: the last interval was empty, so both sets are empty.
+     */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, data_buf)), ==,
+                    NVME_SUCCESS);
+    femu_ocp_lat_skew(qts, 1200 * 1000);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc3, 1, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 512);
+    g_assert_cmpuint(ldl_le_p(&p[92]), ==, 0);
+    g_assert_cmpuint(ldl_le_p(&p[92 + 208]), ==, 0);
+    femu_ocp_lat_skew(qts, 0);
+
+    guest_free(alloc, data_buf);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/* CRC-32 (IEEE 802.3, as zlib computes it) for FEMU firmware images */
+static uint32_t femu_fw_crc(uint32_t crc, const uint8_t *p, size_t len)
+{
+    crc = ~crc;
+    while (len--) {
+        crc ^= *p++;
+        for (int k = 0; k < 8; k++) {
+            crc = crc & 1 ? (crc >> 1) ^ 0xedb88320u : crc >> 1;
+        }
+    }
+    return ~crc;
+}
+
+/* a FEMU image with revision @fr and security version @svn: 8 KiB */
+static void femu_fw_image(uint8_t *img, const char *fr, uint32_t svn)
+{
+    uint32_t plen = 8192 - 32;
+    uint32_t crc;
+
+    memset(img, 0, 8192);
+    memcpy(img, "FEMUFW01", 8);
+    memset(img + 8, ' ', 8);
+    memcpy(img + 8, fr, strlen(fr));
+    stl_le_p(img + 16, svn);
+    stl_le_p(img + 20, plen);
+    for (uint32_t i = 0; i < plen; i++) {
+        img[32 + i] = i * 7;
+    }
+    crc = femu_fw_crc(0, img, 24);
+    crc = femu_fw_crc(crc, img + 32, plen);
+    stl_le_p(img + 24, crc);
+}
+
+/* Firmware Image Download of @len bytes at byte @off from guest @buf */
+static uint16_t femu_fw_dl(FemuCtrlState *c, uint64_t buf, uint32_t off,
+                           uint32_t len)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_DOWNLOAD_FW;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.dptr.prp2 = cpu_to_le64(buf + 4096);
+    cmd.cdw10 = cpu_to_le32(len / 4 - 1);
+    cmd.cdw11 = cpu_to_le32(off / 4);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static uint16_t femu_fw_cmt(FemuCtrlState *c, uint8_t fs, uint8_t ca)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ACTIVATE_FW;
+    cmd.cdw10 = cpu_to_le32(fs | ca << 3);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* download the 8 KiB image @img in two pieces, the second first */
+static void femu_fw_send(FemuCtrlState *c, uint64_t buf, const uint8_t *img)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    qtest_memwrite(qts, buf, img + 4096, 4096);
+    g_assert_cmphex(femu_fw_dl(c, buf, 4096, 4096), ==, NVME_SUCCESS);
+    qtest_memwrite(qts, buf, img, 4096);
+    g_assert_cmphex(femu_fw_dl(c, buf, 0, 4096), ==, NVME_SUCCESS);
+}
+
+/* Identify FR and log 03h: AFI and the revision in slot @slot */
+static void femu_fw_state(FemuCtrlState *c, uint64_t buf, char *fr,
+                          uint8_t *afi, int slot, char *frs)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmphex(femu_identify(c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf + 64, fr, 8);
+    g_assert_cmphex(femu_log_cmd(c, 0xffffffff, 0x03, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    *afi = qtest_readb(qts, buf);
+    qtest_memread(qts, buf + 8 * slot, frs, 8);
+}
+
+/*
+ * Firmware Image Download and Firmware Commit with fw_slots=3 (Base 2.3,
+ * 5.2.8, 5.2.9): Identify FRMW 17h, FWUG 1, OACS bit 2; misaligned and
+ * overlapping pieces refused; the commit action matrix with exact status;
+ * activation now with the notice, and at the next reset; the security
+ * version floor; Sanitize refused while an activation is pending.
+ */
+void femu_test_fw_update(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t buf = femu_alloc_64k(alloc, &raw);
+    g_autofree uint8_t *img = g_malloc(8192);
+    char fr0[8], fr[8], frs[8];
+    uint8_t afi;
+    uint32_t res;
+    uint16_t cid, want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + FEMU_ID_FRMW), ==, 0x17);
+    g_assert_cmphex(qtest_readw(qts, buf + 256) & (1 << 2), ==, 1 << 2);
+    g_assert_cmphex(qtest_readb(qts, buf + 319), ==, 1);        /* FWUG */
+    g_assert_cmphex(qtest_readw(qts, buf + 270), ==, 1);        /* MTFA */
+    g_assert_cmphex(qtest_readw(qts, buf + 360), ==, 1);        /* MPTFAWR */
+    femu_fw_state(&c, buf, fr0, &afi, 1, frs);
+    g_assert_cmphex(afi, ==, 0x01);
+    g_assert_cmpmem(frs, 8, fr0, 8);
+
+    /* NUMD is zero-based: 4092 bytes is not a 4 KiB multiple */
+    femu_fw_image(img, "FW-2", 2);
+    qtest_memwrite(qts, buf, img, 8192);
+    g_assert_cmphex(femu_fw_dl(&c, buf, 0, 4092), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_fw_dl(&c, buf, 4, 4096), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_fw_dl(&c, buf, 6 * 1024 * 1024, 4096), ==,
+                    NVME_INVALID_FIELD);
+    /* no image staged yet: CA 000b has nothing to store */
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, 0x107);
+
+    /* overlap */
+    g_assert_cmphex(femu_fw_dl(&c, buf, 0, 4096), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fw_dl(&c, buf, 0, 8192), ==, 0x114);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, 0x107);   /* unit 1 missing */
+    /* a non-ASCII revision, with a CRC that matches */
+    femu_fw_image(img, "F\x01", 2);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, 0x107);
+    femu_fw_image(img, "FW-2", 2);
+    /*
+     * A hole: staging still holds every byte of a good image from the last
+     * download, but only unit 0 was sent since, so the image is invalid.
+     */
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 9, 0), ==, 0x106);
+    qtest_memwrite(qts, buf, img, 4096);
+    g_assert_cmphex(femu_fw_dl(&c, buf, 0, 4096), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, 0x107);
+
+    /* two pieces, the second first; slot 1 is read only; slot 4 is past N */
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 1, 0), ==, 0x106);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 4, 0), ==, 0x106);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, NVME_SUCCESS);
+    femu_fw_state(&c, buf, fr, &afi, 2, frs);
+    g_assert_cmpmem(fr, 8, fr0, 8);                 /* not activated */
+    g_assert_cmphex(afi, ==, 0x01);
+    g_assert_cmpmem(frs, 8, "FW-2    ", 8);
+    /* CA 000b again without a new Download */
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, 0x107);
+
+    /* a bad CRC */
+    img[100] ^= 1;
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 3, 0), ==, 0x107);
+    img[100] ^= 1;
+
+    /* CA 011b activates slot 2 now, with the notice when bit 9 is on */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1 << 9,
+                                             NULL)), ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 3), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x030102);
+    femu_fw_state(&c, buf, fr, &afi, 2, frs);
+    g_assert_cmpmem(fr, 8, "FW-2    ", 8);
+    g_assert_cmphex(afi, ==, 0x02);
+
+    /* CA 000b to the running slot is a sequence error */
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 0), ==, NVME_CMD_SEQ_ERROR);
+    /* security version 1 is below the floor of 2 */
+    femu_fw_image(img, "FW-1", 1);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 3, 0), ==, 0x113);
+
+    /* CA 001b to FS 0 picks slot 3; it runs only after the next reset */
+    femu_fw_image(img, "FW-3", 3);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 0, 1), ==, NVME_SUCCESS);
+    femu_fw_state(&c, buf, fr, &afi, 3, frs);
+    g_assert_cmpmem(fr, 8, "FW-2    ", 8);
+    g_assert_cmphex(afi, ==, 0x32);
+    g_assert_cmpmem(frs, 8, "FW-3    ", 8);
+    /* Sanitize waits for the reset; its log is untouched (SPROG 0) */
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, 0x111);
+    g_assert_cmphex(femu_log_cmd(&c, 0xffffffff, FEMU_LOG_SANITIZE, 0, buf,
+                                 512), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 2) & 0x7, ==, 0);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_fw_state(&c, buf, fr, &afi, 3, frs);
+    g_assert_cmpmem(fr, 8, "FW-3    ", 8);
+    g_assert_cmphex(afi, ==, 0x03);
+    /*
+     * Slot 1 can run without a new image, but its factory image (security
+     * version 0) is below the floor of 3. Without ocp nothing refreshes it.
+     */
+    g_assert_cmphex(femu_fw_cmt(&c, 1, 3), ==, 0x113);
+    femu_fw_state(&c, buf, fr, &afi, 1, frs);
+    g_assert_cmpmem(fr, 8, "FW-3    ", 8);
+    g_assert_cmpmem(frs, 8, fr0, 8);
+    /* slot 1 takes no new image, whatever the action */
+    femu_fw_image(img, "FW-4", 4);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 1, 1), ==, 0x106);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 1, 3), ==, 0x106);
+
+    /* CA 011b with a fresh image stores and runs it at once */
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 2, 3), ==, NVME_SUCCESS);
+    femu_fw_state(&c, buf, fr, &afi, 2, frs);
+    g_assert_cmpmem(fr, 8, "FW-4    ", 8);
+    g_assert_cmphex(afi, ==, 0x02);
+
+    /*
+     * CA 010b refuses slot 3 (FW-3, security version 3) below the floor of
+     * 4; then FW-5 goes to slot 3 and is named for the next reset.
+     */
+    femu_fw_image(img, "FW-5", 5);
+    g_assert_cmphex(femu_fw_cmt(&c, 3, 2), ==, 0x113);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 3, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_fw_cmt(&c, 3, 2), ==, NVME_SUCCESS);
+    femu_fw_state(&c, buf, fr, &afi, 3, frs);
+    g_assert_cmphex(afi, ==, 0x32);
+    /* power loss runs the pending slot, as a reset does */
+    {
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                               "'path':'/machine/peripheral/fw-test',"
+                               "'property':'simulate-power-loss',"
+                               "'value':true}}");
+
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+    }
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_fw_state(&c, buf, fr, &afi, 3, frs);
+    g_assert_cmpmem(fr, 8, "FW-5    ", 8);
+    g_assert_cmphex(afi, ==, 0x03);
+
+    guest_free(alloc, raw);
+    femu_disable(&c);
+}
+
+/*
+ * With ocp=on: three slots by default (FRMW 17h). Running a higher security
+ * version refreshes slot 1 (FWUP-20); C0h reports the running security
+ * version (SMART-22) and the lowest permitted revision (SMART-33).
+ */
+void femu_test_fw_ocp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t buf = femu_alloc_64k(alloc, &raw);
+    g_autofree uint8_t *img = g_malloc(8192);
+    uint8_t p[512];
+    char fr[8], frs[8];
+    uint8_t afi;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + FEMU_ID_FRMW), ==, 0x17);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint(ldq_le_p(&p[144]), ==, 0);
+    g_assert_cmpuint(ldq_le_p(&p[208]), ==, 0);
+
+    femu_fw_image(img, "FW-7", 7);
+    femu_fw_send(&c, buf, img);
+    g_assert_cmphex(femu_fw_cmt(&c, 0, 3), ==, NVME_SUCCESS);
+    femu_fw_state(&c, buf, fr, &afi, 1, frs);
+    g_assert_cmpmem(fr, 8, "FW-7    ", 8);
+    g_assert_cmphex(afi, ==, 0x02);
+    g_assert_cmpmem(frs, 8, "FW-7    ", 8);         /* slot 1 refreshed */
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint(ldq_le_p(&p[144]), ==, 7);
+    g_assert_cmpmem(&p[208], 8, "FW-7    ", 8);
+    /* the refreshed slot 1 now runs: its security version meets the floor */
+    g_assert_cmphex(femu_fw_cmt(&c, 1, 3), ==, NVME_SUCCESS);
+
+    guest_free(alloc, raw);
+    femu_disable(&c);
+}
+
+/*
+ * OCP 2.7 Device Capabilities (C4h) and DSSD power states (C7h) with
+ * ocp=on and ps_max_watts=25: version 2 and the GUID; support bits agree
+ * with log 05h; DSSD states below 25 invalid, the rest map to PS0 (80h);
+ * C7h current, saved and default, kept over a reset; Power Management
+ * saveable; CAP.CPS 11b.
+ */
+/*
+ * OCP Hardware Component log (C6h): version 2, the GUID, the size in bytes
+ * 47:32; descriptors from byte 64 with no gap up to the size; the
+ * controller, NAND, DRAM, PMIC and PCB, then serial number, country of
+ * origin (no text), hardware revision and an MMDDYYYY born-on date.
+ */
+void femu_test_ocp_hwcomp(void *obj, void *data,
+                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    static const uint8_t guid[16] = {
+        0xdc, 0x57, 0x0f, 0x9f, 0xb9, 0x31, 0x6b, 0xb7,
+        0xd0, 0x4e, 0xcd, 0x30, 0x1f, 0x82, 0xb6, 0xbc,
+    };
+    static const uint32_t want[] = { 1, 2, 3, 4, 5, 9, 10, 11, 12 };
+    g_autofree uint8_t *p = g_malloc(4096);
+    uint64_t size, pos = 64;
+    int i = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc6, 1, 0, buf, 4096), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, p, 4096);
+    g_assert_cmpuint(lduw_le_p(&p[0]), ==, 2);
+    g_assert_cmpmem(&p[16], 16, guid, 16);
+    size = ldq_le_p(&p[32]);
+    g_assert_cmpuint(size, >, 64);
+    g_assert_cmpuint(size, <=, 4096);
+    while (pos < size) {
+        uint64_t lot = ldq_le_p(&p[pos]);
+        uint64_t add = ldq_le_p(&p[pos + 8]);
+        uint32_t id = ldl_le_p(&p[pos + 16]);
+
+        g_assert_cmpint(i, <, ARRAY_SIZE(want));
+        g_assert_cmpuint(id, ==, want[i]);
+        if (id == 12) {                          /* MMDDYYYY */
+            g_assert_cmpuint(add, ==, 2);
+            for (int k = 0; k < 8; k++) {
+                g_assert_true(g_ascii_isdigit(p[pos + 44 + lot * 4 + k]));
+            }
+        }
+        if (id == 10) {
+            g_assert_cmpuint(add, ==, 0);        /* not available */
+        }
+        pos += 44 + lot * 4 + add * 4;
+        i++;
+    }
+    g_assert_cmpuint(pos, ==, size);
+    g_assert_cmpint(i, ==, ARRAY_SIZE(want));
+    /* the OCP UUID lists it in log 00h */
+    g_assert_cmphex(femu_ocp_log(&c, 0x00, 1, 0, buf, 1024), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 0xc6 * 4) & 1, ==, 1);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+void femu_test_ocp_caps(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    static const uint8_t guid[16] = {
+        0x97, 0x42, 0x05, 0x0d, 0xd1, 0xe1, 0xc9, 0x98,
+        0x5d, 0x49, 0x58, 0x4b, 0x91, 0x3c, 0x05, 0xb7,
+    };
+    g_autofree uint8_t *p = g_malloc(4096);
+    uint32_t acs[256];
+    uint32_t r;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex((qpci_io_readq(c.pdev, c.bar, 0) >> 46) & 3, ==, 3);
+    g_assert_cmphex(femu_log_cmd(&c, 0, FEMU_LOG_CMD_EFFECTS, 0, buf, 4096),
+                    ==, NVME_SUCCESS);
+    qtest_memread(qts, buf + 1024, acs, sizeof(acs));
+    for (uint8_t u = 0; u <= 1; u++) {
+        g_assert_cmphex(femu_ocp_log(&c, 0xc4, u, 0, buf, 4096), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, p, 4096);
+        g_assert_cmpuint(lduw_le_p(&p[0]), ==, 1);
+        g_assert_cmpuint(lduw_le_p(&p[2]), ==, 0);
+        g_assert_cmphex(lduw_le_p(&p[4]), ==,
+                        le32_to_cpu(acs[0x08]) & 1 ? 0x17 : 0);
+        g_assert_cmphex(lduw_le_p(&p[8]), ==,
+                        le32_to_cpu(acs[0x09]) & 1 ? 0x03 : 0);
+        g_assert_cmphex(lduw_le_p(&p[10]), ==,
+                        le32_to_cpu(acs[0x04]) & 1 ? 0x0f : 0);
+        g_assert_cmphex(lduw_le_p(&p[12]), ==, 0);
+        g_assert_cmpuint(lduw_le_p(&p[14]), ==, 25);
+        g_assert_cmphex(p[16], ==, 0);
+        g_assert_cmphex(p[16 + 24], ==, 0);
+        g_assert_cmphex(p[16 + 25], ==, 0x80);
+        g_assert_cmphex(p[16 + 127], ==, 0x80);
+        for (int b = 144; b < 4078; b++) {
+            g_assert_cmphex(p[b], ==, 0);
+        }
+        g_assert_cmpuint(lduw_le_p(&p[4078]), ==, 2);
+        g_assert_cmpmem(&p[4080], 16, guid, 16);
+    }
+
+    /* C7h: default and current 25, capabilities 5h */
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 25);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 1, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 25);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 3, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 0x5);
+    /* below the minimum, and a reserved bit, are refused */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 0, 1, 24, NULL), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 0, 1, 0x80 | 30, NULL), ==,
+                    NVME_INVALID_FIELD);
+    /* saved 40, then current 30 without SV; a reset brings back 40 */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 1, 1, 40, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 0, 1, 30, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 30);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 2, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 40);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 40);
+    /* the minimum and the top state are valid */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 0, 1, 25, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 0, 1, 127, NULL), ==,
+                    NVME_SUCCESS);
+    /* NSID 1 is an invalid field for an NVM subsystem feature (GETF-4) */
+    {
+        NvmeCmd cmd;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.cdw10 = cpu_to_le32(0xc7);
+        cmd.cdw11 = cpu_to_le32(30);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==,
+                        NVME_INVALID_FIELD);
+    }
+    /*
+     * Power Management saves with ocp (PWR-5). PS0 with Workload Hint 1
+     * (20h): C7h current becomes 25, and the C7h saved value (40) stays.
+     */
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x02, 3, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r & 0x1, ==, 0x1);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0x02, 1, 0, 0x20, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 25);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 2, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 40);
+    /* saving C7h 50 keeps the 02h saved value and its current hint */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc7, 1, 1, 50, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x02, 2, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 0x20);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x02, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 0x20);
+    /* an unsaved 02h change, then a reset: both saved values come back */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0x02, 0, 0, 0, NULL), ==,
+                    NVME_SUCCESS);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x02, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 0x20);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc7, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(r, ==, 50);
+    /* Identify MP of PS0: 25 W in 0.01 W units */
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 2048), ==, 2500);
+
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/* qom-set @prop of device @id to @v */
+static void femu_qom_u32(QTestState *qts, const char *id, const char *prop,
+                         uint32_t v)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':%s,'property':%s,'value':%u}}",
+                             path, prop, v);
+}
+
+/* one 4 KiB read at LBA 0, in microseconds of host time */
+static int64_t femu_read_us(FemuCtrlState *c, uint64_t buf)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    return g_get_monotonic_time() - t0;
+}
+
+/* SMART bytes 216 to 231: HCTM transitions and seconds per level */
+static void femu_hctm_smart(FemuCtrlState *c, uint64_t buf, uint32_t *v)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmphex(femu_log_cmd(c, 0xffffffff, 0x02, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    for (int i = 0; i < 4; i++) {
+        v[i] = qtest_readl(qts, buf + 216 + 4 * i);
+    }
+}
+
+/*
+ * Thermal throttling with HCTM (feature 10h) on a bbssd device whose page
+ * read takes 50 ms, ambient 300 K, thermal_r 1 mK/mW. HCTMA, MNTMT and
+ * MXTMT; the 0-means-off rules; light and heavy levels from idle power;
+ * a heavy read takes 3x; SMART counts and seconds; turning HCTM off
+ * gives back the nominal time.
+ */
+void femu_test_thermal_throttle(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t r;
+    uint32_t v[4];
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 322), ==, 1);       /* HCTMA */
+    g_assert_cmpuint(qtest_readw(qts, buf + 324), ==, 273);     /* MNTMT */
+    g_assert_cmpuint(qtest_readw(qts, buf + 326), ==,
+                     qtest_readw(qts, buf + 268));              /* = CCTEMP */
+
+    /* 0 turns a level off; both on need TMT1 < TMT2; inside MNTMT..MXTMT */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             310u << 16, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0, 320, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             320u << 16 | 310, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             310u << 16 | 310, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             272u << 16, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x10, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 320);                /* the refusals changed nothing */
+    /* both halves come back; one past MXTMT is refused */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             310u << 16 | 330, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0x10, 0, 0, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 310u << 16 | 330);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0,
+                                             qtest_readw(qts, buf + 326) + 1,
+                                             NULL)), ==, NVME_INVALID_FIELD);
+
+    qtest_memset(qts, buf, 0x33, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    /* nominal 50 ms; the host adds polling and scheduling on top */
+    us = femu_read_us(&c, buf);
+    g_test_message("nominal read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 45000);
+    g_assert_cmpint(us, <, 100000);
+    /* the vendor command that zeroes the delays (EFh, 4) is ignored here */
+    {
+        NvmeCmd cmd;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = 0xef;
+        cmd.cdw10 = cpu_to_le32(4);
+        femu_admin(&c, &cmd);
+    }
+    g_assert_cmpint(femu_read_us(&c, buf), >=, 45000);
+
+    /* 320 K: light (TMT1 310), 75 ms; then 340 K: heavy (TMT2 330), 150 ms */
+    femu_qom_u32(qts, "thr", "x-idle-mw", 20000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    us = femu_read_us(&c, buf);
+    g_test_message("light read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 70000);
+    g_assert_cmpint(us, <, 130000);
+    femu_qom_u32(qts, "thr", "x-idle-mw", 40000);
+    qtest_clock_step(qts, 3000 * 1000 * 1000LL);
+    us = femu_read_us(&c, buf);
+    g_test_message("heavy read %" PRId64 " us", us);
+    g_assert_cmpint(us, >=, 145000);
+    g_assert_cmpint(us, <, 260000);
+    femu_hctm_smart(&c, buf, v);
+    g_assert_cmpuint(v[0], ==, 1);              /* one light transition */
+    g_assert_cmpuint(v[1], ==, 1);              /* one heavy transition */
+    g_assert_cmpuint(v[2], >=, 1);
+    g_assert_cmpuint(v[3], >=, 2);
+
+    /* cooling to 300 K releases both levels with HCTM still set */
+    femu_qom_u32(qts, "thr", "x-idle-mw", 0);
+    qtest_clock_step(qts, 3000 * 1000 * 1000LL);
+    us = femu_read_us(&c, buf);
+    g_assert_cmpint(us, <, 100000);
+    /* hot again, then HCTM off: nominal at once; the counts stay */
+    femu_qom_u32(qts, "thr", "x-idle-mw", 40000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x10, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    us = femu_read_us(&c, buf);
+    g_assert_cmpint(us, <, 100000);
+    femu_hctm_smart(&c, buf, v);
+    g_assert_cmpuint(v[1], ==, 2);              /* the second heavy entry */
+    femu_qom_u32(qts, "thr", "x-idle-mw", 0);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * With ocp=on the throttle protects autonomously: heavy at 350 K, released
+ * below 348 K, with the SMART temperature warning set and cleared with it;
+ * C0h byte 96 counts the episode and byte 97 shows the level. HCTM is off
+ * all along.
+ */
+void femu_test_thermal_ocp(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t p[512];
+
+    uint32_t v[4];
+    uint32_t res = 0;
+    uint16_t cid, want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /*
+     * Feature 04h over threshold at 340 K, SMART temperature events on.
+     * At 345 K the threshold warns first; the host reads the log.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x04, false, 0, 340, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 0x2, NULL)),
+                    ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    femu_qom_u32(qts, "thro", "x-idle-mw", 45000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(femu_log_cmd(&c, 0xffffffff, 0x02, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    /*
+     * 355 K: autonomous entry sends its own event (TTHROTTLE-2), although
+     * the temperature warning was already on.
+     */
+    want = femu_aer(&c);
+    femu_qom_u32(qts, "thro", "x-idle-mw", 55000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x020101);
+    g_assert_cmphex(femu_log_cmd(&c, 0xffffffff, 0x02, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf) & 0x2, ==, 0x2);
+    /* writes go on while protected; HCTM statistics stay zero */
+    qtest_memset(qts, buf, 0x44, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_hctm_smart(&c, buf, v);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpuint(v[i], ==, 0);
+    }
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint(p[96], ==, 1);
+    g_assert_cmpuint(p[97], ==, 2);
+    /* 349 K: still protected (hysteresis), still warned */
+    femu_qom_u32(qts, "thro", "x-idle-mw", 49000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint(p[97], ==, 2);
+    g_assert_cmphex(femu_log_cmd(&c, 0xffffffff, 0x02, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf) & 0x2, ==, 0x2);
+    /* 335 K: released with an event (TTHROTTLE-7); the count stays */
+    want = femu_aer(&c);
+    femu_qom_u32(qts, "thro", "x-idle-mw", 35000);
+    qtest_clock_step(qts, 2000 * 1000 * 1000LL);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x020101);
+    g_assert_cmphex(femu_ocp_log(&c, 0xc0, 1, 0, buf, 512), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, p, sizeof(p));
+    g_assert_cmpuint(p[96], ==, 1);
+    g_assert_cmpuint(p[97], ==, 0);
+    g_assert_cmphex(femu_log_cmd(&c, 0xffffffff, 0x02, 0, buf, 512), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf) & 0x2, ==, 0);
+    femu_qom_u32(qts, "thro", "x-idle-mw", 0);
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/* field 1 of x-ftl-trace (modelled request time, ns) on device @id */
+static uint64_t femu_model_ns(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-ftl-trace'}}", path);
+    g_auto(GStrv) v = NULL;
+    uint64_t ns;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    ns = g_ascii_strtoull(v[1], NULL, 10);
+    qobject_unref(rsp);
+    return ns;
+}
+
+/*
+ * plane_reads in the real bbssd FTL: one channel, one LUN, two planes, so
+ * the two pages of an 8 KiB write land on planes 0 and 1 of one die. One
+ * 8 KiB read then takes one tR (5 ms) with plane_reads, two without.
+ */
+void femu_test_plane_reads_timing(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = data ? "prd-on" : "prd-off";
+    FemuCtrlState c = { 0 };
+    uint64_t raw = 0;
+    uint64_t buf = femu_alloc_64k(alloc, &raw);
+    NvmeRwCmd rw;
+    uint64_t before, d;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6c, 8192);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 4096 / c.lba_size,
+                                    buf + 4096)), ==, NVME_SUCCESS);
+    before = femu_model_ns(qts, id);
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.dptr.prp2 = cpu_to_le64(buf + 4096);
+    rw.nlb = cpu_to_le16(8192 / c.lba_size - 1);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                    NVME_SUCCESS);
+    d = femu_model_ns(qts, id) - before;
+    g_test_message("%s: 8 KiB read modelled %" PRIu64 " ns", id, d);
+    if (data) {
+        g_assert_cmpuint(d, >=, 5000000);
+        g_assert_cmpuint(d, <, 7500000);
+    } else {
+        g_assert_cmpuint(d, >=, 10000000);
+    }
+    guest_free(alloc, raw);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/* qom-set the ANA state "g:s" of device "anac" */
+static void femu_ana_set(QTestState *qts, const char *gs)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/anac',"
+                             "'property':'ana-state','value':%s}}", gs);
+}
+
+/*
+ * ANA reporting (Base 2.3, 8.1.1): the Identify fields, log 0Ch with one
+ * group per namespace, RGO, and a path change through ana-state: the ANA
+ * Change notice, the Change Counts, and I/O status 302h (Inaccessible) and
+ * 301h (Persistent Loss). A reset restarts the counts and keeps the state.
+ */
+void femu_test_ana(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t io = guest_alloc(alloc, 4096);
+    uint8_t l[64];
+    uint32_t res = 0;
+    uint16_t cid, want;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 76) & 8, ==, 8);         /* CMIC */
+    g_assert_cmpuint(qtest_readb(qts, buf + 342), ==, 10);          /* ANATT */
+    g_assert_cmphex(qtest_readb(qts, buf + 343), ==, 0x0f);
+    g_assert_cmpuint(qtest_readl(qts, buf + 344), >=, 1);
+    g_assert_cmpuint(qtest_readl(qts, buf + 348), ==,
+                     qtest_readl(qts, buf + 344));
+    g_assert_cmphex(qtest_readl(qts, buf + 92) & (1u << 11), ==, 1u << 11);
+    g_assert_cmphex(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 92), ==, 1);            /* group */
+
+    g_assert_cmphex(femu_ana_log(&c, buf, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, l, sizeof(l));
+    g_assert_cmpuint(ldq_le_p(l), ==, 0);
+    g_assert_cmpuint(lduw_le_p(l + 8), ==, 1);
+    g_assert_cmpuint(ldl_le_p(l + 16), ==, 1);                      /* AGID */
+    g_assert_cmpuint(ldl_le_p(l + 20), ==, 1);                      /* NNV */
+    g_assert_cmpuint(ldq_le_p(l + 24), ==, 1);
+    g_assert_cmpuint(l[32], ==, 1);                                 /* Opt */
+    g_assert_cmpuint(ldl_le_p(l + 48), ==, 1);                      /* NSID */
+    /* RGO: the reply is shorter, so clear what the last read left */
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmphex(femu_ana_log(&c, buf, true), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, l, sizeof(l));
+    g_assert_cmpuint(ldl_le_p(l + 20), ==, 0);
+    g_assert_cmpuint(ldl_le_p(l + 48), ==, 0);
+
+    /* Inaccessible: the notice comes, the counts move, I/O gets 302h */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 11,
+                                             NULL)), ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    femu_ana_set(qts, "1:3");
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x0c0302);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==, 0x302);
+    g_assert_cmphex(femu_ana_log(&c, buf, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, l, sizeof(l));
+    g_assert_cmpuint(ldq_le_p(l), ==, 1);
+    g_assert_cmpuint(ldq_le_p(l + 24), ==, 2);
+    g_assert_cmpuint(l[32], ==, 3);
+    /* admin commands still run */
+    g_assert_cmphex(femu_identify(&c, 1, 0, 0, buf), ==, NVME_SUCCESS);
+
+    /* back to Non-Optimized: reads work */
+    femu_ana_set(qts, "1:2");
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, io)), ==,
+                    NVME_SUCCESS);
+    /* a bad value is refused */
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/anac',"
+                    "'property':'ana-state','value':'1:5'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    /*
+     * Notices off, a change, notices on: the change not yet read is
+     * reported then (Base 2.3, 5.2.26.1.5).
+     */
+    g_assert_cmphex(femu_ana_log(&c, buf, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_ana_set(qts, "1:1");
+    want = femu_aer(&c);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 11,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x0c0302);
+    /* Persistent Loss: 301h, and the state is final */
+    femu_ana_set(qts, "1:4");
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==, 0x301);
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/anac',"
+                    "'property':'ana-state','value':'1:1'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/anac',"
+                    "'property':'ana-state'}}");
+    g_assert_cmpstr(qdict_get_str(rsp, "return"), ==, "1:4");
+    qobject_unref(rsp);
+
+    /* a reset: Change Counts restart, the state stays */
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_ana_log(&c, buf, false), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, l, sizeof(l));
+    g_assert_cmpuint(ldq_le_p(l), ==, 0);
+    g_assert_cmpuint(ldq_le_p(l + 24), ==, 1);
+    g_assert_cmpuint(l[32], ==, 4);
+    /* the group in the command set independent structure (CNS 08h) */
+    g_assert_cmphex(femu_identify(&c, 1, 0x08, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readl(qts, buf + 4), ==, 1);
+
+    femu_disable(&c);
+    guest_free(alloc, io);
+    guest_free(alloc, buf);
+}
+
+/* Set Features 0Ch: APSTE and a table whose entry 0 is @e0, entry @i is @ei */
+static uint16_t femu_apst(FemuCtrlState *c, uint64_t buf, bool on,
+                          uint64_t e0, int i, uint64_t ei)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd = { 0 };
+
+    qtest_memset(qts, buf, 0, 256);
+    qtest_writeq(qts, buf, cpu_to_le64(e0));
+    if (i) {
+        qtest_writeq(qts, buf + 8 * i, cpu_to_le64(ei));
+    }
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x0c);
+    cmd.cdw11 = cpu_to_le32(on);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* the modelled time of one 4 KiB read at LBA 0 on device "pwr" */
+static uint64_t femu_pwr_read_ns(FemuCtrlState *c, uint64_t buf)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t before = femu_model_ns(qts, "pwr");
+
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    return femu_model_ns(qts, "pwr") - before;
+}
+
+static uint32_t femu_ps_now(FemuCtrlState *c)
+{
+    uint32_t res = 0;
+
+    g_assert_cmphex(FEMU_SC(femu_get_feature(c, 0x02, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    return res & 0x1f;
+}
+
+/*
+ * Power states (Base 2.3, 8.1.18): four descriptors and APSTA; PS2 stretches
+ * the array time by throttle_heavy_pct; APST takes an idle controller to
+ * PS3 after ITPT, and the next read pays the 5 ms exit latency, as it does
+ * after the host sets PS3. Feature 0Ch refuses an operational target and a
+ * state past NPSS; a reset clears it.
+ */
+void femu_test_power_states(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t io = guest_alloc(alloc, 4096);
+    const uint64_t to3 = 50u << 8 | 3u << 3;
+    uint64_t d0, d;
+    uint32_t res = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 263), ==, 3);       /* NPSS */
+    g_assert_cmpuint(qtest_readb(qts, buf + 265) & 1, ==, 1);   /* APSTA */
+    g_assert_cmpuint(qtest_readw(qts, buf + 2048 + 32), ==, 1500);
+    g_assert_cmpuint(qtest_readb(qts, buf + 2048 + 96 + 3) & 2, ==, 2);
+    g_assert_cmpuint(qtest_readl(qts, buf + 2048 + 96 + 8), ==, 5000);
+    g_assert_cmpuint(qtest_readb(qts, buf + 2048 + 64 + 3) & 2, ==, 0);
+
+    qtest_memset(qts, io, 0x5e, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+    d0 = femu_pwr_read_ns(&c, io);
+    g_test_message("PS0 read %" PRIu64 " ns", d0);
+    g_assert_cmpuint(d0, >=, 1000000);
+    g_assert_cmpuint(d0, <, 1500000);
+
+    /* PS2: the array time triples */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 2, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 2);
+    d = femu_pwr_read_ns(&c, io);
+    g_test_message("PS2 read %" PRIu64 " ns", d);
+    g_assert_cmpuint(d, >=, 3000000);
+    g_assert_cmpuint(d, <, 3500000);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_pwr_read_ns(&c, io), ==, d0);
+
+    /* bad tables change nothing */
+    g_assert_cmphex(femu_apst(&c, buf, true, 50u << 8 | 1u << 3, 0, 0), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_apst(&c, buf, true, to3, 5, to3), ==,
+                    NVME_INVALID_FIELD);
+
+    /* APST: PS0 to PS3 after 50 ms idle; a read wakes it, 5 ms later */
+    g_assert_cmphex(femu_apst(&c, buf, true, to3, 0, 0), ==, NVME_SUCCESS);
+    {
+        NvmeCmd cmd = { 0 };
+
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(0x0c);
+        qtest_memset(qts, buf, 0xff, 256);
+        g_assert_cmphex(FEMU_SC(femu_admin_result(&c, &cmd, &res)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(res & 1, ==, 1);
+        g_assert_cmphex(qtest_readq(qts, buf), ==, to3);
+        g_assert_cmphex(qtest_readq(qts, buf + 8), ==, 0);
+    }
+    g_usleep(120 * 1000);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 3);
+    d = femu_pwr_read_ns(&c, io);
+    g_test_message("read after APST %" PRIu64 " ns", d);
+    g_assert_cmpuint(d, ==, d0 + 5000000);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+
+    /* the host sets PS3: the same wake */
+    g_assert_cmphex(femu_apst(&c, buf, false, 0, 0, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 3, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 3);
+    g_assert_cmpuint(femu_pwr_read_ns(&c, io), ==, d0 + 5000000);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+
+    /* a reset turns APST off */
+    g_assert_cmphex(femu_apst(&c, buf, true, to3, 0, 0), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    {
+        NvmeCmd cmd = { 0 };
+
+        cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(0x0c);
+        g_assert_cmphex(FEMU_SC(femu_admin_result(&c, &cmd, &res)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, 0);
+        g_assert_cmphex(qtest_readq(qts, buf), ==, 0);
+    }
+
+    femu_disable(&c);
+    guest_free(alloc, io);
+    guest_free(alloc, buf);
+}
+
+#define FEMU_FID_POWER_LIMIT    0x23
+#define FEMU_PL_W(w)            (2u << 16 | (w) * 100)  /* PLS 10b */
+#define FEMU_SC_POWER_LIMIT     0x13e
+
+/* Set Features 23h with @dw13 (PLS, PLV) */
+static uint16_t femu_pl(FemuCtrlState *c, uint32_t dw13, bool save)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(FEMU_FID_POWER_LIMIT | (save ? 1u << 31 : 0));
+    cmd.cdw13 = cpu_to_le32(dw13);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static uint32_t femu_pl_read(FemuCtrlState *c, uint8_t sel)
+{
+    uint32_t res = 0;
+
+    g_assert_cmphex(FEMU_SC(femu_get_feature(c, FEMU_FID_POWER_LIMIT, sel, 0,
+                                             0, &res)), ==, NVME_SUCCESS);
+    return res;
+}
+
+/*
+ * Identify with @npss visible states: PSD0's MP, relative ranks at most
+ * NPSS, and every PSD slot past NPSS zero.
+ */
+static void femu_pl_check_id(FemuCtrlState *c, uint64_t buf, uint8_t npss,
+                             uint16_t mp0)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    int i;
+
+    g_assert_cmphex(femu_identify(c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 96) & (1u << 20), ==, 1u << 20);
+    g_assert_cmpuint(qtest_readb(qts, buf + 385), ==, 2);
+    g_assert_cmpuint(qtest_readw(qts, buf + 390), ==, 1500);
+    g_assert_cmphex(qtest_readw(qts, buf + 520) & (1 << 4), ==, 1 << 4);
+    g_assert_cmpuint(qtest_readb(qts, buf + 263), ==, npss);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2048), ==, mp0);
+    for (i = 0; i <= npss; i++) {
+        for (int f = 12; f < 16; f++) {
+            g_assert_cmpuint(qtest_readb(qts, buf + 2048 + i * 32 + f), ==,
+                             i);
+        }
+    }
+    for (i = 2048 + (npss + 1) * 32; i < 3072; i++) {
+        g_assert_cmpuint(qtest_readb(qts, buf + i), ==, 0);
+    }
+}
+
+/*
+ * The modelled time of a read of LBA 0 on "pwr": the PS0 time @d0 with
+ * the 1 ms array time stretched to @pct, plus the 5 ms exit latency of
+ * PS3 after a @wake.
+ */
+static void femu_pl_read_time(FemuCtrlState *c, uint64_t io, uint64_t d0,
+                              uint32_t pct, bool wake)
+{
+    uint64_t d = femu_pwr_read_ns(c, io) - (wake ? 5000000 : 0);
+    uint64_t want = d0 + 1000000ull * (pct - 100) / 100;
+
+    g_test_message("read %" PRIu64 " ns, want %" PRIu64, d, want);
+    g_assert_cmpuint(d, >=, want - 20000);
+    g_assert_cmpuint(d, <=, want + 20000);
+}
+
+/*
+ * Power Limit with ps_max_watts 15: MP 15 W, 9 W, 5.25 W and 0.05 W, and
+ * array time x1, x1.5, x3 (throttle_light_pct 150, heavy 300). The state
+ * the controller is in stays across a raise and a removal; a limit moves
+ * it only out of a prohibited state, and a wake from PS3 goes to the last
+ * operational state the limit allows.
+ */
+void femu_test_power_limit(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t io = guest_alloc(alloc, 4096);
+    uint64_t d0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, io, 0x6e, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, io)), ==,
+                    NVME_SUCCESS);
+    d0 = femu_pwr_read_ns(&c, io);
+    g_assert_cmpuint(d0, >=, 1000000);
+    g_assert_cmpuint(d0, <, 1500000);
+    femu_pl_check_id(&c, buf, 3, 1500);
+    g_assert_cmphex(femu_pl_read(&c, 0), ==, 0x20000);
+    g_assert_cmphex(femu_pl_read(&c, 1), ==, 0x20000);
+    g_assert_cmphex(femu_pl_read(&c, 2), ==, 0x20000);
+    g_assert_cmphex(femu_pl_read(&c, 3), ==, 0x5);
+    /* log 12h: FSUPP, CCC, controller scope */
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x12, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * FEMU_FID_POWER_LIMIT), ==,
+                    0x00200011);
+    /* log 05h: Set Features may change the controller's power states */
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 4096, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x09) & (1 << 4), ==, 1 << 4);
+
+    /* reserved scales; a limit below PS2 (5.2499 W) changes nothing */
+    g_assert_cmphex(femu_pl(&c, 700, false), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_pl(&c, 3u << 16 | 700, false), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_pl(&c, 1u << 16 | 52499, true), ==,
+                    FEMU_SC_POWER_LIMIT);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(3), false), ==,
+                    FEMU_SC_POWER_LIMIT);
+    femu_pl_check_id(&c, buf, 3, 1500);
+    g_assert_cmphex(femu_pl_read(&c, 0), ==, 0x20000);
+    g_assert_cmphex(femu_pl_read(&c, 2), ==, 0x20000);
+
+    /* 5.25 W exactly: PS0 and PS1 go, the controller moves to old PS2 */
+    g_assert_cmphex(femu_pl(&c, 1u << 16 | 52500, false), ==, NVME_SUCCESS);
+    femu_pl_check_id(&c, buf, 1, 525);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2048 + 32), ==, 5);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 2, NULL)),
+                    ==, NVME_INVALID_FIELD);
+    femu_pl_read_time(&c, io, d0, 300, false);
+
+    /* 10 W, then none: the state stays old PS2, renumbered */
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==, NVME_SUCCESS);
+    femu_pl_check_id(&c, buf, 2, 900);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 1);
+    femu_pl_read_time(&c, io, d0, 300, false);
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    femu_pl_check_id(&c, buf, 3, 1500);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 2);
+    femu_pl_read_time(&c, io, d0, 300, false);
+
+    /* asleep from PS0, a 10 W limit: the wake goes to old PS1 */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 3, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 2);
+    femu_pl_read_time(&c, io, d0, 150, true);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+
+    /* asleep from PS0, a limit that comes and goes: the wake is to PS0 */
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 3, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 3);
+    femu_pl_read_time(&c, io, d0, 100, true);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+
+    /* saved 10 W, current 11 W; a reset brings back the saved one */
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), true), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+    femu_pl_read_time(&c, io, d0, 150, false);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(11), false), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl_read(&c, 0), ==, FEMU_PL_W(11));
+    g_assert_cmphex(femu_pl_read(&c, 2), ==, FEMU_PL_W(10));
+    g_assert_cmphex(femu_pl_read(&c, 1), ==, 0x20000);
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_pl_read(&c, 0), ==, FEMU_PL_W(10));
+    femu_pl_check_id(&c, buf, 2, 900);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+    femu_pl_read_time(&c, io, d0, 150, false);
+    /* host PS1 under the limit is old PS2 */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 1, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 1);
+    femu_pl_read_time(&c, io, d0, 300, false);
+
+    /* leave nothing saved behind */
+    g_assert_cmphex(femu_pl(&c, 2u << 16, true), ==, NVME_SUCCESS);
+    femu_disable(&c);
+    guest_free(alloc, io);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* Set Features 0Ch with the 32 entries @t (host numbers) */
+static uint16_t femu_pl_apst_set(FemuCtrlState *c, uint64_t buf, bool on,
+                                 const uint64_t *t)
+{
+    NvmeCmd cmd = { 0 };
+
+    for (int i = 0; i < 32; i++) {
+        qtest_writeq(c->pdev->bus->qts, buf + 8 * i, t[i]);
+    }
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x0c);
+    cmd.cdw11 = cpu_to_le32(on);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+/* Get Features 0Ch: APSTE, and the table must equal @want */
+static void femu_pl_apst_check(FemuCtrlState *c, uint64_t buf, bool on,
+                               const uint64_t *want)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmd = { 0 };
+    uint32_t res = 0;
+
+    cmd.opcode = NVME_ADM_CMD_GET_FEATURES;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x0c);
+    qtest_memset(qts, buf, 0xff, 256);
+    g_assert_cmphex(FEMU_SC(femu_admin_result(c, &cmd, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res & 1, ==, on);
+    for (int i = 0; i < 32; i++) {
+        g_assert_cmphex(qtest_readq(qts, buf + 8 * i), ==, want[i]);
+    }
+}
+
+#define FEMU_APST(ms, ps)       ((uint64_t)(ms) << 8 | (uint64_t)(ps) << 3)
+
+/*
+ * The APST table under a limit (8.1.18.6): rows of prohibited states go,
+ * the rest are renumbered, and an ITPS that names a prohibited state names
+ * the new PS0. The table from before the first limit comes back when the
+ * limit rises (cut again) or goes; APSTE is the host's.
+ */
+void femu_test_power_limit_apst(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    /* A: rows 0 to 2 go to PS3 after 100, 200, 300 ms; row 3 names PS1 */
+    const uint64_t a[32] = { FEMU_APST(100, 3), FEMU_APST(200, 3),
+                             FEMU_APST(300, 3), FEMU_APST(0, 1) };
+    const uint64_t a2[32] = { FEMU_APST(300, 1), 0 };
+    const uint64_t b[32] = { FEMU_APST(400, 1) };
+    const uint64_t a1[32] = { FEMU_APST(200, 2), FEMU_APST(300, 2), 0 };
+    const uint64_t cc[32] = { FEMU_APST(500, 2) };
+    const uint64_t due[32] = { FEMU_APST(50, 3) };
+    const uint64_t empty[32] = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, true, a), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, true, a);
+
+    /* 6 W: old rows 2 and 3 as rows 0 and 1; row 3's ITPS 1 becomes 0 */
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(6), false), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, true, a2);
+    /* past NPSS 1, or a timed row to an operational state: refused */
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, true, a1), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, true, b), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, true, b);
+
+    /* 10 W: A cut for one state, not B */
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, true, a1);
+
+    /* C with APSTE off, then no limit: A, and APSTE stays off */
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, false, cc), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, false, a);
+
+    /*
+     * PS0 to PS3 after 50 ms is due when a 10 W limit comes: the move to
+     * PS3 happens first, so the limit leaves the controller asleep.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x02, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, true, due), ==, NVME_SUCCESS);
+    g_usleep(150 * 1000);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 2);
+
+    /* a reset with a saved limit drops the table kept from before it */
+    g_assert_cmphex(femu_pl(&c, 2u << 16, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl_apst_set(&c, buf, true, a), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), true), ==, NVME_SUCCESS);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_pl(&c, 2u << 16, true), ==, NVME_SUCCESS);
+    femu_pl_apst_check(&c, buf, false, empty);
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A system reset of an enabled controller with power_limit: feature 23h
+ * takes its saved value (10 W, NPSS 2), not the current one (6 W).
+ */
+void femu_test_power_limit_sysreset(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=pls,addr=5,devsz_mb=16,"
+        "femu_mode=1,power_states=on,power_limit=on,ps_max_watts=15");
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    femu_enable(&c, pdev, &qs->alloc);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), true), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(6), false), ==, NVME_SUCCESS);
+    femu_pl_check_id(&c, buf, 1, 525);
+    qtest_qmp_assert_success(qts, "{'execute':'system_reset'}");
+    qtest_qmp_eventwait(qts, "RESET");
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, pdev, &qs->alloc);
+    g_assert_cmphex(femu_pl_read(&c, 0), ==, FEMU_PL_W(10));
+    femu_pl_check_id(&c, buf, 2, 900);
+    g_assert_cmpuint(femu_ps_now(&c), ==, 0);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+#define FEMU_SC_NS_WP           0x020
+#define FEMU_SC_INTERRUPTED     0x021
+
+/* an I/O or admin command of @opcode on @nsid, with CDW10 to 12 and PRP1 */
+static uint16_t femu_wp_cmd(FemuCtrlState *c, bool admin, uint8_t opcode,
+                            uint32_t nsid, uint32_t dw10, uint32_t dw11,
+                            uint32_t dw12, uint64_t prp1)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(prp1);
+    cmd.cdw10 = cpu_to_le32(dw10);
+    cmd.cdw11 = cpu_to_le32(dw11);
+    cmd.cdw12 = cpu_to_le32(dw12);
+    return FEMU_SC(admin ? femu_admin(c, &cmd) : femu_io(c, &cmd));
+}
+
+static uint32_t femu_wp_get(FemuCtrlState *c, uint32_t nsid, uint8_t sel)
+{
+    uint32_t res = 0xff;
+
+    g_assert_cmphex(FEMU_SC(femu_get_feature(c, FEMU_FID_NS_WP, sel, nsid,
+                                             0, &res)), ==, NVME_SUCCESS);
+    return res;
+}
+
+/* NSATTR bit 0 (CWP) in CNS 00h byte 99 and CNS 08h byte 8 */
+static void femu_wp_check_cwp(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                              bool cwp)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmphex(femu_identify(c, nsid, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 99) & 1, ==, cwp);
+    g_assert_cmphex(femu_identify(c, nsid, 0x08, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, buf + 8) & 1, ==, cwp);
+}
+
+/*
+ * Namespace Write Protection on two namespaces (oncs=0x19f). Each command
+ * runs on namespace 1 unprotected first; protected, the ones that change
+ * it fail with 20h and change nothing, and the others work. Namespace 2
+ * stays writable, and a Format of all namespaces fails before it changes
+ * namespace 2. A reset keeps the state.
+ */
+void femu_test_ns_wp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    const struct {
+        const char *name;
+        bool admin;
+        uint8_t opcode;
+        uint32_t dw10, dw11, dw12;
+        bool allowed;
+    } cmds[] = {
+        { "write", false, NVME_CMD_WRITE, 8, 0, 7, false },
+        { "write zeroes", false, NVME_CMD_WRITE_ZEROES, 8, 0, 7, false },
+        { "write zeroes deac", false, NVME_CMD_WRITE_ZEROES, 8, 0,
+          7 | 1u << 25, false },
+        { "write uncorrectable", false, NVME_CMD_WRITE_UNCOR, 16, 0, 7,
+          false },
+        { "dsm deallocate", false, NVME_CMD_DSM, 0, 1 << 2, 0, false },
+        { "copy", false, NVME_CMD_COPY, 24, 0, 0, false },
+        { "dsm hint", false, NVME_CMD_DSM, 0, 1 << 0, 0, true },
+        { "read", false, NVME_CMD_READ, 0, 0, 7, true },
+        { "compare", false, NVME_CMD_COMPARE, 0, 0, 7, true },
+        { "verify", false, NVME_CMD_VERIFY, 0, 0, 7, true },
+        { "flush", false, NVME_CMD_FLUSH, 0, 0, 0, true },
+    };
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    /* NWPC, log 12h (FSUPP, NCC, NIC, namespace scope), log 05h */
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf + 531), ==, 1);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x12, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * FEMU_FID_NS_WP), ==,
+                    0x0010000d);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 4096, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * 0x09) & 0xc, ==, 0xc);
+
+    /* selects, saving, the states FEMU does not offer, NSIDs */
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 0);
+    g_assert_cmphex(femu_wp_get(&c, 1, 3), ==, 0x6);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_NS_WP, 0,
+                                             NVME_NSID_BROADCAST, 0, NULL)),
+                    ==, NVME_INVALID_NSID);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, FEMU_FID_NS_WP, true, 1, 1,
+                                             NULL)), ==,
+                    NVME_FID_NOT_SAVEABLE);
+    g_assert_cmphex(femu_wp_set(&c, 1, 2), ==, NVME_FEAT_NOT_CHANGEABLE);
+    g_assert_cmphex(femu_wp_set(&c, 1, 3), ==, NVME_FEAT_NOT_CHANGEABLE);
+    g_assert_cmphex(femu_wp_set(&c, 1, 4), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 0);
+    femu_wp_check_cwp(&c, buf, 1, false);
+
+    /* the DSM range and the Copy descriptor: blocks 0 to 7 */
+    qtest_memset(qts, list, 0, 64);
+    qtest_writel(qts, list + 4, 8);
+    qtest_writeq(qts, list + 8, 0);
+    qtest_writew(qts, list + 32 + 16, 7);
+    qtest_writeq(qts, list + 32 + 8, 0);
+
+    /* unprotected: every command works */
+    for (i = 0; i < ARRAY_SIZE(cmds); i++) {
+        uint64_t prp = cmds[i].opcode == NVME_CMD_DSM ? list :
+                       cmds[i].opcode == NVME_CMD_COPY ? list + 32 : buf;
+
+        femu_power_write(&c, buf, 1, 0, 8, 0x5c, false);
+        g_test_message("unprotected %s", cmds[i].name);
+        g_assert_cmphex(femu_wp_cmd(&c, cmds[i].admin, cmds[i].opcode, 1,
+                                    cmds[i].dw10, cmds[i].dw11, cmds[i].dw12,
+                                    prp), ==, NVME_SUCCESS);
+    }
+
+    g_assert_cmphex(femu_get_lba_status(&c, buf, 0, 255, 0x10, 0), ==,
+                    NVME_SUCCESS);
+
+    /* protected: data 0xa1 in blocks 0 to 31, nothing may change it */
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 16, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 24, 8, 0xa1, false);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 1);
+    g_assert_cmphex(femu_wp_get(&c, 1, 1), ==, 1);
+    g_assert_cmphex(femu_wp_get(&c, 1, 2), ==, 1);
+    g_assert_cmphex(femu_wp_get(&c, 2, 0), ==, 0);
+    femu_wp_check_cwp(&c, buf, 1, true);
+    femu_wp_check_cwp(&c, buf, 2, false);
+    for (i = 0; i < ARRAY_SIZE(cmds); i++) {
+        uint64_t prp = cmds[i].opcode == NVME_CMD_DSM ? list :
+                       cmds[i].opcode == NVME_CMD_COPY ? list + 32 : buf;
+
+        if (cmds[i].opcode == NVME_CMD_WRITE ||
+            cmds[i].opcode == NVME_CMD_COMPARE) {
+            qtest_memset(qts, buf, cmds[i].opcode == NVME_CMD_WRITE ?
+                         0xee : 0xa1, 4096);
+        }
+        g_test_message("protected %s", cmds[i].name);
+        g_assert_cmphex(femu_wp_cmd(&c, cmds[i].admin, cmds[i].opcode, 1,
+                                    cmds[i].dw10, cmds[i].dw11, cmds[i].dw12,
+                                    prp), ==,
+                        cmds[i].allowed ? NVME_SUCCESS : FEMU_SC_NS_WP);
+    }
+    for (i = 0; i < 32; i++) {
+        femu_power_read(&c, buf, 1, i, 0xa1);
+    }
+    /* not in Figure 671 */
+    g_assert_cmphex(femu_get_lba_status(&c, buf, 0, 255, 0x10, 0), ==,
+                    FEMU_SC_NS_WP);
+
+    /* namespace 2 takes writes; a Format of namespace 1 fails */
+    femu_power_write(&c, buf, 2, 0, 8, 0xb2, false);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, FEMU_SC_NS_WP);
+
+    /*
+     * Namespace 2 protected, namespace 1 not: a Format of all fails
+     * before it changes namespace 1, which comes first.
+     */
+    g_assert_cmphex(femu_wp_set(&c, 1, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_set(&c, 2, 1), ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc5, false);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, NVME_NSID_BROADCAST, 0, 0)), ==,
+                    FEMU_SC_NS_WP);
+    for (i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 1, i, 0xc5);
+        femu_power_read(&c, buf, 2, i, 0xb2);
+    }
+    g_assert_cmphex(femu_wp_set(&c, 2, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+
+    /* a reset keeps the state */
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 1);
+    femu_wp_check_cwp(&c, buf, 1, true);
+    qtest_memset(qts, buf, 0xee, 4096);
+    g_assert_cmphex(femu_wp_cmd(&c, false, NVME_CMD_WRITE, 1, 0, 0, 7, buf),
+                    ==, FEMU_SC_NS_WP);
+
+    /* all namespaces at once, both ways */
+    g_assert_cmphex(femu_wp_set(&c, NVME_NSID_BROADCAST, 1), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_get(&c, 2, 0), ==, 1);
+    g_assert_cmphex(femu_wp_cmd(&c, false, NVME_CMD_WRITE, 2, 0, 0, 7, buf),
+                    ==, FEMU_SC_NS_WP);
+    g_assert_cmphex(femu_wp_set(&c, NVME_NSID_BROADCAST, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 0);
+    femu_wp_check_cwp(&c, buf, 1, false);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+
+    /*
+     * Copy format 2 from protected namespace 2 into namespace 1 works;
+     * into protected namespace 1 it fails and copies nothing.
+     */
+    qtest_memset(qts, buf, 0, 512);
+    qtest_writew(qts, buf + 4, 0x4);
+    g_assert_cmphex(femu_hbs(&c, true, buf), ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 2, 16, 8, 0x9d, false);
+    g_assert_cmphex(femu_wp_set(&c, 2, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_copy_fmt2(&c, list, 64, 2, 16, 8)), ==,
+                    NVME_SUCCESS);
+    for (i = 64; i < 72; i++) {
+        femu_power_read(&c, buf, 1, i, 0x9d);
+    }
+    femu_power_write(&c, buf, 1, 80, 8, 0x3e, false);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_copy_fmt2(&c, list, 80, 2, 16, 8)), ==,
+                    FEMU_SC_NS_WP);
+    for (i = 80; i < 88; i++) {
+        femu_power_read(&c, buf, 1, i, 0x3e);
+    }
+
+    /* a block erase covers the protected namespaces; exiting does not */
+    g_assert_cmphex(femu_sanitize(&c, 2), ==, FEMU_SC_NS_WP);
+    g_assert_cmphex(femu_sanitize(&c, 1), ==, NVME_SUCCESS);
+    femu_power_read(&c, buf, 1, 80, 0x3e);
+    g_assert_cmphex(femu_wp_set(&c, NVME_NSID_BROADCAST, 0), ==,
+                    NVME_SUCCESS);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Protection releases the Streams resources of the namespace, and a
+ * protected namespace takes no new ones (Figure 671 note 3).
+ */
+void femu_test_ns_wp_streams(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t result = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_directive(&c, false, 0xffffffff, 1, 0x101, 0, 0,
+                                   NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x103, 3, 0, 0, &result),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(result, ==, 3);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0, buf, 32, NULL),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 22), ==, 3);
+
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x101, 0, buf, 32, NULL),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 22), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 2), ==, 4);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x103, 3, 0, 0, &result),
+                    ==, FEMU_SC_NS_WP);
+
+    g_assert_cmphex(femu_wp_set(&c, 1, 0), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_directive(&c, true, 1, 0x103, 2, 0, 0, &result),
+                    ==, NVME_SUCCESS);
+    g_assert_cmpuint(result, ==, 2);
+
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The write buffer is destaged when protection comes: A durable (FUA), B
+ * buffered over it, protect, cut. B reads back, and the protection
+ * survives the cut. Without protection the same cut brings back C.
+ */
+void femu_test_ns_wp_buffer(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, true);
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xb2);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 1);
+    femu_wp_check_cwp(&c, buf, 1, true);
+    qtest_memset(c.pdev->bus->qts, buf, 0xee, 4096);
+    g_assert_cmphex(femu_wp_cmd(&c, false, NVME_CMD_WRITE, 1, 0, 0, 7, buf),
+                    ==, FEMU_SC_NS_WP);
+
+    /* the control: unprotected, the buffered page is lost */
+    g_assert_cmphex(femu_wp_set(&c, 1, 0), ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, true);
+    femu_power_write(&c, buf, 1, 0, 8, 0xd4, false);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* hold the FTL thread of device "wpd" off its rings, or let it go */
+static void femu_wp_hold(QTestState *qts, bool hold)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/wpd',"
+                           "'property':'x-ftl-hold','value':%d}}", hold);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/*
+ * A write that changed the backend and waits on the FTL ring holds the
+ * protection off: Set Features 84h fails with Command Interrupted and the
+ * state stays. Once the write completes, the protection takes.
+ */
+void femu_test_ns_wp_drain(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeRwCmd rw = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x7e, 4096);
+    femu_wp_hold(qts, true);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_usleep(100 * 1000);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, FEMU_SC_INTERRUPTED);
+    g_assert_cmphex(femu_wp_get(&c, 1, 0), ==, 0);
+    femu_wp_hold(qts, false);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+    femu_power_read(&c, buf, 1, 0, 0x7e);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * FUSES is 0, so a command that names a fused operation fails with Invalid
+ * Field and does not run. A Compare that would miscompare, then its Write:
+ * both fail, and the blocks keep their data. Admin commands too; FUSE 11b
+ * is reserved. A normal command after them runs.
+ */
+void femu_test_fused_refused(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd cmd;
+    int fuse;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+
+    /* Compare against B (a miscompare), then Write C: neither runs */
+    qtest_memset(qts, buf, 0xb2, 4096);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_COMPARE;
+    cmd.flags = 1;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw12 = cpu_to_le32(7);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    qtest_memset(qts, buf, 0xc3, 4096);
+    cmd.opcode = NVME_CMD_WRITE;
+    cmd.flags = 2;
+    g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_INVALID_FIELD);
+    for (int i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 1, i, 0xa1);
+    }
+
+    /* each FUSE value on a Write and on an admin Identify */
+    for (fuse = 1; fuse <= 3; fuse++) {
+        qtest_memset(qts, buf, 0xd4, 4096);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_WRITE;
+        cmd.flags = fuse;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw12 = cpu_to_le32(7);
+        g_assert_cmphex(FEMU_SC(femu_io(&c, &cmd)), ==, NVME_INVALID_FIELD);
+        for (int i = 0; i < 8; i++) {
+            femu_power_read(&c, buf, 1, i, 0xa1);
+        }
+
+        /* a refused Identify moves no data */
+        qtest_memset(qts, buf, 0x6c, 4096);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+        cmd.flags = fuse;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_INVALID_FIELD);
+        g_assert_cmphex(qtest_readq(qts, buf), ==, 0x6c6c6c6c6c6c6c6cULL);
+        g_assert_cmphex(qtest_readq(qts, buf + 4088), ==,
+                        0x6c6c6c6c6c6c6c6cULL);
+    }
+
+    /* FUSES reads 0, and normal commands still run */
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, buf + 522), ==, 0);
+    femu_power_write(&c, buf, 1, 0, 8, 0xe5, false);
+    femu_power_read(&c, buf, 1, 0, 0xe5);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+#define FEMU_SC_SANNS_BUSY      0x02c
+#define FEMU_SC_SANNS_LIMIT     0x112
+
+/* log 81h for @nsid into @buf; returns SSTAT */
+static uint16_t femu_sanns_sstat(FemuCtrlState *c, uint32_t nsid,
+                                 uint64_t buf)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x81 | (512 / 4 - 1) << 16);
+    g_assert_cmphex(FEMU_SC(femu_admin(c, &cmd)), ==, NVME_SUCCESS);
+    return qtest_readw(c->pdev->bus->qts, buf + 2);
+}
+
+/* Dword 1 of the completion that femu_complete() took last from @q */
+static uint32_t femu_sanns_dw1(FemuCtrlState *c, FemuQueue *q)
+{
+    uint64_t slot = q->cq_addr +
+                    ((q->cq_head + FEMU_QSIZE - 1) % FEMU_QSIZE) *
+                    sizeof(NvmeCqe);
+    NvmeCqe cqe;
+
+    qtest_memread(c->pdev->bus->qts, slot, &cqe, sizeof(cqe));
+    return le32_to_cpu(cqe.dw1);
+}
+
+/* log 7Fh with NLT @nlt into @buf: the number of NSIDs; GENCTR too */
+static uint64_t femu_sanns_list(FemuCtrlState *c, uint64_t buf, bool nlt,
+                                uint64_t *gen)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(0x7f | (uint32_t)nlt << 8 | (64 / 4 - 1) << 16);
+    qtest_memset(c->pdev->bus->qts, buf, 0xff, 64);
+    g_assert_cmphex(FEMU_SC(femu_admin(c, &cmd)), ==, NVME_SUCCESS);
+    if (gen) {
+        *gen = qtest_readq(c->pdev->bus->qts, buf);
+    }
+    return qtest_readq(c->pdev->bus->qts, buf + 8);
+}
+
+/*
+ * Set test hook @prop of device "sanns": x-fetch-hold is a bool,
+ * x-ftl-hold a number.
+ */
+static void femu_sanns_hold(QTestState *qts, const char *prop, bool on)
+{
+    QDict *rsp = g_str_equal(prop, "x-ftl-hold") ?
+        qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                  "'path':'/machine/peripheral/sanns',"
+                  "'property':%s,'value':%d}}", prop, on) :
+        qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                  "'path':'/machine/peripheral/sanns',"
+                  "'property':%s,'value':%i}}", prop, on);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* submit an 8-block Write of @pattern to @nsid at @lba; do not wait */
+static void femu_sanns_write(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                             uint64_t lba, uint8_t pattern)
+{
+    NvmeRwCmd rw = { 0 };
+
+    qtest_memset(c->pdev->bus->qts, buf, pattern, 4096);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(nsid);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(lba);
+    rw.nlb = cpu_to_le16(7);
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+}
+
+/*
+ * Sanitize Namespace (8Ch) with sanitize_ms 200 on two namespaces. NDE is
+ * set for a new namespace and cleared by a write. A crypto erase of
+ * namespace 1 refuses its I/O (Flush aside), a second one and a Sanitize
+ * while it runs; namespace 2 keeps working. At the end namespace 1 reads
+ * zero, its log shows SOS 001b and NDE, and an event names log 81h.
+ */
+void femu_test_sanitize_ns(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint32_t res = 0;
+    uint64_t gen = 0, gen2 = 0;
+    uint16_t cid, want;
+    NvmeCmd fmt = { 0 };
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    /* log 05h: 8Ch changes logical blocks; the subsystem log: MNSOIP 1 */
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 4096, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 4 * FEMU_ADM_SANITIZE_NS), ==,
+                    0x3);
+    femu_sanns_sstat(&c, 0, buf);
+    g_assert_cmphex(qtest_readl(qts, buf + 40), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, buf + 44), ==, 0);
+
+    /* a new namespace: NDE, GDE, SOS 000b; STNSID, no MNSOIP */
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0x500);
+    g_assert_cmphex(qtest_readl(qts, buf + 40), ==, 0xffffffff);
+    g_assert_cmphex(qtest_readl(qts, buf + 44), ==, 1);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 2, 0, 8, 0xb2, false);
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0);
+
+    /* refused, and nothing changes */
+    g_assert_cmphex(femu_sanns(&c, 0, 0x4), ==, NVME_INVALID_NSID);
+    g_assert_cmphex(femu_sanns(&c, NVME_NSID_BROADCAST, 0x4), ==,
+                    NVME_INVALID_NSID);
+    g_assert_cmphex(femu_sanns(&c, 3, 0x4), ==, NVME_INVALID_NSID);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x5), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x2), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x4 | 1 << 10), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x1), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+
+    /* namespace 1 in progress */
+    g_assert_cmphex(femu_sanns(&c, 1, 0x4), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf) & 0x7, ==, 0x2);
+    g_assert_cmpuint(qtest_readw(qts, buf), <, 0xffff);
+    g_assert_cmphex(femu_wp_cmd(&c, false, NVME_CMD_READ, 1, 0, 0, 7, buf),
+                    ==, FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_wp_cmd(&c, false, NVME_CMD_FLUSH, 1, 0, 0, 0, 0),
+                    ==, NVME_SUCCESS);
+    femu_power_read(&c, buf, 2, 0, 0xb2);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x4), ==, FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_sanns(&c, 2, 0x4), ==, FEMU_SC_SANNS_LIMIT);
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, FEMU_SC_SANNS_BUSY);
+    fmt.opcode = 0x80;
+    fmt.nsid = cpu_to_le32(1);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &fmt)), ==, FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_get_lba_status(&c, buf, 0, 255, 0x10, 0), ==,
+                    FEMU_SC_SANNS_BUSY);
+
+    /* Figures 144 and 145: what names namespace 1 or all, or changes it */
+    g_assert_cmphex(femu_wp_cmd(&c, true, NVME_ADM_CMD_GET_LOG_PAGE, 1,
+                                0x02 | (512 / 4 - 1) << 16, 0, 0, buf), ==,
+                    FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_wp_cmd(&c, true, NVME_ADM_CMD_GET_LOG_PAGE, 2,
+                                0x02 | (512 / 4 - 1) << 16, 0, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x05, 0, 1, 0, NULL)), ==,
+                    FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x05, 0, 2, 0, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x05, false,
+                                             NVME_NSID_BROADCAST, 0, NULL)),
+                    ==, FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_wp_cmd(&c, true, 0x14, 1, 1, 0, 0, 0), ==,
+                    FEMU_SC_SANNS_BUSY);
+    g_assert_cmphex(femu_wp_cmd(&c, true, 0x11, 0, 0, 0, 0, buf), ==,
+                    FEMU_SC_SANNS_BUSY);
+    /* log 7Fh: namespace 1 in progress; none erased and idle */
+    g_assert_cmphex(femu_sanns_list(&c, buf, false, &gen), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, buf + 16), ==, 1);
+    g_assert_cmphex(femu_sanns_list(&c, buf, true, NULL), ==, 0);
+
+    /* it ends: an event for log 81h, NDE, SOS 001b, the data gone */
+    want = femu_aer(&c);
+    qtest_clock_step(qts, 250 * 1000 * 1000LL);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x810106);
+    g_assert_cmphex(femu_sanns_dw1(&c, &c.admin), ==, 1);
+    /* an inactive NSID has no log 81h */
+    g_assert_cmphex(femu_wp_cmd(&c, true, NVME_ADM_CMD_GET_LOG_PAGE, 3,
+                                0x81 | (512 / 4 - 1) << 16, 0, 0, buf), ==,
+                    NVME_INVALID_NSID);
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0x401);
+    g_assert_cmphex(qtest_readw(qts, buf), ==, 0xffff);
+    g_assert_cmphex(qtest_readl(qts, buf + 4), ==, 0x4);
+    for (i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 1, i, 0);
+        femu_power_read(&c, buf, 2, i, 0xb2);
+    }
+    g_assert_cmphex(femu_sanns_sstat(&c, 2, buf), ==, 0);
+    g_assert_cmphex(femu_sanns_list(&c, buf, false, &gen2), ==, 0);
+    g_assert_cmpuint(gen2, >, gen);
+    g_assert_cmphex(femu_sanns_list(&c, buf, true, NULL), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, buf + 16), ==, 1);
+
+    /* a write clears NDE; SOS stays; it leaves the erased list */
+    femu_power_write(&c, buf, 1, 8, 8, 0xc3, false);
+    g_assert_cmphex(femu_sanns_sstat(&c, 1, buf), ==, 0x1);
+    g_assert_cmphex(femu_sanns_list(&c, buf, true, &gen), ==, 0);
+    g_assert_cmpuint(gen, >, gen2);
+
+    /* now namespace 2: namespace 1 keeps what was written since */
+    g_assert_cmphex(femu_sanns(&c, 2, 0x4), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 250 * 1000 * 1000LL);
+    /*
+     * No AER was outstanding. A read with RAE keeps the event, so the
+     * next AER returns it with NSID 2 in Dword 1.
+     */
+    g_assert_cmphex(femu_wp_cmd(&c, true, NVME_ADM_CMD_GET_LOG_PAGE, 2,
+                                0x81 | 1 << 15 | (512 / 4 - 1) << 16, 0, 0,
+                                buf), ==, NVME_SUCCESS);
+    want = femu_aer(&c);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x810106);
+    g_assert_cmphex(femu_sanns_dw1(&c, &c.admin), ==, 2);
+    g_assert_cmphex(femu_sanns_sstat(&c, 2, buf), ==, 0x401);
+    for (i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 2, i, 0);
+        femu_power_read(&c, buf, 1, 8 + i, 0xc3);
+    }
+
+    /*
+     * A Write queued and not fetched when the sanitize starts never runs,
+     * also after it ends: it completes with 2Ch.
+     */
+    femu_sanns_hold(qts, "x-fetch-hold", true);
+    femu_sanns_write(&c, buf, 1, 16, 0xee);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x4), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 250 * 1000 * 1000LL);
+    femu_sanns_hold(qts, "x-fetch-hold", false);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    FEMU_SC_SANNS_BUSY);
+    for (i = 16; i < 24; i++) {
+        femu_power_read(&c, buf, 1, i, 0);
+    }
+
+    /* a fetched Write the FTL has not finished: also 2Ch */
+    femu_sanns_hold(qts, "x-ftl-hold", true);
+    femu_sanns_write(&c, buf, 1, 24, 0xee);
+    g_usleep(300 * 1000);
+    g_assert_cmphex(femu_sanns(&c, 1, 0x4), ==, NVME_SUCCESS);
+    qtest_clock_step(qts, 250 * 1000 * 1000LL);
+    femu_sanns_hold(qts, "x-ftl-hold", false);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    FEMU_SC_SANNS_BUSY);
+    femu_power_read(&c, buf, 1, 24, 0);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+#define FEMU_SC_CANCEL_CID      0x184
+
+/*
+ * Deferred abort: with the FTL held, three Writes wait in to_ftl, two to
+ * namespace 1 and one to namespace 2. A Cancel of all of namespace 1
+ * reports CEDA 2. After the release the two complete with Command Abort
+ * Requested, the third with success; the FTL step still ran, so the data
+ * reads back. The request slots then serve new commands as usual.
+ */
+void femu_test_cancel_deferred(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t wbuf[3];
+    uint16_t cid[3];
+    uint16_t sc[3];
+    uint32_t res = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* each Write keeps its own buffer until it completes */
+    for (int i = 0; i < 3; i++) {
+        wbuf[i] = guest_alloc(alloc, 4096);
+    }
+    femu_cancel_hook(qts, "cancel", "x-ftl-hold", 1);
+    cid[0] = femu_cancel_rw(&c, wbuf[0], 1, 0, true, 0xa1);
+    cid[1] = femu_cancel_rw(&c, wbuf[1], 2, 0, true, 0xa2);
+    cid[2] = femu_cancel_rw(&c, wbuf[2], 1, 8, true, 0xa1);
+    g_usleep(300 * 1000);
+    g_assert_cmphex(femu_cancel(&c, 1, 0xffff, c.io.qid, 1, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 2 << 16);
+    femu_cancel_hook(qts, "cancel", "x-ftl-hold", 0);
+    femu_cancel_reap(&c, 3, cid, sc, NULL);
+    g_assert_cmphex(sc[0], ==, NVME_CMD_ABORT_REQ);
+    g_assert_cmphex(sc[1], ==, NVME_SUCCESS);
+    g_assert_cmphex(sc[2], ==, NVME_CMD_ABORT_REQ);
+    for (int i = 0; i < 16; i++) {
+        femu_power_read(&c, buf, 1, i, 0xa1);
+        femu_power_read(&c, buf, 2, i % 8, 0xa2);
+    }
+    /* nothing left: a second Cancel finds no command */
+    g_assert_cmphex(femu_cancel(&c, NVME_NSID_BROADCAST, 0xffff, c.io.qid,
+                                1, &res), ==, NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0);
+    for (int i = 0; i < FEMU_QSIZE; i++) {
+        femu_power_write(&c, buf, 1, 16, 8, 0xb3, false);
+    }
+    femu_power_read(&c, buf, 1, 16, 0xb3);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    for (int i = 0; i < 3; i++) {
+        guest_free(alloc, wbuf[i]);
+    }
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Immediate abort: a Read held past its FTL step, first in pq (x-cpl-hold
+ * 2), then in the return ring (1). A single Cancel by CID reports CMDA 1,
+ * and the Read completes with Command Abort Requested. The two CQEs may
+ * post in either order (5.2.1.1).
+ */
+void femu_test_cancel_immediate(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    const uint32_t nsid[2] = { NVME_NSID_BROADCAST, 1 };
+    uint16_t cid[2];
+    uint16_t sc[2];
+    uint32_t res[2];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* a mapped page, so the Read reaches the media */
+    femu_power_write(&c, buf, 1, 0, 8, 0xc4, false);
+    for (int hold = 2; hold >= 1; hold--) {
+        femu_cancel_hook(qts, "cancel", "x-cpl-hold", hold);
+        cid[0] = femu_cancel_rw(&c, buf, 1, 0, false, 0);
+        femu_cancel_wait_cpl(qts, "cancel", 1);
+        cid[1] = femu_cancel_submit(&c, nsid[hold - 1], cid[0], c.io.qid, 0);
+        femu_cancel_reap(&c, 2, cid, sc, res);
+        g_assert_cmphex(sc[0], ==, NVME_CMD_ABORT_REQ);
+        g_assert_cmphex(sc[1], ==, NVME_SUCCESS);
+        g_assert_cmphex(res[1], ==, 1);
+        femu_cancel_wait_cpl(qts, "cancel", 0);
+    }
+    femu_cancel_hook(qts, "cancel", "x-cpl-hold", 0);
+    femu_power_read(&c, buf, 1, 0, 0xc4);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * An immediate abort completes a Read before its 100 ms model time, from
+ * pq (x-cpl-hold 2) and from the return ring (1). Its stage times end at
+ * the abort, so they add up to its total, in the controller's stages and
+ * in the read class of namespace 1.
+ */
+void femu_test_cancel_stages(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint16_t cid[2];
+    uint16_t sc[2];
+    uint32_t res[2];
+    QDict *rsp;
+    QDict *ret;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc7, false);
+    for (int hold = 2; hold >= 1; hold--) {
+        femu_cancel_wait_cpl(qts, "cancel", 0);
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                        "'arguments':{'reset':true}}");
+        qobject_unref(rsp);
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                        "'arguments':{'nsid':1,'reset':true}}");
+        qobject_unref(rsp);
+        femu_cancel_hook(qts, "cancel", "x-cpl-hold", hold);
+        cid[0] = femu_cancel_rw(&c, buf, 1, 0, false, 0);
+        femu_cancel_wait_cpl(qts, "cancel", 1);
+        cid[1] = femu_cancel_submit(&c, 1, cid[0], c.io.qid, 0);
+        femu_cancel_reap(&c, 2, cid, sc, res);
+        g_assert_cmphex(sc[0], ==, NVME_CMD_ABORT_REQ);
+        g_assert_cmphex(res[1], ==, 1);
+        femu_cancel_hook(qts, "cancel", "x-cpl-hold", 0);
+        /* a pause: the pollers have recorded what they posted */
+        femu_cancel_wait_cpl(qts, "cancel", 0);
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                        "'arguments':{'nsid':1}}");
+        ret = qdict_get_qdict(rsp, "return");
+        /* the Read and the Cancel; the Read alone in the read class */
+        g_assert_cmpint(qdict_get_int(femu_stage(ret, "total"), "count"),
+                        ==, 2);
+        femu_stages_check_sum(ret);
+        g_assert_cmpint(qdict_get_int(femu_stage(qdict_get_qdict(ret, "read"),
+                                                 "total"), "count"), ==, 1);
+        femu_stages_check_sum(qdict_get_qdict(ret, "read"));
+        qobject_unref(rsp);
+    }
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The field checks (Figures 590 and 591), a CID that is not found, a
+ * single Cancel whose CID names another namespace (the target is left as
+ * it was), and the effects log entry.
+ */
+void femu_test_cancel_checks(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint16_t sq;
+    uint16_t cid;
+    uint32_t res = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    sq = c.io.qid;
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 4096, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 1024 + 4 * FEMU_IO_CANCEL), ==,
+                    0x1);
+
+    g_assert_cmphex(femu_cancel(&c, 1, c.cid, sq, 0, NULL), ==,
+                    FEMU_SC_CANCEL_CID);
+    g_assert_cmphex(femu_cancel(&c, 1, 0x10, sq + 1, 0, NULL), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_cancel(&c, 1, 0x10, sq, 1, NULL), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_cancel(&c, 1, 0xffff, sq, 2, NULL), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_cancel(&c, 0, 0xffff, sq, 1, NULL), ==,
+                    NVME_INVALID_NSID);
+    res = 0xdead;
+    g_assert_cmphex(femu_cancel(&c, 1, 0xfff0, sq, 0, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0);
+
+    femu_cancel_hook(qts, "cancel", "x-ftl-hold", 1);
+    cid = femu_cancel_rw(&c, buf, 2, 0, true, 0xd5);
+    g_usleep(300 * 1000);
+    g_assert_cmphex(femu_cancel(&c, 1, cid, sq, 0, NULL), ==,
+                    NVME_INVALID_FIELD);
+    femu_cancel_hook(qts, "cancel", "x-ftl-hold", 0);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    femu_power_read(&c, buf, 2, 0, 0xd5);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* cancel off: 18h is not supported; and the refusals at realize */
+void femu_test_cancel_refused(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':5,'cancel':true", "a mode other than bbssd or NoSSD" },
+        { "'femu_mode':1,'cancel':true,'buffer_size':16", "buffer_size" },
+        { "'femu_mode':1,'cancel':true,'mapping':'dftl'",
+          "a mapping other than page" },
+        { "'femu_mode':1,'cancel':true,'ocp':true", "ocp" },
+    };
+    QDict *rsp;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x05, buf, 4096, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 1024 + 4 * FEMU_IO_CANCEL), ==,
+                    0);
+    g_assert_cmphex(femu_cancel(&c, 1, 0xffff, c.io.qid, 1, NULL), ==,
+                    NVME_INVALID_OPCODE);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'cancelr','addr':'5','devsz_mb':16,%s}}",
+            cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/* mapped, lost and orphan pages of the FTL of device "shftl" */
+static void femu_shftl_check(QTestState *qts, uint64_t *mapped,
+                             uint64_t *lost, uint64_t *orphans)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/shftl',"
+                           "'property':'x-ftl-check'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           mapped, lost, orphans), ==, 3);
+    qobject_unref(rsp);
+}
+
+/* the first block of each NAND page of @nsid in [0, @pages) reads @pat */
+static void femu_shftl_read(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                            uint32_t pages, uint8_t pat)
+{
+    for (uint32_t p = 0; p < pages; p++) {
+        femu_power_read(c, buf, nsid, p * 8, pat);
+    }
+}
+
+#define FEMU_SHFTL_PAGES    128     /* NAND pages in each namespace */
+
+/*
+ * The pages of each namespace: namespace 1 wrote its 128 pages 4 times,
+ * namespace 2 once, and GC moved pages of namespace 2, which namespace 1
+ * never overwrote. The namespace counters add up to the device counters.
+ */
+static void femu_shftl_counters(QTestState *qts)
+{
+    const char *key[3] = { "host-write-pages", "nand-write-pages",
+                           "gc-write-pages" };
+    uint64_t sum[3] = { 0 };
+    uint64_t dev[3];
+
+    for (uint32_t nsid = 1; nsid <= 2; nsid++) {
+        g_autofree char *args = g_strdup_printf("'nsid':%u", nsid);
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, args, &rsp);
+        QDict *nc = qdict_get_qdict(ns, "namespace-counters");
+        QDict *ctr = qdict_get_qdict(ns, "counters");
+
+        g_assert_nonnull(nc);
+        g_assert_cmpuint(qdict_get_int(nc, "host-write-pages"), ==,
+                         (nsid == 1 ? 4 : 1) * FEMU_SHFTL_PAGES);
+        /* no buffer: each host page is one program of its own namespace */
+        g_assert_cmpuint(qdict_get_int(nc, "nand-write-pages"), ==,
+                         qdict_get_int(nc, "host-write-pages"));
+        if (nsid == 2) {
+            g_assert_cmpuint(qdict_get_int(nc, "gc-write-pages"), >, 0);
+        }
+        g_assert_cmpfloat_with_epsilon(qdict_get_double(nc, "waf"),
+            ((double)qdict_get_int(nc, "nand-write-pages") +
+             (double)qdict_get_int(nc, "gc-write-pages")) /
+            (double)qdict_get_int(nc, "host-write-pages"), 0.000000001);
+        for (int k = 0; k < 3; k++) {
+            sum[k] += qdict_get_int(nc, key[k]);
+            dev[k] = qdict_get_int(ctr, key[k]);
+        }
+        qobject_unref(rsp);
+    }
+    for (int k = 0; k < 3; k++) {
+        g_assert_cmpuint(sum[k], ==, dev[k]);
+    }
+}
+
+/*
+ * shared_ftl: two namespaces of 512 KiB place into one FTL. Their first
+ * writes alternate, so each line holds pages of both. Overwrites of
+ * namespace 1 then make GC move live pages of namespace 2. The FTL keeps
+ * every mapping, and both namespaces read back.
+ */
+void femu_test_shared_ftl(void *obj, void *data,
+                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    QDict *rsp;
+    QDict *ns;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (uint32_t p = 0; p < FEMU_SHFTL_PAGES; p++) {
+        femu_power_write(&c, buf, 1, p * 8, 8, 0x10, false);
+        femu_power_write(&c, buf, 2, p * 8, 8, 0x5b, false);
+    }
+    for (int round = 1; round <= 3; round++) {
+        for (uint32_t p = 0; p < FEMU_SHFTL_PAGES; p++) {
+            femu_power_write(&c, buf, 1, p * 8, 8, 0x10 + round, false);
+        }
+    }
+    ns = femu_query_ns(qts, "'nsid':2", &rsp);
+    g_assert_cmpuint(qdict_get_int(ns, "shared-ftl-nsid"), ==, 1);
+    g_assert_cmpuint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                   "gc-write-pages"), >, 0);
+    qobject_unref(rsp);
+    femu_shftl_counters(qts);
+    femu_shftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 2 * FEMU_SHFTL_PAGES);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_shftl_read(&c, buf, 2, FEMU_SHFTL_PAGES, 0x5b);
+    femu_shftl_read(&c, buf, 1, FEMU_SHFTL_PAGES, 0x13);
+    /* a page that finds no place is not a host page of namespace 2 */
+    femu_place_fail_id(qts, "shftl", 1);
+    {
+        NvmeRwCmd rw = { 0 };
+
+        qtest_memset(qts, buf, 0x5c, 4096);
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(2);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.nlb = cpu_to_le16(7);
+        g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                        NVME_CAP_EXCEEDED);
+    }
+    femu_shftl_counters(qts);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Format of one namespace of a shared FTL unmaps only its slice: the
+ * other keeps its mappings and its data.
+ */
+void femu_test_shared_ftl_format(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (uint32_t p = 0; p < FEMU_SHFTL_PAGES; p++) {
+        femu_power_write(&c, buf, 1, p * 8, 8, 0x21, false);
+        femu_power_write(&c, buf, 2, p * 8, 8, 0x22, false);
+    }
+    femu_shftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 2 * FEMU_SHFTL_PAGES);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    femu_shftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, FEMU_SHFTL_PAGES);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_shftl_read(&c, buf, 2, FEMU_SHFTL_PAGES, 0x22);
+    femu_shftl_read(&c, buf, 1, 4, 0);
+    /* namespace 1 works again; then namespace 2 goes */
+    femu_power_write(&c, buf, 1, 0, 8, 0x23, false);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 2, 0, 0)), ==, NVME_SUCCESS);
+    femu_shftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 1);
+    femu_power_read(&c, buf, 1, 0, 0x23);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * With a write buffer, pages of namespace 2 may wait in it when namespace
+ * 1 is formatted. The Format drops only the entries of namespace 1, so a
+ * Flush of namespace 2 still maps its pages.
+ */
+void femu_test_shared_ftl_buffer(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0x30, false);
+    for (uint32_t p = 0; p < 8; p++) {
+        femu_power_write(&c, buf, 2, p * 8, 8, 0x31, false);
+    }
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    femu_power_flush(&c, 2);
+    femu_shftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 8);
+    g_assert_cmpuint(lost, ==, 0);
+    femu_shftl_read(&c, buf, 2, 8, 0x31);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* the refusals of shared_ftl at realize */
+void femu_test_shared_ftl_refused(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QTestState *qts = ((QFemu *)obj)->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'devsz_mb':16,'mapping':'dftl'", "a mapping other than page" },
+        { "'devsz_mb':16,'ns_wp':true", "ns_wp" },
+        { "'devsz_mb':16,'telemetry_da4':true", "telemetry_da4" },
+        { "'devsz_mb':16,'namespace_sizes':'514K,510K'",
+          "whole NAND pages" },
+        /* each fits alone; together they leave GC no room */
+        { "'devsz_mb':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':8,"
+          "'blks_per_pl':8,'pls_per_lun':1,'luns_per_ch':2,'nchs':2",
+          "share one FTL" },
+    };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'shftlr','addr':'5','femu_mode':1,"
+            "'namespaces':2,'shared_ftl':true,%s}}", cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/* query-femu-stages for @nsid (0: none), with @reset; the reply */
+static QDict *femu_stages_ns(QTestState *qts, uint32_t nsid, bool reset,
+                             QDict **rsp)
+{
+    g_autofree char *args = nsid ?
+        g_strdup_printf("{'nsid':%u,'reset':%s}", nsid,
+                        reset ? "true" : "false") :
+        g_strdup_printf("{'reset':%s}", reset ? "true" : "false");
+
+    *rsp = qtest_qmp(qts, "{'execute':'query-femu-stages','arguments':%p}",
+                     qobject_from_json(args, &error_abort));
+    g_assert_true(qdict_haskey(*rsp, "return"));
+    return qdict_get_qdict(*rsp, "return");
+}
+
+static int64_t femu_stage_count(QDict *cls)
+{
+    return qdict_get_int(femu_stage(cls, "total"), "count");
+}
+
+/*
+ * stage_ns: 8 Reads of mapped pages of namespace 1 (3 ms each) and 4
+ * Writes of namespace 2 land in their own classes, with the durations,
+ * bands and sums the controller's stages have. A reset of namespace 1
+ * leaves namespace 2 and the controller's stages as they were.
+ */
+void femu_test_io_stages_ns(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    QDict *rsp;
+    QDict *ret;
+    QDict *rd;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 8; i++) {
+        femu_power_write(&c, buf, 1, i * 8, 8, 0x41, false);
+    }
+    for (uint32_t nsid = 0; nsid <= 2; nsid++) {
+        femu_stages_ns(qts, nsid, true, &rsp);
+        qobject_unref(rsp);
+    }
+    for (i = 0; i < 8; i++) {
+        femu_power_read(&c, buf, 1, i * 8, 0x41);
+    }
+    for (i = 0; i < 4; i++) {
+        femu_power_write(&c, buf, 2, i * 8, 8, 0x42, false);
+    }
+    /* a pause: the pollers have recorded every CQE they posted */
+    femu_cancel_wait_cpl(qts, "stns", 0);
+
+    ret = femu_stages_ns(qts, 1, false, &rsp);
+    g_assert_cmpuint(qdict_get_int(ret, "nsid"), ==, 1);
+    rd = qdict_get_qdict(ret, "read");
+    g_assert_cmpint(femu_stage_count(rd), ==, 8);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "write")), ==, 0);
+    g_assert_cmpuint(qdict_get_int(femu_stage(rd, "total"), "max-ns"), >=,
+                     3000000);
+    g_assert_cmpuint(qdict_get_int(femu_stage(rd, "total"), "sum-ns"), >=,
+                     8 * 3000000);
+    femu_stage_check_buckets(femu_stage(rd, "total"));
+    femu_stages_check_sum(rd);
+    femu_stages_check_bands(rd);
+    g_assert_cmpint(femu_stage_count(ret), ==, 12);
+    qobject_unref(rsp);
+
+    ret = femu_stages_ns(qts, 2, false, &rsp);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "read")), ==, 0);
+    rd = qdict_get_qdict(ret, "write");
+    g_assert_cmpint(femu_stage_count(rd), ==, 4);
+    g_assert_cmpuint(qdict_get_int(femu_stage(rd, "total"), "sum-ns"), >, 0);
+    femu_stages_check_sum(rd);
+    femu_stages_check_bands(rd);
+    qobject_unref(rsp);
+
+    /* bad selectors fail before a reset clears anything */
+    for (i = 0; i < 2; i++) {
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages','arguments':"
+                        "{'nsid':%d,'reset':true}}", i ? 9 : 0);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        qobject_unref(rsp);
+    }
+    ret = femu_stages_ns(qts, 1, false, &rsp);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "read")), ==, 8);
+    g_assert_cmpint(femu_stage_count(ret), ==, 12);
+    qobject_unref(rsp);
+
+    /* reset namespace 1 only */
+    ret = femu_stages_ns(qts, 1, true, &rsp);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "read")), ==, 8);
+    qobject_unref(rsp);
+    ret = femu_stages_ns(qts, 1, false, &rsp);
+    rd = qdict_get_qdict(ret, "read");
+    g_assert_cmpint(femu_stage_count(rd), ==, 0);
+    g_assert_cmpint(qdict_get_int(femu_stage(rd, "total"), "sum-ns"), ==, 0);
+    g_assert_cmpint(qdict_get_int(femu_stage(rd, "total"), "max-ns"), ==, 0);
+    g_assert_cmpint(qlist_size(qdict_get_qlist(rd, "bands")), ==, 0);
+    g_assert_cmpint(femu_stage_count(ret), ==, 12);
+    qobject_unref(rsp);
+    ret = femu_stages_ns(qts, 2, false, &rsp);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "write")), ==, 4);
+    qobject_unref(rsp);
+    /* a reset of the controller's stages keeps the namespace classes */
+    femu_stages_ns(qts, 0, true, &rsp);
+    qobject_unref(rsp);
+    ret = femu_stages_ns(qts, 2, false, &rsp);
+    g_assert_cmpint(femu_stage_count(ret), ==, 0);
+    g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "write")), ==, 4);
+    qobject_unref(rsp);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* nsid without stage_ns, and stage_ns without io_stages or with ns_mgmt */
+void femu_test_io_stages_ns_refused(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QTestState *qts = ((QFemu *)obj)->dev.bus->qts;
+    const char *cases[][2] = {
+        { "'stage_ns':true", "stage_ns needs io_stages=on" },
+        { "'stage_ns':true,'io_stages':true,'ns_mgmt':true",
+          "stage_ns is not supported with ns_mgmt" },
+    };
+    QDict *rsp;
+
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages','arguments':"
+                    "{'nsid':1}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "stage_ns"));
+    qobject_unref(rsp);
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'stnsr','addr':'5','femu_mode':1,"
+            "'devsz_mb':16,%s}}", cases[i][0]);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i][0], desc);
+        g_assert_nonnull(strstr(desc, cases[i][1]));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/* x-durable-check of device "power": LPNs, generations, ended ones */
+static void femu_durable_counts(QTestState *qts, uint64_t *lpns,
+                                uint64_t *gens, uint64_t *ended)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/power',"
+                           "'property':'x-durable-check'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           lpns, gens, ended), ==, 3);
+    qobject_unref(rsp);
+}
+
+/*
+ * durable_at_done with 2 s programs:
+ * - A is flushed: its program has ended;
+ * - B is written; one Flush books its program, and a second Flush, with
+ *   the buffer already empty, must still wait for that program to end;
+ * - C is written and a Flush books its program; a cut 0.2 s later, inside
+ *   that program, gives back B;
+ * - C written and flushed again survives a cut.
+ */
+void femu_test_durable_at_done(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+    int64_t t0;
+    uint16_t f2;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_flush(&c, 1);
+    /* the idle pass may retire ended generations: none is pending */
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 0);
+
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    t0 = g_get_monotonic_time();
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(100 * 1000);
+    femu_submit(&c, &c.io, &flush);
+    f2 = le16_to_cpu(flush.cid);
+    for (int i = 0; i < 2; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                        NVME_SUCCESS);
+        /*
+         * The second Flush found an empty buffer, yet waits for B's
+         * program, booked by the first one 2 s from about t0.
+         */
+        if (cid == f2) {
+            g_assert_cmpint(g_get_monotonic_time() - t0, >=, 1500000);
+        }
+    }
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 0);
+
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(200 * 1000);
+    /* C's program is pending: the cut lands inside it */
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(lpns, ==, 1);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xb2);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens, ==, 0);
+
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_power_flush(&c, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* queue @a then @b on the admin queue and ring its doorbell once */
+static void femu_admin_submit2(FemuCtrlState *c, NvmeCmd *a, NvmeCmd *b)
+{
+    FemuQueue *q = &c->admin;
+    NvmeCmd *cmds[2] = { a, b };
+
+    for (int i = 0; i < 2; i++) {
+        cmds[i]->cid = cpu_to_le16(c->cid++);
+        qtest_memwrite(c->pdev->bus->qts,
+                       q->sq_addr + q->sq_tail * sizeof(NvmeCmd), cmds[i],
+                       sizeof(NvmeCmd));
+        q->sq_tail = (q->sq_tail + 1) % FEMU_QSIZE;
+    }
+    qpci_io_writel(c->pdev, c->bar, femu_sq_doorbell(c, q->qid), q->sq_tail);
+}
+
+/* Set Features 06h with WCE @wce on the admin queue; do not wait */
+static uint16_t femu_vwc_submit(FemuCtrlState *c, bool wce)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.cdw10 = cpu_to_le32(0x06);
+    cmd.cdw11 = cpu_to_le32(wce);
+    femu_submit(c, &c->admin, &cmd);
+    return le16_to_cpu(cmd.cid);
+}
+
+/*
+ * durable_at_done, 2 s programs: a cache disable writes B back and
+ * completes when B's program ends, no earlier.
+ * - wait for its CQE: at least 1.5 s; a cut after it keeps B;
+ * - a cut 0.2 s after the submit, inside B's program, gives back A, and
+ *   the held command never completes.
+ */
+void femu_test_durable_vwc_off(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd set = { 0 };
+    NvmeCmd get = { 0 };
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+    uint32_t res = 0;
+    uint16_t cid;
+    uint16_t want;
+    int64_t t0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_flush(&c, 1);
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    t0 = g_get_monotonic_time();
+    /*
+     * A Get Features 06h behind it, under the same doorbell, runs only
+     * after it completes.
+     */
+    set.opcode = NVME_ADM_CMD_SET_FEATURES;
+    set.cdw10 = cpu_to_le32(0x06);
+    get.opcode = NVME_ADM_CMD_GET_FEATURES;
+    get.cdw10 = cpu_to_le32(0x06);
+    femu_admin_submit2(&c, &set, &get);
+    want = le16_to_cpu(set.cid);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, &cid, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 1500000);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, &cid, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, le16_to_cpu(get.cid));
+    g_assert_cmpuint(res & 1, ==, 0);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xb2);
+
+    /* turn the cache on again; C waits in it */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 1, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_vwc_submit(&c, false);
+    g_usleep(200 * 1000);
+    /* C's program is pending: the cut lands inside it */
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xb2);
+
+    /*
+     * A controller reset while a cache disable waits: the held command
+     * goes with the reset, no completion of it shows up later, and the
+     * admin queue answers at once. The pending program still ends, so D
+     * stays.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 1, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0xd4, false);
+    femu_vwc_submit(&c, false);
+    g_usleep(200 * 1000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    t0 = g_get_monotonic_time();
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    memset(&get, 0, sizeof(get));
+    get.opcode = NVME_ADM_CMD_GET_FEATURES;
+    get.cdw10 = cpu_to_le32(0x06);
+    femu_submit(&c, &c.admin, &get);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, &cid, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, le16_to_cpu(get.cid));
+    g_assert_cmpint(g_get_monotonic_time() - t0, <, 1000000);
+    femu_power_read(&c, buf, 1, 0, 0xd4);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* one I/O command on @lba..@lba + @nlb - 1 of namespace 1; its status */
+static uint16_t femu_durable_cmd(FemuCtrlState *c, uint8_t opc, uint64_t buf,
+                                 uint64_t lba, uint32_t nlb, uint32_t cdw12)
+{
+    NvmeCmd cmd = { 0 };
+    uint8_t range[16] = { 0 };
+
+    cmd.opcode = opc;
+    cmd.nsid = cpu_to_le32(1);
+    if (opc == NVME_CMD_DSM) {
+        stl_le_p(range + 4, nlb);
+        stq_le_p(range + 8, lba);
+        qtest_memwrite(c->pdev->bus->qts, buf, range, sizeof(range));
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw11 = cpu_to_le32(1 << 2);    /* Attribute Deallocate */
+    } else {
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32((uint32_t)lba);
+        cmd.cdw11 = cpu_to_le32((uint32_t)(lba >> 32));
+        cmd.cdw12 = cpu_to_le32((nlb - 1) | cdw12);
+    }
+    return femu_io(c, &cmd);
+}
+
+/*
+ * durable_at_done, 2 s programs: a change of LBAs with no program is
+ * durable at once. A (pages 0 and 1) is durable; B over both pages is
+ * programming. Then DSM of LBA 1, Write Zeroes with DEAC of LBA 2 and
+ * Write Uncorrectable of LBA 9. A cut inside B's programs rolls the pages
+ * back to A, and keeps the three changes. Then Format: B pending, the
+ * Format drops the history, and a cut leaves the namespace zero.
+ */
+void femu_test_durable_partial(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xa1, false);
+    femu_power_flush(&c, 1);
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xb2, false);
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(lpns, ==, 2);
+    g_assert_cmpuint(gens - ended, ==, 2);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_DSM, buf, 1, 1, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_ZEROES, buf, 2, 1,
+                                     1u << 25), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_UNCOR, buf, 9, 1, 0),
+                    ==, NVME_SUCCESS);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    femu_power_read(&c, buf, 1, 1, 0);
+    femu_power_read(&c, buf, 1, 2, 0);
+    femu_power_read(&c, buf, 1, 3, 0xa1);
+    femu_power_read(&c, buf, 1, 8, 0xa1);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_READ, buf, 9, 1, 0), ==,
+                    NVME_UNRECOVERED_READ);
+
+    /* Format drops the history of the namespace */
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens, ==, 0);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * durable_at_done, 2 s programs, the cases durable-partial leaves out:
+ * - two pending generations of one page (B, then C over it): a DSM patches
+ *   both, so the cut gives A with the LBA zero;
+ * - a Write Zeroes with DEAC over an LBA that was uncorrectable before the
+ *   pending write: the cut keeps it readable and zero;
+ * - Sanitize with history pending: none is left, and the cut reads zero.
+ */
+void femu_test_durable_partial2(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* page 0: A durable; page 1: A durable, then LBA 8 uncorrectable */
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xa1, false);
+    femu_power_flush(&c, 1);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_UNCOR, buf, 8, 1, 0),
+                    ==, NVME_SUCCESS);
+    /* B over both pages, then C over page 0: three pending generations */
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xb2, false);
+    femu_submit(&c, &c.io, &flush);
+    femu_power_write(&c, buf, 1, 0, 8, 0xc3, false);
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 3);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_DSM, buf, 1, 1, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_ZEROES, buf, 8, 1,
+                                     1u << 25), ==, NVME_SUCCESS);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    femu_power_read(&c, buf, 1, 1, 0);
+    femu_power_read(&c, buf, 1, 8, 0);
+    femu_power_read(&c, buf, 1, 9, 0xa1);
+
+    /* Sanitize (block erase) drops the history */
+    femu_power_write(&c, buf, 1, 0, 8, 0xd4, false);
+    femu_submit(&c, &c.io, &flush);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens, ==, 0);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Submit @n one-page writes of @pattern to pages 0 .. @n - 1 at once and
+ * collect them; returns the time from the first submit to the last
+ * completion, in ms.
+ */
+static int64_t femu_durable_burst(FemuCtrlState *c, uint64_t buf, int n,
+                                  uint8_t pattern, bool fua, bool collect)
+{
+    int64_t t0 = g_get_monotonic_time();
+    uint16_t cid;
+
+    qtest_memset(c->pdev->bus->qts, buf, pattern, 4096);
+    for (int i = 0; i < n; i++) {
+        NvmeRwCmd rw = { 0 };
+
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(i * 8);
+        rw.nlb = cpu_to_le16(7);
+        rw.control = cpu_to_le16(fua ? NVME_RW_FUA : 0);
+        femu_submit(c, &c->io, (NvmeCmd *)&rw);
+    }
+    for (int i = 0; collect && i < n; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, &cid, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    return (g_get_monotonic_time() - t0) / 1000;
+}
+
+/*
+ * durable_at_done, 500 ms programs, 16 dies, 3 journal slots
+ * (buffer_size 3): 12 programs run in 4 waves of 3, so the last ends at
+ * about 2000 ms. With no slots they would all end at 500 ms; with the
+ * latest slot each time, much later.
+ *
+ *   slots:  p0 p1 p2 | p3 p4 p5 | p6 p7 p8 | p9 p10 p11
+ *   ends:     500    |   1000   |   1500   |   2000 ms
+ *
+ * S1 failed these writes at the bound. A cut at 750 ms keeps the first
+ * wave and gives back the rest.
+ */
+void femu_test_durable_stall(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeCmd flush = { .opcode = NVME_CMD_FLUSH, .nsid = cpu_to_le32(1) };
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+    int64_t t0;
+    int64_t ms;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    /* FUA: each write completes when its program ends */
+    ms = femu_durable_burst(&c, buf, 12, 0xd4, true, true);
+    g_assert_cmpint(ms, >=, 1800);
+    g_assert_cmpint(ms, <=, 3000);
+    for (int i = 0; i < 12; i++) {
+        femu_power_read(&c, buf, 1, i * 8, 0xd4);
+    }
+
+    /* the same burst over new pages' history, cut inside the second wave */
+    g_usleep(2100 * 1000);
+    femu_durable_burst(&c, buf, 12, 0xe5, true, false);
+    g_usleep(750 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 9);
+    femu_power_cut(&c);
+    for (int i = 0; i < 12; i++) {
+        femu_power_read(&c, buf, 1, i * 8, i < 3 ? 0xe5 : 0xd4);
+    }
+
+    /* buffered: the Flush ends when the last of the 12 programs ends */
+    g_usleep(2100 * 1000);
+    t0 = g_get_monotonic_time();
+    femu_durable_burst(&c, buf, 12, 0xf6, false, true);
+    femu_submit(&c, &c.io, &flush);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &cid, NULL)), ==,
+                    NVME_SUCCESS);
+    ms = (g_get_monotonic_time() - t0) / 1000;
+    g_assert_cmpint(ms, >=, 1800);
+    g_assert_cmpint(ms, <=, 3000);
+    femu_power_cut(&c);
+    for (int i = 0; i < 12; i++) {
+        femu_power_read(&c, buf, 1, i * 8, 0xf6);
+    }
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * durable_at_done, 2 s programs, buffer on: Write Zeroes without DEAC
+ * and Copy stage their bytes as a write's payload, so the FTL takes the
+ * before-image of each destination page.
+ *
+ *   page 0: A (0xa1), page 2: C (0xc3), both durable
+ *   Write Zeroes page 0, cut before its program: A
+ *   Write Zeroes page 0, Flush, cut: zeros
+ *   Copy page 2 to page 0, cut before its program: zeros
+ *   Copy page 2 to page 0, Flush, cut: C
+ *   write cache off: Write Zeroes, then Copy of page 4, each cut 0.2 s
+ *   into its program: C; a page that finds no place goes back at once
+ */
+void femu_test_durable_wz_copy(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    QTestState *qts = femu->dev.bus->qts;
+    const uint64_t src[1] = { 16 };
+    const uint16_t nlb[1] = { 8 };
+    NvmeCmd cmd;
+    uint64_t lpns;
+    uint64_t gens;
+    uint64_t ended;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 16, 8, 0xc3, false);
+    femu_power_flush(&c, 1);
+
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_ZEROES, buf, 0, 8, 0),
+                    ==, NVME_SUCCESS);
+    femu_power_read(&c, buf, 1, 0, 0x00);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    g_assert_cmphex(femu_durable_cmd(&c, NVME_CMD_WRITE_ZEROES, buf, 0, 8, 0),
+                    ==, NVME_SUCCESS);
+    femu_power_flush(&c, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0x00);
+
+    g_assert_cmphex(FEMU_SC(femu_copy(&c, list, 0, src, nlb, 1, 1, 0)), ==,
+                    NVME_SUCCESS);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0x00);
+    g_assert_cmphex(FEMU_SC(femu_copy(&c, list, 0, src, nlb, 1, 1, 0)), ==,
+                    NVME_SUCCESS);
+    femu_power_flush(&c, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+    femu_power_read(&c, buf, 1, 16, 0xc3);
+
+    /* write cache off: each command programs at once; cut inside it */
+    femu_power_write(&c, buf, 1, 32, 8, 0xd4, false);
+    femu_power_flush(&c, 1);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    /* a direct program completes the command at its end: do not wait */
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_WRITE_ZEROES;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.cdw12 = cpu_to_le32(7);
+    femu_submit(&c, &c.io, &cmd);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    qtest_memset(qts, list, 0, 4096);
+    qtest_writeq(qts, list + 8, 32);
+    qtest_writew(qts, list + 16, 7);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_CMD_COPY;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(list);
+    femu_submit(&c, &c.io, &cmd);
+    g_usleep(200 * 1000);
+    femu_durable_counts(qts, &lpns, &gens, &ended);
+    g_assert_cmpuint(gens - ended, ==, 1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+
+    /*
+     * A page that finds no place goes back at once, and the command stops:
+     * page 1 fails, page 2 (C) is never reached.
+     */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_place_fail_id(qts, "power", 1);
+    g_assert_cmphex(FEMU_SC(femu_durable_cmd(&c, NVME_CMD_WRITE_ZEROES, buf,
+                                             8, 16, 0)), ==,
+                    NVME_CAP_EXCEEDED);
+    femu_power_read(&c, buf, 1, 16, 0xc3);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* durable_at_done: the commands it does not support yet, and realize */
+void femu_test_durable_refused(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const char *cases[][2] = {
+        { "'buffer_size':16,'vwc':1,'durable_at_done':true",
+          "durable_at_done needs power_loss=on" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,"
+          "'durable_at_done':true,'ns_wp':true",
+          "durable_at_done is not supported with ns_wp" },
+    };
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    /* nothing is programming: a cache disable completes at once */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *add = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'durr','addr':'5','femu_mode':1,"
+            "'devsz_mb':8,%s}}", cases[i][0]);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i][0], desc);
+        g_assert_nonnull(strstr(desc, cases[i][1]));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/* qom-set plp-health on the device with id "power" */
+static void femu_plp_health(QTestState *qts, uint32_t pct)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/power',"
+                           "'property':'plp-health','value':%u}}", pct);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* SMART Critical Warning */
+static uint8_t femu_plp_cw(FemuCtrlState *c, uint64_t buf)
+{
+    g_assert_cmphex(FEMU_SC(femu_get_log(c, FEMU_LOG_SMART, buf, 512, 0)), ==,
+                    NVME_SUCCESS);
+    return qtest_readb(c->pdev->bus->qts, buf);
+}
+
+/* the microseconds a write takes */
+static int64_t femu_plp_write_us(FemuCtrlState *c, uint64_t buf,
+                                 uint8_t pattern, bool fua)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    femu_power_write(c, buf, 1, 0, 8, pattern, fua);
+    return g_get_monotonic_time() - t0;
+}
+
+/*
+ * plp=on, vwc=0, 2 s programs: the buffer stays on, a write and a FUA
+ * write both complete from it, and a cut keeps both. C0h counts the
+ * two cuts and reports Capacitor Health 120.
+ */
+void femu_test_plp_keep(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    const char *cases[][2] = {
+        { "'buffer_size':16,'plp':true", "plp needs power_loss=on" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,'plp':true,"
+          "'plp_health':65535", "plp_health must be 0 to 65534" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,"
+          "'plp_fail_mode':'rom'", "plp_fail_mode needs plp=on" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,'plp':true,"
+          "'plp_fail_mode':'off'", "must be rom, wtm or normal" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,'plp':true,"
+          "'durable_at_done':true", "plp is not supported with durable" },
+        { "'ocp':true,'ocp_profile':'BAABAAAAAABAB'",
+          "DP-CFG-6 A needs plp=on" },
+        { "'buffer_size':16,'power_loss':true,'plp':true,"
+          "'ocp':true,'plp_fail_mode':'wtm'",
+          "DP-CFG-6 B needs plp_fail_mode rom" },
+        { "'buffer_size':16,'vwc':1,'power_loss':true,'plp':true,"
+          "'ocp':true", "plp with ocp=on needs vwc=0" },
+    };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(femu_plp_write_us(&c, buf, 0xa1, false), <, 1000000);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    g_assert_cmpint(femu_plp_write_us(&c, buf, 0xb2, true), <, 1000000);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xb2);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 128) & 0xffff, ==, 120);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 160), ==, 2);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *add = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'plpr','addr':'5','femu_mode':1,"
+            "'devsz_mb':8,%s}}", cases[i][0]);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i][0], desc);
+        g_assert_nonnull(strstr(desc, cases[i][1]));
+        qobject_unref(rsp);
+    }
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * ocp=on with DP-CFG-6 A, so C2h exists. Its factory value is ROM (01b,
+ * ROWTM-1); 00b is refused. With C6h at 1 minute and the energy at 0,
+ * the next check fails the protection: a SMART reliability event, CW
+ * 18h (backup failed, read only), and writes fail 82h. The buffered
+ * page was written back first, so a cut keeps it.
+ */
+void femu_test_plp_fail_rom(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    NvmeRwCmd rw = { 0 };
+    uint32_t r;
+    uint32_t res = 0;
+    uint16_t cid;
+    uint16_t want;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 0, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 1);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 1, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 1);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 3, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r & 0x7, ==, 0x5);          /* saveable, changeable */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc2, 0, 1, 0, NULL), ==,
+                    NVME_INVALID_FIELD);
+    /* WTM saved, then ROM current: a reset brings WTM back */
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc2, 1, 1, 2u << 30, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc2, 0, 1, 1u << 30, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 2, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 2);
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc2, 0, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 1);
+    /* PLP-7: the check runs every 15 minutes from the factory */
+    g_assert_cmphex(femu_ocp_feat(&c, false, 0xc6, 1, 1, 0, &r), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(r, ==, 15);
+    g_assert_cmphex(femu_ocp_feat(&c, true, 0xc6, 0, 1, 1u << 16, NULL), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, NVME_ASYNCHRONOUS_EVENT_CONF,
+                                             false, 0,
+                                             NVME_SMART_FAILED_VOLATILE_MEDIA,
+                                             NULL)), ==, NVME_SUCCESS);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    want = femu_aer(&c);
+
+    femu_plp_health(qts, 0);
+    /* not checked yet: nothing changed */
+    qtest_clock_step(qts, 30 * NANOSECONDS_PER_SECOND);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0);
+    qtest_clock_step(qts, 31 * NANOSECONDS_PER_SECOND);
+    g_assert_cmpint(femu_complete(&c, &c.admin, &cid, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(cid, ==, want);
+    g_assert_cmphex(res & 0xffffff, ==, 0x020001);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0x18);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 128) & 0xffff, ==, 0);
+
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(7);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                    FEMU_SC(NVME_WRITE_TO_RO));
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    /* every cut starts the protection, failed or not (SMART-24) */
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 160), ==, 1);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0x18);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * plp_fail_mode=wtm, no ocp, 2 s programs: C6h is not there, and the check
+ * runs every 15 minutes. Before it fails, a Flush has nothing to wait for
+ * (NVMe-IO-3). After it fails, CW is 10h, a write waits for its program,
+ * and a cut keeps both it and the page buffered before.
+ */
+void femu_test_plp_fail_wtm(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, false);
+    femu_power_write(&c, buf, 1, 8, 8, 0xb2, false);
+    {
+        int64_t t0 = g_get_monotonic_time();
+
+        femu_power_flush(&c, 1);
+        g_assert_cmpint(g_get_monotonic_time() - t0, <, 1000000);
+    }
+    femu_plp_health(qts, 0);
+    qtest_clock_step(qts, 14 * 60 * NANOSECONDS_PER_SECOND);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0);
+    qtest_clock_step(qts, 61 * NANOSECONDS_PER_SECOND);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0x10);
+    g_assert_cmpint(femu_plp_write_us(&c, buf, 0xc3, false), >=, 1500000);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+    femu_power_read(&c, buf, 1, 8, 0xb2);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * plp_fail_mode=normal with the energy at 0 from realize: the check at
+ * the first enable fails the protection (PLP-3). CW is 10h, writes go on
+ * from the buffer, and a cut loses them as without plp. The failure stays
+ * when the energy comes back.
+ */
+void femu_test_plp_fail_normal(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0x10);
+    /* no working protection: FUA programs the page */
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, true);
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    femu_plp_health(qts, 120);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xa1);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 160), ==, 1);
+    g_assert_cmpuint(femu_plp_cw(&c, buf), ==, 0x10);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Power-fail atomicity. Pages hold 8 blocks; A writes blocks 7 and 8,
+ * one in each of pages 0 and 1, and B is a FUA write of block 0. B
+ * programs page 0 with A's block 7 in it. @data "off": without
+ * awupf_lbas both pages of A wait in the buffer, so a cut keeps block 7
+ * and loses block 8, the tear this test must see. "on": awupf_lbas=8
+ * makes A one transaction, so both blocks stay; AWUN and AWUPF are 7,
+ * and a write whose second page finds no room changes nothing. Nor does
+ * a short FUA write inside one page that finds no room.
+ */
+void femu_test_awupf(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    bool on = !strcmp(data, "on");
+    NvmeRwCmd rw = { 0 };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_power_write(&c, buf, 1, 0, 8, 0xa1, true);
+    femu_power_write(&c, buf, 1, 8, 8, 0xa1, true);
+    femu_power_write(&c, buf, 1, 7, 2, 0xb2, false);
+    femu_power_write(&c, buf, 1, 0, 1, 0xc3, true);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 0, 0xc3);
+    femu_power_read(&c, buf, 1, 7, 0xb2);
+    femu_power_read(&c, buf, 1, 8, on ? 0xb2 : 0xa1);
+    if (!on) {
+        goto out;
+    }
+
+    g_assert_cmphex(FEMU_SC(femu_identify(&c, 0, 1, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readw(qts, buf + 526), ==, 7);    /* AWUN */
+    g_assert_cmpuint(qtest_readw(qts, buf + 528), ==, 7);    /* AWUPF */
+
+    /* page 0 finds room, page 1 does not: the write fails whole */
+    {
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                               "'path':'/machine/peripheral/power',"
+                               "'property':'x-place-skip','value':1}}");
+
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+    }
+    femu_place_fail_id(qts, "power", 1);
+    qtest_memset(qts, buf, 0xd4, 1024);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(7);
+    rw.nlb = cpu_to_le16(1);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                    FEMU_SC(NVME_CAP_EXCEEDED));
+    femu_power_read(&c, buf, 1, 7, 0xb2);
+    femu_power_read(&c, buf, 1, 8, 0xb2);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 7, 0xb2);
+    femu_power_read(&c, buf, 1, 8, 0xb2);
+
+    /* a FUA write inside one page whose page finds no room changes nothing */
+    femu_place_fail_id(qts, "power", 1);
+    qtest_memset(qts, buf, 0xe5, 1024);
+    rw.slba = cpu_to_le64(2);
+    rw.control = cpu_to_le16(NVME_RW_FUA);
+    g_assert_cmphex(FEMU_SC(femu_io(&c, (NvmeCmd *)&rw)), ==,
+                    FEMU_SC(NVME_CAP_EXCEEDED));
+    femu_power_read(&c, buf, 1, 2, 0xa1);
+    femu_power_read(&c, buf, 1, 3, 0xa1);
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 2, 0xa1);
+    {
+        const char *cases[][2] = {
+            { "'awupf_lbas':8", "awupf_lbas: it needs power_loss=on" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'awupf_lbas':3",
+              "a power of two from 2 to 65536" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'awupf_lbas':8,"
+              "'durable_at_done':true", "not supported with durable_at" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'awupf_lbas':8,"
+              "'err_write_fail_ppm':10", "not supported with err_write" },
+        };
+
+        for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+            g_autofree char *add = g_strdup_printf(
+                "{'execute':'device_add','arguments':{"
+                "'driver':'femu','id':'awr','addr':'5','femu_mode':1,"
+                "'devsz_mb':8,%s}}", cases[i][0]);
+            QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("%s: %s", cases[i][0], desc);
+            g_assert_nonnull(strstr(desc, cases[i][1]));
+            qobject_unref(rsp);
+        }
+    }
+out:
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* qom-set x-sdc on device "power": one fault on the next install of lba */
+static void femu_sdc_one(QTestState *qts, const char *spec)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/power',"
+                           "'property':'x-sdc','value':%s}}", spec);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* read one block of namespace 1: the status, and its first byte in *@b0 */
+static uint16_t femu_sdc_read(FemuCtrlState *c, uint64_t buf, uint64_t lba,
+                              uint8_t *b0, uint8_t *b1)
+{
+    NvmeRwCmd rw = { 0 };
+    uint16_t status;
+
+    qtest_memset(c->pdev->bus->qts, buf, 0x5a, 512);
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(lba);
+    status = FEMU_SC(femu_io(c, (NvmeCmd *)&rw));
+    *b0 = qtest_readb(c->pdev->bus->qts, buf);
+    *b1 = qtest_readb(c->pdev->bus->qts, buf + 1);
+    return status;
+}
+
+/*
+ * sdc=on with power_loss: one flip, one lost and one misdirected write,
+ * each through x-sdc, into buffered pages. @data "on": e2e_check (the
+ * default) fails each read of a spoiled block with 81h and counts it in
+ * C0h Detected Errors. "off": the reads succeed with the wrong data. A
+ * new write clears a mark; a cut restores the buffered pages with their
+ * marks, while the misdirected page outside the buffer stays spoiled.
+ */
+void femu_test_sdc(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    bool on = !strcmp(data, "on");
+    uint16_t bad = on ? FEMU_SC(NVME_UNRECOVERED_READ) : NVME_SUCCESS;
+    uint8_t b0;
+    uint8_t b1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (int p = 0; p < 3; p++) {
+        femu_power_write(&c, buf, 1, p * 8, 8, 0xa1, true);
+    }
+
+    /* flip: block 3 holds one changed bit */
+    femu_sdc_one(qts, "1:flip:3");
+    femu_power_write(&c, buf, 1, 0, 8, 0xb2, false);
+    g_assert_cmphex(femu_sdc_read(&c, buf, 3, &b0, &b1), ==, bad);
+    if (!on) {
+        g_assert_cmphex(b0, ==, 0xb3);
+        g_assert_cmphex(b1, ==, 0xb2);
+    }
+    g_assert_cmphex(femu_sdc_read(&c, buf, 4, &b0, &b1), ==, NVME_SUCCESS);
+    g_assert_cmphex(b0, ==, 0xb2);
+    /* Detected Errors in bytes 75:72; Corrected (79:76) stays 0 */
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 72), ==, on ? 1 : 0);
+    /* a new write of the block clears its mark */
+    femu_power_write(&c, buf, 1, 3, 1, 0xc3, false);
+    femu_power_read(&c, buf, 1, 3, 0xc3);
+
+    /* lost: blocks 8 to 15 keep the old data */
+    femu_sdc_one(qts, "1:lost:8");
+    femu_power_write(&c, buf, 1, 8, 8, 0xd4, false);
+    g_assert_cmphex(femu_sdc_read(&c, buf, 8, &b0, &b1), ==, bad);
+    if (!on) {
+        g_assert_cmphex(b0, ==, 0xa1);
+    }
+
+    /* misdirect: page 2 keeps the old data, page 3 gets the new */
+    femu_sdc_one(qts, "1:misdirect:16");
+    femu_power_write(&c, buf, 1, 16, 8, 0xe5, false);
+    g_assert_cmphex(femu_sdc_read(&c, buf, 16, &b0, &b1), ==, bad);
+    g_assert_cmphex(femu_sdc_read(&c, buf, 24, &b0, &b1), ==, bad);
+    if (!on) {
+        g_assert_cmphex(femu_sdc_read(&c, buf, 16, &b0, &b1), ==, 0);
+        g_assert_cmphex(b0, ==, 0xa1);
+        g_assert_cmphex(femu_sdc_read(&c, buf, 24, &b0, &b1), ==, 0);
+        g_assert_cmphex(b0, ==, 0xe5);
+    }
+
+    /* the cut restores pages 0 to 2 clean; page 3 was never buffered */
+    femu_power_cut(&c);
+    femu_power_read(&c, buf, 1, 3, 0xa1);
+    femu_power_read(&c, buf, 1, 8, 0xa1);
+    femu_power_read(&c, buf, 1, 16, 0xa1);
+    g_assert_cmphex(femu_sdc_read(&c, buf, 24, &b0, &b1), ==, bad);
+    g_assert_cmpuint(femu_ocp_c0h_field(&c, buf, 72), ==, on ? 5 : 0);
+
+    if (on) {
+        const char *cases[][2] = {
+            { "'sdc':true", "sdc needs power_loss=on" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'sdc':true,"
+              "'durable_at_done':true", "sdc is not supported with durable" },
+            { "'sdc_ppm':10", "sdc_ppm and sdc_kind need sdc=on" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'sdc':true,"
+              "'sdc_kind':'bad'", "sdc_kind flip, lost, misdirect or mix" },
+            { "'buffer_size':16,'vwc':1,'power_loss':true,'sdc':true,"
+              "'awupf_lbas':8", "sdc is not supported with awupf_lbas" },
+        };
+        const char *bad_sdc[] = { "1:flip:99999999", "1:flip:3x", "2:flip:3",
+                                  "1:bend:3" };
+        QDict *qr;
+
+        /* x-sdc takes only a block of a namespace, and one at a time */
+        for (int i = 0; i < ARRAY_SIZE(bad_sdc); i++) {
+            qr = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/power',"
+                           "'property':'x-sdc','value':%s}}", bad_sdc[i]);
+            g_assert_true(qdict_haskey(qr, "error"));
+            qobject_unref(qr);
+        }
+        femu_sdc_one(qts, "1:flip:40");
+        qr = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                       "'path':'/machine/peripheral/power',"
+                       "'property':'x-sdc','value':'1:lost:41'}}");
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(qr, "error"),
+                                              "desc"), "already waiting"));
+        qobject_unref(qr);
+
+        for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+            g_autofree char *add = g_strdup_printf(
+                "{'execute':'device_add','arguments':{"
+                "'driver':'femu','id':'sdcr','addr':'5','femu_mode':1,"
+                "'devsz_mb':8,%s}}", cases[i][0]);
+            QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("%s: %s", cases[i][0], desc);
+            g_assert_nonnull(strstr(desc, cases[i][1]));
+            qobject_unref(rsp);
+        }
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/* power_states without power_limit: no PLS, no MUP, no feature 23h */
+void femu_test_power_limit_off(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 96) & (1u << 20), ==, 0);
+    g_assert_cmpuint(qtest_readb(qts, buf + 385), ==, 0);
+    g_assert_cmpuint(qtest_readw(qts, buf + 390), ==, 0);
+    g_assert_cmpuint(qtest_readb(qts, buf + 263), ==, 3);
+    g_assert_cmphex(femu_pl(&c, FEMU_PL_W(10), false), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FID_POWER_LIMIT, 0, 0,
+                                             0, NULL)), ==,
+                    NVME_INVALID_FIELD);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+void femu_test_power_limit_refused(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'power_limit':true", "power_limit needs power_states" },
+        { "'power_limit':true,'power_states':true,"
+          "'persist_file':'plimit.img'",
+          "power_limit is not supported with persist_file" },
+        { "'power_limit':true,'power_states':true,'ocp':true",
+          "power_states does not work with ocp" },
+    };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'plimit','addr':'5','devsz_mb':1,"
+            "'femu_mode':1,%s}}", cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/*
+ * l2p_dram_ns: each mapping lookup costs controller DRAM time, and a read
+ * starts its NAND read after it. With 2 ms of lookup (@data set) a read's
+ * modelled time is 2 ms longer than without it.
+ */
+void femu_test_l2p_dram(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = data ? "l2p-on" : "l2p-off";
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t before, d;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2a, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    before = femu_model_ns(qts, id);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    d = femu_model_ns(qts, id) - before;
+    g_test_message("%s: read modelled %" PRIu64 " ns", id, d);
+    if (data) {
+        g_assert_cmpuint(d, >=, 2000000 + 40000);
+    } else {
+        g_assert_cmpuint(d, <, 2000000);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* the throttle properties are refused out of range or without the throttle */
+void femu_test_throttle_refused(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } bad[] = {
+        { "'hot_k':360", "hot_k needs throttle=on" },
+        { "'throttle':true", "throttle needs thermal_tau_ms" },
+        { "'throttle':true,'thermal_tau_ms':100,'thermal_r':1,"
+          "'throttle_light_pct':90", "throttle_light_pct" },
+        { "'throttle':true,'thermal_tau_ms':100,'thermal_r':1,"
+          "'throttle_light_pct':200,'throttle_heavy_pct':150",
+          "throttle_light_pct" },
+        { "'throttle':true,'thermal_tau_ms':100,'thermal_r':1,"
+          "'throttle_heavy_pct':2000", "throttle_light_pct" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'thr-bad','addr':'5','devsz_mb':64,'femu_mode':1,%s}}",
+            bad[i].opts);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), bad[i].msg));
+        qobject_unref(rsp);
+    }
+}
+
+/* fw_slots: at most 7; ocp needs 3; no subsystem */
+void femu_test_fw_refused(void *obj, void *data,
+                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } bad[] = {
+        { "'fw_slots':8", "0 (auto) to 7" },
+        { "'ocp':true,'fw_slots':2", "fw_slots of 3" },
+        { "'ocp':true,'fw_slots':1", "fw_slots of 3" },
+        { "'fw_slots':2,'subsys':'ocpsub'", "femu-subsys" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'fwr','addr':'5','devsz_mb':64,'femu_mode':1,%s}}",
+            bad[i].opts);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), bad[i].msg));
+        qobject_unref(rsp);
+    }
+}
+
+/* Without a subsystem there is no endurance group, so CNS 19h is refused. */
+void femu_test_endgrp_list_absent(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    buf = guest_alloc(alloc, 4096);
+    g_assert_cmphex(FEMU_SC(femu_identify(&c, 0, FEMU_CNS_ENDGRP_LIST, 0, buf)),
+                    ==, NVME_INVALID_FIELD);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * x-gc-frontier of the device "trace": data line, valid, GC line, valid,
+ * and an LPN the GC line holds
+ */
+static void femu_gcf_state(QTestState *qts, int *v)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/trace',"
+                           "'property':'x-gc-frontier'}}");
+    g_auto(GStrv) f = NULL;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(f), ==, 5);
+    for (int i = 0; i < 5; i++) {
+        v[i] = atoi(f[i]);
+    }
+    qobject_unref(rsp);
+}
+
+/*
+ * gc_frontier: the pages collection copies go to the collection line, not
+ * to the line host writes fill. The fill writes every LPN once, so each
+ * line holds 8 even and 8 odd pages; then only even LPNs are rewritten, in
+ * order. Collection runs only when free lines run short (both thresholds at
+ * 95%), so most victims hold their 8 cold odd pages and few even ones.
+ * For each write that changes no line, the host line gains exactly the one
+ * page written, and the collection line gains the pages copied. Without the
+ * property, the copies would land in the host line.
+ */
+void femu_test_gc_frontier_placement(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    int checked = 0;
+    int a[5];
+    int b[5];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 1024; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int round = 0; round < 6; round++) {
+        for (int lpn = 0; lpn < 1024; lpn += 2) {
+            uint64_t gc0 = femu_ftl_trace_field(qts, 4);
+            uint64_t gc1;
+
+            femu_gcf_state(qts, a);
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8,
+                                            buf)), ==, NVME_SUCCESS);
+            femu_gcf_state(qts, b);
+            gc1 = femu_ftl_trace_field(qts, 4);
+            if (gc1 == gc0 || a[0] != b[0] || a[2] != b[2] || b[2] < 0) {
+                continue;
+            }
+            /*
+             * A write that ran collection, with no line change. The write
+             * may invalidate one page an earlier collection copied, so the
+             * collection line gains the copies or one fewer.
+             */
+            g_assert_cmpint(b[1] - a[1], ==, 1);
+            g_assert_cmpint(b[3] - a[3], <=, (int)(gc1 - gc0));
+            g_assert_cmpint(b[3] - a[3], >=, (int)(gc1 - gc0) - 1);
+            checked++;
+        }
+    }
+    g_test_message("gc frontier: %d collecting writes checked", checked);
+    g_assert_cmpint(checked, >, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Read reclaim of the open collection line. The fill and even overwrites
+ * of the placement test run until the collection line holds pages. Then
+ * four reads of an LPN on that line, and one write, which runs the
+ * reclaim. @data is "rr" (read_reclaim_limit=4 only) or "open"
+ * (pd_open_read_limit=4). Either way the line is sealed and its pages
+ * move. With read_reclaim_limit alone, the data frontier would drop the
+ * request; the collection line is sealed for any reason, so its cold
+ * pages cannot hide in a line that never closes.
+ */
+void femu_test_gc_frontier_reclaim(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t gc0;
+    int v[5] = { -1, -1, -1, -1, -1 };
+    int lpn = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (lpn = 0; lpn < 1024; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int i = 0; i < 6 * 512 && (v[3] < 2 || v[4] < 0); i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)(i % 512) * 2 * 8, buf)),
+                        ==, NVME_SUCCESS);
+        femu_gcf_state(qts, v);
+    }
+    g_assert_cmpint(v[4], >=, 0);
+    g_test_message("gc line %d holds %d pages, LPN %d", v[2], v[3], v[4]);
+    gc0 = femu_c0h_field(&c, log, 16);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ,
+                                        (uint64_t)v[4] * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    /* a write to an odd LPN, which no collection line holds yet */
+    {
+        int gcl = v[2];
+
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 1 * 8, buf)),
+                        ==, NVME_SUCCESS);
+        femu_gcf_state(qts, v);
+        g_test_message("%s: gc line %d -> %d, pages moved %" PRIu64,
+                       (const char *)data, gcl, v[2],
+                       femu_c0h_field(&c, log, 16) - gc0);
+        g_assert_cmpint(v[2], !=, gcl);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 16) - gc0, >, 0);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/* gc_frontier is refused where its pointer would be ignored or miscounted */
+void femu_test_gc_frontier_refused(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'blks_per_pl':80,'gc_pace':true", "gc_pace" },
+        { "'blks_per_pl':80,'streams':true", "Streams" },
+        { "'blks_per_pl':80,'retention_limit_sec':10",
+          "retention_limit_sec without" },
+        { "'blks_per_pl':80,'subsys':'fdpsub'", "FDP" },
+        { "'blks_per_pl':160,'tier_mode':'static','tier_static_mb':1,"
+          "'nand_cell_type':3", "tier_mode=static" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'gcfr','addr':'5','devsz_mb':4,'femu_mode':1,"
+            "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+            "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,'gc_frontier':true,"
+            "%s}}", cases[i].opts);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        g_assert_nonnull(strstr(desc, "gc_frontier"));
+        qobject_unref(rsp);
+    }
+    /*
+     * The controls: the plain line with gc_frontier is accepted, and so is
+     * the tier line with gc_frontier off, so each refusal above comes from
+     * gc_frontier and not from the rest of its line.
+     */
+    {
+        static const char *const ok[] = {
+            "'blks_per_pl':80,'gc_frontier':true",
+            "'blks_per_pl':160,'tier_mode':'static','tier_static_mb':1,"
+            "'nand_cell_type':3,'gc_frontier':false",
+        };
+
+        for (int i = 0; i < ARRAY_SIZE(ok); i++) {
+            g_autofree char *cmd = g_strdup_printf(
+                "{'execute':'device_add','arguments':{'driver':'femu',"
+                "'id':'gcfr','addr':'5','devsz_mb':4,'femu_mode':1,"
+                "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+                "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,%s}}", ok[i]);
+            QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+            g_assert_true(qdict_haskey(rsp, "return"));
+            qobject_unref(rsp);
+            qpci_unplug_acpi_device_test(qts, "gcfr", 5);
+        }
+    }
+}
+
+/* x-gc-idle of the device "gc-test": steps, victims, free lines, target */
+static void femu_gci_state(QTestState *qts, int *v)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-gc-idle'}}");
+    g_auto(GStrv) f = NULL;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(f), ==, 4);
+    for (int i = 0; i < 4; i++) {
+        v[i] = atoi(f[i]);
+    }
+    qobject_unref(rsp);
+}
+
+static void femu_gci_hold(QTestState *qts, bool on)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/gc-test',"
+                             "'property':'x-gc-idle-hold','value':%i}}",
+                             on);
+}
+
+/* x-gc-idle-kick: one step now, and its outcome or "not-due" */
+static char *femu_gci_kick(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-gc-idle-kick'}}");
+    char *out;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    out = g_strdup(qdict_get_str(rsp, "return"));
+    qobject_unref(rsp);
+    return out;
+}
+
+/*
+ * x-maint-idle of "gc-test": idle reclaims, idle refreshes, all read
+ * reclaims, all retention refreshes, GC copies, erases
+ */
+static void femu_maint_state(QTestState *qts, uint64_t *v)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-maint-idle'}}");
+    g_auto(GStrv) f = NULL;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-maint-idle: %s", qdict_get_str(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(f), ==, 6);
+    for (int i = 0; i < 6; i++) {
+        v[i] = g_ascii_strtoull(f[i], NULL, 10);
+    }
+    qobject_unref(rsp);
+}
+
+/*
+ * One channel, one LUN, 16 pages a line. LPNs 0 to 15 fill line 0, with
+ * idle steps held so only the kicks below run one.
+ *   refresh: retention 1 s at age_scale 4, nothing read; after 0.4 s
+ *            (1.6 s of age) one idle step
+ *            rewrites line 0 (16 copies, 1 erase) with no host write
+ *   reclaim: read limit 4; four reads of LPN 0 queue line 0, and one
+ *            idle step rewrites it with no host write
+ *   off:     the same as refresh without maint_idle: nothing moves
+ */
+void femu_test_maint_idle(void *obj, void *data,
+                          QGuestAllocator *alloc)
+{
+    const char *mode = data;
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    g_autofree char *what = NULL;
+    uint64_t v[6];
+
+    /* held before the first enable, so no step moves the scan cursor */
+    femu_gci_hold(qts, true);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 16; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    if (!strcmp(mode, "reclaim")) {
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                            NVME_SUCCESS);
+        }
+        g_usleep(50 * 1000);
+    } else {
+        /*
+         * retention_limit_sec 1 and age_scale 4: 0.4 s of real time is
+         * 1.6 s of age, past the limit only with the scale applied
+         */
+        g_usleep(400 * 1000);
+    }
+    femu_maint_state(qts, v);
+    g_assert_cmpuint(v[4], ==, 0);
+    g_assert_cmpuint(v[5], ==, 0);
+    what = femu_gci_kick(qts);
+    g_test_message("maint-idle %s: kick %s", mode, what);
+    femu_maint_state(qts, v);
+    if (!strcmp(mode, "off")) {
+        g_assert_cmpstr(what, ==, "at-target");
+        for (int i = 0; i < 6; i++) {
+            g_assert_cmpuint(v[i], ==, 0);
+        }
+    } else {
+        bool reclaim = !strcmp(mode, "reclaim");
+
+        g_assert_cmpuint(v[0], ==, reclaim ? 1 : 0);
+        g_assert_cmpuint(v[1], ==, reclaim ? 0 : 1);
+        g_assert_cmpuint(v[2], ==, reclaim ? 1 : 0);
+        g_assert_cmpuint(v[3], ==, reclaim ? 0 : 1);
+        g_assert_cmpuint(v[4], ==, 16);
+        g_assert_cmpuint(v[5], ==, 1);
+        {
+            QDict *rsp;
+            QDict *ctr = qdict_get_qdict(femu_query_ns(qts,
+                "'path':'/machine/peripheral/gc-test'", &rsp), "counters");
+
+            g_assert_cmpint(qdict_get_int(ctr, "idle-reclaims"), ==,
+                            reclaim ? 1 : 0);
+            g_assert_cmpint(qdict_get_int(ctr, "idle-refreshes"), ==,
+                            reclaim ? 0 : 1);
+            qobject_unref(rsp);
+        }
+    }
+    /* the data is still there */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 15 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0x3c);
+    femu_gci_hold(qts, false);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* poison @buf, read @lpn into it, and check the whole page holds @pat */
+static void femu_maint_read_check(FemuCtrlState *c, QTestState *qts,
+                                  uint64_t buf, int lpn, uint8_t pat)
+{
+    g_autofree uint8_t *page = g_malloc(FEMU_DATA_SIZE);
+
+    qtest_memset(qts, buf, 0xff, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_READ, (uint64_t)lpn * 8, buf)),
+                    ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, page, FEMU_DATA_SIZE);
+    for (int i = 0; i < FEMU_DATA_SIZE; i++) {
+        g_assert_cmpint(page[i], ==, pat);
+    }
+}
+
+/*
+ * Kick idle steps until one does work, and return its outcome. A step that
+ * meets booked media work only moves its fence ("none"), so it is retried.
+ */
+static char *femu_maint_kick_work(QTestState *qts)
+{
+    char *what = NULL;
+
+    for (int i = 0; i < 500; i++) {
+        g_free(what);
+        what = femu_gci_kick(qts);
+        if (strcmp(what, "not-due") && strcmp(what, "none")) {
+            break;
+        }
+        g_usleep(10000);
+    }
+    return what;
+}
+
+/*
+ * Space recovery on a nearly full device. 56 lines of 16 pages, 48 of them
+ * for the 768 LPNs; gc_thres_pcent_high=90 forces collection at 5 free
+ * lines. One overwrite of LPN 16k for each k leaves every victim with one
+ * invalid page, below the two that unforced collection asks for, and the
+ * write path ends at 5 free lines. Four reads of LPN 0 queue its line for
+ * a read reclaim, which must wait for space:
+ *   step 1: one forced victim (15 copies, 1 erase), no reclaim
+ *   step 2: the reclaim (16 copies, 1 erase)
+ */
+void femu_test_maint_idle_space(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t v0[6];
+    uint64_t v[6];
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    char *what;
+    int g0[4];
+    int g[4];
+
+    femu_gci_hold(qts, true);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 768; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int k = 0; k < 48; k++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, k * 16 * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_gci_state(qts, g0);
+    femu_maint_state(qts, v0);
+    g_test_message("maint-idle-space before: free %d target %d", g0[2],
+                   g0[3]);
+    g_assert_cmpint(g0[3], ==, 5);
+    g_assert_cmpint(g0[2], ==, 5);
+    g_assert_cmpuint(v0[0], ==, 0);
+    g_assert_cmpuint(v0[2], ==, 0);
+    /* the write path collected 16 victims forced for the last 16 writes */
+    g_assert_cmpuint(v0[4], ==, 16 * 15);
+    g_assert_cmpuint(v0[5], ==, 16);
+
+    what = femu_maint_kick_work(qts);
+    femu_gci_state(qts, g);
+    femu_maint_state(qts, v);
+    g_test_message("maint-idle-space step 1: %s, free %d", what, g[2]);
+    g_assert_cmpstr(what, ==, "gain");
+    g_free(what);
+    g_assert_cmpint(g[0], ==, g0[0] + 1);
+    g_assert_cmpint(g[1], ==, g0[1] + 1);
+    g_assert_cmpuint(v[0], ==, 0);
+    g_assert_cmpuint(v[4] - v0[4], ==, 15);
+    g_assert_cmpuint(v[5] - v0[5], ==, 1);
+
+    what = femu_maint_kick_work(qts);
+    femu_maint_state(qts, v);
+    g_test_message("maint-idle-space step 2: %s", what);
+    g_assert_cmpstr(what, ==, "reclaimed");
+    g_free(what);
+    g_assert_cmpuint(v[0], ==, 1);
+    g_assert_cmpuint(v[2], ==, 1);
+    g_assert_cmpuint(v[4] - v0[4], ==, 15 + 16);
+    g_assert_cmpuint(v[5] - v0[5], ==, 2);
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 768);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_maint_read_check(&c, qts, buf, 0, 0x5a);
+    femu_maint_read_check(&c, qts, buf, 767, 0x5a);
+    femu_gci_hold(qts, false);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Scan fairness. LPNs 0 to 15 fill line 0, which nothing reads and which
+ * ages past the 1 s retention limit. LPNs 16 to 31 then fill line 1. Before
+ * each idle step, four reads of LPN 16 queue its line for a read reclaim;
+ * that line is always younger than the limit, so the read path never asks
+ * for an age refresh. Only the scan can find line 0:
+ *   step 0: queued reclaim      step 1: scan, refresh of line 0
+ *   steps 2 to 5: no aged line, so the queued reclaim
+ * A step that always took the queued line would never refresh line 0.
+ */
+void femu_test_maint_idle_burst(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    uint64_t v[6];
+
+    femu_gci_hold(qts, true);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2d, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 16; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    g_usleep(1100 * 1000);
+    qtest_memset(qts, buf, 0x4e, FEMU_DATA_SIZE);
+    for (int lpn = 16; lpn < 32; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int step = 0; step < 6; step++) {
+        g_autofree char *what = NULL;
+
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 16 * 8, buf)),
+                            ==, NVME_SUCCESS);
+        }
+        what = femu_maint_kick_work(qts);
+        femu_maint_state(qts, v);
+        g_test_message("maint-idle-burst step %d: %s", step, what);
+        g_assert_cmpstr(what, ==, "reclaimed");
+        g_assert_cmpuint(v[0], ==, step ? step : 1);
+        g_assert_cmpuint(v[1], ==, step ? 1 : 0);
+        g_assert_cmpuint(v[4], ==, 16 * (step + 1));
+        g_assert_cmpuint(v[5], ==, step + 1);
+    }
+    /* the refresh came from the scan: the read path asked for none */
+    g_assert_cmpuint(v[3], ==, 1);
+    g_assert_cmpuint(v[2], ==, 5);
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 32);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_maint_read_check(&c, qts, buf, 0, 0x2d);
+    femu_maint_read_check(&c, qts, buf, 15, 0x2d);
+    femu_maint_read_check(&c, qts, buf, 16, 0x4e);
+    femu_maint_read_check(&c, qts, buf, 31, 0x4e);
+    femu_gci_hold(qts, false);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The fill writes the 768 pages of the namespace once, and two passes of
+ * overwrites in a fixed random order leave invalid pages in most lines.
+ * The write path collects only below 8 free lines (gc_thres_pcent=90).
+ */
+static void femu_gci_workload(FemuCtrlState *c, QTestState *qts, uint64_t buf)
+{
+    uint32_t lcg = 4242;
+
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 768; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int i = 0; i < 2 * 768; i++) {
+        lcg = lcg * 1103515245u + 12345u;
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE,
+                                        (uint64_t)((lcg >> 8) % 768) * 8,
+                                        buf)), ==, NVME_SUCCESS);
+    }
+}
+
+/*
+ * gc_idle_ms=5, gc_idle_pcent=75: idle time collects until 20 of the 80
+ * lines are free, which the write path never does. The hold keeps idle
+ * steps out of the workload. After it ends, a bounded wait sees the free
+ * lines reach the target with no host I/O, and every mapping still holds.
+ */
+void femu_test_gc_idle_recover(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    g_autofree char *last = NULL;
+    int v[4];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_gci_hold(qts, true);
+    femu_gci_workload(&c, qts, buf);
+    femu_gci_state(qts, v);
+    g_test_message("before: steps %d victims %d free %d target %d",
+                   v[0], v[1], v[2], v[3]);
+    g_assert_cmpint(v[0], ==, 0);
+    g_assert_cmpint(v[3], ==, 20);
+    g_assert_cmpint(v[2], <, v[3]);
+    femu_gci_hold(qts, false);
+    for (int i = 0; v[2] < v[3] && i < 500; i++) {
+        g_usleep(10000);
+        femu_gci_state(qts, v);
+    }
+    g_test_message("after: steps %d victims %d free %d", v[0], v[1], v[2]);
+    g_assert_cmpint(v[2], >=, v[3]);
+    g_assert_cmpint(v[1], >, 0);
+    g_assert_cmpint(v[0], >=, v[1]);
+    femu_gci_hold(qts, true);
+    /* the last step's media work may not have ended yet: wait out its fence */
+    last = femu_gci_kick(qts);
+    for (int i = 0; !strcmp(last, "not-due") && i < 500; i++) {
+        g_free(last);
+        g_usleep(10000);
+        last = femu_gci_kick(qts);
+    }
+    g_assert_cmpstr(last, ==, "at-target");
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 768);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The retry fence: a step that finds no victim moves it gc_idle_ms (3 s)
+ * ahead. The
+ * fill leaves no invalid page, so no line is a victim, and gc_idle_pcent=50
+ * keeps the 31 free lines below the target of 40. The first kick after the
+ * quiet time finds nothing; a kick at once must wait for the fence.
+ */
+void femu_test_gc_idle_fence(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    int v[4];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_gci_hold(qts, true);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 768; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    {
+        g_autofree char *k0 = femu_gci_kick(qts);
+
+        g_assert_cmpstr(k0, ==, "not-due");
+    }
+    g_usleep(3300000);
+    for (int i = 0; i < 2; i++) {
+        g_autofree char *k1 = femu_gci_kick(qts);
+        g_autofree char *k2 = femu_gci_kick(qts);
+
+        g_test_message("kick %d: %s, then %s", i, k1, k2);
+        g_assert_cmpstr(k1, ==, "none");
+        g_assert_cmpstr(k2, ==, "not-due");
+        g_usleep(3300000);
+    }
+    femu_gci_state(qts, v);
+    g_assert_cmpint(v[0], ==, 2);
+    g_assert_cmpint(v[1], ==, 0);
+    g_assert_cmpint(v[3], ==, 40);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Fill the namespace, then overwrite LPNs 0 to 63: four lines hold no
+ * valid page, and 27 lines stay free, above the write path threshold.
+ */
+static void femu_gci_dead_lines(FemuCtrlState *c, QTestState *qts,
+                                uint64_t buf)
+{
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 768 + 64; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE,
+                                        (uint64_t)(lpn % 768) * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+}
+
+/*
+ * The media fence: with a 2 s block erase, a step that erases one victim
+ * keeps the next step out until the erase ends. The quiet time is 1 ms,
+ * and a gain sets no retry fence, so only the erase can hold the kick.
+ */
+void femu_test_gc_idle_media(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_gci_hold(qts, true);
+    femu_gci_dead_lines(&c, qts, buf);
+    g_usleep(50000);
+    for (int i = 0; i < 2; i++) {
+        g_autofree char *k1 = femu_gci_kick(qts);
+        g_autofree char *k2 = femu_gci_kick(qts);
+
+        g_test_message("kick %d: %s, then %s", i, k1, k2);
+        g_assert_cmpstr(k1, ==, "gain");
+        g_assert_cmpstr(k2, ==, "not-due");
+        g_usleep(2500000);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The sweep flag: each idle step sleeps 300 ms inside the sweep. A pause
+ * must wait for the step, so x-gc-idle-order never sees one running.
+ * Without the flag, the pause returns while a step sleeps.
+ */
+void femu_test_gc_idle_sweep(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    unsigned steps = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_gci_hold(qts, true);
+    femu_gci_dead_lines(&c, qts, buf);
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/gc-test',"
+                             "'property':'x-gc-idle-latch','value':300}}");
+    femu_gci_hold(qts, false);
+    for (int i = 0; i < 60; i++) {
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                               "'path':'/machine/peripheral/gc-test',"
+                               "'property':'x-gc-idle-order'}}");
+        int running;
+
+        g_assert_true(qdict_haskey(rsp, "return"));
+        g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"), "%d %u",
+                               &running, &steps), ==, 2);
+        qobject_unref(rsp);
+        g_assert_cmpint(running, ==, 0);
+        g_usleep(20000);
+    }
+    g_test_message("idle steps seen: %u", steps);
+    g_assert_cmpuint(steps, >, 0);
+    femu_gci_hold(qts, true);
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/gc-test',"
+                             "'property':'x-gc-idle-latch','value':0}}");
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 768);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * gc_idle_ms omitted: the same workload, then the same wait, and the pages
+ * collection copied do not change. The idle hooks are absent.
+ */
+void femu_test_gc_idle_off(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t gc0;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_gci_workload(&c, qts, buf);
+    gc0 = femu_c0h_field(&c, log, 16);
+    g_usleep(300000);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, gc0);
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-gc-idle'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/* gc_bg_invalid_pcent is a percent: 101 is refused, 100 is accepted */
+void femu_test_gc_bg_invalid_refused(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const int values[] = { 101, 255, 100 };
+
+    for (size_t i = 0; i < ARRAY_SIZE(values); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'gbir','addr':'5','devsz_mb':3,'secsz':512,"
+            "'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':60,"
+            "'pls_per_lun':1,'luns_per_ch':1,'nchs':1,'femu_mode':1,"
+            "'gc_bg_invalid_pcent':%d}}", values[i]);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        if (values[i] > 100) {
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("gc_bg_invalid_pcent=%d: %s", values[i], desc);
+            g_assert_nonnull(strstr(desc, "gc_bg_invalid_pcent must be 0 "
+                                    "to 100"));
+            qobject_unref(rsp);
+            continue;
+        }
+        /* the control: the line itself is accepted at the largest value */
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        qpci_unplug_acpi_device_test(qts, "gbir", 5);
+    }
+}
+
+/*
+ * The host-link order of a write. With a 1 MB/s link, a 64 KiB write takes
+ * 65.5 ms on the link and a 512 B read 0.5 ms; a program takes 0.2 ms on
+ * the one LUN. Both go in under one doorbell, the write first. The write's data
+ * crosses the link before its program, so the read's media waits behind
+ * that program and the write completes first. With pcie_write_first=off
+ * (@data "old"), the old order charges the link after the program, and
+ * the read completes first. The queue posts in model time order, so host
+ * speed does not change which completes first.
+ */
+void femu_test_link_write_order(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool old = data && !strcmp(data, "old");
+    FemuCtrlState c = { 0 };
+    uint64_t wbuf = guest_alloc(alloc, 16 * FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t rbuf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    NvmeRwCmd w = { 0 };
+    NvmeRwCmd r = { 0 };
+    uint16_t wcid;
+    uint16_t first;
+    uint16_t second;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, wbuf, 0x5a, 16 * FEMU_DATA_SIZE);
+    for (int i = 1; i < 16; i++) {
+        uint64_t prp = cpu_to_le64(wbuf + (uint64_t)i * FEMU_DATA_SIZE);
+
+        qtest_memwrite(qts, list + (i - 1) * 8, &prp, sizeof(prp));
+    }
+    /* the page the read targets holds data, so the read uses the LUN */
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 1024, wbuf)), ==,
+                    NVME_SUCCESS);
+    g_usleep(50000);
+
+    w.opcode = NVME_CMD_WRITE;
+    w.nsid = cpu_to_le32(1);
+    w.dptr.prp1 = cpu_to_le64(wbuf);
+    w.dptr.prp2 = cpu_to_le64(list);
+    w.slba = cpu_to_le64(0);
+    w.nlb = cpu_to_le16(16 * FEMU_DATA_SIZE / c.lba_size - 1);
+    w.cid = cpu_to_le16(c.cid++);
+    wcid = le16_to_cpu(w.cid);
+    r.opcode = NVME_CMD_READ;
+    r.nsid = cpu_to_le32(1);
+    r.dptr.prp1 = cpu_to_le64(rbuf);
+    r.slba = cpu_to_le64(1024);
+    r.nlb = cpu_to_le16(0);
+    r.cid = cpu_to_le16(c.cid++);
+    qtest_memwrite(qts, c.io.sq_addr + c.io.sq_tail * sizeof(NvmeCmd), &w,
+                   sizeof(NvmeCmd));
+    c.io.sq_tail = (c.io.sq_tail + 1) % FEMU_QSIZE;
+    qtest_memwrite(qts, c.io.sq_addr + c.io.sq_tail * sizeof(NvmeCmd), &r,
+                   sizeof(NvmeCmd));
+    c.io.sq_tail = (c.io.sq_tail + 1) % FEMU_QSIZE;
+    qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, c.io.qid),
+                   c.io.sq_tail);
+
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &first, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, &second, NULL)), ==,
+                    NVME_SUCCESS);
+    g_test_message("%s order: %s completes first", old ? "old" : "new",
+                   first == wcid ? "the write" : "the read");
+    g_assert_cmpuint(first == wcid, ==, !old);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, rbuf);
+    guest_free(alloc, list);
+    guest_free(alloc, wbuf);
+}
+
+/*
+ * x-rber-u of "rber-test": used, length, short, the 4 counters, generator,
+ * and the time the last host read added in ns
+ */
+static void femu_rber_state(QTestState *qts, uint64_t *v)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/rber-test',"
+                           "'property':'x-rber-u'}}");
+    g_auto(GStrv) f = NULL;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(f), ==, 9);
+    for (int i = 0; i < 9; i++) {
+        v[i] = g_ascii_strtoull(f[i], NULL, 10);
+    }
+    qobject_unref(rsp);
+}
+
+/* load the next decode draws, or "off" for the generator */
+static void femu_rber_script(QTestState *qts, const char *u)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/rber-test',"
+                             "'property':'x-rber-u','value':%s}}", u);
+}
+
+/* one 4 KiB host read of @lpn, and its time in us */
+static int64_t femu_rber_read_st(FemuCtrlState *c, uint64_t buf,
+                                 uint64_t lpn, uint16_t status)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    g_assert_cmphex(FEMU_SC(femu_rw(c, NVME_CMD_READ, lpn * 8, buf)), ==,
+                    status);
+    return g_get_monotonic_time() - t0;
+}
+
+static int64_t femu_rber_read(FemuCtrlState *c, uint64_t buf, uint64_t lpn)
+{
+    return femu_rber_read_st(c, buf, lpn, NVME_SUCCESS);
+}
+
+/*
+ * Scripted decode outcomes on one LUN with a 100 ms page read. A draw of 1
+ * fails every attempt; 0 passes, as the mean is tiny (rber_ppb=1). The 4
+ * KiB page has 4 codewords of 1 KiB, read in order. @data names the case:
+ *   retry: codeword 2 fails twice           1 event, 2 passes, 3 reads
+ *   soft:  codeword 0 fails 3 hard, soft ok soft 1, limit 0, 6 reads
+ *   limit: codeword 0 fails soft as well    soft 1, limit 1, 6 reads;
+ *          nothing corrected it, so the read fails (81h)
+ *   limit-timing: the same with rber_timing_only=on: the read passes
+ *   clean: every codeword passes at once    no counter, 1 read
+ * The C0h counters at 296 to 320 must match, and the block read count at
+ * offset 32 must grow by every page read, retries and soft passes too.
+ */
+void femu_test_rber_scripted(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    static const struct {
+        const char *name;
+        const char *u;
+        uint64_t used;
+        uint64_t ctr[4];
+        int reads;
+        uint64_t extra_ns;
+        uint16_t status;
+    } cases[] = {
+        { "retry", "0 0 1 1 0 0", 6, { 1, 2, 0, 0 }, 3, 200000000,
+          NVME_SUCCESS },
+        { "soft", "1 1 1 0 0 0 0", 7, { 1, 2, 1, 0 }, 6, 510000000,
+          NVME_SUCCESS },
+        { "limit", "1 1 1 1 0 0 0", 7, { 1, 2, 1, 1 }, 6, 510000000,
+          NVME_UNRECOVERED_READ },
+        { "limit-timing", "1 1 1 1 0 0 0", 7, { 1, 2, 1, 1 }, 6, 510000000,
+          NVME_SUCCESS },
+        { "clean", "0 0 0 0", 4, { 0, 0, 0, 0 }, 1, 0, NVME_SUCCESS },
+    };
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    int k = -1;
+    uint64_t v0[9];
+    uint64_t v[9];
+    uint64_t c0[4];
+    uint64_t r0;
+    uint64_t p0;
+    uint8_t out[FEMU_DATA_SIZE];
+    int64_t us;
+
+    for (size_t i = 0; i < G_N_ELEMENTS(cases); i++) {
+        if (!strcmp(cases[i].name, data)) {
+            k = i;
+        }
+    }
+    g_assert_cmpint(k, >=, 0);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    /* tests with the same device line share one QEMU: count from here */
+    r0 = femu_c0h_field(&c, log, 32);
+    p0 = femu_c0h_field(&c, log, 160);
+    femu_rber_state(qts, v0);
+    for (int i = 0; i < 4; i++) {
+        c0[i] = femu_c0h_field(&c, log, 296 + 8 * i);
+    }
+    femu_rber_script(qts, cases[k].u);
+    qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
+    us = femu_rber_read_st(&c, buf, 0, cases[k].status);
+    femu_rber_state(qts, v);
+    /* a read that passes returns the data the write left */
+    if (cases[k].status == NVME_SUCCESS) {
+        qtest_memread(qts, buf, out, sizeof(out));
+        for (size_t i = 0; i < sizeof(out); i++) {
+            g_assert_cmphex(out[i], ==, 0x3c);
+        }
+    }
+    g_test_message("%s: %" PRId64 " us, used %" PRIu64 ", counters %" PRIu64
+                   " %" PRIu64 " %" PRIu64 " %" PRIu64, cases[k].name, us,
+                   v[0], v[3], v[4], v[5], v[6]);
+    g_assert_cmpuint(v[0], ==, cases[k].used);
+    g_assert_cmpuint(v[2], ==, 0);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpuint(v[3 + i] - v0[3 + i], ==, cases[k].ctr[i]);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 296 + 8 * i) - c0[i], ==,
+                         cases[k].ctr[i]);
+    }
+    g_assert_cmpuint(femu_c0h_field(&c, log, 32) - r0, ==, cases[k].reads);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 160) - p0, ==, cases[k].reads);
+    /*
+     * The one LUN is idle, so each extra page read takes pg_rd_lat (100 ms)
+     * and soft decode adds rr_soft_ns (10 ms) once.
+     */
+    if (cases[k].extra_ns) {
+        g_assert_cmpuint(v[8], ==, cases[k].extra_ns);
+    }
+    g_assert_cmpint(us, >=, cases[k].reads * 100000 - 1000);
+    femu_rber_script(qts, "off");
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/* SMART: Media and Data Integrity Errors and error log entries (low 64) */
+static void femu_err_smart(FemuCtrlState *c, uint64_t log, uint64_t *media,
+                           uint64_t *entries)
+{
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, NVME_LOG_SMART_INFO, log, 512,
+                                         0)), ==, NVME_SUCCESS);
+    *media = qtest_readq(c->pdev->bus->qts, log + 160);
+    *entries = qtest_readq(c->pdev->bus->qts, log + 176);
+}
+
+/*
+ * err_read_unc_ppm and err_write_fail_ppm at 250000: one command in four
+ * fails, at a fixed period. Writes 4 and 8 get Write Fault, read 4 gets
+ * Unrecovered Read Error, the others pass.
+ */
+void femu_test_err_inject(void *obj, void *data,
+                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t me0, el0, me, el;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_err_smart(&c, log, &me0, &el0);
+    qtest_memset(femu->dev.bus->qts, buf, 0x6e, FEMU_DATA_SIZE);
+    for (int i = 1; i <= 8; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        i % 4 ? NVME_SUCCESS : NVME_WRITE_FAULT);
+    }
+    /* each failure counts as a media error and adds an error log entry */
+    femu_err_smart(&c, log, &me, &el);
+    g_assert_cmpuint(me - me0, ==, 2);
+    g_assert_cmpuint(el - el0, ==, 2);
+    for (int i = 1; i <= 4; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 8, buf)), ==,
+                        i % 4 ? NVME_SUCCESS : NVME_UNRECOVERED_READ);
+    }
+    femu_err_smart(&c, log, &me, &el);
+    g_assert_cmpuint(me - me0, ==, 3);
+    g_assert_cmpuint(el - el0, ==, 3);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/* Media and Data Integrity Errors of the SMART log, low 64 bits */
+static uint64_t femu_rrl_media_errors(FemuCtrlState *c, uint64_t log)
+{
+    g_assert_cmphex(FEMU_SC(femu_get_log(c, 0x02, log, 512, 0)), ==,
+                    NVME_SUCCESS);
+    return qtest_readq(c->pdev->bus->qts, log + 160);
+}
+
+/*
+ * dram_hit_ns: the DRAM time of a page hit. One LUN with 100 ms page
+ * reads. @data names the case: "buffer" reads a page the write buffer
+ * holds; "cache" reads a page twice, so the read cache answers the second
+ * read. Device lines ending in "on" set dram_hit_ns to 20 ms, so a hit
+ * takes 20 to 100 ms; without it the hit takes pg_rd_lat / 16, 6.25 ms.
+ */
+void femu_test_dram_hit(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool on = g_str_has_suffix(mode, "-on");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int64_t us;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6d, 4096);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    if (g_str_has_prefix(mode, "cache")) {
+        /* the first read misses and fills the cache */
+        us = femu_timed_read(&c, 0, buf);
+        g_test_message("dram_hit %s: miss %" PRId64 " us", mode, us);
+        g_assert_cmpint(us, >=, 100000);
+    }
+    us = femu_timed_read(&c, 0, buf);
+    g_test_message("dram_hit %s: hit %" PRId64 " us", mode, us);
+    if (on) {
+        g_assert_cmpint(us, >=, 20000);
+        g_assert_cmpint(us, <, 100000);
+    } else {
+        g_assert_cmpint(us, >=, 6000);
+        g_assert_cmpint(us, <, 20000);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * fw_gc_page_ns: the firmware time of a collection move. The device has one
+ * channel, one LUN and one plane, so every move and every host operation
+ * share one die, and each move adds its firmware slot to that die:
+ *
+ *   die  [read][slot ......][program][read][slot ......][program]
+ *
+ * The workload writes every page, overwrites 600 seeded pages, which is
+ * more than the raw capacity, and reads one page; that read waits for the
+ * collection work left on the die. C0h gives the GC pages (16), the moves
+ * with a slot (336) and their firmware time (344); x-ftl-trace field 1 is
+ * the summed modelled time of the host commands. @data names the case:
+ *
+ *   on        each move takes one 5 ms slot; the host waits about that
+ *             time per move in all. A background pass loses the host gap
+ *             before the next command, so the bound is half to 1.5 times.
+ *   off       the control: the same workload with no slot stays far below
+ *             half of the GC pages times 5 ms
+ *   copyback  every move is a copyback on the die and takes one slot
+ *   pace      paced moves take one slot each
+ *   fdp       FDP collection on the trace geometry, 1 us slots
+ *
+ * The time bounds are smoke checks: host time between commands can hide
+ * collection work. The exact time math is in the unit test test-gc-fw.c.
+ */
+#define FEMU_GC_FW_NS 5000000ULL
+
+void femu_test_gc_fw(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool on = strcmp(mode, "off") != 0;
+    bool fdp = !strcmp(mode, "fdp");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    const uint32_t pages = fdp ? 256 : 768;
+    uint32_t seed = 11;
+    uint64_t gc, fw_pages, fw_ns, cb, model, f;
+    uint64_t v[4];
+    QDict *rsp;
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x47, 16 * 4096);
+    for (i = 0; i < pages; i += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 600; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (seed >> 8) % pages, 1,
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-fw',"
+                    "'property':'fw_gc_page_ns'}}");
+    f = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    femu_gc_fw_counts(&c, log, NULL, v);
+    gc = v[0];
+    fw_pages = v[1];
+    fw_ns = v[2];
+    cb = femu_c0h_field(&c, log, 248);
+    model = femu_ftl_trace_id(qts, "gc-fw", 1);
+    g_test_message("gc_fw %s: %" PRIu64 " moved, %" PRIu64 " slots, %" PRIu64
+                   " fw ns, %" PRIu64 " by copyback, %" PRIu64 " model ns",
+                   mode, gc, fw_pages, fw_ns, cb, model);
+    g_assert_cmpuint(gc, >, 0);
+    if (!on) {
+        g_assert_cmpuint(f, ==, 0);
+        g_assert_cmpuint(fw_pages, ==, 0);
+        g_assert_cmpuint(fw_ns, ==, 0);
+        g_assert_cmpuint(model, <, gc * FEMU_GC_FW_NS / 2);
+    } else {
+        g_assert_cmpuint(f, >, 0);
+        g_assert_cmpuint(fw_pages, ==, gc);
+        g_assert_cmpuint(fw_ns, ==, fw_pages * f);
+        if (!strcmp(mode, "copyback")) {
+            g_assert_cmpuint(cb, ==, gc);
+        }
+        /*
+         * One die and F far above the NAND times: the host waits for nearly
+         * every slot. Host gaps and the pass after the last read hide a
+         * part, so the bounds are wide. They catch a dropped or doubled
+         * slot, as the controls K1, K2 and K5 show.
+         */
+        if (!strcmp(mode, "on") || !strcmp(mode, "copyback")) {
+            g_assert_cmpuint(model, >=, fw_pages * f / 4);
+            g_assert_cmpuint(model, <=, fw_pages * f * 3 / 2);
+        }
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/* Set Features 12h (Read Recovery Level): @sv, @nsid, CDW11, CDW12 */
+static uint16_t femu_rrl_set_full(FemuCtrlState *c, bool sv, uint32_t nsid,
+                                  uint32_t dw11, uint32_t dw12)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.cdw10 = cpu_to_le32(0x12 | (sv ? 1u << 31 : 0));
+    cmd.cdw11 = cpu_to_le32(dw11);
+    cmd.cdw12 = cpu_to_le32(dw12);
+    return FEMU_SC(femu_admin(c, &cmd));
+}
+
+static uint16_t femu_rrl_set(FemuCtrlState *c, uint32_t dw12)
+{
+    return femu_rrl_set_full(c, false, 0, 0, dw12);
+}
+
+/*
+ * Read Recovery Levels (rrl=on) on the rber-retry device: rr_steps=2, four
+ * codewords per page, scripted decode draws (1 fails, 0 passes). Identify
+ * reports RRLVLS and levels 4, 9 and 15; the default is 4; level 5 and a
+ * reserved bit fail. Then, per level, a read with a given script:
+ *   15 "0 1 0 0"        codeword 1 fails its one decode: the read fails
+ *   9  "1 1 1 0 0 0"    codeword 0 fails 3 hard decodes, no soft: fails
+ *   9  "0 0 1 1 0 0"    codeword 2 passes on retry 2: the read passes
+ *   4  "1 1 1 0 0 0 0"  soft decode recovers codeword 0: passes
+ * A failed read has DNR set and counts in the SMART media errors. With the
+ * read cache on, a failed page is not cached: a second level 15 read
+ * draws again and fails again, and a later read of the second page of a
+ * failed 8 KiB read draws again too. Feature 12h takes NSID 0 only, is not
+ * saveable (SEL 3 is 4h, SEL 1 and 2 return 4), and a reset keeps it.
+ */
+void femu_test_rrl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const struct {
+        uint32_t level;
+        const char *u;
+        uint64_t used;
+        bool fails;
+        uint64_t extra_ns;      /* retries and soft decode the level made */
+    } cases[] = {
+        { 15, "0 1 0 0", 4, true, 0 },
+        { 9, "1 1 1 0 0 0", 6, true, 200000000 },
+        { 9, "0 0 1 1 0 0", 6, false, 200000000 },
+        { 4, "1 1 1 0 0 0 0", 7, false, 510000000 },
+    };
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint8_t id[4096];
+    uint32_t res;
+    uint64_t v[9];
+    uint64_t err0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, id, sizeof(id));
+    g_assert_cmphex(ldl_le_p(id + 96) & (1 << 3), ==, 1 << 3);
+    g_assert_cmphex(lduw_le_p(id + 100), ==, 0x8210);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 4);
+    g_assert_cmphex(femu_rrl_set(&c, 5), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_rrl_set(&c, 0x10 | 15), ==, NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 1, 0, 15), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 0xffffffff, 0, 15), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 0, 1u << 16, 15), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_rrl_set_full(&c, true, 0, 0, 15), ==,
+                    NVME_FID_NOT_SAVEABLE);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 4);
+    /* NVMSETID is ignored: there are no NVM Sets */
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 0, 7, 15), ==, NVME_SUCCESS);
+    for (uint8_t sel = 1; sel <= 3; sel++) {
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, sel, 0, 0, &res)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, sel == 3 ? 0x4 : 4);
+    }
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 1, 0, &res)), ==,
+                    NVME_INVALID_FIELD);
+    /* a Controller Level Reset keeps the level (Base 2.3, 4.4) */
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 15);
+
+    /* one page per case: the read cache would answer a page read before */
+    qtest_memset(qts, buf, 0x3c, 8192);
+    for (int i = 0; i < 7; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    for (size_t i = 0; i < G_N_ELEMENTS(cases); i++) {
+        uint16_t st;
+
+        g_assert_cmphex(femu_rrl_set(&c, cases[i].level), ==, NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 0, &res)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, cases[i].level);
+        err0 = femu_rrl_media_errors(&c, log);
+        femu_rber_script(qts, cases[i].u);
+        st = femu_rw(&c, NVME_CMD_READ, i * 8, buf);
+        femu_rber_state(qts, v);
+        g_test_message("rrl %u: status 0x%x, draws %" PRIu64,
+                       cases[i].level, st, v[0]);
+        g_assert_cmpuint(v[0], ==, cases[i].used);
+        g_assert_cmpuint(v[2], ==, 0);              /* no script underrun */
+        g_assert_cmpuint(v[8], ==, cases[i].extra_ns);
+        if (cases[i].fails) {
+            g_assert_cmphex(st & 0x7fff, ==,
+                            NVME_UNRECOVERED_READ | NVME_DNR);
+            g_assert_cmpuint(femu_rrl_media_errors(&c, log) - err0, ==, 1);
+        } else {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_SUCCESS);
+            g_assert_cmpuint(femu_rrl_media_errors(&c, log) - err0, ==, 0);
+        }
+        femu_rber_script(qts, "off");
+    }
+
+    /* the read cache keeps no page that failed: the retry fails too */
+    g_assert_cmphex(femu_rrl_set(&c, 15), ==, NVME_SUCCESS);
+    femu_rber_script(qts, "0 1 0 0 0 1 0 0");
+    for (int i = 0; i < 2; i++) {
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 4 * 8, buf) & 0x7fff, ==,
+                        NVME_UNRECOVERED_READ | NVME_DNR);
+    }
+    femu_rber_state(qts, v);
+    g_assert_cmpuint(v[0], ==, 8);
+
+    /* both pages of a failed 8 KiB read leave the cache, not the first only */
+    femu_rber_script(qts, "0 1 0 0 0 1 0 0");
+    femu_crypto_submit(&c, NVME_CMD_READ, 5 * 8, buf, 0);
+    g_assert_cmphex(femu_complete(&c, &c.io, NULL, NULL) & 0x7fff, ==,
+                    NVME_UNRECOVERED_READ | NVME_DNR);
+    femu_rber_script(qts, "0 0 0 0");
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 6 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    femu_rber_state(qts, v);
+    g_assert_cmpuint(v[0], ==, 4);
+    femu_rber_script(qts, "off");
+    g_assert_cmphex(femu_rrl_set(&c, 4), ==, NVME_SUCCESS);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Read disturb with real draws: rber_read_double=1 doubles the error mean
+ * with each read of the block. A fresh block reads with no retry; after 40
+ * reads the mean reaches the cap and reads need retries. Without the read
+ * term, the mean stays near 1e-5 and no read retries.
+ */
+void femu_test_rber_disturb(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t v[9];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_rber_read(&c, buf, 0);
+    femu_rber_state(qts, v);
+    g_assert_cmpuint(v[3], ==, 0);
+    for (int i = 0; i < 40; i++) {
+        femu_rber_read(&c, buf, 0);
+    }
+    femu_rber_state(qts, v);
+    g_test_message("after 41 reads: %" PRIu64 " retry reads, %" PRIu64
+                   " passes, %" PRIu64 " soft", v[3], v[4], v[5]);
+    g_assert_cmpuint(v[3], >, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * rber_ppb=0 given: reads draw nothing and count nothing. The generator
+ * stays at its seed (1) and no read adds time.
+ */
+void femu_test_rber_off(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t v[9];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (int i = 0; i < 16; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, i * 8, buf)), ==,
+                        NVME_SUCCESS);
+        femu_rber_read(&c, buf, i);
+    }
+    femu_rber_state(qts, v);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpuint(v[3 + i], ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 296 + 8 * i), ==, 0);
+    }
+    g_assert_cmpuint(v[7], ==, 1);
+    g_assert_cmpuint(v[8], ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The age term, from the first program (pd_open_age), with no ECC tiers.
+ * age_scale=1000000 and rber_age_double_sec=1000 double the error mean
+ * every ms of wall time. A read right after the write needs no retry; after
+ * 300 ms the mean is at the cap, and reads retry. Without the age term the
+ * mean stays near 1e-5.
+ */
+void femu_test_rber_age(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t v0[9];
+    uint64_t v[9];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_rber_state(qts, v0);
+    g_usleep(300000);
+    femu_rber_read(&c, buf, 0);
+    femu_rber_state(qts, v);
+    g_test_message("after 300 ms: %" PRIu64 " retry reads, %" PRIu64
+                   " passes", v[3] - v0[3], v[4] - v0[4]);
+    g_assert_cmpuint(v[3] - v0[3], ==, 1);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The wear term: rber_ppb=2000000 gives a fresh mean of 16 bit errors per
+ * codeword, far below 40, so a fresh block reads with no retry. Eight
+ * sequential overwrites of the whole namespace erase each line about five
+ * times; with rber_pe_double=1, two erases already give a mean of 64, and
+ * the last written page retries. Without the wear term it does not.
+ */
+void femu_test_rber_wear(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t v0[9];
+    uint64_t v[9];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_rber_state(qts, v0);
+    femu_rber_read(&c, buf, 0);
+    femu_rber_state(qts, v);
+    g_assert_cmpuint(v[3] - v0[3], ==, 0);
+    for (int round = 0; round < 8; round++) {
+        for (int lpn = 0; lpn < 768; lpn++) {
+            g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8,
+                                            buf)), ==, NVME_SUCCESS);
+        }
+    }
+    femu_rber_state(qts, v0);
+    femu_rber_read(&c, buf, 767);
+    femu_rber_state(qts, v);
+    g_test_message("worn read: %" PRIu64 " retry reads, %" PRIu64 " passes",
+                   v[3] - v0[3], v[4] - v0[4]);
+    g_assert_cmpuint(v[3] - v0[3], ==, 1);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* rber_ppb is refused where its booking or inputs would be wrong */
+void femu_test_rber_refused(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'pg_xfer_lat':1000", "bus phase timing" },
+        { "'cmd_addr_lat':100", "bus phase timing" },
+        { "'ch_xfer_lat':100", "bus phase timing" },
+        { "'status_lat':100", "bus phase timing" },
+        { "'onfi_mode':0", "ONFI timing" },
+        { "'pe_suspend':1", "pe_suspend" },
+        { "'mp_read':1", "mp_read or onfi_cache_read" },
+        { "'gc_copyback':true", "gc_copyback" },
+        { "'ecc_step_ns':100", "ecc_step_ns" },
+        { "'mapping':'hybrid'", "a mapping other than page or dftl" },
+        { "'ecc_cw_bytes':1000", "ecc_cw_bytes must be" },
+        { "'ecc_hard_bits':2000", "ecc_hard_bits must be" },
+        { "'ecc_soft_bits':10", "ecc_soft_bits must be" },
+        { "'rr_steps':17", "rr_steps must be" },
+        { "'rr_gain':1", "rr_gain must be" },
+        { "'rr_floor_pct':101", "rr_floor_pct must be" },
+        { "'rr_soft_senses':9", "rr_soft_senses must be" },
+        { "'rr_soft_ns':20000000", "rr_soft_ns must be" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        for (int on = 1; on >= 0; on--) {
+            g_autofree char *cmd = g_strdup_printf(
+                "{'execute':'device_add','arguments':{'driver':'femu',"
+                "'id':'rbr','addr':'5','devsz_mb':4,'femu_mode':1,"
+                "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+                "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,"
+                "'nchs':1,'rber_ppb':%d,%s}}", on, cases[i].opts);
+            QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+            if (on) {
+                const char *desc;
+
+                g_assert_true(qdict_haskey(rsp, "error"));
+                desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+                g_test_message("%s: %s", cases[i].opts, desc);
+                g_assert_nonnull(strstr(desc, cases[i].msg));
+            } else {
+                /* the control: the same line with the model off */
+                if (!qdict_haskey(rsp, "return")) {
+                    g_test_message("control %s refused: %s", cases[i].opts,
+                                   qdict_get_str(qdict_get_qdict(rsp,
+                                                 "error"), "desc"));
+                    g_assert_not_reached();
+                }
+                qpci_unplug_acpi_device_test(qts, "rbr", 5);
+            }
+            qobject_unref(rsp);
+        }
+    }
+}
+
+/*
+ * The namespace atomic unit, made certain: a 16-block write over two 4 KiB
+ * pages stops halfway through its first page (x-copy-hold). A read of the
+ * second page, sent on another queue, must wait: one range lock covers the
+ * whole write, not the page being copied. After the hold ends, the read
+ * returns the new data.
+ */
+void femu_test_atomic_hold(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q1, q2;
+    uint64_t oldb = guest_alloc(alloc, 2 * 4096);
+    uint64_t newb = guest_alloc(alloc, 2 * 4096);
+    uint64_t rd = guest_alloc(alloc, 4096);
+    uint8_t got[4096];
+    NvmeRwCmd rw;
+    uint64_t waits;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q1, 1);
+    femu_zap_create_queue(&c, &q2, 2);
+    qtest_memset(qts, oldb, 0x11, 2 * 4096);
+    qtest_memset(qts, newb, 0x22, 2 * 4096);
+    for (i = 0; i < 2; i++) {
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(i ? newb : oldb);
+        rw.dptr.prp2 = cpu_to_le64((i ? newb : oldb) + 4096);
+        rw.nlb = cpu_to_le16(16 - 1);
+        if (i) {
+            femu_rwa_hold(qts, 1);
+        }
+        femu_zap_queue(&c, &q1, (NvmeCmd *)&rw);
+        femu_zap_ring(&c, &q1);
+        if (!i) {
+            g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    for (i = 0; i < FEMU_POLL_LIMIT_MS && !femu_rwa_get(qts, "x-copy-held");
+         i++) {
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(femu_rwa_get(qts, "x-copy-held"), !=, 0);
+    waits = femu_rwa_get(qts, "x-range-waits");
+
+    /* the second page: blocks 8 to 15, which the held copy has not reached */
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(rd);
+    rw.slba = cpu_to_le64(8);
+    rw.nlb = cpu_to_le16(8 - 1);
+    femu_zap_queue(&c, &q2, (NvmeCmd *)&rw);
+    femu_zap_ring(&c, &q2);
+    for (i = 0; i < FEMU_POLL_LIMIT_MS &&
+         femu_rwa_get(qts, "x-range-waits") == waits; i++) {
+        g_usleep(1000);
+    }
+    g_usleep(200000);
+    g_assert_false(femu_rwa_cq_ready(&c, &q2));
+    g_assert_cmpuint(femu_rwa_get(qts, "x-range-waits"), >, waits);
+
+    femu_rwa_hold(qts, 0);
+    g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_zap_complete(&c, &q2, NULL), ==, NVME_SUCCESS);
+    qtest_memread(qts, rd, got, sizeof(got));
+    for (i = 0; i < (int)sizeof(got); i++) {
+        g_assert_cmphex(got[i], ==, 0x22);
+    }
+    femu_queue_free(&c, &q2);
+    femu_queue_free(&c, &q1);
+    femu_disable(&c);
+    guest_free(alloc, rd);
+    guest_free(alloc, newb);
+    guest_free(alloc, oldb);
+}
+
+/* the five hints of namespace 1: NPWG, NPWA, NPDG, NPDA, NOWS */
+static void femu_hints(FemuCtrlState *c, uint64_t buf, uint16_t *h,
+                       uint8_t *nsfeat)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmpint(femu_identify(c, 1, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    for (int i = 0; i < 5; i++) {
+        h[i] = qtest_readw(qts, buf + 64 + 2 * i);
+    }
+    *nsfeat = qtest_readb(qts, buf + 24);
+}
+
+/*
+ * perf_hints from a known geometry: a 4 KiB page of 512 B blocks on 2
+ * channels of 2 LUNs. @data "on": NPWG = NPWA = NPDG = NPDA = 7 (one page)
+ * and NOWS = 31 (one stripe); after Format to 4 KiB blocks, 0 and 3.
+ * "off": every hint 0. NSFEAT bits 5:4 stay 01b in every case.
+ */
+void femu_test_perf_hints(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    bool on = !strcmp(data, "on");
+    uint16_t h[5];
+    uint8_t nsfeat;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_hints(&c, buf, h, &nsfeat);
+    g_assert_cmphex(nsfeat & 0x30, ==, 0x10);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpuint(h[i], ==, on ? 7 : 0);
+    }
+    g_assert_cmpuint(h[4], ==, on ? 31 : 0);
+    if (on) {
+        /* format 3 is 4 KiB: one block per page, four per stripe */
+        g_assert_cmpint(femu_format_dw10(&c, 3), ==, NVME_SUCCESS);
+        femu_hints(&c, buf, h, &nsfeat);
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmpuint(h[i], ==, 0);
+        }
+        g_assert_cmpuint(h[4], ==, 3);
+        g_assert_cmpint(femu_format_dw10(&c, 0), ==, NVME_SUCCESS);
+        femu_hints(&c, buf, h, &nsfeat);
+        g_assert_cmpuint(h[0], ==, 7);
+        g_assert_cmpuint(h[4], ==, 31);
+    }
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * A managed bbssd namespace addresses its own FTL from block zero, and the
+ * FTL decides that from the controller's capabilities. Those must be in
+ * place from realize: with them filled in only by Identify Controller, a
+ * host that wrote before asking addressed the second namespace at its
+ * backend offset and was refused near its end.
+ */
+void femu_test_ns_mgmt_before_identify(void *obj, void *data,
+                                       QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    NvmeIdNs id;
+    NvmeCmd cmd;
+    uint64_t nsze;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, 4096);
+
+    g_assert_cmpint(femu_identify(&c, 2, NVME_ID_CNS_NS, 0, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, &id, sizeof(id));
+    nsze = le64_to_cpu(id.nsze);
+    g_assert_cmpuint(nsze, >, 0);
+
+    for (int op = 0; op < 2; op++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = op ? NVME_CMD_READ : NVME_CMD_WRITE;
+        cmd.nsid = cpu_to_le32(2);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32((uint32_t)(nsze - 1));
+        cmd.cdw11 = cpu_to_le32((uint32_t)((nsze - 1) >> 32));
+        g_assert_cmphex(femu_io(&c, &cmd), ==, NVME_SUCCESS);
+    }
+
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * Compare, Write Zeroes, Verify and Copy are on by default. Each is listed in
+ * ONCS and does its work; with oncs=0 each is left out and refused.
+ */
+void femu_test_oncs_default(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    QTestState *qts;
+    bool on = data != NULL;
+    uint16_t want = on ? NVME_SUCCESS : NVME_INVALID_OPCODE;
+    uint64_t buf, list, src = 0, zero, dst;
+    uint16_t nlb;
+    uint8_t got[FEMU_DATA_SIZE];
+    NvmeIdCtrl id;
+    NvmeCmd cmd;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qts = c.pdev->bus->qts;
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    list = guest_alloc(alloc, 4096);
+    nlb = FEMU_DATA_SIZE / c.lba_size;
+    zero = nlb;
+    dst = 2 * nlb;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, &id, sizeof(id));
+    g_assert_cmphex(le16_to_cpu(id.oncs) & 0x189, ==, on ? 0x189 : 0);
+
+    qtest_memset(qts, buf, 0x5a, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE, src, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE, zero, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_COMPARE, src, buf), ==, want);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_VERIFY, src, 0), ==, want);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE_ZEROES, zero, 0), ==,
+                    want);
+    g_assert_cmphex(femu_copy(&c, list, dst, &src, &nlb, 1, 1, 0), ==, want);
+    if (!on) {
+        femu_disable(&c);
+        return;
+    }
+
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_READ, zero, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, got, sizeof(got));
+    for (i = 0; i < sizeof(got); i++) {
+        g_assert_cmphex(got[i], ==, 0);
+    }
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_READ, dst, buf), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, got, sizeof(got));
+    for (i = 0; i < sizeof(got); i++) {
+        g_assert_cmphex(got[i], ==, 0x5a);
+    }
+    femu_disable(&c);
+}
+
+#define FEMU_STATS_PLANE_READS  160     /* C0h: plane operations that read */
+
+static uint64_t femu_plane_reads(FemuCtrlState *c, uint64_t buf)
+{
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, FEMU_LOG_FEMU_STATS, buf, 512, 0)),
+                    ==, NVME_SUCCESS);
+    return qtest_readq(c->pdev->bus->qts, buf + FEMU_STATS_PLANE_READS);
+}
+
+/*
+ * Compare and Verify read the media, so the FTL charges each a NAND read, as
+ * it does a Read, and a miscompare as well. Before, none of them read the
+ * media.
+ */
+void femu_test_compare_verify_media(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, log, before;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    log = guest_alloc(alloc, 512);
+
+    qtest_memset(c.pdev->bus->qts, buf, 0x5a, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE, 0, buf), ==,
+                    NVME_SUCCESS);
+    /* a Read moves the counter, so the counter can show a media read */
+    before = femu_plane_reads(&c, log);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_READ, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_plane_reads(&c, log), >, before);
+    qtest_memset(c.pdev->bus->qts, buf, 0x5a, FEMU_DATA_SIZE);
+    before = femu_plane_reads(&c, log);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_COMPARE, 0, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_plane_reads(&c, log), >, before);
+    before = femu_plane_reads(&c, log);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_VERIFY, 0, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_plane_reads(&c, log), >, before);
+    /* a miscompare read the media too */
+    qtest_memset(c.pdev->bus->qts, buf, 0xa5, FEMU_DATA_SIZE);
+    before = femu_plane_reads(&c, log);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_COMPARE, 0, buf), ==,
+                    NVME_CMP_FAILURE);
+    g_assert_cmpuint(femu_plane_reads(&c, log), >, before);
+    femu_disable(&c);
+}
+
+/*
+ * One LUN, a 100 ms read and a 400 ms program: a one-page Copy reads the
+ * source and then programs the destination on the same LUN, which takes
+ * 500 ms. The program used to be issued at the start of the Copy, so it also
+ * waited for the read and the Copy took 600 ms.
+ */
+void femu_test_copy_timing(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf, list, src = 0;
+    uint16_t nlb;
+    gint64 start, ms;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    list = guest_alloc(alloc, 4096);
+    nlb = FEMU_DATA_SIZE / c.lba_size;
+
+    qtest_memset(c.pdev->bus->qts, buf, 0x5a, FEMU_DATA_SIZE);
+    g_assert_cmphex(femu_oncs_cmd(&c, NVME_CMD_WRITE, src, buf), ==,
+                    NVME_SUCCESS);
+    start = g_get_monotonic_time();
+    g_assert_cmphex(femu_copy(&c, list, 2 * nlb, &src, &nlb, 1, 1, 0), ==,
+                    NVME_SUCCESS);
+    ms = (g_get_monotonic_time() - start) / 1000;
+    g_test_message("one-page Copy took %" PRId64 " ms", ms);
+    g_assert_cmpint(ms, >=, 480);
+    g_assert_cmpint(ms, <, 560);
+    femu_disable(&c);
+}
+
+/*
+ * Program disturb actions (phase 2). The devices use id=trace, so the
+ * latency helpers of the phase 1 tests work, and these read the FTL checks
+ * of the same device.
+ */
+static void femu_pd2_ftl_check(QTestState *qts, uint64_t *mapped,
+                               uint64_t *lost, uint64_t *orphans)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/trace',"
+                           "'property':'x-ftl-check'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           mapped, lost, orphans), ==, 3);
+    qobject_unref(rsp);
+}
+
+/* query-femu pad-write-pages of namespace 1, -1 when absent, and its waf */
+static int64_t femu_pd2_query_pads(QTestState *qts, double *waf)
+{
+    QDict *rsp;
+    QDict *ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "counters");
+    int64_t pads = qdict_haskey(ctr, "pad-write-pages") ?
+                   qdict_get_int(ctr, "pad-write-pages") : -1;
+
+    *waf = qdict_get_double(ctr, "waf");
+    qobject_unref(rsp);
+    return pads;
+}
+
+/* query-femu media-bytes minus host-bytes of FDP handle @h */
+static uint64_t femu_pd2_handle_extra(QTestState *qts, int h)
+{
+    QDict *rsp;
+    QDict *fdp = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "fdp");
+    QList *hs = qdict_get_qlist(fdp, "handles");
+    uint64_t extra = UINT64_MAX;
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(hs, e) {
+        QDict *d = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (qdict_get_int(d, "id") == h) {
+            extra = qdict_get_int(d, "media-bytes") -
+                    qdict_get_int(d, "host-bytes");
+        }
+    }
+    qobject_unref(rsp);
+    return extra;
+}
+
+/*
+ * Line mode, 16-page blocks. @data names the case:
+ *   "read":   pd_open_read_limit=4, one LUN, gc_copyback=on. Four reads of
+ *             page 0 of the open line, then a one-page write: the FTL
+ *             seals the frontier and rewrites it, so 8 pages move, none by
+ *             copyback (C0h 248), pd_open_reclaims (256) counts 1, and
+ *             read_reclaims (40) none.
+ *   "under":  the same with three reads: nothing moves.
+ *   "master": read_reclaim_limit=4 only. The same reads queue the frontier,
+ *             and the write drops the request: nothing moves.
+ *   "closed": pd_open_read_limit=4, two channels. 31 pages fill the
+ *             channel 0 block of the frontier line and leave the channel 1
+ *             block one page short. Page 0 sits in the full block, so four
+ *             reads of it queue nothing, though its line is still open.
+ *   "pad":    pd_open_close_sec=1 at age_scale 1000 and pd_open_tiers=1.
+ *             8 pages, then 20 ms: the next read pads the other 8 pages on
+ *             the LUN first, 8 plane programs (C0h 168), so it waits 8
+ *             programs (1.6 ms), and the full block takes no open tier.
+ *             C0h 264 counts 8 pads, 272 one close, and the amplification
+ *             is (8 + 8) / 8, in C0h and in query-femu, which reports
+ *             pad-write-pages only after a pad.
+ *   "nopad":  the same without pd_open_close_sec: no pad, and the read of
+ *             the open block pays the open tier.
+ * Every case ends with overwrite passes that make collection erase the
+ * lines, then checks the mapping.
+ */
+void femu_test_pd2(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool closed = !strcmp(mode, "closed");
+    bool pad = !strcmp(mode, "pad");
+    bool nopad = !strcmp(mode, "nopad");
+    int npages = closed ? 31 : 8;
+    int reads = !strcmp(mode, "under") ? 3 : 4;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 32 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t gc0, rr0, or0, pp0, cb0, gc, rr, orr, pads, closes, progs, t0, t1;
+    uint64_t mapped, lost, orphans;
+    double waf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 32 * 4096);
+    femu_pd_write_ns(&c, qts, 0, npages, buf, list);
+
+    if (pad || nopad) {
+        g_usleep(20 * 1000);
+        pp0 = femu_c0h_field(&c, log, 168);
+        t0 = femu_pd_read_ns(&c, qts, 0, buf);
+        progs = femu_c0h_field(&c, log, 168) - pp0;
+        t1 = femu_pd_read_ns(&c, qts, 0, buf);
+        pads = femu_c0h_field(&c, log, 264);
+        closes = femu_c0h_field(&c, log, 272);
+        g_test_message("pd2 %s: reads %" PRIu64 " %" PRIu64 " ns, %" PRIu64
+                       " pads, %" PRIu64 " closes, %" PRIu64 " programs, "
+                       "waf x1000 %" PRIu64, mode, t0, t1, pads, closes,
+                       progs, femu_c0h_field(&c, log, 0) & 0xffffffffu);
+        if (pad) {
+            g_assert_cmpuint(pads, ==, 8);
+            g_assert_cmpuint(closes, ==, 1);
+            g_assert_cmpuint(progs, ==, 8);
+            g_assert_cmpuint(t0, >=, 8 * 200000);
+            g_assert_cmpuint(t0, <, FEMU_PD_STEP_NS);
+            g_assert_cmpuint(t1, <, 8 * 200000);
+            g_assert_cmpuint(femu_c0h_field(&c, log, 0) & 0xffffffffu, ==,
+                             2000);
+            g_assert_cmpint(femu_pd2_query_pads(qts, &waf), ==, 8);
+            g_assert_cmpfloat(waf, ==, 2.0);
+        } else {
+            g_assert_cmpuint(pads + closes + progs, ==, 0);
+            g_assert_cmpuint(t0, >=, FEMU_PD_STEP_NS);
+            g_assert_cmpuint(femu_c0h_field(&c, log, 0) & 0xffffffffu, ==,
+                             1000);
+            g_assert_cmpint(femu_pd2_query_pads(qts, &waf), ==, -1);
+            g_assert_cmpfloat(waf, ==, 1.0);
+        }
+    } else {
+        for (int i = 0; i < reads; i++) {
+            g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
+                            NVME_SUCCESS);
+        }
+        gc0 = femu_c0h_field(&c, log, 16);
+        rr0 = femu_c0h_field(&c, log, 40);
+        or0 = femu_c0h_field(&c, log, 256);
+        cb0 = femu_c0h_field(&c, log, 248);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 100, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        /* gc_copyback is on: a refresh still reads every page */
+        g_assert_cmpuint(femu_c0h_field(&c, log, 248), ==, cb0);
+        gc = femu_c0h_field(&c, log, 16) - gc0;
+        rr = femu_c0h_field(&c, log, 40) - rr0;
+        orr = femu_c0h_field(&c, log, 256) - or0;
+        g_test_message("pd2 %s: %" PRIu64 " open reclaims, %" PRIu64
+                       " read reclaims, %" PRIu64 " pages moved", mode, orr,
+                       rr, gc);
+        g_assert_cmpuint(rr, ==, 0);
+        if (!strcmp(mode, "read")) {
+            g_assert_cmpuint(orr, ==, 1);
+            g_assert_cmpuint(gc, ==, 8);
+        } else {
+            g_assert_cmpuint(orr, ==, 0);
+            g_assert_cmpuint(gc, ==, 0);
+        }
+        femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+        g_assert_cmpuint(mapped, ==, npages + 1);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+    }
+    femu_pd2_readback(&c, qts, buf, npages, 0x5a);
+
+    /* three passes over the 256-page namespace make collection erase */
+    for (int pass = 0; pass < 3; pass++) {
+        for (int p = 0; p < 256; p += 16) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, p, 16, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+    }
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 16, 0x5a);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A stream line padded and closed: one page of stream 7, then 300 ms, three
+ * times pd_open_close_sec at age_scale 10. The next request pads the 15
+ * free pages. The stream then takes a new line, and its data reads back.
+ */
+void femu_test_pd2_stream(void *obj, void *data,
+                          QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4f, 4096);
+    g_assert_cmphex(femu_directive(&c, false, 0xffffffff, 1, 0x101,
+                                   0, 0, NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_stream_write(&c, 1, 0, buf, 1, 7), ==, NVME_SUCCESS);
+    g_usleep(300 * 1000);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    g_test_message("pd2 stream: %" PRIu64 " pads, %" PRIu64 " closes",
+                   femu_c0h_field(&c, log, 264), femu_c0h_field(&c, log, 272));
+    g_assert_cmpuint(femu_c0h_field(&c, log, 264), ==, 15);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 272), ==, 1);
+    for (int i = 1; i < 8; i++) {
+        g_assert_cmphex(femu_stream_write(&c, 1, i * (4096 / c.lba_size),
+                                          buf, 1, 7), ==, NVME_SUCCESS);
+    }
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 8);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 8, 0x4f);
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* FDP host bytes and media bytes written, from the endurance group log */
+static void femu_pd2_fdp_bytes(FemuCtrlState *c, uint64_t log, uint64_t *hbmw,
+                               uint64_t *mbmw)
+{
+    uint8_t st[64];
+
+    g_assert_cmpint(femu_endgrp_log(c, FEMU_LOG_FDP_STATS, 0, log,
+                                    sizeof(st)), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, log, st, sizeof(st));
+    *hbmw = ldq_le_p(st);
+    *mbmw = ldq_le_p(st + 16);
+}
+
+/*
+ * FDP, 16-page reclaim units. @data names the case:
+ *   "pad":     pd_open_close_sec=1, real time. Two pages through placement
+ *              0, then 1.1 s: the next request pads the other 14 pages of
+ *              the unit, moves handle 0 to a fresh unit (full RUAMW) and
+ *              logs host event 01h. MBMW grows by the pads, HBMW does not,
+ *              and only handle 0's media bytes in query-femu take them.
+ *              ERUTL stays 0: the limit counts from the first program,
+ *              not from when the handle took the unit.
+ *   "read":    pd_open_read_limit=4. Four reads of page 0 in handle 0's
+ *              open unit, then a write through placement 1: handle 0 moves
+ *              to a fresh unit (controller event 81h) and the unit is
+ *              refreshed, 2 pages, into handle 0's collection unit. Four
+ *              reads there and one more write refresh that unit too, with
+ *              no new 81h: the host never sees a collection unit.
+ *   "read-ii": the same first step on fdpsub-ii through placement 3, the
+ *              initially isolated handle that collection also writes: the
+ *              2 pages move into its fresh unit, and its RUAMW shows them.
+ *   "quiet":   "read" with event 81h turned off for placement 0: the move
+ *              and the refresh happen, and no 81h is logged. The device
+ *              also uses the per-handle collection policy (gc_strategy=4),
+ *              whose units sit in two victim heaps.
+ */
+void femu_test_pd2_fdp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool pad = !strcmp(mode, "pad");
+    bool ii = !strcmp(mode, "read-ii");
+    bool quiet = !strcmp(mode, "quiet");
+    int ph = ii ? 3 : 0;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans, hbmw0, mbmw0, hbmw, mbmw, ruamw0;
+    uint64_t per_page = 4096 / 512;
+    uint16_t ruhid = 0xffff;
+    int nmapped;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6e, 4096);
+    if (quiet) {
+        femu_fdp_move_events_set(&c, log, 0, "1", false);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 0, 2, buf, list, ph)),
+                    ==, NVME_SUCCESS);
+    femu_pd2_fdp_bytes(&c, log, &hbmw0, &mbmw0);
+    ruamw0 = femu_ruh_ruamw(&c, log, ph);
+    if (pad) {
+        g_usleep(1100 * 1000);
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 264), ==, 14);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 272), ==, 1);
+        g_assert_cmpint(femu_pd2_events(&c, log, true, 0x01, &ruhid), ==, 1);
+        g_assert_cmpint(ruhid, ==, 0);
+        g_assert_cmpint(femu_pd2_events(&c, log, false, 0x81, &ruhid), ==, 0);
+        g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==,
+                         ruamw0 + 2 * per_page);
+        /* the limit counts from the first program, so ERUTL stays unset */
+        g_assert_cmpint(femu_endgrp_log(&c, NVME_LOG_FDP_CONFS, 0, log, 64),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(qtest_readl(qts, log + 16 + 24), ==, 0);
+        femu_pd2_fdp_bytes(&c, log, &hbmw, &mbmw);
+        g_assert_cmpuint(hbmw, ==, hbmw0);
+        g_assert_cmpuint(mbmw - mbmw0, ==, 14 * 4096);
+        g_assert_cmpuint(femu_pd2_handle_extra(qts, 0), ==, 14 * 4096);
+        g_assert_cmpuint(femu_pd2_handle_extra(qts, 1), ==, 0);
+        nmapped = 4;
+    } else {
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
+                            NVME_SUCCESS);
+        }
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 50, 1, buf, list,
+                                                        1)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 1);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 40), ==, 0);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 2);
+        g_assert_cmpint(femu_pd2_events(&c, log, false, 0x81, &ruhid), ==,
+                        quiet ? 0 : 1);
+        if (!quiet) {
+            g_assert_cmpint(ruhid, ==, ph);
+        }
+        femu_pd2_fdp_bytes(&c, log, &hbmw, &mbmw);
+        g_assert_cmpuint(hbmw - hbmw0, ==, 4096);
+        g_assert_cmpuint(mbmw - mbmw0, ==, 4096 + 2 * 4096);
+        if (ii) {
+            g_assert_cmpuint(femu_ruh_ruamw(&c, log, 3), ==,
+                             (16 - 2) * per_page);
+        }
+        nmapped = 5;
+        if (!ii) {
+            /* page 0 now sits in handle 0's open collection unit */
+            for (int i = 0; i < 4; i++) {
+                g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
+                                NVME_SUCCESS);
+            }
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 51, 1, buf,
+                                                            list, 1)), ==,
+                            NVME_SUCCESS);
+            g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 2);
+            g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 4);
+            g_assert_cmpint(femu_pd2_events(&c, log, false, 0x81, &ruhid),
+                            ==, quiet ? 0 : 1);
+            nmapped = 6;
+        }
+    }
+
+    /* the handle took a fresh unit: more writes and the data are sound */
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 2, 2, buf, list,
+                                                    ph)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_pd2_fdp_check(qts), ==, 0);
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, nmapped);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 4, 0x6e);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * RUAMW counts every program into a unit, also a relocation into the active
+ * unit of the initially isolated handle. fdpsub-ii, one LUN, 16-page units,
+ * buffer_size=32, pd_open_read_limit=4, onfi_cache_read at mode 26 (which
+ * reads these 2-page groups plain). An FUA
+ * write puts 2 pages in handle 3's unit: 14 pages of room. Two reads of
+ * both pages queue the open unit. A buffered write through placement 1
+ * moves handle 3 to a fresh unit and refreshes the old one into it, so the
+ * fresh unit has 14 pages of room, not 16. One more held page through
+ * placement 3 and a Flush leave 13.
+ */
+void femu_test_pd2_fdp_ruamw(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 2 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t per_page = 4096 / 512;
+    uint64_t mapped, lost, orphans;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x71, 2 * 4096);
+    g_assert_cmphex(femu_fdp_wb_write(&c, 0, 2, buf, list, 3, true), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 3), ==, 14 * per_page);
+    for (int i = 0; i < 2; i++) {
+        g_assert_cmphex(femu_read_pages(&c, 0, 2, buf, list), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_fdp_wb_write(&c, 50, 1, buf, list, 1, false), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 1);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 2);
+    g_test_message("RUAMW of placement 3 after the refresh: %" PRIu64,
+                   femu_ruh_ruamw(&c, log, 3));
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 3), ==, 14 * per_page);
+    g_assert_cmpuint(femu_fdp_open_vpc(qts, 3), ==, 2);
+
+    g_assert_cmphex(femu_fdp_wb_write(&c, 60, 1, buf, list, 3, false), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 3), ==, 14 * per_page);
+    g_assert_cmphex(femu_fdp_wb_flush(&c), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 3), ==, 13 * per_page);
+
+    g_assert_cmpuint(femu_pd2_fdp_check(qts), ==, 0);
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 4);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 2, 0x71);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Combinations of the FDP write buffer, the program disturb actions, the
+ * ONFI protocols and the FDP victim policies. Each case runs the pieces
+ * together, which their own tests run apart.
+ */
+
+/* one 4 KiB page at @page with Force Unit Access, unplaced */
+static void femu_combo_fua_page(FemuCtrlState *c, uint64_t buf, uint64_t page)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(page * (4096 / c->lba_size));
+    rw.nlb = cpu_to_le16(4096 / c->lba_size - 1);
+    rw.control = cpu_to_le16(NVME_RW_FUA);
+    g_assert_cmphex(FEMU_SC(femu_io(c, (NvmeCmd *)&rw)), ==, NVME_SUCCESS);
+}
+
+/*
+ * Held pages follow their handle to the unit that replaces its unit. FDP,
+ * 16-page units, buffer_size=16. @data names the case:
+ *   "pad":  pd_open_close_sec=1. 2 pages through placement 0 with FUA, 4
+ *           held. After 1.1 s a read pads the unit (14 pages) and moves
+ *           handle 0 to a fresh unit with host event 01h. A Flush puts the
+ *           4 held pages in the fresh unit: 12 pages of room.
+ *   "seal": fdpsub-ii, pd_open_read_limit=4, placement 3 (the initially
+ *           isolated handle). 2 pages with FUA, 4 held, 4 reads of page 0.
+ *           A held write through placement 1 seals the unit: event 81h,
+ *           then 80h for the 2 pages moved into the fresh unit. A Flush
+ *           adds the 4 held pages there: 6 valid pages, 10 pages of room.
+ */
+void femu_test_combo_fdp_hold(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool pad = !strcmp(data, "pad");
+    int ph = pad ? 0 : 3;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint16_t ruhid = 0xffff;
+    uint8_t ev[8 * 64];
+    uint32_t nev;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x73, 4 * 4096);
+    g_assert_cmphex(femu_fdp_wb_write(&c, 0, 2, buf, list, ph, true), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_fdp_wb_write(&c, 2, 4, buf, list, ph, false), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, 2);
+    if (pad) {
+        g_usleep(1100 * 1000);
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 264), ==, 14);
+        g_assert_cmpint(femu_pd2_events(&c, log, true, 0x01, &ruhid), ==, 1);
+        g_assert_cmpint(ruhid, ==, 0);
+        g_assert_cmpint(femu_pd2_events(&c, log, false, 0x81, &ruhid), ==, 0);
+    } else {
+        for (int i = 0; i < 4; i++) {
+            g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==,
+                            NVME_SUCCESS);
+        }
+        g_assert_cmphex(femu_fdp_wb_write(&c, 50, 1, buf, list, 1, false), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 1);
+        g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 2);
+        /* the handle leaves its unit before the moves land in the new one */
+        nev = femu_fdp_ctrl_events(&c, log, ev, 8);
+        g_test_message("combo seal: %u controller events, first %02x %02x",
+                       nev, ev[0], nev > 1 ? ev[64] : 0);
+        g_assert_cmpuint(nev, ==, 2);
+        g_assert_cmphex(ev[0], ==, FEMU_FDP_EVT_RUH_MODIFIED);
+        g_assert_cmphex(ev[64], ==, FEMU_FDP_EVT_MEDIA_REALLOC);
+        g_assert_cmpint(lduw_le_p(ev + 34), ==, 3);
+    }
+    /* the held pages were never in the old unit */
+    g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, 2);
+    g_assert_cmphex(femu_fdp_wb_flush(&c), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_fdp_open_vpc(qts, ph), ==, pad ? 4 : 6);
+    g_assert_cmpuint(femu_fdp_handle_vpc(qts, ph), ==, 6);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, ph), ==, (pad ? 12 : 10) * 8);
+
+    g_assert_cmpuint(femu_pd2_fdp_check(qts), ==, 0);
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, pad ? 6 : 7);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 6, 0x73);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The open-block read limit counts media reads only, with the write buffer
+ * and onfi_cache_read on. Line mode, one LUN, 16-page blocks,
+ * pd_open_read_limit=4. Pages 0 to 3 go to the open line with FUA, then
+ * pages 2 and 3 are rewritten into the buffer. A read of pages 0 to 3 reads
+ * 2 pages from the media and 2 from the buffer, so the block has 2 reads
+ * and the next write refreshes nothing. A second read of the 4 pages
+ * reaches 4, and the next write refreshes the line. @data "m0" (mode 0)
+ * reads the 2 media pages as one sequence: 105555 + 65005 = 170560 ns;
+ * "m26" reads them plain, which ends first.
+ */
+void femu_test_combo_read_limit(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans, hits0, before, rd;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x74, 4 * 4096);
+    for (int p = 0; p < 4; p++) {
+        femu_combo_fua_page(&c, buf, p);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 2, 2, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, 4);
+
+    hits0 = femu_c0h_field(&c, log, 64);
+    g_usleep(50 * 1000);
+    before = femu_ftl_trace_field(qts, 1);
+    g_assert_cmphex(femu_read_pages(&c, 0, 4, buf, list), ==, NVME_SUCCESS);
+    rd = femu_ftl_trace_field(qts, 1) - before;
+    g_test_message("combo read limit %s: 4-page read %" PRIu64 " ns",
+                   (const char *)data, rd);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 64) - hits0, ==, 2);
+    /* mode 26: two plain reads of 41541 ns end before a sequence would */
+    g_assert_cmpuint(rd, ==, !strcmp(data, "m0") ? 170560 : 2 * 41541);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 100, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 0);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 0);
+
+    g_assert_cmphex(femu_read_pages(&c, 0, 4, buf, list), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 101, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 256), ==, 1);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), >, 0);
+
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 4, 0x74);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Pads are NAND programs on the ONFI bus, with and without SCA. Line mode,
+ * one LUN, mode 26, pd_open_close_sec=1 at age_scale 1000. 8 pages, then
+ * 20 ms: the next read pads the other 8 pages first, so it waits behind 8
+ * programs of 200 us. The read after it does not.
+ */
+void femu_test_combo_pad_onfi(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t t0, t1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x75, 8 * 4096);
+    femu_pd_write_ns(&c, qts, 0, 8, buf, list);
+    g_usleep(20 * 1000);
+    t0 = femu_pd_read_ns(&c, qts, 0, buf);
+    t1 = femu_pd_read_ns(&c, qts, 0, buf);
+    g_test_message("pad %s: reads %" PRIu64 " and %" PRIu64 " ns",
+                   (const char *)data, t0, t1);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 264), ==, 8);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 272), ==, 1);
+    g_assert_cmpuint(t0, >=, t1 + 8 * 200000);
+    g_assert_cmpuint(t1, <, 200000);
+    femu_pd2_readback(&c, qts, buf, 8, 0x75);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Each FDP victim policy with units that a program disturb action retires
+ * early. FDP, 16-page units. Placed writes over 72 pages run for 8 passes
+ * and until collection has erased units; a pass gives handles 0 to 3 20,
+ * 20, 16 and 16 pages. @data is "<policy>/<action>", one action per device, so one
+ * action cannot take a unit before the other:
+ *   "seal": pd_open_read_limit=4. 4 reads of a page just written seal its
+ *           unit, and the refresh moves its pages; no unit is padded.
+ *   "pad":  pd_open_close_sec=1 at age_scale 10, a 100 ms limit, and a
+ *           150 ms pause per pass. Handle 1 leaves 4 pages in a fresh unit
+ *           at the end of a pass, and the next request pads that unit.
+ *           A padded unit holds no valid page, so collection may move
+ *           nothing. Every unit stays in one place
+ * (x-fdp-check 0) and every mapping holds.
+ */
+void femu_test_combo_policy(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool seal = g_str_has_suffix(data, "/seal");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans, gc = 0, mbe = 0, seals, pads;
+    int round;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x76, 4 * 4096);
+    for (round = 0; round < 40 && (round < 8 || !mbe); round++) {
+        for (int p = 0; p < 72; p += 4) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, p, 4, buf,
+                                                            list,
+                                                            (p / 4) % 4)),
+                            ==, NVME_SUCCESS);
+            for (int i = 0; seal && p % 16 == 0 && i < 4; i++) {
+                g_assert_cmphex(femu_rw(&c, NVME_CMD_READ,
+                                        p * (4096 / c.lba_size), buf),
+                                ==, NVME_SUCCESS);
+            }
+        }
+        if (!seal) {
+            g_usleep(150 * 1000);
+        }
+        gc = femu_c0h_field(&c, log, 16);
+        g_assert_cmpint(femu_endgrp_log(&c, FEMU_LOG_FDP_STATS, 0, log, 64),
+                        ==, NVME_SUCCESS);
+        mbe = qtest_readq(qts, log + 32);
+        g_assert_cmpuint(femu_pd2_fdp_check(qts), ==, 0);
+    }
+    seals = femu_c0h_field(&c, log, 256);
+    pads = femu_c0h_field(&c, log, 264);
+    g_test_message("policy %s: %d rounds, %" PRIu64 " moved, %" PRIu64
+                   " bytes erased, %" PRIu64 " open reclaims, %" PRIu64
+                   " pads", (const char *)data, round, gc, mbe, seals, pads);
+    /* collection erased units; with pads their pages are all invalid */
+    g_assert_cmpuint(mbe, >, 0);
+    if (seal) {
+        g_assert_cmpuint(gc, >, 0);
+    }
+    g_assert_cmpuint(seal ? seals : pads, >, 0);
+    g_assert_cmpuint(seal ? pads : seals, ==, 0);
+    femu_pd2_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 72);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_pd2_readback(&c, qts, buf, 8, 0x76);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* hold the FTL thread off its rings (x-ftl-hold), or let it go */
+static void femu_eol_hold(QTestState *qts, bool hold)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-ftl-hold','value':%d}}", hold);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* wait until @want write-class requests hold credits */
+static void femu_eol_wait_held(QTestState *qts, uint64_t want)
+{
+    bool ro;
+    uint64_t cap, pages, reqs = 0;
+    int waited;
+
+    for (waited = 0; waited < FEMU_POLL_LIMIT_MS; waited++) {
+        g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+        if (reqs == want) {
+            return;
+        }
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(reqs, ==, want);
+}
+
+/*
+ * dsm-partial: a deallocate unmaps only the NAND pages it covers in full
+ * (8 LBAs to a page here). A page that keeps some LBAs keeps its mapping,
+ * and those LBAs still read back.
+ *   pages 0 to 6 written
+ *   DSM LBA 1           part of page 0          --> 7 mapped
+ *   DSM LBAs 8 to 15    page 1 in full          --> 6 mapped
+ *   DSM LBAs 17 to 31   part of 2, all of 3     --> 5 mapped
+ *   WZ DEAC LBAs 33, 34 part of page 4          --> 5 mapped
+ *   WZ DEAC LBAs 40..47 page 5 in full          --> 4 mapped
+ *   DSM LBAs 48 to 50   the head of page 6      --> 4 mapped
+ */
+void femu_test_dsm_partial(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint8_t got[1024];
+    static const struct {
+        bool wz;
+        uint64_t slba;
+        uint32_t nlb;
+        uint64_t mapped;
+    } step[] = {
+        { false, 1, 1, 7 },
+        { false, 8, 8, 6 },
+        { false, 17, 15, 5 },
+        { true, 33, 2, 5 },
+        { true, 40, 8, 4 },
+        { false, 48, 3, 4 },
+    };
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0xa7, 4096);
+    for (int i = 0; i < 7; i++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 7);
+    for (size_t i = 0; i < ARRAY_SIZE(step); i++) {
+        uint16_t st = step[i].wz ?
+                      femu_wz(&c, step[i].slba, step[i].nlb, true) :
+                      femu_dealloc_range(&c, step[i].slba, step[i].nlb, list);
+
+        g_assert_cmphex(FEMU_SC(st), ==, NVME_SUCCESS);
+        femu_ftl_check(qts, &mapped, &lost, &orphans);
+        g_test_message("step %zu: %" PRIu64 " pages mapped", i, mapped);
+        g_assert_cmpuint(mapped, ==, step[i].mapped);
+        g_assert_cmpuint(lost, ==, 0);
+        g_assert_cmpuint(orphans, ==, 0);
+    }
+    /* LBA 0 of page 0 kept its data; LBA 1 reads as deallocated */
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, got, sizeof(got));
+    g_assert_cmphex(got[0], ==, 0xa7);
+    g_assert_cmphex(got[511], ==, 0xa7);
+    for (int i = 512; i < 1024; i++) {
+        g_assert_cmphex(got[i], ==, 0);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * With read-only end of life, one write-class command needs a bound, so
+ * Write Zeroes and Copy get limits that follow MDTS (16 KiB here): WZSL in
+ * the NVM Identify Controller, a hard limit since ONCS bit 3 (NVMWZSV) is
+ * clear, and MCL and MSSRL of two blocks of the largest format (8 KiB).
+ * The reserve is one line of 16 pages. Fifteen 16 KiB writes queued at
+ * once cost 5 pages each, so at most three hold credits at a time and the
+ * rest wait in the queue; all complete, and the credits all come back.
+ * @data "off" turns eol_read_only off: the limits and the reserve go.
+ */
+void femu_test_eol_limits(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = strcmp(data, "off") != 0;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t id = guest_alloc(alloc, 4096);
+    const uint64_t slba[3] = { 0, 1, 2 };
+    const uint16_t nlb[3] = { 1, 1, 1 };
+    NvmeIdCtrl ctrl;
+    NvmeIdNs ns;
+    uint8_t nvm[24];
+    bool ro;
+    uint64_t cap, pages, reqs;
+    uint64_t mapped, lost, orphans;
+    uint16_t want, got;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4 * 4096);
+
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, id), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, id, &ctrl, sizeof(ctrl));
+    g_assert_cmphex(le16_to_cpu(ctrl.oncs) & NVME_ONCS_WRITE_ZEROES, ==,
+                    on ? 0 : NVME_ONCS_WRITE_ZEROES);
+    g_assert_cmphex(femu_identify(&c, 0, FEMU_CNS_CS_CTRL, 0, id), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, id, nvm, sizeof(nvm));
+    g_assert_cmpuint(nvm[1], ==, on ? 2 : 0);
+    /* the end-of-life reply carries the version as well (NVM 1.1) */
+    g_assert_cmphex(ldl_le_p(nvm + 20), ==, 0x00010100);
+    g_assert_cmphex(femu_identify(&c, 1, NVME_ID_CNS_NS, 0, id), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, id, &ns, sizeof(ns));
+    g_assert_cmpuint(le32_to_cpu(ns.mcl), ==, on ? 2 : 1024);
+    g_assert_cmpuint(le16_to_cpu(ns.mssrl), ==, on ? 2 : 128);
+
+    /* 32 blocks of 512 bytes are 16 KiB, the limit */
+    g_assert_cmphex(femu_wz(&c, 0, 32, false), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_wz(&c, 0, 33, false), ==,
+                    on ? NVME_INVALID_FIELD : NVME_SUCCESS);
+    g_assert_cmphex(femu_wz(&c, 0, 33, true), ==,
+                    on ? NVME_INVALID_FIELD : NVME_SUCCESS);
+    g_assert_cmphex(femu_copy(&c, list, 64, slba, nlb, 2, 2, 0), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_copy(&c, list, 64, slba, nlb, 3, 3, 0), ==,
+                    on ? FEMU_CMD_SIZE_LIMIT : NVME_SUCCESS);
+
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs) == on);
+    if (on) {
+        g_assert_false(ro);
+        g_assert_cmpuint(cap, ==, 16);
+    }
+
+    /* fifteen 16 KiB writes in the queue at once */
+    for (i = 0; i < 4; i++) {
+        qtest_writeq(qts, list + i * 8, buf + (i + 1) * 4096);
+    }
+    want = c.cid;
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        NvmeRwCmd rw;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.dptr.prp2 = cpu_to_le64(list);
+        rw.slba = cpu_to_le64(32 * i + 1);
+        rw.nlb = cpu_to_le16(31);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(got, ==, (uint16_t)(want + i));
+    }
+    if (on) {
+        g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+        g_assert_cmpuint(pages, ==, 0);
+        g_assert_cmpuint(reqs, ==, 0);
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    femu_query_check_lines(qts, "/machine/peripheral/gc-test", mapped);
+
+    guest_free(alloc, id);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Read-only end of life needs a bound on one write and a ring to the FTL
+ * that takes every request, so realize refuses MDTS 0, more requests than
+ * the ring holds (65535 entries), and a reserve the geometry cannot hold.
+ */
+/*
+ * Single-page writes, the fill of pages 0 to 255 and then random pages,
+ * until @n writes ran or one failed. A failure must be the read-only end
+ * of life (eol_read_only). Returns whether the media went read-only.
+ */
+static bool femu_death_writes(FemuCtrlState *c, uint64_t buf, uint64_t list,
+                              int n)
+{
+    uint32_t seed = 1;
+
+    for (int i = 0; i < n; i++) {
+        uint64_t page = i < 256 ? i : (seed >> 8) % 256;
+        uint16_t st;
+
+        seed = seed * 1103515245 + 12345;
+        st = femu_write_pages(c, page, 1, buf, list);
+        if (FEMU_SC(st) != NVME_SUCCESS) {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_WRITE_TO_RO);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* a uint property of the gc-test device */
+static uint64_t femu_death_prop(QTestState *qts, const char *name)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':%s}}", name);
+    uint64_t v;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    return v;
+}
+
+static uint64_t femu_death_mix(uint64_t x)
+{
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+/* the draw rule of the design: h * 10^6 < ppm * 2^64 */
+static bool femu_death_hit(uint64_t h, uint32_t ppm)
+{
+    uint64_t hi;
+    uint64_t lo;
+
+    mulu64(&lo, &hi, h, 1000000);
+    return hi < ppm;
+}
+
+/*
+ * The listing of kind blocks, paged to the end, into @out (one entry per
+ * block, in channel, LUN, plane, block order). Returns the block count.
+ */
+static uint32_t femu_death_blocks(QTestState *qts, QDict **out, uint32_t max)
+{
+    uint32_t seen = 0;
+    bool more = true;
+
+    while (more) {
+        g_autofree char *args = g_strdup_printf(
+            "'kind':'blocks','offset':%u,'limit':4096", seen);
+        QDict *rsp;
+        QDict *ns = femu_query_ns(qts, args, &rsp);
+        QListEntry *e;
+
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(ns, "blocks"), e) {
+            g_assert_cmpuint(seen, <, max);
+            out[seen] = qdict_clone_shallow(qobject_to(QDict,
+                                                       qlist_entry_obj(e)));
+            seen++;
+        }
+        more = qdict_haskey(ns, "next-offset");
+        qobject_unref(rsp);
+    }
+    return seen;
+}
+
+/*
+ * Before any erase, each block's limit follows the early-life rule of the
+ * design, from the device's own properties (blk_pe_spread is 0): a block
+ * in the cohort (hash A under blk_early_ppm) gets min(blk_pe_limit, 1 +
+ * hash B % blk_early_pe), the others blk_pe_limit. Returns the cohort.
+ */
+static uint32_t femu_death_check_limits(QTestState *qts, uint32_t *total)
+{
+    uint64_t seed = femu_death_prop(qts, "blk_pe_seed");
+    uint64_t limit = femu_death_prop(qts, "blk_pe_limit");
+    uint32_t ppm = femu_death_prop(qts, "blk_early_ppm");
+    uint32_t bound = femu_death_prop(qts, "blk_early_pe");
+    QDict *blk[4096];
+    uint32_t cohort = 0;
+    uint32_t n = femu_death_blocks(qts, blk, ARRAY_SIZE(blk));
+
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t want = limit;
+
+        if (ppm && femu_death_hit(femu_death_mix(seed ^
+                                  0x6561726c79636f68ULL ^
+                                  (i + 1) * 0x9e3779b97f4a7c15ULL), ppm)) {
+            want = MIN(limit, 1 + femu_death_mix(seed ^
+                                  0x6561726c7962646eULL ^
+                                  (i + 1) * 0xd6e8feb86659fd93ULL) % bound);
+            cohort++;
+        }
+        g_assert_cmpuint(qdict_get_int(blk[i], "erase-count"), ==, 0);
+        g_assert_cmpuint(qdict_get_int(blk[i], "pe-limit"), ==, want);
+        qobject_unref(blk[i]);
+    }
+    *total = n;
+    return cohort;
+}
+
+/*
+ * Each failed block sits in a retired or a spare line, never in service,
+ * and the failed blocks add up to @failed, the statistics log count.
+ */
+static void femu_death_check_failed(QTestState *qts, uint64_t failed)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "'kind':'lines','limit':4096", &rsp);
+    QList *lines = qdict_get_qlist(ns, "lines");
+    g_autofree char **state = g_new0(char *, qlist_size(lines));
+    QDict *blk[4096];
+    uint64_t seen = 0;
+    uint32_t nl = 0;
+    uint32_t n;
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(lines, e) {
+        state[nl++] = g_strdup(qdict_get_str(qobject_to(QDict,
+                               qlist_entry_obj(e)), "state"));
+    }
+    qobject_unref(rsp);
+    n = femu_death_blocks(qts, blk, ARRAY_SIZE(blk));
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t line = qdict_get_int(blk[i], "block");
+
+        if (qdict_get_bool(blk[i], "failed")) {
+            g_assert_cmpuint(line, <, nl);
+            if (strcmp(state[line], "retired") &&
+                strcmp(state[line], "spare")) {
+                g_test_message("failed block %u in a %s line", i,
+                               state[line]);
+                g_assert_not_reached();
+            }
+            seen++;
+        }
+        qobject_unref(blk[i]);
+    }
+    for (uint32_t i = 0; i < nl; i++) {
+        g_free(state[i]);
+    }
+    g_assert_cmpuint(seen, ==, failed);
+}
+
+/*
+ * Block death beyond the erase limit, with @data:
+ *   "early":      every block in the early-life cohort (limit at most 3
+ *                 of 1000): blocks wear out under a load that wears none
+ *   "early-off":  the control, without the cohort: no block wears out
+ *   "erase":      erase_fail_ppm=1000000: every erase kills its block;
+ *                 spares go first, then the media goes read-only
+ *   "erase-rate": erase_fail_ppm=100000: some erases kill their block
+ *   "early-part": part of the blocks in the cohort, with a seed
+ * Each block's limit starts as the early-life rule gives it. Every killed
+ * block counts once as grown bad, and none stays in service.
+ */
+void femu_test_block_death(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *kind = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t mapped, lost, orphans;
+    uint64_t overworn, grown, erases, failed;
+    uint32_t cohort, blocks;
+    uint8_t page[512];
+    bool ro;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    cohort = femu_death_check_limits(qts, &blocks);
+    g_test_message("%s: %u of %u blocks in the early-life cohort", kind,
+                   cohort, blocks);
+    qtest_memset(qts, buf, 0x5d, 4096);
+    ro = femu_death_writes(&c, buf, list, 6000);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    overworn = ldq_le_p(page + 112);
+    grown = ldq_le_p(page + 120);
+    erases = ldq_le_p(page + 176);
+    failed = ldq_le_p(page + 328);
+    g_test_message("%s: read-only %d overworn %" PRIu64 " grown bad %" PRIu64
+                   " erases %" PRIu64 " erase failures %" PRIu64, kind, ro,
+                   overworn, grown, erases, failed);
+    g_assert_cmpuint(erases, >, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(&c, NVME_LOG_SMART_INFO, log,
+                                         sizeof(page), 0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, log, page, sizeof(page));
+    g_assert_cmpuint(!!(page[0] & NVME_SMART_MEDIA_READ_ONLY), ==, ro);
+
+    femu_death_check_failed(qts, failed);
+    if (!strcmp(kind, "early")) {
+        g_assert_cmpuint(cohort, ==, blocks);
+        g_assert_cmpuint(failed, ==, 0);
+        g_assert_cmpuint(grown + overworn, >, 0);
+    } else if (!strcmp(kind, "early-part")) {
+        g_assert_cmpuint(cohort, >, 0);
+        g_assert_cmpuint(cohort, <, blocks);
+        g_assert_cmpuint(failed, ==, 0);
+    } else if (!strcmp(kind, "early-off")) {
+        g_assert_cmpuint(cohort, ==, 0);
+        g_assert_cmpuint(failed, ==, 0);
+        g_assert_cmpuint(grown, ==, 0);
+        g_assert_cmpuint(overworn, ==, 0);
+        g_assert_false(ro);
+    } else {
+        /* a failed block retires or swaps, never stays in service */
+        g_assert_cmpuint(overworn, ==, 0);
+        g_assert_cmpuint(cohort, ==, 0);
+        g_assert_cmpuint(failed, >, 0);
+        g_assert_cmpuint(grown, ==, failed);
+        if (strcmp(kind, "erase-rate")) {
+            g_assert_cmpuint(failed, ==, erases);
+            g_assert_true(ro);
+            g_assert_cmpuint(page[3], ==, 0);
+        } else {
+            g_assert_cmpuint(failed, <, erases);
+        }
+    }
+
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A failure-rate property without blk_pe_limit is refused: the dead block
+ * needs the spare, retirement and end-of-life paths.
+ */
+void femu_test_block_death_refused(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const char *const cases[][2] = {
+        { "'erase_fail_ppm':10", "erase_fail_ppm needs blk_pe_limit" },
+        { "'blk_early_ppm':10,'blk_early_pe':2",
+          "blk_early_ppm needs blk_pe_limit" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'death','addr':'5','devsz_mb':1,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':4,"
+            "'blks_per_pl':40,'luns_per_ch':2,'nchs':2,%s}}", cases[i][0]);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i][0], desc);
+        g_assert_nonnull(strstr(desc, cases[i][1]));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+void femu_test_eol_refused(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'mdts':0", "eol_read_only needs mdts" },
+        { "'mdts':10", "eol_read_only reserve" },
+    };
+    QDict *rsp;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'eol','addr':'5','devsz_mb':1,"
+            "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':4,"
+            "'blks_per_pl':40,'luns_per_ch':2,'nchs':2,'blk_pe_limit':9,"
+            "%s}}", cases[i].opts);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].opts, desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
+/*
+ * A queue deleted with admitted writes in it gives their credits back: a
+ * write the FTL never ran programs nothing. Then writes still run.
+ */
+void femu_test_eol_sq_delete(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    bool ro;
+    uint64_t cap, pages, reqs;
+    int round, i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    qtest_memset(qts, buf, 0x2d, 4096);
+    for (round = 0; round < 8; round++) {
+        NvmeCmd cmd;
+
+        femu_create_io_queues(&c);
+        /* every other round, the FTL leaves the admitted writes queued */
+        femu_eol_hold(qts, round % 2 == 0);
+        for (i = 0; i < FEMU_QSIZE - 1; i++) {
+            NvmeRwCmd rw;
+
+            memset(&rw, 0, sizeof(rw));
+            rw.opcode = i % 3 ? NVME_CMD_WRITE : NVME_CMD_WRITE_ZEROES;
+            rw.nsid = cpu_to_le32(1);
+            rw.dptr.prp1 = cpu_to_le64(buf);
+            rw.slba = cpu_to_le64(8 * (i + round * FEMU_QSIZE));
+            rw.nlb = cpu_to_le16(7);
+            femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        }
+        if (round % 2 == 0) {
+            /* 2 pages each, for 4 KiB anywhere: 16 pages of credits */
+            femu_eol_wait_held(qts, 8);
+        }
+        g_assert_cmpint(FEMU_SC(femu_delete_sq(&c, c.io.qid)), ==,
+                        NVME_SUCCESS);
+        femu_eol_hold(qts, false);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_ADM_CMD_DELETE_CQ;
+        cmd.cdw10 = cpu_to_le32(c.io.qid);
+        g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+        femu_queue_free(&c, &c.io);
+
+        g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+        g_test_message("round %d: %" PRIu64 " pages, %" PRIu64 " requests",
+                       round, pages, reqs);
+        g_assert_cmpuint(pages, ==, 0);
+        g_assert_cmpuint(reqs, ==, 0);
+    }
+    femu_create_io_queues(&c);
+    for (i = 0; i < 32; i++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 1, buf, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_queue_free(&c, &c.io);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * A write admitted against the end-of-life reserve was costed in the LBA
+ * format it came in, so Format NVM fails with Command Sequence Error while
+ * such a write waits for the FTL. First a deallocating Dataset Management
+ * and a deallocating Write Zeroes, which hold no pages but would still run
+ * in the new format; then fifteen 16 KiB writes, of which three take the 16
+ * pages of credits (5 each) and the rest wait in the queue. Each time the
+ * FTL is held, a Format to 4 KiB blocks fails; released, everything
+ * completes and the Format runs.
+ */
+void femu_test_eol_format_busy(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4e, 4096);
+    for (i = 0; i < 4; i++) {
+        qtest_writeq(qts, list + i * 8, buf);
+    }
+    /* zero-cost requests: a DSM range at list + 2048, a DEAC Write Zeroes */
+    qtest_memset(qts, list + 2048, 0, 16);
+    qtest_writel(qts, list + 2048 + 4, 8);
+    qtest_writeq(qts, list + 2048 + 8, 64);
+    femu_eol_hold(qts, true);
+    {
+        NvmeCmd cmd;
+        bool ro;
+        uint64_t cap, pages, reqs;
+
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_DSM;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(list + 2048);
+        cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+        femu_submit(&c, &c.io, &cmd);
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_WRITE_ZEROES;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.cdw10 = cpu_to_le32(128);
+        cmd.cdw12 = cpu_to_le32(7 | 1u << 25);
+        femu_submit(&c, &c.io, &cmd);
+        femu_eol_wait_held(qts, 2);
+        g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+        g_assert_cmpuint(pages, ==, 0);
+    }
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 3, 0)), ==,
+                    NVME_CMD_SEQ_ERROR);
+    femu_eol_hold(qts, false);
+    for (i = 0; i < 2; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_eol_wait_held(qts, 0);
+
+    femu_eol_hold(qts, true);
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        NvmeRwCmd rw;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.dptr.prp2 = cpu_to_le64(list);
+        rw.slba = cpu_to_le64(32 * i);
+        rw.nlb = cpu_to_le16(31);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    femu_eol_wait_held(qts, 3);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 3, 0)), ==,
+                    NVME_CMD_SEQ_ERROR);
+    femu_eol_hold(qts, false);
+    for (i = 0; i < FEMU_QSIZE - 1; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_eol_wait_held(qts, 0);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 3, 0)), ==, NVME_SUCCESS);
+    /* the namespace changed format: the next test needs a new device */
+    qos_invalidate_command_line();
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * Read-only end of life with mapping=dftl. The CMT holds one TP and the
+ * writes go to TPs 0 and 1 in turn, so each write evicts a dirty TP and
+ * programs it. When the media goes read-only, the reserve lines are for
+ * the writes admitted before: a TP program must not open one. Every write
+ * completes with success or 82h, and the map and the TPs stay consistent.
+ * @data is the pages of each write; with 8 pages and MDTS 128 KiB the
+ * reserve is 3 lines, more than the 2 free lines TP traffic leaves alone.
+ */
+void femu_test_eol_dftl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t bufs = guest_alloc(alloc, FEMU_EOL_SLOTS * 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint32_t np = atoi(data);
+    uint64_t v[7];
+    uint32_t rnd = 11;
+    bool ro = false;
+    int batch, k, ok = 0, refused = 0;
+
+    /* every page of a write takes its data from the slot's buffer */
+    for (k = 0; k < 512; k++) {
+        qtest_writeq(qts, list + k * 8, bufs);
+    }
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (batch = 0; batch < 4000 && !ro; batch++) {
+        for (k = 0; k < FEMU_EOL_SLOTS; k++) {
+            NvmeRwCmd rw;
+            uint64_t b = bufs + k * 4096;
+
+            rnd = rnd * 1103515245 + 12345;
+            memset(&rw, 0, sizeof(rw));
+            rw.opcode = NVME_CMD_WRITE;
+            rw.nsid = cpu_to_le32(1);
+            rw.dptr.prp1 = cpu_to_le64(b);
+            rw.dptr.prp2 = cpu_to_le64(np == 2 ? b : np > 2 ? list : 0);
+            rw.slba = cpu_to_le64(((k & 1) * 512 +
+                                   (rnd >> 8) % (513 - np)) * 8);
+            rw.nlb = cpu_to_le16(np * 8 - 1);
+            femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        }
+        for (k = 0; k < FEMU_EOL_SLOTS; k++) {
+            uint16_t st = femu_complete(&c, &c.io, NULL, NULL);
+
+            if (FEMU_SC(st) == NVME_SUCCESS) {
+                ok++;
+                continue;
+            }
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_WRITE_TO_RO);
+            g_assert_cmphex(st & FEMU_DNR, ==, FEMU_DNR);
+            refused++;
+            ro = true;
+        }
+    }
+    g_test_message("read-only after %d batches: %d writes done, %d refused",
+                   batch, ok, refused);
+    g_assert_true(ro);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 280), >, 0);
+    femu_tp_check(qts, "/machine/peripheral/gc-test", v);
+    g_assert_cmpuint(v[1], ==, 0);
+    g_assert_cmpuint(v[2], ==, 0);
+    g_assert_cmpuint(v[4], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, log);
+    guest_free(alloc, bufs);
+    femu_disable(&c);
+    /* the device is worn out now: the next test must not inherit it */
+    qos_invalidate_command_line();
+}
+
+/* x-eol-enter: end the life of the media of the device "gc-test" now */
+static void femu_eol_enter(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-eol-enter','value':true}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* submit a write of @np pages from @page through placement identifier @pid */
+static void femu_eol_submit_placed(FemuCtrlState *c, uint64_t page,
+                                   uint32_t np, uint64_t buf, uint64_t list,
+                                   int pid)
+{
+    NvmeRwCmd rw;
+
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.dptr.prp2 = cpu_to_le64(np > 2 ? list : np == 2 ? buf + 4096 : 0);
+    rw.slba = cpu_to_le64(page * (4096 / c->lba_size));
+    rw.nlb = cpu_to_le16(np * (4096 / c->lba_size) - 1);
+    if (pid >= 0) {
+        rw.control = cpu_to_le16(2 << 4);
+        rw.dspec = cpu_to_le16(pid);
+    }
+    femu_submit(c, &c->io, (NvmeCmd *)&rw);
+}
+
+/*
+ * The writes in flight at the end of life under FDP. Forced collection
+ * keeps one unit free, so overwrites through four handles leave about one
+ * free unit. As many 4-page writes as the credits take (each costs 5
+ * pages), one per handle in turn, are admitted and held before the FTL.
+ * The credits (32 pages, or 24 with two groups) and the reserve units of
+ * each group (6, or 7) are what the formula gives. The media then goes
+ * read-only (x-eol-enter), and two more writes are refused. Released, the
+ * six admitted writes must all succeed, from the frontiers and the reserve
+ * units, with no erase; the two later ones fail with 82h and change
+ * nothing. @data: "pad" adds pd_open_close_sec=1 and waits past it, and no
+ * pad page may follow the transition; "reclaim" queues a read reclaim
+ * before it, which must not run after; "rg1" places every write in reclaim
+ * group 1 of two, whose own reserve must take them.
+ */
+void femu_test_eol_fdp_drain(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t rbuf = guest_alloc(alloc, 4096);
+    uint64_t wbuf = guest_alloc(alloc, 6 * 4 * 4096);
+    uint64_t wlist = guest_alloc(alloc, 6 * 4096);
+    uint64_t mapped, lost, orphans, erases, cap, pages, reqs;
+    int64_t host;
+    int64_t pads = 0;
+    double waf;
+    uint32_t rnd = 11;
+    uint64_t nsze;
+    /* placement identifier of handle 0 of group 1 of two (RGIF 1) */
+    int rg = !strcmp(data, "rg1") ? 0x8000 : 0;
+    bool ro;
+    int i, k, n;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_identify_ns(&c, &nsze, &c.lba_size);
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_cmpuint(cap, ==, rg ? 24 : 32);
+    g_assert_cmpint(femu_eol_query_int(qts, "units", "reserve"), ==,
+                    rg ? 2 * 7 : 6);
+    /* every group holds the whole reserve */
+    {
+        int per[2] = { 0, 0 };
+        QListEntry *e;
+        QDict *rsp;
+        QDict *fdp = qdict_get_qdict(femu_query_ns(qts,
+                                                   "'kind':'reclaim-units',"
+                                                   "'limit':4096", &rsp),
+                                     "fdp");
+
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(fdp, "reclaim-units"), e) {
+            QDict *u = qobject_to(QDict, qlist_entry_obj(e));
+
+            if (!strcmp(qdict_get_str(u, "state"), "reserve")) {
+                per[qdict_get_int(u, "group")]++;
+            }
+        }
+        qobject_unref(rsp);
+        g_assert_cmpint(per[0], ==, rg ? 7 : 6);
+        g_assert_cmpint(per[1], ==, rg ? 7 : 0);
+    }
+    n = MIN(cap / 5, 6);
+    g_assert_cmpint(n, >=, 4);
+    for (i = 0; i < 3; i++) {
+        qtest_writeq(qts, list + 8 * i, buf + 4096 * (i + 1));
+    }
+    qtest_memset(qts, buf, 0x10, 4 * 4096);
+    for (i = 0; i < 256; i += 4) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, i, 4, buf, list,
+                                                        rg | i / 64)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 400; i++) {
+        rnd = rnd * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, (rnd >> 8) % 253,
+                                                        1 + (rnd >> 20) % 4,
+                                                        buf, list,
+                                                        rg | i % 4)),
+                        ==, NVME_SUCCESS);
+    }
+    if (!strcmp(data, "reclaim")) {
+        /* page 0's block passes read_reclaim_limit: its unit is queued */
+        for (i = 0; i < 8; i++) {
+            g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 1, rbuf, list)), ==,
+                            NVME_SUCCESS);
+        }
+    }
+
+    femu_eol_hold(qts, true);
+    for (k = 0; k < n; k++) {
+        qtest_memset(qts, wbuf + k * 4 * 4096, 0x60 + k, 4 * 4096);
+        for (i = 0; i < 3; i++) {
+            qtest_writeq(qts, wlist + k * 4096 + 8 * i,
+                         wbuf + k * 4 * 4096 + 4096 * (i + 1));
+        }
+        femu_eol_submit_placed(&c, 40 * k, 4, wbuf + k * 4 * 4096,
+                               wlist + k * 4096, rg | k % 4);
+    }
+    femu_eol_wait_held(qts, n);
+    host = femu_eol_query_int(qts, "counters", "host-write-pages");
+    femu_eol_enter(qts);
+    g_assert_cmpint(femu_eol_query_int(qts, "units", "reserve"), ==, 0);
+    erases = femu_eol_erases(qts);
+    if (!strcmp(data, "pad")) {
+        pads = femu_pd2_query_pads(qts, &waf);
+    }
+    /* refused writes: their pages must keep the data of the preparation */
+    qtest_memset(qts, rbuf, 0x7e, 4096);
+    for (k = 0; k < 2; k++) {
+        femu_eol_submit_placed(&c, 250 + k, 1, rbuf, list, rg | k);
+    }
+    femu_eol_hold(qts, false);
+    for (k = 0; k < n + 2; k++) {
+        uint16_t got;
+        uint16_t st = femu_complete(&c, &c.io, &got, NULL);
+        int idx = (uint16_t)(got - (c.cid - n - 2));
+
+        g_test_message("write %d: 0x%x", idx, st);
+        g_assert_cmpint(idx, <, n + 2);
+        if (idx < n) {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_SUCCESS);
+        } else {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_WRITE_TO_RO);
+        }
+    }
+
+    if (!strcmp(data, "pad")) {
+        /* a request after the limit would pad an open unit */
+        g_usleep(1200 * 1000);
+        g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 1, rbuf, list)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpint(femu_pd2_query_pads(qts, &waf), ==, pads);
+    }
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_true(ro);
+    g_assert_cmpuint(pages, ==, 0);
+    g_assert_cmpuint(reqs, ==, 0);
+    g_assert_cmpuint(femu_eol_erases(qts), ==, erases);
+    /* the FTL programmed every page of every admitted write */
+    g_assert_cmpint(femu_eol_query_int(qts, "counters", "host-write-pages"),
+                    ==, host + 4 * n);
+    for (k = 0; k < n; k++) {
+        for (i = 0; i < 4; i++) {
+            g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 40 * k + i, 1, rbuf,
+                                                    list)), ==, NVME_SUCCESS);
+            g_assert_cmphex(qtest_readb(qts, rbuf + 4095), ==, 0x60 + k);
+        }
+    }
+    for (k = 0; k < 2; k++) {
+        g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 250 + k, 1, rbuf, list)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmphex(qtest_readb(qts, rbuf), ==, 0x10);
+        g_assert_cmphex(qtest_readb(qts, rbuf + 4095), ==, 0x10);
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, wlist);
+    guest_free(alloc, wbuf);
+    guest_free(alloc, rbuf);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * RUH Update at the end of life under FDP. An update of placement handle 0,
+ * whose unit holds a page, and a write behind it are held before the FTL,
+ * then the media goes read-only. The write finishes; the update fails with
+ * Capacity Exceeded,
+ * as one with no empty unit to give, and the handle keeps its written
+ * unit. An update sent after the transition fails the same way, and RUH
+ * Status still answers.
+ */
+void femu_test_eol_fdp_ruh(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t pids = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t full, left;
+    uint16_t pid = cpu_to_le16(0);
+    NvmeCmd cmd;
+    int k;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x21, 4096);
+    qtest_memwrite(qts, pids, &pid, sizeof(pid));
+    full = femu_ruh_ruamw(&c, log, 0);
+
+    /* the write fills handle 0's unit before the update can move it */
+    g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, 6, 1, buf, list, 0)),
+                    ==, NVME_SUCCESS);
+    femu_eol_hold(qts, true);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = FEMU_CMD_IO_MGMT_SEND;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(pids);
+    cmd.cdw10 = cpu_to_le32(FEMU_IOMS_RUH_UPDATE);
+    femu_submit(&c, &c.io, &cmd);
+    /* one queue runs in order: once the write is admitted, so is the update */
+    femu_eol_submit_placed(&c, 7, 1, buf, list, 0);
+    femu_eol_wait_held(qts, 1);
+    femu_eol_enter(qts);
+    femu_eol_hold(qts, false);
+    for (k = 0; k < 2; k++) {
+        uint16_t got;
+        uint16_t st = femu_complete(&c, &c.io, &got, NULL);
+
+        g_test_message("command %u: 0x%x", got, st);
+        if (got == (uint16_t)(c.cid - 1)) {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_SUCCESS);
+        } else {
+            g_assert_cmphex(FEMU_SC(st), ==, NVME_CAP_EXCEEDED);
+            g_assert_cmphex(st & FEMU_DNR, ==, FEMU_DNR);
+        }
+    }
+    /* the handle did not move: its unit holds the page */
+    left = femu_ruh_ruamw(&c, log, 0);
+    g_test_message("RUAMW %" PRIu64 " of %" PRIu64, left, full);
+    g_assert_cmpuint(left, <, full);
+
+    g_assert_cmphex(femu_ruh_update(&c, pids, 1), ==, NVME_CAP_EXCEEDED);
+    g_assert_cmpuint(femu_ruh_ruamw(&c, log, 0), ==, left);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, pids);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Out of units under FDP. With both collection watermarks at 100, a
+ * persistently isolated handle can find no free unit to collect into, and
+ * then a write finds none for its handle either. A write the poller
+ * admitted has changed data already, so with eol_read_only that ends the
+ * life of the media: the write finishes from the reserve units, and later
+ * writes fail with 82h. No write fails with Capacity Exceeded.
+ */
+void femu_test_eol_fdp_full(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans, cap, pages, reqs;
+    uint32_t rnd = 5;
+    bool ro = false;
+    int i, ok = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 3; i++) {
+        qtest_writeq(qts, list + 8 * i, buf + 4096 * (i + 1));
+    }
+    qtest_memset(qts, buf, 0x33, 4 * 4096);
+    for (i = 0; i < 4000; i++) {
+        uint16_t st;
+
+        rnd = rnd * 1103515245 + 12345;
+        st = FEMU_SC(femu_write_pages_placed(&c, i < 64 ? 4 * i :
+                                             (rnd >> 8) % 253,
+                                             i < 64 ? 4 : 1 + (rnd >> 20) % 4,
+                                             buf, list, i % 4));
+        if (st == NVME_WRITE_TO_RO) {
+            ro = true;
+            break;
+        }
+        g_assert_cmphex(st, ==, NVME_SUCCESS);
+        ok++;
+    }
+    g_test_message("%d writes, then read-only: %d", ok, ro);
+    g_assert_true(ro);
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_true(ro);
+    g_assert_cmpuint(reqs, ==, 0);
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, 256);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    g_assert_cmpuint(femu_fdp_check(qts), ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Read-only end of life with dftl: once the media is read-only, a TP
+ * program opens no line, since the reserve lines belong to the writes
+ * admitted before. This is the set-up of dftl-tp-reserve with MDTS 16 KiB,
+ * so the reserve is 9 lines of 4 pages: 36 pages of credits. The fill
+ * leaves 5 free lines, and 47 TPs are pending.
+ *   - With the FTL held, four 4 KiB writes take all 36 credits.
+ *   - The hold on the TPs ends, and x-eol-enter ends the life of the media
+ *     before the FTL runs the writes, as a worn-out block would. The free
+ *     lines are now 14.
+ *   - The FTL runs the four writes. Each one succeeds, and the 47 TPs stay
+ *     pending, in power-loss-protected DRAM.
+ * If a TP could open a line, the first write would publish the 47 TPs into
+ * 12 lines, down to the 2 forced lines, and a later write would find no
+ * page.
+ */
+void femu_test_eol_dftl_tp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = "/machine/peripheral/gc-test";
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t cap, pages, reqs, v[7];
+    bool ro;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_dftl_tp_pending(&c, id, buf, list, 5);
+
+    femu_eol_hold(qts, true);
+    for (i = 0; i < 4; i++) {
+        NvmeRwCmd rw;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.slba = cpu_to_le64(8 + 16 * i);
+        rw.nlb = cpu_to_le16(7);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    femu_eol_wait_held(qts, 4);
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_cmpuint(cap, ==, 36);
+    g_assert_cmpuint(pages, ==, 36);
+
+    femu_tp_hold(qts, id, false);
+    femu_eol_enter(qts);
+    g_assert_true(femu_eol_state(qts, &ro, &cap, &pages, &reqs));
+    g_assert_true(ro);
+    g_assert_cmpuint(femu_free_lines(qts), ==, 14);
+    femu_eol_hold(qts, false);
+    for (i = 0; i < 4; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[0], ==, 64 * 64 - 47);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[6], ==, 47);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 1, buf, list)), ==,
+                    NVME_WRITE_TO_RO);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    /* the media is read-only now: the next test must not inherit it */
+    qos_invalidate_command_line();
+}
+
+/*
+ * A write that waits in its queue for credits can still be aborted: it was
+ * not fetched, so the Abort marks it, and it then completes as aborted
+ * without taking credits. A controller reset drops admitted writes from the
+ * ring and their credits come back.
+ */
+void femu_test_eol_abort_reset(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint16_t first, cid;
+    uint32_t result;
+    NvmeCmd cmd;
+    int i, done = 0, aborted = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (i = 0; i < 4; i++) {
+        qtest_writeq(qts, list + i * 8, buf);
+    }
+    femu_eol_hold(qts, true);
+    first = c.cid;
+    for (i = 0; i < 4; i++) {
+        NvmeRwCmd rw;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.dptr.prp2 = cpu_to_le64(list);
+        rw.slba = cpu_to_le64(32 * i);
+        rw.nlb = cpu_to_le16(31);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    /* three hold 15 of the 16 pages; the fourth waits in the queue */
+    femu_eol_wait_held(qts, 3);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_ABORT;
+    cmd.cdw10 = cpu_to_le32((uint32_t)(first + 3) << 16 | c.io.qid);
+    g_assert_cmphex(FEMU_SC(femu_admin_result(&c, &cmd, &result)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(result & 1, ==, 0);
+    femu_eol_hold(qts, false);
+    for (i = 0; i < 4; i++) {
+        uint16_t st = FEMU_SC(femu_complete(&c, &c.io, &cid, NULL));
+
+        if (cid == (uint16_t)(first + 3)) {
+            g_assert_cmphex(st, ==, FEMU_CMD_ABORT_REQ);
+            aborted++;
+        } else {
+            g_assert_cmphex(st, ==, NVME_SUCCESS);
+            done++;
+        }
+    }
+    g_assert_cmpint(aborted, ==, 1);
+    g_assert_cmpint(done, ==, 3);
+    femu_eol_wait_held(qts, 0);
+
+    /* admitted writes in the ring when the controller resets */
+    femu_eol_hold(qts, true);
+    for (i = 0; i < 4; i++) {
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.opcode = NVME_CMD_WRITE;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(8 * i);
+        cmd.cdw12 = cpu_to_le32(7);
+        femu_submit(&c, &c.io, &cmd);
+    }
+    femu_eol_wait_held(qts, 4);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    /*
+     * Still held, so only the reset can have given the credits back;
+     * query-femu needs an enabled controller.
+     */
+    femu_enable(&c, &femu->dev, alloc);
+    femu_eol_wait_held(qts, 0);
+    femu_eol_hold(qts, false);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 1, buf, buf)), ==,
+                    NVME_SUCCESS);
+
+    femu_queue_free(&c, &c.io);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
+/*
+ * WZSL under read-only end of life. With 8 metadata bytes interleaved in
+ * each block (@data "meta"), the limit (MDTS, 8 KiB) counts them: 15 blocks
+ * of 520 bytes fit, 16 do not. With Write Zeroes off in oncs ("nowz"),
+ * Identify reports neither ONCS bit 3 nor a WZSL.
+ */
+void femu_test_eol_wzsl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool meta = !strcmp(data, "meta");
+    FemuCtrlState c = { 0 };
+    uint64_t id = guest_alloc(alloc, 4096);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, id), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, id + 520) & NVME_ONCS_WRITE_ZEROES, ==,
+                    0);
+    g_assert_cmphex(femu_identify(&c, 0, FEMU_CNS_CS_CTRL, 0, id), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(qtest_readb(qts, id + 1), ==, meta ? 1 : 0);
+    if (meta) {
+        g_assert_cmphex(femu_wz(&c, 0, 15, false), ==, NVME_SUCCESS);
+        g_assert_cmphex(femu_wz(&c, 0, 16, false), ==, NVME_INVALID_FIELD);
+    } else {
+        g_assert_cmphex(femu_wz(&c, 0, 8, false), ==, NVME_INVALID_OPCODE);
+    }
+
+    femu_queue_free(&c, &c.io);
+    guest_free(alloc, id);
+    femu_disable(&c);
+}
+
+/*
+ * A power cut with dftl: the mapping DRAM is power-loss protected, so the
+ * GTD and the CMT stay. Writes the buffer held are undone and never
+ * reached the mapping. FUA writes to TPs 0 to 3 leave TPs 0 to 2 on flash
+ * and TP 3 in the CMT. A deallocate of a page of TP 1 while x-tp-hold
+ * keeps publication back leaves TP 1 pending, as the forced reserve would;
+ * the deallocate writes the buffer back first, which may evict TP 3 too.
+ * After the cut the mappings, the TP pages and the pending TP are as
+ * before. Once released, the next request publishes TP 1, and each FUA
+ * page reads back.
+ */
+void femu_test_dftl_power(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t v[7], before[7], reads, writes;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (uint32_t i = 0; i < 4; i++) {
+        femu_power_write(&c, buf, 1, (uint64_t)i * 512 * 8, 8, 0x30 + i, true);
+        femu_power_write(&c, buf, 1, (uint64_t)i * 512 * 8 + 8, 8, 0x40 + i,
+                         false);
+    }
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/power',"
+                             "'property':'x-tp-hold','value':true}}");
+    g_assert_cmphex(femu_dealloc_pages(&c, 513, 1, log), ==, NVME_SUCCESS);
+    femu_tp_check(qts, "/machine/peripheral/power", before);
+    g_assert_cmpuint(before[3], >=, 3);
+    g_assert_cmpuint(before[6], ==, 1);
+    reads = femu_c0h_field(&c, log, 288);
+    femu_power_cut(&c);
+    femu_tp_check(qts, "/machine/peripheral/power", v);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[0], ==, before[0]);
+    g_assert_cmpuint(v[3], ==, before[3]);
+    g_assert_cmpuint(v[6], ==, 1);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 288), ==, reads);
+
+    /* released, a Flush, which touches no TP, publishes TP 1 */
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/power',"
+                             "'property':'x-tp-hold','value':false}}");
+    writes = femu_c0h_field(&c, log, 280);
+    femu_hybrid_flush(&c);
+    femu_tp_check(qts, "/machine/peripheral/power", v);
+    g_assert_cmpuint(v[4] + v[6], ==, 0);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 280), ==, writes + 1);
+    for (uint32_t i = 0; i < 4; i++) {
+        femu_power_read(&c, buf, 1, (uint64_t)i * 512 * 8, 0x30 + i);
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* log page C0h counters the media test reads */
+#define FEMU_C0H_READ_RECLAIMS  40
+#define FEMU_C0H_RETENTION      48
+#define FEMU_C0H_WL_LINES       136
+#define FEMU_C0H_PD_RECLAIMS    256
+#define FEMU_C0H_PAD_PAGES      264
+#define FEMU_C0H_PAD_CLOSES     272
+
+/*
+ * Translation pages (TPs) are real pages: read stress, data age and an open
+ * block act on a TP line as on a data line, and the TP pointer joins the
+ * open-line actions. 2048 pages are 4 TPs; the CMT holds one. A line is 32
+ * pages on 4 dies. @data selects the case:
+ *   "reads": read_reclaim_limit=20. Reads of pages in TPs 0 and 1 in turn
+ *            read the TP copies 40 times, and the data blocks at most 10
+ *            times each. The open TP line is queued, sealed and rewritten
+ *            on the next write: TPs move, and no data page does.
+ *   "open":  pd_open_read_limit=20 instead: the same, as an open-block
+ *            refresh.
+ *   "publish": read_reclaim_limit=4, and deallocates of one page in TPs
+ *            0 and 1 in turn instead of reads. Each publication reads and
+ *            rewrites its TP, with no CMT access, and those reads queue
+ *            the TP line as host reads do. The deallocates also leave data
+ *            lines for collection, so data pages may move too.
+ *   "age":   retention_limit_sec=1. TPs 2 and 3, then 0 and 1 in turn,
+ *            fill the first TP line; 1.5 s later a read of a page of TP 2
+ *            reads it from that closed line, and the next write refreshes
+ *            the line.
+ *   "pad":   pd_open_close_sec=1. A fill programs 3 TPs into a TP line;
+ *            1.5 s later the next request pads its 29 free pages and
+ *            closes it. No TP program counts the pads; only TP moves
+ *            follow, if collection takes the padded line.
+ */
+void femu_test_dftl_media(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = "/machine/peripheral/tp";
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t v[7], moves, gc, map;
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 64 * 4096);
+
+    if (g_str_equal(mode, "age")) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 1024, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 1536, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        for (i = 0; i < 40; i++) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (i & 1) * 512 + i, 1,
+                                                     buf, list)), ==,
+                            NVME_SUCCESS);
+        }
+    } else {
+        for (i = 0; i < 2048; i += 64) {
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+    }
+    femu_tp_check(qts, id, v);
+    moves = v[5];
+    gc = femu_c0h_field(&c, log, 16);
+    map = femu_c0h_field(&c, log, 280);
+
+    if (g_str_equal(mode, "pad")) {
+        g_usleep(1500 * 1000);
+        g_assert_cmphex(femu_read_pages(&c, 1600, 1, buf, list), ==,
+                        NVME_SUCCESS);
+        g_assert_cmpuint(femu_c0h_field(&c, log, FEMU_C0H_PAD_PAGES), ==, 29);
+        g_assert_cmpuint(femu_c0h_field(&c, log, FEMU_C0H_PAD_CLOSES), ==, 1);
+        femu_tp_check(qts, id, v);
+        g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+        /* collection may take the padded line: only its moves program TPs */
+        g_assert_cmpuint(femu_c0h_field(&c, log, 280) - map, ==,
+                         v[5] - moves);
+        goto out;
+    }
+    if (g_str_equal(mode, "age")) {
+        g_usleep(1500 * 1000);
+        g_assert_cmphex(femu_read_pages(&c, 1025, 1, buf, list), ==,
+                        NVME_SUCCESS);
+    } else if (g_str_equal(mode, "publish")) {
+        for (i = 0; i < 16; i++) {
+            g_assert_cmphex(femu_dealloc_pages(&c, (i & 1) * 512 + i, 1, log),
+                            ==, NVME_SUCCESS);
+        }
+    } else {
+        for (i = 0; i < 40; i++) {
+            g_assert_cmphex(femu_read_pages(&c, (i & 1) * 512 + i, 1, buf,
+                                            list), ==, NVME_SUCCESS);
+        }
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 1700, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+    femu_tp_check(qts, id, v);
+    g_test_message("%s: %" PRIu64 " TPs moved, read %" PRIu64 ", age %" PRIu64
+                   ", open %" PRIu64, mode, v[5] - moves,
+                   femu_c0h_field(&c, log, FEMU_C0H_READ_RECLAIMS),
+                   femu_c0h_field(&c, log, FEMU_C0H_RETENTION),
+                   femu_c0h_field(&c, log, FEMU_C0H_PD_RECLAIMS));
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[5], >, moves);
+    if (!g_str_equal(mode, "publish")) {
+        g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, gc);
+    }
+    g_assert_cmpuint(femu_c0h_field(&c, log,
+                                    g_str_equal(mode, "reads") ||
+                                    g_str_equal(mode, "publish") ?
+                                    FEMU_C0H_READ_RECLAIMS :
+                                    g_str_equal(mode, "age") ?
+                                    FEMU_C0H_RETENTION :
+                                    FEMU_C0H_PD_RECLAIMS), ==, 1);
+
+out:
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Static wear levelling moves a cold, full TP line through the TP pointer.
+ * A line is 4 pages on one die. Writes of pages 512, 1024, 1536, 0 and 513
+ * leave TPs 1, 2, 3 and 0 on flash, each in its only copy: the first TP
+ * line is full. The CMT then holds TP 1, and random writes inside TP 1
+ * (pages 512 to 1023) program no TP and wear the data lines. Wear
+ * levelling then moves the TP line, the coldest full line: TPs move and
+ * collection has no reason to (a full line is no victim).
+ */
+void femu_test_dftl_wl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = "/machine/peripheral/tp";
+    static const uint32_t first[] = { 512, 1024, 1536, 0, 513 };
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t v[7];
+    uint32_t seed = 9;
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3e, 4096);
+    for (i = 0; i < ARRAY_SIZE(first); i++) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, first[i], 1, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    femu_tp_check(qts, id, v);
+    g_assert_cmpuint(v[3], ==, 4);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 280), ==, 4);
+    for (i = 0; i < 20000 && !v[5]; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 512 + (seed >> 8) % 512,
+                                                 1, buf, list)), ==,
+                        NVME_SUCCESS);
+        if (i % 500 == 499) {
+            femu_tp_check(qts, id, v);
+        }
+    }
+    femu_tp_check(qts, id, v);
+    g_test_message("wl: %" PRIu64 " lines moved, %" PRIu64 " TPs moved "
+                   "after %u writes", femu_c0h_field(&c, log,
+                                                     FEMU_C0H_WL_LINES),
+                   v[5], i);
+    g_assert_cmpuint(v[1] + v[2] + v[4], ==, 0);
+    g_assert_cmpuint(v[3], ==, 4);
+    g_assert_cmpuint(v[5], ==, 4);
+    g_assert_cmpuint(femu_c0h_field(&c, log, FEMU_C0H_WL_LINES), >=, 1);
+    /* the free count must match the free list, after the move and later */
+    femu_query_check_lines(qts, id, v[0]);
+    for (i = 0; i < 2000; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 512 + (seed >> 8) % 512,
+                                                 1, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_tp_check(qts, id, v);
+    femu_query_check_lines(qts, id, v[0]);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* the fields of x-tier-check, in order */
+enum {
+    TIER_LINES, TIER_LINE_PGS, TIER_FREE, TIER_CLOSED, TIER_OPEN, TIER_VALID,
+    TIER_HOST_PSLC, TIER_HOST_DENSE, TIER_FOLD_PAGES, TIER_FOLDS,
+    TIER_ERASES, TIER_BAD_RANGE, TIER_BAD_QUEUE, TIER_BAD_COUNT,
+    TIER_BAD_MAP, TIER_BAD_RESERVE, TIER_BAD_PLACE, TIER_STALE,
+    TIER_DAMAGE, TIER_FOLD_NS, TIER_FOLD_PROG_NS, TIER_FOLD_ERASE_NS,
+    TIER_BUSY, TIER_DYN, TIER_ALLOWED, TIER_BAD_LIVE, TIER_BAD_DYN,
+    TIER_CAP_FAIL, TIER_RULE_B, TIER_RULE_C, TIER_IDLE_STEPS,
+    TIER_IDLE_FOLDS, TIER_IDLE_PAGES, TIER_IDLE_EARLY, TIER_FOLD_OPEN,
+    TIER_UPKEEP_STEPS, TIER_BG_DEFERS, TIER_FOLD_HELD, TIER_SEALS,
+    TIER_SEAL_SHORT, TIER_FOLD_SUSP, TIER_SEAL_WAITS,
+    TIER_FIELDS,
+};
+
+/*
+ * x-tier-check of device gc-test into @v, with every tier rule and the
+ * mapping rules of x-ftl-check holding, @lines static pool lines of
+ * @line_pgs pages. Returns the mapped pages.
+ */
+static uint64_t femu_tier_check_geo(QTestState *qts, uint64_t *v,
+                                    uint64_t lines, uint64_t line_pgs)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-tier-check'}}");
+    g_auto(GStrv) f = NULL;
+    uint64_t mapped;
+    uint64_t lost;
+    uint64_t orphans;
+    int i;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-tier-check %s", qdict_get_str(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    qobject_unref(rsp);
+    g_assert_cmpuint(g_strv_length(f), ==, TIER_FIELDS);
+    for (i = 0; i < TIER_FIELDS; i++) {
+        v[i] = g_ascii_strtoull(f[i], NULL, 10);
+    }
+    for (i = TIER_BAD_RANGE; i <= TIER_STALE; i++) {
+        g_assert_cmpuint(v[i], ==, 0);
+    }
+    for (i = TIER_BAD_LIVE; i <= TIER_CAP_FAIL; i++) {
+        g_assert_cmpuint(v[i], ==, 0);
+    }
+    /* an idle step never starts before the work of the last one ended */
+    g_assert_cmpuint(v[TIER_IDLE_EARLY], ==, 0);
+    /* a fold never reads a page whose multi-plane program is still held */
+    g_assert_cmpuint(v[TIER_FOLD_HELD], ==, 0);
+    /* pe_suspend: each seal covers its work, and no fold read suspends */
+    g_assert_cmpuint(v[TIER_SEAL_SHORT], ==, 0);
+    g_assert_cmpuint(v[TIER_FOLD_SUSP], ==, 0);
+    g_assert_cmpuint(v[TIER_LINES], ==, lines);
+    g_assert_cmpuint(v[TIER_LINE_PGS], ==, line_pgs);
+    g_assert_cmpuint(v[TIER_FREE] + v[TIER_CLOSED] + v[TIER_OPEN], ==,
+                     lines + v[TIER_DYN]);
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+    return mapped;
+}
+
+static uint64_t femu_tier_check_lines(QTestState *qts, uint64_t *v,
+                                      uint64_t lines)
+{
+    return femu_tier_check_geo(qts, v, lines, 64);
+}
+
+/* femu_tier_check_lines() for the 4-line static pool of the S1 tests */
+static uint64_t femu_tier_check(QTestState *qts, uint64_t *v)
+{
+    return femu_tier_check_lines(qts, v, 4);
+}
+
+/*
+ * Wait until no free pool line still erases, so the next host page finds
+ * the pool by state and not by host timing. Returns the mapped pages.
+ */
+static uint64_t femu_tier_settle(QTestState *qts, uint64_t *v)
+{
+    uint64_t mapped = femu_tier_check(qts, v);
+
+    for (int i = 0; v[TIER_BUSY] && i < 500; i++) {
+        g_usleep(10000);
+        mapped = femu_tier_check(qts, v);
+    }
+    g_assert_cmpuint(v[TIER_BUSY], ==, 0);
+    return mapped;
+}
+
+/* write pages @first to @first + @n - 1, at most @step to a command */
+static void femu_tier_write(FemuCtrlState *c, uint64_t first, uint32_t n,
+                            uint32_t step, uint64_t buf, uint64_t list)
+{
+    for (uint32_t i = 0; i < n; i += step) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, first + i,
+                                                 MIN(step, n - i), buf,
+                                                 list)), ==, NVME_SUCCESS);
+    }
+}
+
+/*
+ * The pSLC tier with mapping=dftl and a 2-entry mapping cache, so writes
+ * spread over the device evict dirty translation pages to flash. The
+ * translation pages count apart from host pages: the live count matches
+ * the mapping table (x-tier-check), the translation pages are right
+ * (x-ftl-check), and folds keep both right.
+ *
+ * @data NULL: a static pool and 600 random writes, which fold.
+ * @data set: a dynamic pool with tier_shrink_pct=99 and 1408 sequential
+ * pages. The dense room for host pages is (23 - borrowed) lines of 192
+ * pages: 32 lines less 4 static, 2 forced-GC, 2 translation-page lines and
+ * the frontier. The pool grows until Rule B gives lines back; the mapped
+ * pages must fit that room, computed here and not by the device.
+ */
+void femu_test_tier_dftl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    uint64_t tv[7];
+    uint64_t mapped;
+    uint32_t seed = 7;
+    QDict *rsp;
+    QDict *ns;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x74, 8 * 4096);
+    if (data) {
+        femu_tier_write(&c, 0, 1408, 8, buf, list);
+    } else {
+        for (int i = 0; i < 600; i++) {
+            seed = seed * 1103515245 + 12345;
+            femu_tier_write(&c, (seed >> 8) % 4096, 1, 1, buf, list);
+        }
+    }
+    mapped = femu_tier_check(qts, v);
+    g_assert_cmpuint(v[TIER_FOLDS], >=, 1);
+    if (data) {
+        g_assert_cmpuint(mapped, ==, 1408);
+        g_assert_cmpuint(v[TIER_RULE_B], >, 0);
+        g_assert_cmpuint(mapped, <=, (23 - v[TIER_DYN]) * 192);
+    }
+    femu_tp_check(qts, "/machine/peripheral/gc-test", tv);
+    g_assert_cmpuint(tv[1] + tv[2] + tv[4], ==, 0);
+    ns = femu_query_ns(qts, "", &rsp);
+    g_assert_cmpint(qdict_get_int(qdict_get_qdict(ns, "counters"),
+                                  "map-write-pages"), >, 0);
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Idle folds with mapping=dftl (tier_idle_ms=2000, eager, a 2-entry
+ * mapping cache). 220 random writes close three pool lines. Right after
+ * the last write no fold has run, so every fold below runs with no host
+ * request after it. The folds move mappings of translation pages that are
+ * not cached, so those go pending. The idle steps write them out, so none
+ * waits at the end and the translation pages are right.
+ */
+void femu_test_tier_dftl_idle(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    uint64_t tv[7];
+    uint32_t seed = 11;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x75, 4096);
+    for (i = 0; i < 220; i++) {
+        seed = seed * 1103515245 + 12345;
+        femu_tier_write(&c, (seed >> 8) % 4096, 1, 1, buf, list);
+    }
+    femu_tier_check(qts, v);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    for (i = 0; i < 1000; i++) {
+        femu_tier_check(qts, v);
+        femu_tp_check(qts, "/machine/peripheral/gc-test", tv);
+        if (v[TIER_CLOSED] == 0 && !v[TIER_FOLD_OPEN] && tv[6] == 0) {
+            break;
+        }
+        g_usleep(10000);
+    }
+    g_test_message("idle folds %" PRIu64 ", pending TPs %" PRIu64,
+                   v[TIER_IDLE_FOLDS], tv[6]);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], >=, 3);
+    g_assert_cmpuint(tv[6], ==, 0);
+    g_assert_cmpuint(tv[1] + tv[2] + tv[4], ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The pSLC tier with mp_program on 2 planes (TLC blocks of 96 pages, so a
+ * pool line holds 4 LUNs x 2 planes x 32 = 256 pages, and tier_static_mb=1
+ * is that one line). Three-page commands fill the line, and the command
+ * that crosses its end holds programs in the per-LUN batches when the
+ * next page folds the line (through). The fold charges them first, so it
+ * never reads a page that is not programmed yet.
+ */
+void femu_test_tier_mp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 3 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x73, 3 * 4096);
+    femu_tier_write(&c, 0, 255, 3, buf, list);
+    femu_tier_check_geo(qts, v, 1, 256);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 255);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    femu_tier_write(&c, 255, 9, 3, buf, list);
+    g_assert_cmpuint(femu_tier_check_geo(qts, v, 1, 256), ==, 264);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 256);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 264);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The pSLC tier behind a write buffer (64 pages, write-back at 57). 32
+ * buffered pages reach no media and no pool page. A Flush places all 32 in
+ * the pool, none dense.
+ */
+void femu_test_tier_buffer_flush(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x71, 4096);
+    femu_tier_write(&c, 0, 32, 8, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 0);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 0);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 0);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 32);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 32);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 32);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 32);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * tier_full_policy=through with the idle write-back (low mark 0). Eight
+ * rounds of 32 pages and a Flush fill the 256-page pool. 16 more pages
+ * wait in DRAM: the idle write-back finds that the next page needs a fold,
+ * so it stops and the pool owes upkeep. Upkeep folds a line one bounded
+ * step at a time, with idle folds off, and the write-back then places all
+ * 16 pages in the pool.
+ */
+void femu_test_tier_buffer_upkeep(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x72, 4096);
+    for (i = 0; i < 8; i++) {
+        femu_tier_write(&c, i * 32, 32, 8, buf, list);
+        g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    }
+    femu_tier_check(qts, v);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 256);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 4);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    /* a full through pool folds only once a write-back asks for room */
+    g_usleep(50000);
+    femu_tier_check(qts, v);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_UPKEEP_STEPS], ==, 0);
+    femu_tier_write(&c, 256, 16, 8, buf, list);
+    for (i = 0; i < 500; i++) {
+        femu_tier_check(qts, v);
+        if (v[TIER_HOST_PSLC] == 272) {
+            break;
+        }
+        g_usleep(10000);
+    }
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 272);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 272);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    g_assert_cmpint(femu_nand_pages(qts), ==, 272);
+    /* one fold of a full line: 16 steps of one page on each of 4 LUNs */
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 64);
+    g_assert_cmpuint(v[TIER_UPKEEP_STEPS], ==, 16);
+    g_assert_cmpuint(v[TIER_BG_DEFERS], >=, 1);
+    g_assert_cmpuint(v[TIER_VALID], ==, 208);
+    g_assert_cmpuint(v[TIER_IDLE_STEPS], ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * tier_full_policy=direct. Writes fill the pool, the page after the last
+ * pool page goes dense, and the end of that request folds the oldest pool
+ * line. A trim and an overwrite of the next victim leave the fold less to
+ * move, and every fold moves each valid page once.
+ */
+void femu_test_tier_direct(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t v[TIER_FIELDS];
+    uint64_t nsze;
+    uint32_t lba_size;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    /* the pool comes out of the over-provisioning, not the namespace */
+    femu_identify_ns(&c, &nsze, &lba_size);
+    g_assert_cmpuint(nsze * lba_size, ==, 16ULL << 20);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 0);
+    g_assert_cmpuint(v[TIER_FREE], ==, 4);
+    g_assert_cmpuint(v[TIER_VALID], ==, 0);
+
+    /* 240 pages: three full pool lines and part of the fourth */
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 240);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+
+    /* 16 pages fill the pool, 16 go dense, then line 1 folds */
+    femu_tier_write(&c, 240, 32, 32, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 272);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 256);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 16);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 64);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 4);
+    g_assert_cmpuint(v[TIER_VALID], ==, 192);
+    g_assert_cmpuint(v[TIER_FREE], ==, 1);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    /* fold pages are the relocations; host programs do not count them */
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 64);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 24), ==, 272);
+
+    /*
+     * Trim half of line 2 and overwrite 8 more of its pages. The overwrite
+     * waits for the erase of line 1: until it ends, direct writes go dense.
+     */
+    g_assert_cmphex(femu_dealloc_pages(&c, 64, 32, list), ==, NVME_SUCCESS);
+    femu_tier_settle(qts, v);
+    femu_tier_write(&c, 96, 8, 8, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_VALID], ==, 160);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+
+    /* filling the open line folds line 2: only its 24 live pages move */
+    femu_tier_write(&c, 300, 56, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 296);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 2);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 88);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 8);
+    g_assert_cmpuint(v[TIER_VALID], ==, 192);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 320);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 16);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 16), ==, 88);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * tier_full_policy=through, with tier_pslc_read_ns=5 ms. Line 1 keeps one live
+ * page, on channel 1, LUN 1. The next write finds no pool page and folds
+ * line 1 first: a pSLC read on that die, then a TLC lower page program on
+ * channel 0, LUN 0, which may start only when the read data is ready, then
+ * the erase of the pool blocks after the program. So the fold takes at
+ * least 5 + 0.8205 + 3.5 ms. A program that does not wait for its read
+ * ends sooner. An erase that does not wait for the program starts before
+ * the program ends on the idle dies. Only LUN 0/0 waits for the program.
+ */
+void femu_test_tier_through(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    int64_t t0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2d, 4096);
+
+    /* the whole pool; the through policy never folds at request end */
+    femu_tier_write(&c, 0, 256, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 256);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 4);
+    g_assert_cmpuint(v[TIER_FREE], ==, 0);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+
+    /* line 1 keeps page 3 only: the fourth die of the line */
+    g_assert_cmphex(femu_dealloc_pages(&c, 0, 3, list), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_dealloc_pages(&c, 4, 60, list), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 193);
+    g_assert_cmpuint(v[TIER_VALID], ==, 193);
+
+    t0 = g_get_monotonic_time();
+    femu_tier_write(&c, 400, 1, 1, buf, list);
+    g_test_message("write through a fold: %" PRId64 " us",
+                   g_get_monotonic_time() - t0);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 9000);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 194);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 1);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 4);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 257);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 1);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_VALID], ==, 193);
+    g_assert_cmpuint(v[TIER_FOLD_NS], >=, 5000000 + 820500 + 3500000);
+    g_assert_cmpuint(v[TIER_FOLD_PROG_NS], >=, 5000000 + 820500);
+    g_assert_cmpuint(v[TIER_FOLD_ERASE_NS], >=, v[TIER_FOLD_PROG_NS]);
+    g_assert_cmpuint(v[TIER_FOLD_NS], >=, v[TIER_FOLD_ERASE_NS] + 3500000);
+    /* one pSLC erase of 30000 rated (30 x TLC) is 33 millionths */
+    g_assert_cmpuint(v[TIER_DAMAGE], ==, 33);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * One doorbell ring on @q: a write of @wpages pages (1 or 2) from page
+ * @wpage, then a read of page @rpage. Returns the identifier of the write;
+ * the read has the next one. @cid gets the two in the order they
+ * completed, and @read_us how long the read took.
+ */
+static uint16_t femu_tier_write_read(FemuCtrlState *c, FemuQueue *q,
+                                     uint64_t buf, uint64_t wpage,
+                                     uint32_t wpages, uint64_t rpage,
+                                     uint16_t cid[2], int64_t *read_us)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeRwCmd rw;
+    uint16_t first = c->cid;
+    int64_t t0;
+    int i;
+
+    g_assert_cmpuint(wpages, >=, 1);
+    g_assert_cmpuint(wpages, <=, 2);
+    memset(&rw, 0, sizeof(rw));
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    /* every page of the write comes from the one buffer page */
+    rw.dptr.prp2 = cpu_to_le64(wpages == 2 ? buf : 0);
+    rw.nlb = cpu_to_le16(wpages * (FEMU_DATA_SIZE / c->lba_size) - 1);
+    femu_pe_suspend_rw(c, q, &rw, false, NVME_CMD_WRITE, wpage);
+    rw.dptr.prp2 = 0;
+    rw.nlb = cpu_to_le16(FEMU_DATA_SIZE / c->lba_size - 1);
+    femu_pe_suspend_rw(c, q, &rw, false, NVME_CMD_READ, rpage);
+    t0 = g_get_monotonic_time();
+    femu_zap_ring(c, q);
+    for (i = 0; i < 2; i++) {
+        uint64_t slot = q->cq_addr + q->cq_head * sizeof(NvmeCqe);
+        NvmeCqe cqe;
+
+        g_assert_cmpint(femu_zap_complete(c, q, NULL), ==, NVME_SUCCESS);
+        qtest_memread(qts, slot, &cqe, sizeof(cqe));
+        cid[i] = le16_to_cpu(cqe.cid);
+        if (cid[i] == (uint16_t)(first + 1)) {
+            *read_us = g_get_monotonic_time() - t0;
+        }
+    }
+    return first;
+}
+
+/* the tries of tier-suspend-host, each on a new page of the die of page 0 */
+#define TIER_SUSP_TRIES 3
+
+/*
+ * The pSLC tier with pe_suspend: a host program to the pool is suspended
+ * as any program is. A pSLC program takes 200 ms and a pSLC read 25 us.
+ * Pages 0 to 3 go to the four dies, one each. Page 4 then programs on the
+ * die of page 0. A read of page 0 in the same doorbell ring suspends that
+ * program and completes first. No fold ran, so the tier sealed nothing
+ * and no read waited for a seal.
+ *
+ * The poller stamps the two commands one after the other. A host that
+ * stalls it for 200 ms between them makes the read arrive after the
+ * program, and then the write completes first. So a try that ends in
+ * that order runs again, on the next page of that die. A device that
+ * does not suspend fails every try.
+ */
+void femu_test_tier_suspend_host(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    uint64_t pages = 4;
+    int64_t read_us = 0;
+    uint16_t cid[2];
+    uint16_t first;
+    bool read_first = false;
+    int tries;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_zap_create_queue(&c, &q, 2);
+    qtest_memset(qts, buf, 0x5a, 4096);
+    femu_tier_write(&c, 0, 4, 1, buf, list);
+
+    for (tries = 0; tries < TIER_SUSP_TRIES && !read_first; tries++) {
+        /* three more pages bring the pool pointer back to the die */
+        if (tries) {
+            femu_tier_write(&c, pages, 3, 1, buf, list);
+            pages += 3;
+        }
+        first = femu_tier_write_read(&c, &q, buf, pages++, 1, 0, cid,
+                                     &read_us);
+        g_test_message("tier host suspend: cid %u completed before cid %u, "
+                       "read %" PRId64 " us", cid[0], cid[1], read_us);
+        read_first = cid[0] == (uint16_t)(first + 1) && cid[1] == first;
+    }
+    g_assert_true(read_first);
+
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, pages);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, pages);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_SEALS], ==, 0);
+    g_assert_cmpuint(v[TIER_SEAL_WAITS], ==, 0);
+
+    femu_queue_free(&c, &q);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A fold with pe_suspend: no read moves its work. tier_full_policy=through
+ * with a 20 ms pSLC program and a 2 s pSLC erase. The pool holds 255
+ * pages, and line 1 keeps pages 0 to 3, one on each die. One doorbell ring
+ * sends a write of pages 400 and 401, then a read of page 0. Page 400
+ * takes the last pool page, on ch1 lun1. Page 401 finds the pool full and
+ * folds line 1, while the program of page 400 runs.
+ *
+ *   fold order  source     destination
+ *   page 0      ch0 lun0   ch0 lun0
+ *   page 2      ch0 lun1   ch1 lun0
+ *   page 1      ch1 lun0   ch0 lun1   the source runs the copy of page 2
+ *   page 3      ch1 lun1   ch1 lun1   the source runs the program of 400
+ *   then the erase of line 1 on the four LUNs, 2 s
+ *
+ * The fold seals 4 source LUNs, 4 destination LUNs and 4 erases. Its read
+ * of page 3 meets a host program that no earlier seal holds. The seal
+ * before the read makes it wait. Without that seal the read suspends the
+ * program, which x-tier-check counts and femu_tier_check() holds at 0.
+ *
+ * The host read of page 0 arrives while the erase runs on its die. The
+ * erase is sealed, so the read waits for it and takes the erase time at
+ * least. A read that suspended the erase would take under 1 ms. Three
+ * reads wait for a seal: the fold reads of pages 1 and 3, and the host
+ * read. That count is model time, so a slow host does not change it.
+ */
+void femu_test_tier_suspend_fold(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    int64_t read_us = 0;
+    uint16_t cid[2];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_zap_create_queue(&c, &q, 2);
+    qtest_memset(qts, buf, 0x4e, 4096);
+
+    /* all but one pool page; the through policy never folds at request end */
+    femu_tier_write(&c, 0, 255, 16, buf, list);
+    g_assert_cmphex(femu_dealloc_pages(&c, 4, 60, list), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 195);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_SEALS], ==, 0);
+    g_assert_cmpuint(v[TIER_SEAL_WAITS], ==, 0);
+
+    femu_tier_write_read(&c, &q, buf, 400, 2, 0, cid, &read_us);
+    g_test_message("tier fold suspend: cid %u completed before cid %u, "
+                   "read %" PRId64 " us", cid[0], cid[1], read_us);
+    g_assert_cmpint(read_us * 1000, >=, TIER_SUSP_ERASE_NS);
+
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 197);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 4);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 4);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 257);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    /* 4 source LUNs, 4 destination LUNs and 4 erases */
+    g_assert_cmpuint(v[TIER_SEALS], ==, 12);
+    /* the fold reads of pages 1 and 3, and the host read of page 0 */
+    g_assert_cmpuint(v[TIER_SEAL_WAITS], ==, 3);
+
+    femu_queue_free(&c, &q);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * tier_full_policy=direct, with a 2 s pSLC erase. The write that fills the
+ * pool folds line 0 at its end, and the erase of line 0 then runs for 2 s.
+ * The next host page finds only that line free, so it goes dense. Once the
+ * erase ends, the pool takes host pages again. The erase runs on the host
+ * clock, so a host that stalls for half the erase time skips the test.
+ */
+void femu_test_tier_busy(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    int64_t t0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+
+    /*
+     * The erase starts after t0, so it ends after t0 + TIER_BUSY_ERASE_NS.
+     * Page 256 must reach the FTL before then. Its dense program waits for
+     * the erase on its die, so take the time before its submission, and
+     * keep half the erase as margin for the FTL poller.
+     */
+    t0 = g_get_monotonic_time();
+    femu_tier_write(&c, 0, 256, 16, buf, list);
+    if ((g_get_monotonic_time() - t0) * 1000 >= TIER_BUSY_ERASE_NS / 2) {
+        g_test_skip("host too slow: the erase may end before page 256");
+        goto out;
+    }
+    femu_tier_write(&c, 256, 1, 1, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 257);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 256);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 1);
+    g_assert_cmpuint(v[TIER_FREE], ==, 1);
+
+    femu_tier_settle(qts, v);
+    femu_tier_write(&c, 257, 1, 1, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 258);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 257);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 1);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 1);
+    g_assert_cmpuint(v[TIER_FREE], ==, 0);
+
+out:
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * tier_mode=dynamic with no static floor. The pool borrows free dense
+ * lines: 512 host pages fill 8 borrowed lines and none goes dense. A trim
+ * leaves the lines in the pool, and their fold later moves nothing.
+ */
+void femu_test_tier_dyn_borrow(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 0);
+    g_assert_cmpuint(v[TIER_DYN], ==, 0);
+    g_assert_cmpuint(v[TIER_ALLOWED], ==, 32);
+
+    femu_tier_write(&c, 0, 512, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 512);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 512);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    g_assert_cmpuint(v[TIER_DYN], ==, 8);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 8);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 512);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+
+    g_assert_cmphex(femu_dealloc_pages(&c, 0, 512, list), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 0);
+    g_assert_cmpuint(v[TIER_DYN], ==, 8);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * tier_max_mb=1 caps the borrowed part at 4 lines. The request that fills
+ * the fourth line folds the oldest, which goes back to the dense free list.
+ * The next request borrows a line again, so with the cap no page goes
+ * dense: each 64 pages fill a line and fold one.
+ */
+void femu_test_tier_dyn_cap(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_check_lines(qts, v, 0);
+    g_assert_cmpuint(v[TIER_ALLOWED], ==, 4);
+
+    femu_tier_write(&c, 0, 256, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 256);
+    g_assert_cmpuint(v[TIER_DYN], ==, 3);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 64);
+    g_assert_cmpuint(v[TIER_VALID], ==, 192);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+
+    femu_tier_write(&c, 256, 256, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 512);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 512);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 5);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 320);
+    g_assert_cmpuint(v[TIER_DYN], ==, 3);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 192);
+    g_assert_cmpuint(v[TIER_RULE_C], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * tier_shrink_pct=10: past 10% fill the allowance falls, and after each
+ * request the pool holds no more closed borrowed lines than it allows. A
+ * trim back to an empty device lets it borrow again.
+ */
+void femu_test_tier_dyn_shrink(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+    uint64_t most = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    for (uint64_t lpn = 0; lpn < 3072; lpn += 256) {
+        femu_tier_write(&c, lpn, 256, 16, buf, list);
+        g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, lpn + 256);
+        /* only the open borrowed line may be over the allowance */
+        g_assert_cmpuint(v[TIER_DYN], <=, v[TIER_ALLOWED] + v[TIER_OPEN]);
+        most = MAX(most, v[TIER_DYN]);
+    }
+    /* at 75% fill: 32 x 1024 / 3687 lines */
+    g_assert_cmpuint(v[TIER_ALLOWED], ==, 8);
+    g_assert_cmpuint(v[TIER_RULE_C], >, 0);
+    g_assert_cmpuint(most, >, v[TIER_DYN]);
+
+    g_assert_cmphex(femu_dealloc_pages(&c, 0, 3072, list), ==, NVME_SUCCESS);
+    femu_tier_check_lines(qts, v, 0);
+    g_assert_cmpuint(v[TIER_ALLOWED], ==, 32);
+    most = v[TIER_DYN];
+    femu_tier_write(&c, 0, 512, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 512);
+    g_assert_cmpuint(v[TIER_DYN], >, most);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * A static floor of 4 lines with borrowed lines on top, and a shrink point
+ * of 99%. Folds give static lines back, and their host pages add valid
+ * pages that no borrow check saw. Rule B then folds a borrowed line first,
+ * so at each check the dense lines still hold every mapped page.
+ */
+void femu_test_tier_dyn_floor(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    for (int pass = 0; pass < 2; pass++) {
+        for (uint64_t lpn = 0; lpn < 4096; lpn += 512) {
+            femu_tier_write(&c, lpn, 512, 32, buf, list);
+            femu_tier_check_lines(qts, v, 4);
+        }
+    }
+    g_assert_cmpuint(v[TIER_RULE_B], >, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * tier_full_policy=through over a static floor of 4 lines with borrowed
+ * lines on top. Requests of 31 pages do not line up with the 64-page pool
+ * lines. A fold of a borrowed line frees no pool line, so the write folds
+ * again until a static line is free: no host page goes dense.
+ */
+void femu_test_tier_dyn_through(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    for (uint64_t lpn = 0; lpn < 4096; lpn += 512) {
+        femu_tier_write(&c, lpn, 512, 31, buf, list);
+        femu_tier_check_lines(qts, v, 4);
+        g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+    }
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 4096);
+    g_assert_cmpuint(v[TIER_FOLDS], >, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/*
+ * A full device: every exported page written twice, then Format, then new
+ * writes. No host page lacks a place, the dense lines always hold every
+ * valid page, and the dense valid count follows each step.
+ */
+void femu_test_tier_dyn_full(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    for (int pass = 0; pass < 2; pass++) {
+        femu_tier_write(&c, 0, 4096, 32, buf, list);
+        g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 4096);
+        /* a full device allows no borrowed line; only an open one stays */
+        g_assert_cmpuint(v[TIER_ALLOWED], ==, 0);
+        g_assert_cmpuint(v[TIER_DYN], <=, v[TIER_OPEN]);
+    }
+    g_assert_cmpuint(v[TIER_FOLDS], >, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 0);
+    g_assert_cmpuint(v[TIER_ALLOWED], ==, 32);
+
+    femu_tier_write(&c, 0, 256, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 256);
+    g_assert_cmpuint(v[TIER_HOST_DENSE] + v[TIER_HOST_PSLC], >=, 256);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+}
+
+/* stop the next fold of device gc-test after @pages moved pages */
+static void femu_tier_fold_stop(QTestState *qts, uint32_t pages)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-tier-fold-stop','value':%u}}",
+                           pages);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* the stop is spent: a fold reached it */
+static void femu_tier_fold_stopped(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-tier-fold-stop'}}");
+
+    g_assert_cmpint(qdict_get_int(rsp, "return"), ==, 0);
+    qobject_unref(rsp);
+}
+
+/*
+ * A fold that stops part way, as if the dense lines had no page left. The
+ * line stays closed with the pages moved so far, and every rule holds. The
+ * next fold takes the same line and moves only the rest, so no page moves
+ * twice and the line erases once.
+ */
+void femu_test_tier_fold_stop(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+
+    /* the pool fills, 16 pages go dense, and the fold of line 1 stops */
+    femu_tier_fold_stop(qts, 20);
+    femu_tier_write(&c, 240, 32, 32, buf, list);
+    femu_tier_fold_stopped(qts);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 272);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 20);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 236);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 4);
+    g_assert_cmpuint(v[TIER_FREE], ==, 0);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 16);
+
+    /* the pool has no page, so 16 more go dense; then the fold ends */
+    femu_tier_write(&c, 400, 16, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 288);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 64);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 4);
+    g_assert_cmpuint(v[TIER_VALID], ==, 192);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_FREE], ==, 1);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 32);
+    g_assert_cmpuint(femu_c0h_field(&c, log, FEMU_C0H_GC), ==, 64);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The same stop in a dynamic pool capped at 4 borrowed lines. The stopped
+ * line stays borrowed, so the pool can borrow no line and a write goes
+ * dense. The fold then ends and gives the line back, and the pool borrows
+ * again.
+ */
+void femu_test_tier_dyn_fold_stop(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 192, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 192);
+    g_assert_cmpuint(v[TIER_DYN], ==, 3);
+    g_assert_cmpuint(v[TIER_ALLOWED], ==, 4);
+
+    femu_tier_fold_stop(qts, 10);
+    femu_tier_write(&c, 192, 64, 16, buf, list);
+    femu_tier_fold_stopped(qts);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 256);
+    g_assert_cmpuint(v[TIER_DYN], ==, 4);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 4);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 10);
+    g_assert_cmpuint(v[TIER_VALID], ==, 246);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+
+    femu_tier_write(&c, 256, 16, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 272);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 16);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 1);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 64);
+    g_assert_cmpuint(v[TIER_DYN], ==, 3);
+    g_assert_cmpuint(v[TIER_VALID], ==, 192);
+
+    femu_tier_write(&c, 272, 64, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 336);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 320);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 16);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 2);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 128);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Poll x-tier-check until field @f reads @want, for up to 5 s, so a slow
+ * host only waits longer. Returns the mapped pages.
+ */
+static uint64_t femu_tier_wait(QTestState *qts, uint64_t *v, uint64_t lines,
+                               int f, uint64_t want)
+{
+    uint64_t mapped = femu_tier_check_lines(qts, v, lines);
+
+    for (int i = 0; v[f] != want && i < 500; i++) {
+        g_usleep(10000);
+        mapped = femu_tier_check_lines(qts, v, lines);
+    }
+    g_assert_cmpuint(v[f], ==, want);
+    return mapped;
+}
+
+/*
+ * tier_idle_ms=20, eager. Three closed lines fold in the idle time, one
+ * step of 4 pages at a time, so each line takes 16 steps. The next burst
+ * finds the pool lines free and no page goes dense.
+ */
+void femu_test_tier_idle_eager(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    g_assert_cmpuint(femu_tier_wait(qts, v, 4, TIER_CLOSED, 0), ==, 240);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 3);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 3);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 192);
+    g_assert_cmpuint(v[TIER_IDLE_PAGES], ==, 192);
+    g_assert_cmpuint(v[TIER_IDLE_STEPS], ==, 48);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 12);
+    g_assert_cmpuint(v[TIER_VALID], ==, 48);
+    g_assert_cmpuint(v[TIER_FREE], ==, 3);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 1);
+
+    /* the open line and the three folded lines take the whole burst */
+    femu_tier_settle(qts, v);
+    femu_tier_write(&c, 400, 192, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 432);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 432);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * tier_idle_ms=1000: the idle time counts from the end of the last host
+ * request, so no step runs right after the writes. The folds come later.
+ */
+void femu_test_tier_idle_wait(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_IDLE_STEPS], ==, 0);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    femu_tier_wait(qts, v, 4, TIER_CLOSED, 0);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 3);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* the same writes with tier_idle_ms=0: nothing folds in the idle time */
+void femu_test_tier_idle_off(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    g_usleep(200000);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_ERASES], ==, 0);
+    g_assert_cmpuint(v[TIER_IDLE_STEPS], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * tier_lazy_pct=50 on 4 static lines: idle folds stop once the closed and
+ * open lines are at most 2. Of three closed lines, two fold.
+ */
+void femu_test_tier_idle_lazy(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    femu_tier_wait(qts, v, 4, TIER_IDLE_FOLDS, 2);
+    g_usleep(200000);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 2);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 2);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 1);
+    g_assert_cmpuint(v[TIER_OPEN], ==, 1);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A dynamic pool with no floor: idle folds give all 8 borrowed lines back
+ * to the dense free list, and the next burst borrows again.
+ */
+void femu_test_tier_idle_dyn(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 512, 16, buf, list);
+    g_assert_cmpuint(femu_tier_wait(qts, v, 0, TIER_DYN, 0), ==, 512);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 0);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 8);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 8);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 512);
+    g_assert_cmpuint(v[TIER_VALID], ==, 0);
+
+    femu_tier_write(&c, 512, 64, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 576);
+    g_assert_cmpuint(v[TIER_HOST_PSLC], ==, 576);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * pSLC reads of 5 ms: a step ends at least 5 ms after it starts, and the
+ * next one waits for it. x-tier-check counts a step that started early,
+ * and femu_tier_check() wants none. Two lines take 32 steps.
+ */
+void femu_test_tier_idle_steps(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 128, 16, buf, list);
+    g_assert_cmpuint(femu_tier_wait(qts, v, 4, TIER_CLOSED, 0), ==, 128);
+    g_assert_cmpuint(v[TIER_IDLE_STEPS], ==, 32);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 2);
+    g_assert_cmpuint(v[TIER_IDLE_EARLY], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Host writes and a trim while an idle fold is part way through line 1,
+ * with pSLC reads of 20 ms.
+ * The writes fill the pool, so the end of a request folds in the
+ * foreground: it takes line 1 first. No page moves twice, and every rule
+ * holds.
+ */
+void femu_test_tier_idle_write(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    /* a line takes at least 16 steps of 20 ms, so this sees it part way */
+    femu_tier_wait(qts, v, 4, TIER_FOLD_OPEN, 1);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 0);
+
+    femu_tier_write(&c, 0, 16, 16, buf, list);
+    g_assert_cmphex(femu_dealloc_pages(&c, 64, 32, list), ==, NVME_SUCCESS);
+    femu_tier_write(&c, 300, 40, 8, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 248);
+
+    g_assert_cmpuint(femu_tier_wait(qts, v, 4, TIER_CLOSED, 0), ==, 248);
+    /* each pool page was programmed once, so it moves at most once */
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], <=, v[TIER_HOST_PSLC]);
+    /* the full pool made a request fold in the foreground */
+    g_assert_cmpuint(v[TIER_FOLDS], >, v[TIER_IDLE_FOLDS]);
+    g_assert_cmpuint(v[TIER_IDLE_PAGES], <=, v[TIER_FOLD_PAGES]);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A Format while an idle fold is part way through a line. The Format waits
+ * for the step, unmaps every page, and the idle folds then erase the lines
+ * with nothing to move.
+ */
+void femu_test_tier_idle_format(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    /* a line takes at least 16 steps of 20 ms, so this sees it part way */
+    femu_tier_wait(qts, v, 4, TIER_FOLD_OPEN, 1);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 0);
+
+    g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 0);
+    /* Format unmaps; the pool lines and the stopped fold stay */
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    femu_tier_wait(qts, v, 4, TIER_CLOSED, 0);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 3);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A Sanitize block erase while an idle fold is part way through a line. It
+ * takes the same pause as Format: it waits for the step and unmaps every
+ * page, and the idle folds then erase the lines with nothing to move.
+ */
+void femu_test_tier_idle_sanitize(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    /* a line takes at least 16 steps of 20 ms, so this sees it part way */
+    femu_tier_wait(qts, v, 4, TIER_FOLD_OPEN, 1);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 0);
+
+    g_assert_cmpint(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 0);
+    g_assert_cmpuint(v[TIER_VALID], ==, 0);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    femu_tier_wait(qts, v, 4, TIER_CLOSED, 0);
+    g_assert_cmpuint(v[TIER_FOLDS], ==, 3);
+
+    /* the pool takes the next burst again */
+    femu_tier_write(&c, 0, 64, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 64);
+    g_assert_cmpuint(v[TIER_HOST_DENSE], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A controller reset while an idle fold is part way through a line. The
+ * reset waits for the step. After the reset, the stopped fold continues on
+ * the same line: every page moves once and no data is lost.
+ */
+void femu_test_tier_idle_reset(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[TIER_FIELDS];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 240, 16, buf, list);
+    /* a line takes at least 16 steps of 20 ms, so this sees it part way */
+    femu_tier_wait(qts, v, 4, TIER_FOLD_OPEN, 1);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 0);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_assert_cmpuint(femu_tier_check(qts, v), ==, 240);
+    g_assert_cmpuint(v[TIER_FOLD_OPEN], ==, 1);
+
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpuint(femu_tier_wait(qts, v, 4, TIER_CLOSED, 0), ==, 240);
+    g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 3);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], ==, 192);
+    g_assert_cmpuint(v[TIER_FOLD_OPEN], ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * A dynamic pool under dense GC, once for each gc_policy. The device fills
+ * to 75%, then random overwrites leave the dense lines fragmented. GC and
+ * the shrink folds run in the same writes, and every rule holds after
+ * each 250 commands.
+ */
+void femu_test_tier_dyn_gc(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t v[TIER_FIELDS];
+    uint32_t seed = 0x74696572;
+
+    g_test_message("gc_policy %s", (const char *)data);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 4096);
+
+    femu_tier_write(&c, 0, 3072, 16, buf, list);
+    g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 3072);
+    for (int i = 1; i <= 1000; i++) {
+        seed = seed * 1103515245 + 12345;
+        femu_tier_write(&c, ((seed >> 8) % 768) * 4, 4, 4, buf, list);
+        if (i % 250 == 0) {
+            g_assert_cmpuint(femu_tier_check_lines(qts, v, 0), ==, 3072);
+            g_assert_cmpuint(v[TIER_DYN], <=,
+                             v[TIER_ALLOWED] + v[TIER_OPEN]);
+        }
+    }
+    g_assert_cmpuint(v[TIER_FOLDS], >, 0);
+    /* dense GC moved pages too, not only the folds */
+    g_assert_cmpuint(femu_c0h_field(&c, log, FEMU_C0H_GC), >,
+                     v[TIER_FOLD_PAGES]);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* most femu results one device gives in a test: controller + namespaces */
+#define FEMU_QSTATS_MAX     8
+
+/*
+ * query-stats, provider femu, on @target. @names is a JSON list for the
+ * names filter, or NULL for every stat. *rsp holds the "return" list.
+ */
+static QList *femu_qstats(QTestState *qts, const char *target,
+                          const char *names, QDict **rsp)
+{
+    g_autofree char *json = g_strdup_printf(
+        "{'target':'%s','providers':[{'provider':'femu'%s%s}]}", target,
+        names ? ",'names':" : "", names ? names : "");
+    QObject *obj = qobject_from_json(json, &error_abort);
+    QList *ret;
+
+    *rsp = qtest_qmp(qts, "{'execute':'query-stats','arguments':%p}", obj);
+    ret = qdict_get_qlist(*rsp, "return");
+    g_assert_nonnull(ret);
+    return ret;
+}
+
+/* the value of stat @name in the stats list @stats, or NULL */
+static QObject *femu_qstat_obj(QList *stats, const char *name)
+{
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(stats, e) {
+        QDict *st = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (!strcmp(qdict_get_str(st, "name"), name)) {
+            return qdict_get(st, "value");
+        }
+    }
+    return NULL;
+}
+
+static bool femu_qstat(QList *stats, const char *name, uint64_t *v)
+{
+    QObject *o = femu_qstat_obj(stats, name);
+
+    if (!o) {
+        return false;
+    }
+    *v = qnum_get_uint(qobject_to(QNum, o));
+    return true;
+}
+
+/* the femu results of device @path, in reply order, into @out */
+static int femu_qstats_results(QList *results, const char *path, QList **out,
+                               int max)
+{
+    QListEntry *e;
+    int n = 0;
+
+    QLIST_FOREACH_ENTRY(results, e) {
+        QDict *r = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (strcmp(qdict_get_str(r, "provider"), "femu") ||
+            strcmp(qdict_get_str(r, "qom-path"), path)) {
+            continue;
+        }
+        g_assert_cmpint(n, <, max);
+        out[n++] = qdict_get_qlist(r, "stats");
+    }
+    return n;
+}
+
+/* the stats of the one result of device @path whose nsid is @nsid */
+static QList *femu_qstats_of(QList *results, const char *path, uint64_t nsid)
+{
+    QList *all[FEMU_QSTATS_MAX];
+    QList *found = NULL;
+    int n = femu_qstats_results(results, path, all, FEMU_QSTATS_MAX);
+    uint64_t id;
+
+    for (int i = 0; i < n; i++) {
+        if (femu_qstat(all[i], "nsid", &id) && id == nsid) {
+            g_assert_null(found);
+            found = all[i];
+        }
+    }
+    g_assert_nonnull(found);
+    return found;
+}
+
+/* the stats of the result of @path for @nsid, or NULL when there is none */
+static QList *femu_qstats_find(QList *results, const char *path,
+                               uint64_t nsid)
+{
+    QList *all[FEMU_QSTATS_MAX];
+    int n = femu_qstats_results(results, path, all, FEMU_QSTATS_MAX);
+    uint64_t id;
+
+    for (int i = 0; i < n; i++) {
+        if (femu_qstat(all[i], "nsid", &id) && id == nsid) {
+            return all[i];
+        }
+    }
+    return NULL;
+}
+
+/* how long a test waits for the FTL thread to publish, in microseconds */
+#define FEMU_QSTATS_WAIT_US     (10 * G_USEC_PER_SEC)
+
+/*
+ * Wait until query-stats shows what query-femu shows for @nsid: the FTL's
+ * host pages, or the namespace's own host pages when the result names
+ * another namespace in ftl-nsid. query-femu runs on the FTL thread after
+ * every request sent, so its values are final. query-stats reads the
+ * copy that the FTL thread publishes on its next quiet pass.
+ */
+static void femu_qstats_settle(QTestState *qts, const char *path,
+                               uint32_t nsid)
+{
+    g_autofree char *args = g_strdup_printf("'path':'%s','nsid':%u", path,
+                                            nsid);
+    gint64 end = g_get_monotonic_time() + FEMU_QSTATS_WAIT_US;
+    QDict *qrsp;
+    QDict *ns = femu_query_ns(qts, args, &qrsp);
+    QDict *nc = qdict_get_qdict(ns, "namespace-counters");
+    uint64_t host = qdict_get_uint(qdict_get_qdict(ns, "counters"),
+                                   "host-write-pages");
+    uint64_t ns_host = nc ? qdict_get_uint(nc, "host-write-pages") : 0;
+
+    qobject_unref(qrsp);
+    for (;;) {
+        QDict *rsp;
+        QList *stats = femu_qstats_find(femu_qstats(qts, "femu", NULL, &rsp),
+                                        path, nsid);
+        uint64_t v;
+        bool done = stats != NULL;
+
+        if (done && femu_qstat(stats, "host-write-pages", &v)) {
+            done = v == host;
+        }
+        if (done && nc) {
+            done = femu_qstat(stats, "ns-host-write-pages", &v) &&
+                   v == ns_host;
+        }
+        qobject_unref(rsp);
+        if (done) {
+            return;
+        }
+        g_assert_cmpint(g_get_monotonic_time(), <, end);
+        g_usleep(5 * 1000);
+    }
+}
+
+/* wait until the controller result of @path has @name equal to @want */
+static void femu_qstats_wait_ctrl(QTestState *qts, const char *path,
+                                  const char *name, uint64_t want)
+{
+    gint64 end = g_get_monotonic_time() + FEMU_QSTATS_WAIT_US;
+    uint64_t v = 0;
+    bool has = false;
+
+    for (;;) {
+        QDict *rsp;
+        QList *stats = femu_qstats_find(femu_qstats(qts, "femu", NULL, &rsp),
+                                        path, 0);
+
+        has = stats && femu_qstat(stats, name, &v);
+        qobject_unref(rsp);
+        if (has && v == want) {
+            return;
+        }
+        if (g_get_monotonic_time() > end) {
+            g_test_message("%s: want %" PRIu64 ", have %s %" PRIu64, name,
+                           want, has ? "value" : "no value", v);
+            g_assert_not_reached();
+        }
+        g_usleep(5 * 1000);
+    }
+}
+
+/* @key of @d, or 0 when @d does not hold it */
+static uint64_t femu_qdict_uint0(QDict *d, const char *key)
+{
+    return d && qdict_haskey(d, key) ? qdict_get_uint(d, key) : 0;
+}
+
+/*
+ * The namespace result @stats must hold what query-femu reports for
+ * @nsid: page size and namespace counters always; the FTL counters and
+ * line counts unless the result names another namespace in ftl-nsid
+ * (@ftl_nsid, 0 for none). Each is present exactly when query-femu has
+ * it. waf is 1000 times the WAF.
+ */
+static void femu_qstats_match_query(QTestState *qts, QList *stats,
+                                    const char *path, uint32_t nsid,
+                                    uint32_t ftl_nsid)
+{
+    static const char *const ctr_keys[] = {
+        "host-write-pages", "nand-write-pages", "gc-write-pages",
+        "block-erases", "pad-write-pages", "map-write-pages",
+        "map-read-pages", "parity-write-pages", "degraded-reads",
+        "lost-pages", "lost-blocks", "idle-reclaims", "idle-refreshes",
+    };
+    static const char *const line_keys[] = {
+        "free", "victim", "full", "retired", "spare", "total",
+    };
+    static const char *const ns_keys[] = {
+        "host-write-pages", "nand-write-pages", "gc-write-pages",
+    };
+    g_autofree char *args = g_strdup_printf("'path':'%s','nsid':%u", path,
+                                            nsid);
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, args, &rsp);
+    QDict *ctr = qdict_get_qdict(ns, "counters");
+    QDict *lc = qdict_get_qdict(ns, "line-counts");
+    QDict *nc = qdict_get_qdict(ns, "namespace-counters");
+    uint64_t host = qdict_get_uint(ctr, "host-write-pages");
+    uint64_t v;
+
+    /* 0 for a namespace from the command line; Namespace Management adds */
+    g_assert_true(femu_qstat(stats, "generation", &v));
+    g_assert_true(femu_qstat(stats, "page-size", &v));
+    g_assert_cmpuint(v, ==, qdict_get_uint(qdict_get_qdict(ns, "geometry"),
+                                           "page-size"));
+    for (int i = 0; i < ARRAY_SIZE(ns_keys); i++) {
+        g_autofree char *name = g_strdup_printf("ns-%s", ns_keys[i]);
+        bool has = femu_qstat(stats, name, &v);
+
+        g_assert_cmpint(has, ==, nc != NULL);
+        if (has) {
+            g_assert_cmpuint(v, ==, qdict_get_uint(nc, ns_keys[i]));
+        }
+    }
+    g_assert_cmpint(femu_qstat(stats, "ns-waf", &v), ==,
+                    nc && qdict_haskey(nc, "waf"));
+    if (nc && qdict_haskey(nc, "waf")) {
+        g_assert_cmpuint(v, ==, (qdict_get_uint(nc, "nand-write-pages") +
+                                 qdict_get_uint(nc, "gc-write-pages")) *
+                                1000 / qdict_get_uint(nc, "host-write-pages"));
+    }
+    g_assert_cmpint(femu_qstat(stats, "ftl-nsid", &v), ==, ftl_nsid != 0);
+    if (ftl_nsid) {
+        g_assert_cmpuint(v, ==, ftl_nsid);
+        g_assert_null(femu_qstat_obj(stats, "host-write-pages"));
+        g_assert_null(femu_qstat_obj(stats, "free-lines"));
+        qobject_unref(rsp);
+        return;
+    }
+    for (int i = 0; i < ARRAY_SIZE(ctr_keys); i++) {
+        bool has = femu_qstat(stats, ctr_keys[i], &v);
+
+        g_test_message("nsid %u %s: query-stats %s %" PRIu64, nsid,
+                       ctr_keys[i], has ? "has" : "lacks", has ? v : 0);
+        g_assert_cmpint(has, ==, qdict_haskey(ctr, ctr_keys[i]));
+        if (has) {
+            g_assert_cmpuint(v, ==, qdict_get_uint(ctr, ctr_keys[i]));
+        }
+    }
+    g_assert_cmpint(femu_qstat(stats, "waf", &v), ==,
+                    qdict_haskey(ctr, "waf"));
+    if (host) {
+        uint64_t want = (qdict_get_uint(ctr, "nand-write-pages") +
+                         qdict_get_uint(ctr, "gc-write-pages") +
+                         femu_qdict_uint0(ctr, "map-write-pages") +
+                         femu_qdict_uint0(ctr, "pad-write-pages") +
+                         femu_qdict_uint0(ctr, "parity-write-pages")) *
+                        1000 / host;
+
+        g_assert_cmpuint(v, ==, want);
+    }
+    for (int i = 0; i < ARRAY_SIZE(line_keys); i++) {
+        g_autofree char *name = g_strdup_printf("%s-lines", line_keys[i]);
+        bool has = femu_qstat(stats, name, &v);
+
+        g_assert_cmpint(has, ==, lc != NULL);
+        if (has) {
+            g_assert_cmpuint(v, ==, qdict_get_uint(lc, line_keys[i]));
+        }
+    }
+    qobject_unref(rsp);
+}
+
+/* one entry of the femu schema */
+static QDict *femu_qstats_schema_entry(QList *stats, const char *name)
+{
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(stats, e) {
+        QDict *v = qobject_to(QDict, qlist_entry_obj(e));
+
+        if (!strcmp(qdict_get_str(v, "name"), name)) {
+            return v;
+        }
+    }
+    g_assert_not_reached();
+}
+
+static void femu_qstats_check_entry(QList *stats, const char *name,
+                                    const char *type, const char *unit,
+                                    int exponent)
+{
+    QDict *v = femu_qstats_schema_entry(stats, name);
+
+    g_assert_cmpstr(qdict_get_str(v, "type"), ==, type);
+    if (unit) {
+        g_assert_cmpstr(qdict_get_try_str(v, "unit"), ==, unit);
+    } else {
+        g_assert_false(qdict_haskey(v, "unit"));
+    }
+    g_assert_cmpint(qdict_get_int(v, "exponent"), ==, exponent);
+    if (exponent) {
+        g_assert_cmpint(qdict_get_int(v, "base"), ==, 10);
+    } else {
+        g_assert_false(qdict_haskey(v, "base"));
+    }
+}
+
+/*
+ * query-stats-schemas, provider femu: one schema for target femu, each
+ * name once, with the types, units and scales of the reference page.
+ * @order gets the schema position of each name, for the order check.
+ */
+static void femu_qstats_check_schema(QTestState *qts, GHashTable *order)
+{
+    static const char *const stages[] = {
+        "submit", "ftl", "hold", "post-delay", "total", "past-due",
+    };
+    QDict *rsp = qtest_qmp(qts, "{'execute':'query-stats-schemas',"
+                           "'arguments':{'provider':'femu'}}");
+    QList *ret = qdict_get_qlist(rsp, "return");
+    QDict *sch;
+    QList *stats;
+    QListEntry *e;
+    guint pos = 0;
+
+    g_assert_nonnull(ret);
+    g_assert_cmpuint(qlist_size(ret), ==, 1);
+    sch = qobject_to(QDict, qlist_peek(ret));
+    g_assert_cmpstr(qdict_get_str(sch, "provider"), ==, "femu");
+    g_assert_cmpstr(qdict_get_str(sch, "target"), ==, "femu");
+    stats = qdict_get_qlist(sch, "stats");
+    QLIST_FOREACH_ENTRY(stats, e) {
+        const char *name = qdict_get_str(qobject_to(QDict, qlist_entry_obj(e)),
+                                         "name");
+
+        g_assert_true(g_hash_table_insert(order, g_strdup(name),
+                                          GUINT_TO_POINTER(++pos)));
+    }
+    /* nsid, 4 host, 6 stages of 4, returned-after-due, 27 namespace */
+    g_assert_cmpuint(qlist_size(stats), ==, 57);
+    femu_qstats_check_entry(stats, "nsid", "instant", NULL, 0);
+    femu_qstats_check_entry(stats, "generation", "instant", NULL, 0);
+    femu_qstats_check_entry(stats, "host-write-bytes", "cumulative", "bytes",
+                            0);
+    femu_qstats_check_entry(stats, "host-write-pages", "cumulative", NULL, 0);
+    femu_qstats_check_entry(stats, "waf", "instant", NULL, -3);
+    femu_qstats_check_entry(stats, "ns-waf", "instant", NULL, -3);
+    femu_qstats_check_entry(stats, "free-lines", "instant", NULL, 0);
+    for (int i = 0; i < ARRAY_SIZE(stages); i++) {
+        g_autofree char *cmds = g_strdup_printf("%s-commands", stages[i]);
+        g_autofree char *time = g_strdup_printf("%s-time", stages[i]);
+        g_autofree char *sum = g_strdup_printf("%s-time-sum", stages[i]);
+        g_autofree char *max = g_strdup_printf("%s-time-max", stages[i]);
+
+        femu_qstats_check_entry(stats, cmds, "cumulative", NULL, 0);
+        femu_qstats_check_entry(stats, time, "log2-histogram", "seconds", -9);
+        femu_qstats_check_entry(stats, sum, "cumulative", "seconds", -9);
+        femu_qstats_check_entry(stats, max, "peak", "seconds", -9);
+    }
+    femu_qstats_check_entry(stats, "returned-after-due", "cumulative", NULL,
+                            0);
+    femu_qstats_check_entry(stats, "page-size", "instant", "bytes", 0);
+    qobject_unref(rsp);
+}
+
+/* every result lists its stats in schema order, each name once */
+static void femu_qstats_check_order(QList *results, GHashTable *order)
+{
+    QListEntry *e;
+    QListEntry *f;
+
+    QLIST_FOREACH_ENTRY(results, e) {
+        QDict *r = qobject_to(QDict, qlist_entry_obj(e));
+        guint last = 0;
+
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(r, "stats"), f) {
+            const char *name = qdict_get_str(
+                qobject_to(QDict, qlist_entry_obj(f)), "name");
+            guint pos = GPOINTER_TO_UINT(g_hash_table_lookup(order, name));
+
+            g_assert_cmpuint(pos, >, last);
+            last = pos;
+        }
+    }
+}
+
+/* the controller result: every stage equals query-femu-stages */
+static void femu_qstats_match_stages(QTestState *qts, QList *stats)
+{
+    const char *names[] = { "submit", "ftl", "hold", "post-delay", "total",
+                            "past-due" };
+    QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+    QDict *ret = qdict_get_qdict(rsp, "return");
+    uint64_t v;
+
+    g_assert_nonnull(ret);
+    for (int i = 0; i < ARRAY_SIZE(names); i++) {
+        QDict *st = femu_stage(ret, names[i]);
+        g_autofree char *cmds = g_strdup_printf("%s-commands", names[i]);
+        g_autofree char *time = g_strdup_printf("%s-time", names[i]);
+        g_autofree char *sum = g_strdup_printf("%s-time-sum", names[i]);
+        g_autofree char *max = g_strdup_printf("%s-time-max", names[i]);
+        QList *buckets = qobject_to(QList, femu_qstat_obj(stats, time));
+        QListEntry *e;
+        int b = 0;
+
+        g_assert_true(femu_qstat(stats, cmds, &v));
+        g_assert_cmpuint(v, ==, qdict_get_uint(st, "count"));
+        g_assert_true(femu_qstat(stats, sum, &v));
+        g_assert_cmpuint(v, ==, qdict_get_uint(st, "sum-ns"));
+        g_assert_true(femu_qstat(stats, max, &v));
+        g_assert_cmpuint(v, ==, qdict_get_uint(st, "max-ns"));
+        g_assert_nonnull(buckets);
+        g_assert_cmpuint(qlist_size(buckets), ==, 40);
+        QLIST_FOREACH_ENTRY(buckets, e) {
+            g_assert_cmpuint(qnum_get_uint(qobject_to(QNum,
+                                                      qlist_entry_obj(e))),
+                             ==, femu_stage_bucket(st, b));
+            b++;
+        }
+    }
+    g_assert_true(femu_qstat(stats, "returned-after-due", &v));
+    g_assert_cmpuint(v, ==, qdict_get_uint(ret, "returned-after-due"));
+    qobject_unref(rsp);
+}
+
+/* the 40 total-time buckets differ from their reverse */
+static void femu_qstats_check_asymmetric(QList *stats)
+{
+    QList *buckets = qobject_to(QList, femu_qstat_obj(stats, "total-time"));
+    uint64_t b[40];
+    QListEntry *e;
+    bool differ = false;
+    int i = 0;
+
+    g_assert_nonnull(buckets);
+    QLIST_FOREACH_ENTRY(buckets, e) {
+        g_assert_cmpint(i, <, 40);
+        b[i++] = qnum_get_uint(qobject_to(QNum, qlist_entry_obj(e)));
+    }
+    g_assert_cmpint(i, ==, 40);
+    for (i = 0; i < 40; i++) {
+        differ |= b[i] != b[39 - i];
+    }
+    g_assert_true(differ);
+}
+
+/*
+ * query-stats on a bbssd device of 19 lines of 16 pages, io_stages=on.
+ * Before the first enable, the namespace reports its empty FTL. After
+ * writes that make GC run and 8 reads, the namespace result equals
+ * query-femu, the controller result counts the commands sent and equals
+ * query-femu-stages, and the stages keep their lifetime values across
+ * reset=true. The names filter applies to every stat, other targets give
+ * no femu result, and HMP prints the device and every name.
+ */
+void femu_test_query_stats(void *obj, void *data,
+                           QGuestAllocator *alloc)
+{
+    const char *path = "/machine/peripheral/qs";
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    g_autoptr(GHashTable) order = g_hash_table_new_full(g_str_hash,
+                                                        g_str_equal, g_free,
+                                                        NULL);
+    QList *res[FEMU_QSTATS_MAX];
+    uint64_t wr_cmds = 0;
+    uint64_t wr_pages = 0;
+    uint64_t total_before;
+    uint64_t sum_before;
+    uint64_t max_before;
+    uint32_t seed = 7;
+    g_autofree char *hmp = NULL;
+    QList *results;
+    QList *stats;
+    QDict *rsp;
+    uint64_t v;
+    int i;
+
+    femu_qstats_check_schema(qts, order);
+
+    /* realize published the empty FTL */
+    results = femu_qstats(qts, "femu", NULL, &rsp);
+    g_assert_cmpint(femu_qstats_results(results, path, res, FEMU_QSTATS_MAX),
+                    ==, 2);
+    stats = femu_qstats_of(results, path, 1);
+    g_assert_true(femu_qstat(stats, "host-write-pages", &v));
+    g_assert_cmpuint(v, ==, 0);
+    g_assert_true(femu_qstat(stats, "total-lines", &v));
+    g_assert_cmpuint(v, ==, 19);
+    g_assert_false(femu_qstat(stats, "waf", &v));
+    qobject_unref(rsp);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, 4096);
+    /* before GC: NAND pages but no GC pages */
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 64, buf, list)), ==,
+                    NVME_SUCCESS);
+    wr_cmds++;
+    wr_pages += 64;
+    femu_qstats_settle(qts, path, 1);
+    results = femu_qstats(qts, "femu", NULL, &rsp);
+    stats = femu_qstats_of(results, path, 1);
+    g_assert_true(femu_qstat(stats, "nand-write-pages", &v));
+    g_assert_cmpuint(v, ==, 64);
+    g_assert_true(femu_qstat(stats, "gc-write-pages", &v));
+    g_assert_cmpuint(v, ==, 0);
+    qobject_unref(rsp);
+
+    for (i = 64; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+        wr_cmds++;
+        wr_pages += 64;
+    }
+    for (i = 0; i < 600; i++) {
+        uint32_t npages = i % 4 == 3 ? 64 : 1;
+        uint64_t page;
+
+        seed = seed * 1103515245 + 12345;
+        page = (seed >> 8) % (pages - npages + 1);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, page, npages, buf, list)),
+                        ==, NVME_SUCCESS);
+        wr_cmds++;
+        wr_pages += npages;
+    }
+    for (i = 0; i < 8; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ,
+                                        i * (4096 / c.lba_size), buf)), ==,
+                        NVME_SUCCESS);
+    }
+    /* the FTL thread publishes on its first quiet pass */
+    femu_qstats_settle(qts, path, 1);
+    /* a poller adds the stages of a command after its completion entry */
+    femu_qstats_wait_ctrl(qts, path, "total-commands", wr_cmds + 8);
+
+    results = femu_qstats(qts, "femu", NULL, &rsp);
+    g_assert_cmpint(femu_qstats_results(results, path, res, FEMU_QSTATS_MAX),
+                    ==, 2);
+    g_assert_true(femu_qstat(res[0], "nsid", &v));
+    g_assert_cmpuint(v, ==, 0);
+    g_assert_true(femu_qstat(res[1], "nsid", &v));
+    g_assert_cmpuint(v, ==, 1);
+    femu_qstats_check_order(results, order);
+
+    stats = femu_qstats_of(results, path, 1);
+    g_assert_true(femu_qstat(stats, "gc-write-pages", &v));
+    g_assert_cmpuint(v, >, 0);
+    g_assert_true(femu_qstat(stats, "block-erases", &v));
+    g_assert_cmpuint(v, >, 0);
+    femu_qstats_match_query(qts, stats, path, 1, 0);
+
+    stats = femu_qstats_of(results, path, 0);
+    g_assert_true(femu_qstat(stats, "host-write-commands", &v));
+    g_assert_cmpuint(v, ==, wr_cmds);
+    g_assert_true(femu_qstat(stats, "host-write-bytes", &v));
+    g_assert_cmpuint(v, ==, wr_pages * 4096);
+    g_assert_true(femu_qstat(stats, "host-read-commands", &v));
+    g_assert_cmpuint(v, ==, 8);
+    g_assert_true(femu_qstat(stats, "host-read-bytes", &v));
+    g_assert_cmpuint(v, ==, 8 * 4096);
+    g_assert_true(femu_qstat(stats, "total-commands", &v));
+    g_assert_cmpuint(v, ==, wr_cmds + 8);
+    total_before = v;
+    g_assert_true(femu_qstat(stats, "total-time-sum", &sum_before));
+    g_assert_true(femu_qstat(stats, "total-time-max", &max_before));
+    femu_qstats_check_asymmetric(stats);
+    femu_qstats_match_stages(qts, stats);
+    qobject_unref(rsp);
+
+    /* reset=true restarts query-femu-stages, not the lifetime values */
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                    "'arguments':{'reset':true}}");
+    qobject_unref(rsp);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_qstats_wait_ctrl(qts, path, "total-commands", total_before + 1);
+    results = femu_qstats(qts, "femu",
+                          "['total-commands','total-time-sum',"
+                          "'total-time-max']", &rsp);
+    g_assert_cmpint(femu_qstats_results(results, path, res, FEMU_QSTATS_MAX),
+                    ==, 1);
+    g_assert_cmpuint(qlist_size(res[0]), ==, 3);
+    g_assert_true(femu_qstat(res[0], "total-commands", &v));
+    g_assert_cmpuint(v, ==, total_before + 1);
+    g_assert_true(femu_qstat(res[0], "total-time-sum", &v));
+    g_assert_cmpuint(v, >, sum_before);
+    g_assert_true(femu_qstat(res[0], "total-time-max", &v));
+    g_assert_cmpuint(v, >=, max_before);
+    qobject_unref(rsp);
+
+    /* the names filter applies to nsid too */
+    results = femu_qstats(qts, "femu", "['waf']", &rsp);
+    g_assert_cmpint(femu_qstats_results(results, path, res, FEMU_QSTATS_MAX),
+                    ==, 1);
+    g_assert_cmpuint(qlist_size(res[0]), ==, 1);
+    g_assert_nonnull(femu_qstat_obj(res[0], "waf"));
+    qobject_unref(rsp);
+    results = femu_qstats(qts, "femu", "['waf','nsid']", &rsp);
+    g_assert_cmpint(femu_qstats_results(results, path, res, FEMU_QSTATS_MAX),
+                    ==, 2);
+    g_assert_cmpuint(qlist_size(res[0]), ==, 1);
+    g_assert_cmpuint(qlist_size(res[1]), ==, 2);
+    femu_qstats_check_order(results, order);
+    qobject_unref(rsp);
+    results = femu_qstats(qts, "femu", "['nsid']", &rsp);
+    g_assert_cmpint(femu_qstats_results(results, path, res, FEMU_QSTATS_MAX),
+                    ==, 2);
+    qobject_unref(rsp);
+    results = femu_qstats(qts, "femu", "['no-such-stat']", &rsp);
+    g_assert_cmpint(femu_qstats_results(results, path, res, FEMU_QSTATS_MAX),
+                    ==, 0);
+    qobject_unref(rsp);
+
+    results = femu_qstats(qts, "vm", NULL, &rsp);
+    g_assert_cmpint(femu_qstats_results(results, path, res, FEMU_QSTATS_MAX),
+                    ==, 0);
+    qobject_unref(rsp);
+    results = femu_qstats(qts, "vcpu", NULL, &rsp);
+    g_assert_cmpint(femu_qstats_results(results, path, res, FEMU_QSTATS_MAX),
+                    ==, 0);
+    qobject_unref(rsp);
+
+    hmp = qtest_hmp(qts, "info stats femu * femu");
+    g_test_message("%s", hmp);
+    g_assert_null(strstr(hmp, "failed to find"));
+    g_assert_nonnull(strstr(hmp, "/machine/peripheral/qs\r\n"));
+    g_assert_nonnull(strstr(hmp, "host-write-bytes (cumulative, B): "));
+    g_assert_nonnull(strstr(hmp, "waf (instant, * 10^-3): "));
+    g_assert_nonnull(strstr(hmp, "total-time (log2-histogram, ns): "));
+    g_assert_nonnull(strstr(hmp, "free-lines (instant): "));
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A poller stops inside the stage update of one read, for 2 s
+ * (x-stage-hold-ms). The poller posts the completion entry first, then
+ * updates the stages, so the hold begins soon after the entry; the test
+ * waits 100 ms more. A
+ * query-stats call during the hold must not wait for the poller under the
+ * BQL: it returns without the stage stats, and with the rest. A filter
+ * with no stage stat leaves the stage sets alone. After the hold, the
+ * stage stats come back with the read in them.
+ */
+void femu_test_query_stats_stage_hold(void *obj, void *data,
+                                      QGuestAllocator *alloc)
+{
+    const char *path = "/machine/peripheral/stage-test";
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    QList *res[FEMU_QSTATS_MAX];
+    QList *results;
+    QList *stats;
+    NvmeRwCmd rw;
+    QDict *rsp;
+    gint64 t0;
+    gint64 took;
+    uint64_t v;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    femu_stage_hold(qts, 2000);
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(4096 / c.lba_size - 1);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    g_usleep(100 * 1000);
+
+    t0 = g_get_monotonic_time();
+    results = femu_qstats(qts, "femu", NULL, &rsp);
+    took = g_get_monotonic_time() - t0;
+    g_test_message("query-stats during the hold took %" PRId64 " us", took);
+    /* a wait for the poller would take the rest of the 2 s hold */
+    g_assert_cmpint(took, <, 1000 * 1000);
+    stats = femu_qstats_of(results, path, 0);
+    g_assert_true(femu_qstat(stats, "host-read-commands", &v));
+    g_assert_cmpuint(v, ==, 1);
+    g_assert_null(femu_qstat_obj(stats, "total-time"));
+    g_assert_null(femu_qstat_obj(stats, "total-commands"));
+    femu_qstats_of(results, path, 1);
+    qobject_unref(rsp);
+
+    results = femu_qstats(qts, "femu", "['nsid','host-read-commands']", &rsp);
+    g_assert_cmpint(femu_qstats_results(results, path, res, FEMU_QSTATS_MAX),
+                    ==, 2);
+    g_assert_cmpuint(qlist_size(femu_qstats_of(results, path, 0)), ==, 2);
+    qobject_unref(rsp);
+
+    /* the read in progress keeps the hold it began with */
+    femu_stage_hold(qts, 0);
+    femu_qstats_wait_ctrl(qts, path, "total-commands", 1);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Two namespaces, each with its own FTL (@data NULL) or one shared FTL
+ * (@data "shared"). Namespace 1 gets 6 page writes and namespace 2 gets 2,
+ * so the two results differ. The device lists the controller, then
+ * namespace 1, then namespace 2, and each namespace result equals the
+ * query-femu reply for its own NSID. A shared FTL reports its counters
+ * once, in the result of namespace 1; namespace 2 names it in ftl-nsid.
+ */
+void femu_test_query_stats_two_ns(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    const char *path = "/machine/peripheral/qs2";
+    bool shared = data && g_str_equal(data, "shared");
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    QList *res[FEMU_QSTATS_MAX];
+    QList *results;
+    QDict *rsp;
+    uint64_t v;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (uint32_t p = 0; p < 6; p++) {
+        femu_power_write(&c, buf, 1, p * 8, 8, 0x21, false);
+    }
+    for (uint32_t p = 0; p < 2; p++) {
+        femu_power_write(&c, buf, 2, p * 8, 8, 0x22, false);
+    }
+    femu_qstats_settle(qts, path, 1);
+    femu_qstats_settle(qts, path, 2);
+
+    results = femu_qstats(qts, "femu", NULL, &rsp);
+    g_assert_cmpint(femu_qstats_results(results, path, res, FEMU_QSTATS_MAX),
+                    ==, 3);
+    for (int i = 0; i < 3; i++) {
+        g_assert_true(femu_qstat(res[i], "nsid", &v));
+        g_assert_cmpuint(v, ==, i);
+    }
+    for (uint32_t id = 1; id <= 2; id++) {
+        QList *stats = femu_qstats_of(results, path, id);
+        uint64_t mine = id == 1 ? 6 : 2;
+
+        femu_qstats_match_query(qts, stats, path, id,
+                                shared && id == 2 ? 1 : 0);
+        if (shared) {
+            g_assert_true(femu_qstat(stats, "ns-host-write-pages", &v));
+            g_assert_cmpuint(v, ==, mine);
+            if (id == 1) {
+                g_assert_true(femu_qstat(stats, "host-write-pages", &v));
+                g_assert_cmpuint(v, ==, 8);
+            }
+        } else {
+            g_assert_true(femu_qstat(stats, "host-write-pages", &v));
+            g_assert_cmpuint(v, ==, mine);
+        }
+    }
+    qobject_unref(rsp);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+#define FEMU_G1_EOL_QUEUES  32
+
+/*
+ * Read-only end of life with 32 queues of 2048 entries: 65536 requests,
+ * which realize refused while the rings held 65535. Number of Queues and
+ * MQES report the configuration, ONCS shows end-of-life admission (Write
+ * Zeroes bit clear, oncs=0x8 asks for it), and the last queue moves data.
+ */
+void femu_test_g1_eol_queues(void *obj, void *data,
+                             QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    uint64_t id = guest_alloc(alloc, FEMU_G1_PAGE);
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t nsze;
+    uint32_t result = 0;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, FEMU_FEAT_NUM_QUEUES, 0, 0,
+                                             0, &result)), ==, NVME_SUCCESS);
+    g_assert_cmphex(result, ==, (FEMU_G1_EOL_QUEUES - 1) |
+                    ((FEMU_G1_EOL_QUEUES - 1) << 16));
+    g_assert_cmpuint(qpci_io_readq(c.pdev, c.bar, 0x0) & 0xffff, ==, 2047);
+    g_assert_cmphex(femu_identify(&c, 0, NVME_ID_CNS_CTRL, 0, id), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readw(qts, id + 520) & 0x8, ==, 0);
+    femu_identify_ns(&c, &nsze, &c.lba_size);
+
+    femu_burst_queue(&c, &q, FEMU_G1_EOL_QUEUES);
+    qtest_memset(qts, buf, 0x6c, FEMU_DATA_SIZE);
+    cid = femu_g1_queue_submit(&c, &q, NVME_CMD_WRITE, 0, buf);
+    g_assert_cmphex(femu_g1_queue_reap(&c, &q, cid), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
+    cid = femu_g1_queue_submit(&c, &q, NVME_CMD_READ, 0, buf);
+    g_assert_cmphex(femu_g1_queue_reap(&c, &q, cid), ==, NVME_SUCCESS);
+    femu_g1_all(qts, buf, FEMU_DATA_SIZE, 0x6c);
+
+    femu_queue_free(&c, &q);
+    guest_free(alloc, buf);
+    guest_free(alloc, id);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+#define FEMU_G1_SMALL_RING   64      /* x-ring-slots: holds 63 requests */
+#define FEMU_G1_SMALL_Q      128     /* entries of the SQ and the CQ */
+#define FEMU_G1_SMALL_MORE   10      /* Reads sent while the ring is full */
+
+/* a uint32 test property of device @id */
+static int64_t femu_g1_qom_get(QTestState *qts, const char *id,
+                               const char *prop)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':%s}}", path, prop);
+    int64_t v;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * The ring from the FTL thread is full. x-ring-slots 64 makes each ring
+ * hold 63 requests, and x-cpl-hold 1 keeps them on the ring to the
+ * poller. 63 Reads fill it; 10 more wait in the ring to the FTL thread,
+ * which must take none of them (x-ftl-ring-full counts its passes). A
+ * pause then still returns, and x-cpl-count finds 63: a thread that took
+ * one more request and held it, or waited with it, fails here. After the
+ * release each of the 73 commands completes one time.
+ */
+void femu_test_g1_ring_full(void *obj, void *data,
+                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q = { .qid = 1, .phase = 1 };
+    const uint32_t full = FEMU_G1_SMALL_RING - 1;
+    const uint32_t count = full + FEMU_G1_SMALL_MORE;
+    uint64_t buf = guest_alloc(alloc, FEMU_G1_PAGE);
+    bool seen[FEMU_G1_SMALL_Q] = { false };
+    NvmeCqe cqe;
+    uint16_t first;
+    uint16_t cid;
+    uint32_t e;
+    int waited;
+
+    femu_cancel_hook(qts, "g1-small", "x-ring-slots", FEMU_G1_SMALL_RING);
+    femu_enable(&c, &femu->dev, alloc);
+    q.sq_addr = guest_alloc(alloc, FEMU_G1_SMALL_Q * sizeof(NvmeCmd));
+    q.cq_addr = guest_alloc(alloc, FEMU_G1_SMALL_Q * sizeof(NvmeCqe));
+    qtest_memset(qts, q.cq_addr, 0, FEMU_G1_SMALL_Q * sizeof(NvmeCqe));
+    g_assert_cmphex(femu_g1_create(&c, NVME_ADM_CMD_CREATE_CQ, 1, q.cq_addr,
+                                   FEMU_G1_SMALL_Q - 1, NVME_CQ_PC), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_g1_create(&c, NVME_ADM_CMD_CREATE_SQ, 1, q.sq_addr,
+                                   FEMU_G1_SMALL_Q - 1,
+                                   (1 << 16) | NVME_SQ_PC), ==,
+                    NVME_SUCCESS);
+
+    femu_cancel_hook(qts, "g1-small", "x-cpl-hold", 1);
+    first = c.cid;
+    femu_g1_sized_submit(&c, &q, buf, full, FEMU_G1_SMALL_Q);
+    femu_cancel_wait_cpl(qts, "g1-small", full);
+    g_assert_cmpint(femu_g1_qom_get(qts, "g1-small", "x-ftl-ring-full"),
+                    ==, 0);
+
+    femu_g1_sized_submit(&c, &q, buf, FEMU_G1_SMALL_MORE, FEMU_G1_SMALL_Q);
+    for (waited = 0;
+         !femu_g1_qom_get(qts, "g1-small", "x-ftl-ring-full"); waited++) {
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+    /* the pause returns, and no request moved past the full ring */
+    g_assert_cmpint(femu_g1_qom_get(qts, "g1-small", "x-cpl-count"), ==,
+                    full);
+    qtest_memread(qts, q.cq_addr, &cqe, sizeof(cqe));
+    g_assert_cmpuint(le16_to_cpu(cqe.status), ==, 0);
+
+    femu_cancel_hook(qts, "g1-small", "x-cpl-hold", 0);
+    for (e = 0; e < count; e++) {
+        femu_g1_cqe_wait(qts, &q, e, 1, &cqe);
+        g_assert_cmphex(le16_to_cpu(cqe.status) >> 1, ==, NVME_SUCCESS);
+        g_assert_cmpuint(le16_to_cpu(cqe.sq_id), ==, q.qid);
+        cid = le16_to_cpu(cqe.cid) - first;
+        g_assert_cmpuint(cid, <, count);
+        g_assert_false(seen[cid]);
+        seen[cid] = true;
+    }
+    qpci_io_writel(c.pdev, c.bar, femu_cq_doorbell(&c, q.qid), count);
+    g_usleep(10 * 1000);
+    qtest_memread(qts, q.cq_addr + count * sizeof(cqe), &cqe, sizeof(cqe));
+    g_assert_cmpuint(le16_to_cpu(cqe.status), ==, 0);
+
+    guest_free(alloc, q.cq_addr);
+    guest_free(alloc, q.sq_addr);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}

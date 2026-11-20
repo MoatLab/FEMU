@@ -363,7 +363,7 @@ A NoSSD namespace and a ZNS namespace of different sizes on one controller:
 
 ## Validation
 
-qtest cases in `hw/femu/tests/qtest/femu-test.c`:
+qtest cases in `hw/femu/tests/qtest/` (several files):
 
 - layout and modes: `namespace-capacity`, `namespace-identity`,
   `namespace-mixed-identity` and its `-bbssd` and `-kv` variants,
