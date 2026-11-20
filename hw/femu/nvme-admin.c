@@ -761,6 +761,9 @@ void nvme_start_dataplane(FemuCtrl *n)
         nvme_init_poller(n);
         n->poller_on = true;
     }
+    /* the FTL thread publishes the query-stats copies again */
+    qatomic_inc(&n->stats_epoch);
+    smp_mb();   /* the epoch lands before the flag */
     /* x-fuzz: no poller runs, so the I/O path stays stopped */
     if (!n->test_fuzz) {
         n->dataplane_started = true;

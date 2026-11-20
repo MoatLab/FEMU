@@ -9,7 +9,7 @@ mode changes, and files that FEMU removes.
  QEMU v11.1.3 tree
    + hw/femu/            FEMU devices, tests, docs, scripts (FEMU only)
    + roms/               firmware sources (kept as FEMU ships them)
-   + 25 QEMU files       content changes, listed below
+   + 28 QEMU files       content changes, listed below
 ```
 
 ## Files that FEMU changes

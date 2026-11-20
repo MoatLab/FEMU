@@ -211,7 +211,8 @@ check that the fuzzer finds the enable sequence.
 
 ```sh
 ./qemu-fuzz-x86_64 --fuzz-target=generic-fuzz-femu-control \
-    -dict=DIR/control.dict -max_total_time=600 -timeout=25 corpus
+    -use_value_profile=1 -dict=DIR/control.dict -max_total_time=1200 \
+    -timeout=25 corpus
 ```
 
 ## Documentation checks
