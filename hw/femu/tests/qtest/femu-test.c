@@ -42536,6 +42536,7 @@ static void femu_test_cxl_storm_unplug(void *obj, void *data,
         " -global cxl-rp.power_controller_present=on "
         "-global ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off");
     QDict *args = qdict_new();
+    QDict *rsp;
 
     femu_cxl_storm(qts, 8, 128, 20000, 0);
     qtest_readq(qts, FEMU_CXL_WINDOW);
@@ -42552,6 +42553,18 @@ static void femu_test_cxl_storm_unplug(void *obj, void *data,
     femu_cxl_config(qts, 52, femu_cxl_rp_exp_cap(qts) + PCI_EXP_SLTCTL,
                     PCI_EXP_SLTCTL_PWR_IND_ON);
     femu_cxl_decode(qts);
+    femu_cxl_storm_wait(qts, "ssd2");
+    /*
+     * The first storm can end before ssd2 decodes, so the faults left in
+     * flight may not reach it. A second storm must reach it.
+     */
+    g_test_message("in-flight faults that reached ssd2: %" PRIu64,
+                   femu_cxl_stat_of(qts, "ssd2", "der-fault-reads"));
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/ssd2',"
+                    "'property':'test-storm','value':'4,128,500,0,7'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
     femu_cxl_storm_wait(qts, "ssd2");
     g_assert_cmpuint(femu_cxl_stat_of(qts, "ssd2", "der-fault-reads"), >, 0);
     qtest_quit(qts);
