@@ -44,8 +44,8 @@ typedef struct NvmeBus {
 #define NVME_MAX_NAMESPACES  256
 
 /*
- * x-fuzz-control: Identify Controller with this CDW15 writes one byte past
- * a buffer of FEMU_FUZZ_CONTROL_LEN bytes, for the generic fuzzer control.
+ * x-fuzz-control: an admin command with this CDW15 writes one byte past a
+ * buffer of FEMU_FUZZ_CONTROL_LEN bytes, for the generic fuzzer control.
  */
 #define FEMU_FUZZ_CONTROL_KEY 0x3cc3a55a
 /* the key as CDW15 holds it in memory, little endian */

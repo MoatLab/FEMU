@@ -189,21 +189,25 @@ Some state stays across inputs, as on a real drive: the namespace
 format, firmware slots and logs. A crash that does not come back in
 step 1 needs an earlier input.
 
-The control target has `x-fuzz-control=on`. Identify Controller with
-CDW15 set to 0x3cc3a55a then writes one byte past a 16-byte buffer.
-`gen-generic-seeds.py --control DIR` writes a seed that hits it and a
-seed one dword away. A run from the second seed must find the crash in
-`nvme_identify`. The trigger seed alone checks reach and the sanitizer
-report. The run from the near seed checks that the fuzzer finds the key.
-The plant compares the key with a `memcmp()` call, so libFuzzer sees
-both operands. The near seed holds a CDW15 value that occurs once, so
-libFuzzer copies the key to the right bytes.
+The control target has `x-fuzz-control=on`. Each reset then enables the
+controller with an 8-entry admin queue pair. An admin command with CDW15
+set to 0x3cc3a55a then writes one byte past a 16-byte buffer. The write
+is in `nvme_fuzz_control`. `gen-generic-seeds.py --control DIR` writes two
+seeds of 88 bytes: one Identify command and its doorbell write. The
+trigger seed holds the key, and the near seed holds another CDW15.
 
-Compare tracing alone did not find the crash in a 600 s run. So the
-control run also gets the key from `control.dict` as a dictionary word.
-The control then checks this path: a mutation with the dictionary, a
-report, a replay alone, a qtest replay and a replay without the plant.
-It does not show that compare tracing finds a 4-byte key.
+The trigger seed alone checks reach and the sanitizer report. A run
+from the near seed must find the crash. libFuzzer sees both `memcmp()`
+operands and can copy the key over the compared bytes. The run also
+gets the key from `control.dict` as a dictionary word. A changed copy
+of the found input, with the key bytes put back to the near value, must
+not crash.
+
+The setup keeps short the path from an input to the plant. In a longer
+seed, about 96 % of the inputs that the fuzzer kept had lost the enable
+writes or the CDW15 place. The control checks that the fuzzer places a
+4-byte key with its compare feedback or its dictionary. It does not
+check that the fuzzer finds the enable sequence.
 
 ```sh
 ./qemu-fuzz-x86_64 --fuzz-target=generic-fuzz-femu-control \

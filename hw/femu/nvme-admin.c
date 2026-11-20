@@ -1747,22 +1747,6 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
     /* CNS is bits 7:0; the controller identifier sits above it */
     uint32_t cns  = le32_to_cpu(c->cns) & 0xff;
 
-    /*
-     * x-fuzz-control: a heap overflow that the generic fuzzer must find.
-     * libFuzzer sees both memcmp() operands and can copy the key into the
-     * input. Its memcmp table gets far fewer entries than the table of
-     * 32-bit compares. The volatile pointer keeps the call in any build.
-     */
-    if (unlikely(n->fuzz_control_buf) && cns == NVME_ID_CNS_CTRL) {
-        static const uint8_t key[4] = FEMU_FUZZ_CONTROL_KEY_BYTES;
-        /* volatile keeps a real memcmp() call for libFuzzer to hook */
-        int (*volatile cmp)(const void *, const void *, size_t) = memcmp;
-
-        if (!cmp(&cmd->cdw15, key, sizeof(key))) {
-            n->fuzz_control_buf[FEMU_FUZZ_CONTROL_LEN] = 1;
-        }
-    }
-
     switch (cns) {
     case NVME_ID_CNS_NS_CTRL_LIST:
         return nvme_identify_ctrl_list(n, cmd, true);
@@ -6401,9 +6385,29 @@ static uint16_t nvme_security(FemuCtrl *n, NvmeCmd *cmd, bool send)
     return NVME_SUCCESS;
 }
 
+/*
+ * x-fuzz-control: a heap overflow that the generic fuzzer must find. It
+ * checks CDW15 of every admin command, so a mutant with another opcode or
+ * field still reaches it. libFuzzer sees both memcmp() operands and can
+ * copy the key into the input. The volatile pointer keeps the call.
+ */
+static void nvme_fuzz_control(FemuCtrl *n, const NvmeCmd *cmd)
+{
+    static const uint8_t key[4] = FEMU_FUZZ_CONTROL_KEY_BYTES;
+    /* volatile keeps a real memcmp() call for libFuzzer to hook */
+    int (*volatile cmp)(const void *, const void *, size_t) = memcmp;
+
+    if (!cmp(&cmd->cdw15, key, sizeof(key))) {
+        n->fuzz_control_buf[FEMU_FUZZ_CONTROL_LEN] = 1;
+    }
+}
+
 static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     trace_femu_admin_cmd(cmd->cid, cmd->opcode);
+    if (unlikely(n->fuzz_control_buf)) {
+        nvme_fuzz_control(n, cmd);
+    }
     /* admin data is always moved by PRP over PCIe */
     if (cmd->psdt != NVME_PSDT_PRP) {
         return NVME_INVALID_FIELD | NVME_DNR;

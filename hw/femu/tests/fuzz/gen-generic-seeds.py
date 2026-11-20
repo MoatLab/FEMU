@@ -297,10 +297,18 @@ def seeds(target):
     return out
 
 
+def control_seed(cdw15):
+    """
+    One Identify Controller and its doorbell. x-fuzz-control enables the
+    controller at each reset, with AQA 7/7, ASQ and ACQ as here.
+    """
+    return [pattern(cmd(**ident(1, cdw15=cdw15))), mmio_write(0x1000, 1)]
+
+
 def control_seeds():
     """The trigger hits the planted overflow; the near seed is one dword off."""
-    return {"trigger": admin_seed([ident(1, cdw15=CONTROL_KEY)]),
-            "near": admin_seed([ident(1, cdw15=CONTROL_NEAR)])}
+    return {"trigger": control_seed(CONTROL_KEY),
+            "near": control_seed(CONTROL_NEAR)}
 
 
 def control_dict():
@@ -346,6 +354,10 @@ def self_test():
             return 1
         if control_dict() != 'key="\\x5a\\xa5\\xc3\\x3c"\n':
             print("self-test: the control dictionary is wrong")
+            return 1
+        # short, so few inputs the fuzzer keeps lose the path to the plant
+        if len(near) > 96:
+            print("self-test: the near seed has %d bytes" % len(near))
             return 1
         if near.count(struct.pack("<I", CONTROL_NEAR)) != 1:
             print("self-test: the near CDW15 is not unique in the seed")
