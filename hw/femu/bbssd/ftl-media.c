@@ -602,6 +602,7 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     NandLoc loc;
     NandMediaOp op;
 
+    ncmd->at = stime;
     switch (ncmd->cmd) {
     case NAND_READ:  op = NAND_MEDIA_READ;    break;
     case NAND_WRITE: op = NAND_MEDIA_PROGRAM; break;
@@ -722,6 +723,66 @@ uint64_t ssd_media_seal(struct ssd *ssd, struct ppa *ppa)
     }
     return nand_media_seal(&ssd->media, &loc,
                            nand_lun_end(get_lun(ssd, ppa)));
+}
+
+/*
+ * ssd_media_seal_any - ssd_media_seal(), under pe_suspend or read_prio
+ *
+ * GC uses it for its copies. With read_prio a read can go ahead of a
+ * queued program, so it also moves a booked copy. After this call it does
+ * not. Returns the seal time, or 0 with neither policy.
+ */
+uint64_t ssd_media_seal_any(struct ssd *ssd, struct ppa *ppa)
+{
+    NandLoc loc = {
+        .ch = ppa->g.ch, .lun = ppa->g.lun, .pl = ppa->g.pl,
+    };
+
+    if (!ssd->sp.pe_suspend && !ssd->sp.read_prio) {
+        return 0;
+    }
+    return nand_media_seal_any(&ssd->media, &loc,
+                           nand_lun_end(get_lun(ssd, ppa)));
+}
+
+/* whether a read of @ppa reads the other dies of its stripe instead */
+static bool ssd_read_degraded(struct ssd *ssd, struct ppa *ppa)
+{
+    struct ssdparams *spp = &ssd->sp;
+    int die = ppa->g.ch * spp->luns_per_ch + ppa->g.lun;
+
+    if (spp->rain_parity) {
+        return spp->rain_fidx[ppa->g.lun * spp->nchs + ppa->g.ch] <
+               spp->rain_nfail || die == ssd_offline_die(ssd);
+    }
+    return spp->die_parity && die == ssd_offline_die(ssd);
+}
+
+/*
+ * ssd_media_seal_read - ssd_media_seal_any() for the LUNs a read of @ppa uses
+ *
+ * A read of a failed or offline die reads the other dies of its stripe
+ * (ssd_rain_read(), ssd_parity_read()), so all dies are sealed then. A
+ * sealed die needs no read of its own, so sealing it too does no harm.
+ * Returns the latest seal time, or 0 with neither policy.
+ */
+uint64_t ssd_media_seal_read(struct ssd *ssd, struct ppa *ppa)
+{
+    uint64_t end = 0;
+
+    if (!ssd_read_degraded(ssd, ppa)) {
+        return ssd_media_seal_any(ssd, ppa);
+    }
+    for (int ch = 0; ch < ssd->sp.nchs; ch++) {
+        for (int lun = 0; lun < ssd->sp.luns_per_ch; lun++) {
+            struct ppa p = *ppa;
+
+            p.g.ch = ch;
+            p.g.lun = lun;
+            end = MAX(end, ssd_media_seal_any(ssd, &p));
+        }
+    }
+    return end;
 }
 
 /*
@@ -865,7 +926,7 @@ uint64_t ssd_advance_status_seq(struct ssd *ssd, const NandLoc *locs, int n,
  * @dst: the page programmed from it
  *
  * Counts as one read of the source block and one program, like the off-chip
- * move it replaces, and returns the latency of both steps.
+ * move it replaces, and returns when the program ends.
  */
 uint64_t ssd_advance_copyback(struct ssd *ssd, struct ppa *src,
                               struct ppa *dst)
@@ -883,5 +944,5 @@ uint64_t ssd_advance_copyback(struct ssd *ssd, struct ppa *src,
                 qatomic_read(&ssd->media_plane_ops[NAND_MEDIA_PROGRAM]) + 1);
     sloc = bb_decode_loc(ssd, src, stime, true);
     dloc = bb_decode_loc(ssd, dst, stime, true);
-    return nand_media_copyback(&ssd->media, &sloc, &dloc, stime).latency_ns;
+    return nand_media_copyback(&ssd->media, &sloc, &dloc, stime).done_ns;
 }

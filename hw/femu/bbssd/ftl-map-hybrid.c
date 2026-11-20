@@ -263,14 +263,13 @@ static uint64_t femu_map_hybrid_reclaim(struct ssd *ssd, int budget)
                     h->data_blocks[lbn] = new;
                     have_data = true;
                 }
-                lat += hybrid_charge(ssd, &old, NAND_READ);   /* read valid page */
+                lat += ssd_merge_copy(ssd, &old, &new);
                 mark_page_invalid(ssd, &old);
                 set_rmap_ent(ssd, INVALID_LPN, &old);
 
                 set_maptbl_ent(ssd, lpn, &new);
                 set_rmap_ent(ssd, lpn, &new);
                 mark_page_valid(ssd, &new);
-                lat += hybrid_charge(ssd, &new, NAND_WRITE);  /* program merged page */
                 ssd_advance_write_pointer_class(ssd, FEMU_MAP_CLASS_DATA);
                 ssd->gc_write_pages++;       /* WAF: a merge-relocated page */
                 h->merge_read_pages++;

@@ -1009,11 +1009,14 @@ static struct ppa fdp_gc_dest_page(struct ssd *ssd, FemuRuHandle *dest_ruh,
     return ppa;
 }
 
-/* relocate @old_ppa to @new_ppa, which fdp_gc_dest_page() chose */
+/*
+ * Relocate @old_ppa to @new_ppa, which fdp_gc_dest_page() chose. @ready is
+ * when the read of @old_ppa ends; a copyback has no read of its own.
+ */
 static void fdp_gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
                            struct ppa *new_ppa, FemuReclaimUnit *dest_ru,
                            FemuRuHandle *dest_ruh, bool copyback,
-                           struct fdp_moves *mv)
+                           struct fdp_moves *mv, uint64_t ready)
 {
     uint64_t lpn = get_rmap_ent(ssd, old_ppa);
     FemuReclaimUnit *ret_ru = NULL;
@@ -1061,18 +1064,19 @@ static void fdp_gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
     if (copyback) {
         ssd_gc_charge_copyback(ssd, old_ppa, new_ppa);
     } else {
-        ssd_gc_charge_move(ssd, new_ppa);
+        ssd_gc_charge_move(ssd, old_ppa, new_ppa, ready);
     }
 }
 
 /*
  * gc_write_page_fdp_style - relocate a valid page to a GC destination RU.
- * Returns false when there is nowhere to put it, which leaves the page where it
- * is: the caller must then not erase the block it came from.
+ * Its data is in DRAM at @ready. Returns false when there is nowhere to put
+ * it, which leaves the page where it is: the caller must then not erase the
+ * block it came from.
  */
 static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
                                     FemuRuHandle *dest_ruh, uint16_t rgidx,
-                                    struct fdp_moves *mv)
+                                    struct fdp_moves *mv, uint64_t ready)
 {
     FemuReclaimUnit *dest_ru;
     struct ppa new_ppa = fdp_gc_dest_page(ssd, dest_ruh, rgidx, &dest_ru, mv);
@@ -1080,7 +1084,8 @@ static bool gc_write_page_fdp_style(struct ssd *ssd, struct ppa *old_ppa,
     if (!dest_ru) {
         return false;
     }
-    fdp_gc_move_to(ssd, old_ppa, &new_ppa, dest_ru, dest_ruh, false, mv);
+    fdp_gc_move_to(ssd, old_ppa, &new_ppa, dest_ru, dest_ruh, false, mv,
+                   ready);
 
     /* this page is relocated; whether the next one can be is the next call */
     return true;
@@ -1114,6 +1119,7 @@ static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
                                           &dest_ru, mv);
         struct ppa src;
         bool found = false;
+        uint64_t ready = 0;
         bool copyback;
         int pos;
 
@@ -1158,9 +1164,10 @@ static bool fdp_reclaim_ru_copyback(struct ssd *ssd,
         }
         copyback = ssd_copyback_ok(ssd, &src, &dst);
         if (!copyback) {
-            gc_read_page(ssd, &src);
+            ready = gc_read_page(ssd, &src);
         }
-        fdp_gc_move_to(ssd, &src, &dst, dest_ru, dest_ruh, copyback, mv);
+        fdp_gc_move_to(ssd, &src, &dst, dest_ru, dest_ruh, copyback, mv,
+                       ready);
     }
     return true;
 }
@@ -1186,13 +1193,15 @@ static bool clean_one_block_fdp_style(struct ssd *ssd, struct ppa *ppa,
         pg_iter = get_pg(ssd, ppa);
         /* a unit a handle update closed early has pages never written */
         if (pg_iter->status == PG_VALID) {
-            gc_read_page(ssd, ppa);
+            uint64_t ready = gc_read_page(ssd, ppa);
+
             /*
              * Nowhere to put this one. Stop here and say so: the pages already
              * moved keep their new home, and the ones still in this block have
              * to keep theirs, so the block must not be erased.
              */
-            if (!gc_write_page_fdp_style(ssd, ppa, dest_ruh, rgidx, mv)) {
+            if (!gc_write_page_fdp_style(ssd, ppa, dest_ruh, rgidx, mv,
+                                         ready)) {
                 return false;
             }
         }
@@ -1238,6 +1247,8 @@ static void fdp_ru_reset(struct ssd *ssd, FemuReclaimUnit *ru)
         ru->lines[i]->vpc = 0;
         ru->lines[i]->close_time = 0;
         ru->lines[i]->open_time = 0;
+        /* a reset-all erase skips collection, so no fence outlives it */
+        ru->lines[i]->gc_fence = 0;
     }
 
     ru->vpc = 0;
@@ -1510,16 +1521,22 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
         }
     }
 
+    /* with gc_erase_order each line erases after its latest copy ends */
     for (int i = 0; i < spp->lines_per_ru; i++) {
         struct line *victim_line = victim_ru->lines[i];
+        uint64_t fence;
+        uint64_t start = ssd_gc_erase_start(ssd, victim_line, &fence);
+
         ppa.g.blk = victim_line->id;
+        ssd->gc_erase_fence = fence;
         for (int ch = rg->ch0; ch < rg->ch0 + rg->nch; ch++) {
             for (int lun = rg->lun0; lun < rg->lun0 + rg->nlun; lun++) {
                 ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk,
-                                    spp->enable_gc_delay, 0);
+                                    spp->enable_gc_delay, start);
                 blk_cnt += spp->pls_per_lun;
             }
         }
+        ssd->gc_erase_fence = 0;
     }
 
     /* update FDP statistics: media bytes written (GC writes) */

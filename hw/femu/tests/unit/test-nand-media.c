@@ -842,6 +842,27 @@ static void test_pe_seal(void)
           lat, (40000 - 1000) + 10000);
     check("seal, read_prio alone: no read is counted", m.seal_waits, 0);
     nand_media_destroy(&m);
+
+    /* read_prio alone: seal_any keeps the queued programs ahead of a read */
+    bb_config(&cfg);
+    cfg.policy.read_prio = true;
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    check("seal any, read_prio alone: the seal is set",
+          nand_media_seal_any(&m, &a, t0 + 80000), t0 + 80000);
+    lat = nand_media_op(&m, &rd, NAND_MEDIA_READ, t0 + 1000).latency_ns;
+    check("seal any, read_prio alone: the read waits for both programs",
+          lat, (80000 - 1000) + 10000);
+    nand_media_destroy(&m);
+
+    /* neither policy: seal_any does nothing */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    check("seal any, no policy: no seal",
+          nand_media_seal_any(&m, &a, t0 + 40000), 0);
+    nand_media_destroy(&m);
 }
 
 /*
@@ -966,6 +987,100 @@ static void test_pe_flush(void)
     nand_media_init(&m, &cfg);
     nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
     check("flush, read_prio alone: no pe_end", nand_media_pe_end(&m), 0);
+    nand_media_destroy(&m);
+}
+
+/*
+ * The order of one collection copy, as bbssd books it: read the valid page
+ * on LUN 0, program the copy on LUN 1, erase the victim block on LUN 0.
+ * tR 10 us, tPROG 40 us, tBERS 2 ms, tsusp 5 us.
+ *
+ *   old order   LUN 0 [rd][erase ...]      erase starts at 10 us
+ *               LUN 1 [copy    ]           copy ends at 40 us
+ *   new order   LUN 0 [rd]      [erase ...] erase starts at the copy end
+ *               LUN 1     [copy    ]        copy starts at the read end
+ */
+static void test_gc_order(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc src;
+    NandLoc dst;
+    NandLoc host;
+    const uint64_t t0 = 1000000000ULL;
+    uint64_t ready;
+    uint64_t fence;
+    uint64_t done;
+    uint64_t lat;
+
+    printf("# collection order: read, copy program, erase\n");
+    memset(&src, 0, sizeof(src));
+    src.blk = 3;
+    dst = src;
+    dst.lun = 1;
+    dst.blk = 5;
+    /* a host read of another block on the copy LUN */
+    host = dst;
+    host.blk = 7;
+
+    /* every step at now: the erase starts before the copy ends */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    nand_media_op(&m, &src, NAND_MEDIA_READ, t0);
+    fence = nand_media_op(&m, &dst, NAND_MEDIA_PROGRAM, t0).done_ns;
+    check("gc order off: the copy ends at 40 us", fence, t0 + 40000);
+    done = nand_media_op(&m, &src, NAND_MEDIA_ERASE, t0).done_ns;
+    check("gc order off: the erase starts after the read only",
+          done - 2000000, t0 + 10000);
+    check_lt("gc order off: the erase starts before the copy ends",
+             done - 2000000, fence);
+    nand_media_destroy(&m);
+
+    /* the copy at the read end, the erase at the fence */
+    bb_config(&cfg);
+    nand_media_init(&m, &cfg);
+    ready = nand_media_op(&m, &src, NAND_MEDIA_READ, t0).done_ns;
+    check("gc order: the data is in DRAM at 10 us", ready, t0 + 10000);
+    fence = nand_media_op(&m, &dst, NAND_MEDIA_PROGRAM, ready).done_ns;
+    check("gc order: the copy starts at the read end", fence, t0 + 50000);
+    done = nand_media_op(&m, &src, NAND_MEDIA_ERASE, fence).done_ns;
+    check("gc order: the erase starts at the copy end",
+          done - 2000000, fence);
+    nand_media_destroy(&m);
+
+    /*
+     * pe_suspend, no seal: a host read at 20 us suspends the copy, which
+     * then ends 15 us later, after the erase on LUN 0 started.
+     */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    ready = nand_media_op(&m, &src, NAND_MEDIA_READ, t0).done_ns;
+    fence = nand_media_op(&m, &dst, NAND_MEDIA_PROGRAM, ready).done_ns;
+    nand_media_op(&m, &src, NAND_MEDIA_ERASE, fence);
+    lat = nand_media_op(&m, &host, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    check("gc order, no seal: the read suspends the copy", lat, 5000 + 10000);
+    check("gc order, no seal: the copy ends after the erase start",
+          lun_avail[1], fence + 15000);
+    check("gc order, no seal: the copy LUN records the moved end",
+          m.susp[dst.ch * cfg.luns_per_ch + dst.lun].pe_end, fence + 15000);
+    nand_media_destroy(&m);
+
+    /* sealed at the copy end: the read waits, and the copy stays put */
+    seal_config(&cfg);
+    nand_media_init(&m, &cfg);
+    ready = nand_media_op(&m, &src, NAND_MEDIA_READ, t0).done_ns;
+    fence = nand_media_op(&m, &dst, NAND_MEDIA_PROGRAM, ready).done_ns;
+    check("gc order, seal: the seal is the copy end",
+          nand_media_seal(&m, &dst, lun_avail[1]), fence);
+    done = nand_media_op(&m, &src, NAND_MEDIA_ERASE, fence).done_ns;
+    lat = nand_media_op(&m, &host, NAND_MEDIA_READ, t0 + 20000).latency_ns;
+    check("gc order, seal: the read waits for the copy",
+          lat, (50000 - 20000) + 10000);
+    check("gc order, seal: the read is counted", m.seal_waits, 1);
+    /* the copy LUN, read after the booking: the program did not move */
+    check("gc order, seal: the copy still ends at the fence",
+          m.susp[dst.ch * cfg.luns_per_ch + dst.lun].pe_end, fence);
+    check("gc order, seal: the erase keeps its start", done - 2000000, fence);
     nand_media_destroy(&m);
 }
 
@@ -1796,6 +1911,7 @@ int main(void)
     test_pe_suspend_limits();
     test_pe_seal();
     test_pe_flush();
+    test_gc_order();
     test_read_prio();
     test_media_hold();
     test_partial_xfer();

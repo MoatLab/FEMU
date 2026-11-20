@@ -946,6 +946,16 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "KV. Refused with gc_pace, pe_suspend, read_prio, cxl_ssd, "
       "namespace_modes, ns_mgmt, shared namespaces and the hybrid and fast mappings; off "
       "(default)" },
+    { "gc_erase_order",
+      "bbssd, CSD, FDP: collection and hybrid or fast merges program a "
+      "copy when its read ends and erase a victim line after the latest "
+      "copy program of its pages ends, as a real SSD must; with pe_suspend "
+      "or read_prio the LUN of each copy is sealed before its read and "
+      "after its program, so a read does not move either past the erase. "
+      "KV books this order always. on (default); off restores the old "
+      "timing of each path: each collection read, program and erase "
+      "starts at the time collection runs, and a DFTL translation page "
+      "copy still programs after its read" },
     { "age_scale",
       "bbssd, CSD: data ages this many times faster than wall time, for "
       "retention_limit_sec, ecc_retention_sec and rber_age_double_sec "

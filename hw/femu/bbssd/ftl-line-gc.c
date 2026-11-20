@@ -1180,6 +1180,17 @@ uint64_t ssd_erase_lun_block(struct ssd *ssd, int ch, int lun, int blk,
             .stime = stime,
         };
 
+        /*
+         * x-gc-order: the array starts at the later of the start given to
+         * the media and the end of the work on the LUN. Check that against
+         * the fence of the line the caller erases (ssd->gc_erase_fence).
+         */
+        if (ssd->gc_erase_fence) {
+            uint64_t at = MAX(stime ? (uint64_t)stime : ssd_now(ssd),
+                              nand_lun_end(lunp));
+
+            ssd->gc_order_lun_early += at < ssd->gc_erase_fence;
+        }
         lat = ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun, &gce);
     }
     lunp->gc_endtime = nand_lun_end(lunp);
@@ -1215,19 +1226,122 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa)
                 PPA_ARG(ppa), blk->erase_cnt);
 }
 
-void gc_read_page(struct ssd *ssd, struct ppa *ppa)
+/*
+ * Book one collection operation on @ppa. With gc_erase_order it starts at
+ * @stime; without it the wrapper samples the clock, as before, so the off
+ * timing is the old one. Sets *@lat to the latency the wrapper returns.
+ * Returns when the operation ends, from the start the wrapper used.
+ */
+static uint64_t gc_book(struct ssd *ssd, struct ppa *ppa, int cmd,
+                        uint64_t stime, uint64_t *lat)
 {
-    /* advance ssd status, we don't care about how long it takes */
-    if (ssd->sp.enable_gc_delay) {
-        struct nand_cmd gcr;
-        gcr.type = GC_IO;
-        gcr.cmd = NAND_READ;
-        gcr.stime = 0;
-        ssd_advance_status(ssd, ppa, &gcr);
-    } else {
-        /* the page is still read from the media, only not timed */
-        qatomic_set(&ssd->gc_untimed_reads, ssd->gc_untimed_reads + 1);
+    struct nand_cmd c = { .type = GC_IO, .cmd = cmd };
+
+    if (ssd->sp.gc_erase_order) {
+        c.stime = stime;
     }
+    *lat = ssd_advance_status(ssd, ppa, &c);
+    return c.at + *lat;
+}
+
+/*
+ * Read a valid page for collection, from now. Returns when its data is in
+ * controller DRAM, or 0 when collection is not timed.
+ *
+ * With gc_erase_order, a read that suspends the program of its own page,
+ * or goes ahead of it, would read data the array does not hold yet. So
+ * the LUN of the page is sealed at its booked end first, as the tier fold
+ * does, and the read starts after that work.
+ */
+uint64_t gc_read_page(struct ssd *ssd, struct ppa *ppa)
+{
+    if (ssd->sp.enable_gc_delay) {
+        uint64_t lat;
+
+        if (ssd->sp.gc_erase_order && ssd_media_seal_read(ssd, ppa)) {
+            ssd->gc_order_src_seals++;
+        }
+        return gc_book(ssd, ppa, NAND_READ, ssd_now(ssd), &lat);
+    }
+    /* the page is still read from the media, only not timed */
+    qatomic_set(&ssd->gc_untimed_reads, ssd->gc_untimed_reads + 1);
+    return 0;
+}
+
+/**
+ * ssd_gc_fence - note the end of a copy for the erase of its source line
+ * @ssd: the device
+ * @src: the page collection copied
+ * @dst: the page it programmed
+ * @end: when that program ends
+ *
+ * The erase of the line of @src waits for the latest such end
+ * (gc_erase_order). With pe_suspend or read_prio a read could move the
+ * program and its end past that erase, so the LUN of @dst is sealed at its
+ * end first: a later read starts after the program. The seal covers all
+ * work booked on that LUN, a parity program too, so it can only be later.
+ *
+ *   LUN d  [copy program]|seal       reads on LUN d start here or later
+ *   LUN s                [erase ...] the erase starts at the fence
+ */
+void ssd_gc_fence(struct ssd *ssd, struct ppa *src, struct ppa *dst,
+                  uint64_t end)
+{
+    struct line *line = get_line(ssd, src);
+
+    if (ssd->sp.gc_erase_order) {
+        uint64_t held = ssd_media_seal_any(ssd, dst);
+
+        ssd->gc_order_seals += held != 0;
+        end = MAX(end, held);
+    }
+    line->gc_fence = MAX(line->gc_fence, end);
+}
+
+/**
+ * ssd_gc_erase_start - the start time for the erases of a collected line
+ * @ssd: the device
+ * @victim: the emptied line
+ * @fence: set to the end of its latest copy program, 0 for none
+ *
+ * With gc_erase_order, the erases start when the latest copy of the line
+ * ends, as on a real SSD: the old block holds the only durable copy until
+ * then. Without it they start now, as before. Returns the start to book
+ * (0: now) and clears the fence of the line.
+ */
+uint64_t ssd_gc_erase_start(struct ssd *ssd, struct line *victim,
+                            uint64_t *fence)
+{
+    uint64_t now;
+
+    *fence = victim->gc_fence;
+    victim->gc_fence = 0;
+    if (!*fence) {
+        return 0;
+    }
+    now = ssd_now(ssd);
+    ssd->gc_order_victims++;
+    if (*fence <= now) {
+        return 0;
+    }
+    if (ssd->sp.gc_erase_order) {
+        return *fence;
+    }
+    ssd->gc_order_early++;
+    return 0;
+}
+
+/*
+ * x-gc-order: "victims early lun_early seals src_seals", the counts named
+ * in struct ssd.
+ */
+char *ssd_gc_order_report(struct ssd *ssd)
+{
+    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+                           " %" PRIu64,
+                           ssd->gc_order_victims, ssd->gc_order_early,
+                           ssd->gc_order_lun_early, ssd->gc_order_seals,
+                           ssd->gc_order_src_seals);
 }
 
 /**
@@ -1261,23 +1375,56 @@ void ssd_gc_move_page(struct ssd *ssd, uint64_t lpn, struct ppa *old_ppa,
 /**
  * ssd_gc_charge_move - time the program of a relocated page
  * @ssd: the device
+ * @old_ppa: the page collection read
  * @new_ppa: the page collection wrote
+ * @ready: when the read of @old_ppa ends (gc_read_page())
  *
  * Charges the program when collection is timed and moves the LUN's collection
- * end to its busy-until time.
+ * end to its busy-until time. With gc_erase_order the program starts when
+ * its data is in DRAM; without it, now.
  */
-void ssd_gc_charge_move(struct ssd *ssd, struct ppa *new_ppa)
+void ssd_gc_charge_move(struct ssd *ssd, struct ppa *old_ppa,
+                        struct ppa *new_ppa, uint64_t ready)
 {
     struct nand_lun *lun = get_lun(ssd, new_ppa);
 
     if (ssd->sp.enable_gc_delay) {
-        struct nand_cmd gcw;
-        gcw.type = GC_IO;
-        gcw.cmd = NAND_WRITE;
-        gcw.stime = 0;
-        ssd_advance_status(ssd, new_ppa, &gcw);
+        uint64_t lat;
+
+        ssd_gc_fence(ssd, old_ppa, new_ppa,
+                     gc_book(ssd, new_ppa, NAND_WRITE,
+                             MAX(ready, ssd_now(ssd)), &lat));
     }
     lun->gc_endtime = nand_lun_end(lun);
+}
+
+/**
+ * ssd_merge_copy - time one page copy of a hybrid or FAST merge
+ * @ssd: the device
+ * @old_ppa: the page the merge reads
+ * @new_ppa: the page it programs
+ *
+ * A merge copies pages as collection does, so it keeps the same order: the
+ * program starts when the read ends, and the erase of the line of @old_ppa
+ * waits for the program (ssd_gc_fence()). Without gc_erase_order both
+ * start now, as before. Returns the read latency plus the program latency,
+ * the cost the merge adds to its request.
+ */
+uint64_t ssd_merge_copy(struct ssd *ssd, struct ppa *old_ppa,
+                        struct ppa *new_ppa)
+{
+    uint64_t rlat;
+    uint64_t plat;
+    uint64_t ready;
+    uint64_t done;
+
+    if (ssd->sp.gc_erase_order && ssd_media_seal_read(ssd, old_ppa)) {
+        ssd->gc_order_src_seals++;
+    }
+    ready = gc_book(ssd, old_ppa, NAND_READ, ssd_now(ssd), &rlat);
+    done = gc_book(ssd, new_ppa, NAND_WRITE, MAX(ready, ssd_now(ssd)), &plat);
+    ssd_gc_fence(ssd, old_ppa, new_ppa, done);
+    return rlat + plat;
 }
 
 /*
@@ -1296,7 +1443,8 @@ void ssd_gc_charge_copyback(struct ssd *ssd, struct ppa *old_ppa,
     struct nand_lun *lun = get_lun(ssd, new_ppa);
 
     if (ssd->sp.enable_gc_delay) {
-        ssd_advance_copyback(ssd, old_ppa, new_ppa);
+        ssd_gc_fence(ssd, old_ppa, new_ppa,
+                     ssd_advance_copyback(ssd, old_ppa, new_ppa));
     }
     lun->gc_endtime = nand_lun_end(lun);
     ssd->gc_copyback_pages++;
@@ -1347,10 +1495,13 @@ static struct ppa gc_dest_page(struct ssd *ssd, uint64_t tag,
     return get_new_page(ssd);
 }
 
-/* relocate @old_ppa to @new_ppa, which gc_dest_page() chose */
+/*
+ * Relocate @old_ppa to @new_ppa, which gc_dest_page() chose. @ready is when
+ * the read of @old_ppa ends; a copyback has no read of its own.
+ */
 static void gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
                        struct ppa *new_ppa, struct write_pointer *stream_wp,
-                       uint64_t tag, bool copyback)
+                       uint64_t tag, bool copyback, uint64_t ready)
 {
     uint64_t lpn = get_rmap_ent(ssd, old_ppa);
 
@@ -1375,13 +1526,17 @@ static void gc_move_to(struct ssd *ssd, struct ppa *old_ppa,
     if (copyback) {
         ssd_gc_charge_copyback(ssd, old_ppa, new_ppa);
     } else {
-        ssd_gc_charge_move(ssd, new_ppa);
+        ssd_gc_charge_move(ssd, old_ppa, new_ppa, ready);
     }
 }
 
-/* move valid page data (already in DRAM) from victim line to a new page */
-/* true when the page was relocated; false when there is nowhere to put it */
-static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
+/*
+ * Move valid page data from the victim line to a new page; it is in DRAM at
+ * @ready. True when the page was relocated; false when there is nowhere to
+ * put it.
+ */
+static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa,
+                          uint64_t ready)
 {
     uint64_t tag = get_line(ssd, old_ppa)->stream_tag;
     struct write_pointer *stream_wp;
@@ -1397,7 +1552,7 @@ static bool gc_write_page(struct ssd *ssd, struct ppa *old_ppa)
          */
         return false;
     }
-    gc_move_to(ssd, old_ppa, &new_ppa, stream_wp, tag, false);
+    gc_move_to(ssd, old_ppa, &new_ppa, stream_wp, tag, false, ready);
     return true;
 }
 
@@ -1917,8 +2072,7 @@ static bool gc_relocate(struct ssd *ssd, struct ppa *ppa)
     if (rmap_is_tp(owner)) {
         return tp_move(ssd, ppa);
     }
-    gc_read_page(ssd, ppa);
-    return gc_write_page(ssd, ppa);
+    return gc_write_page(ssd, ppa, gc_read_page(ssd, ppa));
 }
 
 static bool clean_one_block(struct ssd *ssd, struct ppa *ppa)
@@ -1969,6 +2123,7 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     line->open_time = 0;
     line->stream_tag = 0;
     line->kind = LINE_DATA;
+    line->gc_fence = 0;
     /* move this line to free line list */
     QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
     lm->free_line_cnt++;
@@ -2021,6 +2176,7 @@ static bool reclaim_line_copyback(struct ssd *ssd, struct line *victim)
         struct ppa dst = gc_dest_page(ssd, tag, &stream_wp);
         struct ppa src;
         bool found = false;
+        uint64_t ready = 0;
         bool copyback;
         int pos;
 
@@ -2050,9 +2206,9 @@ static bool reclaim_line_copyback(struct ssd *ssd, struct line *victim)
         }
         copyback = ssd_copyback_ok(ssd, &src, &dst);
         if (!copyback) {
-            gc_read_page(ssd, &src);
+            ready = gc_read_page(ssd, &src);
         }
-        gc_move_to(ssd, &src, &dst, stream_wp, tag, copyback);
+        gc_move_to(ssd, &src, &dst, stream_wp, tag, copyback, ready);
     }
     return true;
 }
@@ -2160,15 +2316,19 @@ static void ssd_reset_lun_block(struct ssd *ssd, int ch, int lun, int blk)
 /*
  * Erase an emptied line on every live LUN, then free it, or retire it if a
  * block wore out. Each LUN erases its own block, so the LUNs erase in
- * parallel.
+ * parallel. With gc_erase_order they start after the latest copy program of
+ * the line (ssd_gc_erase_start()).
  */
 static void reclaim_line_tail(struct ssd *ssd, struct line *victim_line)
 {
     struct ssdparams *spp = &ssd->sp;
     struct ppa ppa;
+    uint64_t fence;
+    uint64_t start = ssd_gc_erase_start(ssd, victim_line, &fence);
     int ch, lun;
 
     ftl_assert(victim_line->vpc == 0);
+    ssd->gc_erase_fence = fence;
     ppa.ppa = 0;
     ppa.g.blk = victim_line->id;
     for (ch = 0; ch < spp->nchs; ch++) {
@@ -2178,9 +2338,10 @@ static void reclaim_line_tail(struct ssd *ssd, struct line *victim_line)
                 continue;
             }
             ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk, spp->enable_gc_delay,
-                                0);
+                                start);
         }
     }
+    ssd->gc_erase_fence = 0;
     if (ssd->wear_on) {
         uint8_t spare = ssd_available_spare(ssd);
         uint64_t overworn = ssd->overworn_blocks;

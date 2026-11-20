@@ -300,6 +300,8 @@ struct ssdparams {
     int wl_spread;
     bool gc_pace;
     bool gc_copyback; /* collection moves a page on its die when it can */
+    /* a copy programs after its read; the victim erases after its copies */
+    bool gc_erase_order;
     /* program disturb read terms; all 0 = off (see bb_decode_loc()) */
     int pd_edge_wls;
     int pd_edge_tiers;
@@ -375,6 +377,8 @@ typedef struct line {
     int rg;
     /* LINE_DATA or LINE_TP, set when a write pointer takes the line */
     int kind;
+    /* the latest end of a copy program of a page collection moved out */
+    uint64_t gc_fence;
 } line;
 
 /* wp: record next write addr */
@@ -426,6 +430,7 @@ struct nand_cmd {
     int type;
     int cmd;
     int64_t stime; /* Coperd: request arrival time */
+    uint64_t at;   /* set by ssd_advance_status(): the start it used */
 };
 
 /* ========== FDP FTL Structures ========== */
@@ -935,6 +940,20 @@ struct ssd {
      */
     uint64_t forced_gc_timed;
     uint64_t forced_gc_end;
+    /*
+     * x-gc-order: erased lines with a timed copy, those whose erase was
+     * booked before their latest copy end, the erases whose start (the
+     * LUN end or the booked time) was before it, and the copy programs
+     * sealed under pe_suspend or read_prio. src_seals counts the seals
+     * of the source LUNs before the reads.
+     */
+    uint64_t gc_order_victims;
+    uint64_t gc_order_early;
+    uint64_t gc_order_lun_early;
+    uint64_t gc_order_seals;
+    uint64_t gc_order_src_seals;
+    /* the fence of the line being erased, for the check above; 0 = none */
+    uint64_t gc_erase_fence;
 
     /*
      * Wear: erases summed over every block, kept as a running total so the
@@ -1020,6 +1039,8 @@ typedef enum SsdGcIdleOutcome {
 uint64_t ssd_media_last_end(struct ssd *ssd);
 /* pe_suspend: no read moves the work booked so far on the LUN of @ppa */
 uint64_t ssd_media_seal(struct ssd *ssd, struct ppa *ppa);
+uint64_t ssd_media_seal_any(struct ssd *ssd, struct ppa *ppa);
+uint64_t ssd_media_seal_read(struct ssd *ssd, struct ppa *ppa);
 bool ssd_gc_idle_due(struct ssd *ssd, uint64_t now);
 SsdGcIdleOutcome ssd_gc_idle_step(struct ssd *ssd, uint64_t now);
 void ssd_gc_idle_note(struct ssd *ssd, uint64_t req_end);
@@ -1077,6 +1098,7 @@ uint64_t ssd_buffer_destage(struct ssd *ssd, int budget, uint64_t stime);
 uint64_t ssd_buffer_flush_seal(struct ssd *ssd, uint64_t stime);
 /* the Flush seals, Flush end, program end and seal waits (x-flush-check) */
 char *ssd_flush_report(struct ssd *ssd);
+char *ssd_gc_order_report(struct ssd *ssd);
 uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
 void ssd_release_stream(struct ssd *ssd, unsigned slot);
 void ssd_deallocate_fdp_ns(struct ssd *ssd, NvmeNamespace *ns);

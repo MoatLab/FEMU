@@ -368,8 +368,9 @@ uint64_t tp_publish(struct ssd *ssd, uint64_t stime, bool timed)
  *
  * Reads the copy and writes the current mapping of the TP, so a change
  * pending or dirty in the CMT goes out with it. May use the reserve: it is
- * what frees a TP line. Returns false, with nothing changed, when there is
- * no page or the GTD does not name @old_ppa.
+ * what frees a TP line. The erase of the line of @old_ppa waits for the
+ * program (ssd_gc_fence()). Returns false, with nothing changed, when there
+ * is no page or the GTD does not name @old_ppa.
  */
 bool tp_move(struct ssd *ssd, struct ppa *old_ppa)
 {
@@ -377,6 +378,7 @@ bool tp_move(struct ssd *ssd, struct ppa *old_ppa)
     uint64_t tp = owner & ~TP_RMAP_TAG;
     bool timed = ssd->sp.enable_gc_delay;
     struct ppa ppa;
+    uint64_t done;
     int32_t slot;
     uint64_t rd;
 
@@ -386,9 +388,13 @@ bool tp_move(struct ssd *ssd, struct ppa *old_ppa)
                 " that the GTD does not confirm\n", PPA_ARG(old_ppa), owner);
         return false;
     }
+    /* the program of the copy ends before the read, as gc_read_page() */
+    if (timed && ssd->sp.gc_erase_order && ssd_media_seal_any(ssd, old_ppa)) {
+        ssd->gc_order_src_seals++;
+    }
     /* the copy reaches DRAM before the program can start */
     rd = tp_read(ssd, tp, 0, timed);
-    if (!tp_program(ssd, tp, true, rd, timed, NULL)) {
+    if (!tp_program(ssd, tp, true, rd, timed, &done)) {
         return false;
     }
     clear_bit(tp, ssd->tp_pending);
@@ -397,6 +403,9 @@ bool tp_move(struct ssd *ssd, struct ppa *old_ppa)
         ssd->cmt.slots[slot].dirty = false;
     }
     ppa = ssd->gtd[tp];
+    if (timed) {
+        ssd_gc_fence(ssd, old_ppa, &ppa, done);
+    }
     get_lun(ssd, &ppa)->gc_endtime = nand_lun_end(get_lun(ssd, &ppa));
     ssd->tp_moves++;
     return true;

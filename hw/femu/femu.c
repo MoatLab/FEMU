@@ -4735,6 +4735,12 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
                        "owns the shared namespaces");
             return;
         }
+        if (storage && n->bb_params.gc_erase_order !=
+                       storage->bb_params.gc_erase_order) {
+            error_setg(errp, "gc_erase_order must match the controller that "
+                       "owns the shared namespaces");
+            return;
+        }
         /* a joining controller skips mode init, so refuse it here too */
         if (n->bb_params.gc_idle_ms) {
             error_setg(errp, "FEMU: gc_idle_ms is not supported with shared "
@@ -5779,6 +5785,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("wl_spread", FemuCtrl, bb_params.wl_spread, 0),
     DEFINE_PROP_BOOL("gc_pace", FemuCtrl, bb_params.gc_pace, false),
     DEFINE_PROP_BOOL("gc_copyback", FemuCtrl, bb_params.gc_copyback, false),
+    DEFINE_PROP_BOOL("gc_erase_order", FemuCtrl, bb_params.gc_erase_order,
+                     true),
     DEFINE_PROP_INT32("pd_edge_wls", FemuCtrl, bb_params.pd_edge_wls, 0),
     DEFINE_PROP_INT32("pd_edge_tiers", FemuCtrl, bb_params.pd_edge_tiers, 0),
     DEFINE_PROP_INT32("pd_open_tiers", FemuCtrl, bb_params.pd_open_tiers, 0),
@@ -6103,6 +6111,25 @@ static char *femu_test_flush_check(Object *obj, Error **errp)
     }
     resume = nvme_pause_pollers(n);
     report = ssd_flush_report(ns->ssd);
+    nvme_resume_pollers(n, resume);
+    return report;
+}
+
+/* qtest only: the GC order counts of namespace 1 (ssd_gc_order_report()) */
+static char *femu_test_gc_order(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    char *report;
+    bool resume;
+
+    if (!ns || !(NS_BBSSD(ns) || NS_CSD(ns)) || !ns->ssd) {
+        error_setg(errp, "the GC order check requires a bbssd or CSD "
+                   "namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    report = ssd_gc_order_report(ns->ssd);
     nvme_resume_pollers(n, resume);
     return report;
 }
@@ -6945,6 +6972,7 @@ static void femu_instance_init(Object *obj)
                                 femu_test_durable_check, NULL);
         object_property_add_str(obj, "x-flush-check", femu_test_flush_check,
                                 NULL);
+        object_property_add_str(obj, "x-gc-order", femu_test_gc_order, NULL);
         object_property_add_str(obj, "x-rain-fail", NULL,
                                 femu_test_rain_fail);
         object_property_add_str(obj, "x-rain-check", femu_test_rain_check,

@@ -849,15 +849,31 @@ static bool suspend_read_start(NandMedia *m, const NandLoc *loc, uint64_t t,
     return true;
 }
 
-uint64_t nand_media_seal(NandMedia *m, const NandLoc *loc, uint64_t t)
+/* the policies that move booked work, which a seal holds in place */
+static bool seal_policy(const NandMedia *m)
+{
+    return m->cfg.policy.pe_suspend || m->cfg.policy.read_prio;
+}
+
+static uint64_t seal_at(NandMedia *m, const NandLoc *loc, uint64_t t)
 {
     NandSuspendState *st = suspend_state(m, loc);
 
-    if (!m->cfg.policy.pe_suspend || !st) {
+    if (!st) {
         return 0;
     }
     st->seal = mx(st->seal, t);
     return st->seal;
+}
+
+uint64_t nand_media_seal(NandMedia *m, const NandLoc *loc, uint64_t t)
+{
+    return m->cfg.policy.pe_suspend ? seal_at(m, loc, t) : 0;
+}
+
+uint64_t nand_media_seal_any(NandMedia *m, const NandLoc *loc, uint64_t t)
+{
+    return seal_policy(m) ? seal_at(m, loc, t) : 0;
 }
 
 uint64_t nand_media_pe_end(const NandMedia *m)
@@ -876,15 +892,16 @@ uint64_t nand_media_pe_end(const NandMedia *m)
 }
 
 /*
- * When a read that reaches the array at @t may start under pe_suspend: at
- * the seal of its position, if that is after @t. The suspend rule then
- * sees the read arrive there, so it leaves the sealed work alone.
+ * When a read that reaches the array at @t may start under pe_suspend or
+ * read_prio: at the seal of its position, if that is after @t. The suspend
+ * and priority rules then see the read arrive there, so they leave the
+ * sealed work alone.
  */
 static uint64_t seal_read_time(NandMedia *m, const NandLoc *loc, uint64_t t)
 {
     NandSuspendState *st;
 
-    if (!m->cfg.policy.pe_suspend) {
+    if (!seal_policy(m)) {
         return t;
     }
     st = suspend_state(m, loc);

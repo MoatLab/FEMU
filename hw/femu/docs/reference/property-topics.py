@@ -27,7 +27,7 @@ DEVICES = [
                       "x-cpl-count", "x-cpl-hold",
                       "x-gc-frontier", "x-gc-idle",
                       "x-gc-idle-hold", "x-gc-idle-kick", "x-gc-idle-latch",
-                      "x-gc-idle-order", "x-maint-idle",
+                      "x-gc-idle-order", "x-gc-order", "x-maint-idle",
                       "x-ns-test", "x-oc12-clock", "x-opal-gkey",
                       "x-opal-power-cycle",
                       "x-oc12-trace", "x-ocp-lat-skew-ms", "x-idle-mw", "x-telemetry-trigger",
@@ -160,7 +160,8 @@ DEVICES = [
                 "props": [
                     "gc_thres_pcent", "gc_thres_pcent_high", "gc_policy",
                     "gc_seed", "gc_strategy", "wl_spread", "gc_pace",
-                    "gc_copyback", "mapping", "mapping_cache_mb",
+                    "gc_copyback", "gc_erase_order", "mapping",
+                    "mapping_cache_mb",
                     "read_cache_mb", "cache_evict", "hot_cold_sep",
                     "gc_frontier", "gc_idle_ms", "gc_idle_pcent",
                     "maint_idle",

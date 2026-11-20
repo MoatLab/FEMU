@@ -180,14 +180,13 @@ static uint64_t fast_merge_one_lbn(struct ssd *ssd, int64_t lbn, int *relocated)
         if (!mapped_ppa(&new)) {
             break;
         }
-        lat += fast_charge(ssd, &old, NAND_READ);
+        lat += ssd_merge_copy(ssd, &old, &new);
         mark_page_invalid(ssd, &old);
         set_rmap_ent(ssd, INVALID_LPN, &old);
 
         set_maptbl_ent(ssd, lpn, &new);
         set_rmap_ent(ssd, lpn, &new);
         mark_page_valid(ssd, &new);
-        lat += fast_charge(ssd, &new, NAND_WRITE);
         ssd_advance_write_pointer_class(ssd, FEMU_MAP_CLASS_DATA);
         ssd->gc_write_pages++;
         f->merge_read_pages++;

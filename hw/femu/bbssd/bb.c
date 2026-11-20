@@ -630,6 +630,12 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     /* A linked CXL medium already built the FTL from its own geometry. */
     if (n->cxl_ssd) {
+        if (!n->bb_params.gc_erase_order) {
+            error_setg(errp, "FEMU bbssd: gc_erase_order=off is not supported "
+                       "with cxl_ssd: the controller uses the FTL of the CXL "
+                       "medium, which keeps the order");
+            return;
+        }
         ns->ssd = n->cxl_ssd;
         ns->ssd_borrowed = true;
         n->ssd = ns->ssd;

@@ -4077,6 +4077,112 @@ static void femu_test_ftl_trace_mp(void *obj, void *data,
     femu_ftl_trace_run(obj, alloc, mp->want, mp, NULL);
 }
 
+/*
+ * x-gc-order: victims, early, lun_early, seals of the copy LUNs, seals of
+ * the source LUNs (ssd_gc_order_report())
+ */
+#define GC_ORDER_FIELDS 5
+
+/*
+ * The order of collection, from the counts the FTL keeps as it books an
+ * erase (x-gc-order). The workload fills the device and overwrites random
+ * pages, so forced collection copies pages of most victims. A copy program
+ * ends at least tPROG after collection starts, so with gc_erase_order off
+ * each victim with a copy books its erase before its copies end: "early"
+ * is above 0, the planted control. With the order on, every erase waits
+ * for the fence and "early" is 0. The control uses the real clock: it
+ * fails only if the FTL thread stops for more than tPROG after the last
+ * copy of every one of the victims. The controls set tPROG to 2 ms, ten
+ * times the default, to make that very unlikely.
+ *
+ *   off  LUN s [rd][erase ....]       erase booked at now < copy end
+ *        LUN d [copy    ]
+ *   on   LUN s [rd]      [erase ....] erase booked at the copy end
+ *        LUN d     [copy    ]
+ *
+ * @data: "on", "off" (the control), "suspend" (on, with pe_suspend and a
+ * read after each write, so each copy program is sealed), or "prio" (the
+ * same with read_prio, where a read could go ahead of a queued copy).
+ */
+static void femu_test_gc_erase_order(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool on = strcmp(mode, "off") != 0;
+    bool reads = !strcmp(mode, "suspend") || !strcmp(mode, "prio");
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t v[GC_ORDER_FIELDS];
+    g_auto(GStrv) f = NULL;
+    uint32_t seed = 1;
+    QDict *rsp;
+    uint32_t i;
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-order',"
+                    "'property':'gc_erase_order'}}");
+    g_assert_cmpint(qdict_get_bool(rsp, "return"), ==, on);
+    qobject_unref(rsp);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6b, 64 * 4096);
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 400; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (seed >> 8) % pages, 1,
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+        if (reads) {
+            seed = seed * 1103515245 + 12345;
+            g_assert_cmphex(femu_rw(&c, NVME_CMD_READ,
+                                    ((seed >> 8) % pages) * 8, buf), ==,
+                            NVME_SUCCESS);
+        }
+    }
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-order',"
+                    "'property':'x-gc-order'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-gc-order %s: %s", mode, qdict_get_str(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    qobject_unref(rsp);
+    g_assert_cmpuint(g_strv_length(f), ==, GC_ORDER_FIELDS);
+    for (i = 0; i < GC_ORDER_FIELDS; i++) {
+        v[i] = g_ascii_strtoull(f[i], NULL, 10);
+    }
+
+    g_assert_cmpuint(v[0], >, 0);
+    if (on) {
+        g_assert_cmpuint(v[1], ==, 0);
+        g_assert_cmpuint(v[2], ==, 0);
+    } else {
+        /* the control: the erase is booked before its copies end */
+        g_assert_cmpuint(v[1], >, 0);
+        g_assert_cmpuint(v[3], ==, 0);
+    }
+    /* the copy LUNs and the source LUNs are sealed apart */
+    if (reads) {
+        g_assert_cmpuint(v[3], >, 0);
+        g_assert_cmpuint(v[4], >, 0);
+    } else {
+        g_assert_cmpuint(v[3], ==, 0);
+        g_assert_cmpuint(v[4], ==, 0);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 #define FTL_TRACE_MP_OFF \
     "764 3450000000 10306 10306 12181 11112 12821 22487 5556 " \
     "15238286681531891579"
@@ -28655,6 +28761,36 @@ static void femu_test_kv_model_shared(void *obj, void *data,
     qos_invalidate_command_line();
 }
 
+/*
+ * A joining controller runs the FTL of the owner, so gc_erase_order must
+ * match it. The owner keeps the default, on: a joiner with it off is
+ * refused, and the control, a joiner with the default, is accepted.
+ */
+static void femu_test_gc_erase_order_shared(void *obj, void *data,
+                                            QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp;
+    const char *desc;
+
+    femu_shared_add(qts, "order-owner", 5, 1);
+    rsp = qtest_qmp(qts,
+        "{'execute':'device_add','arguments':{'driver':'femu',"
+        "'id':'order-join','addr':'6','subsys':'shared','devsz_mb':4,"
+        "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+        "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,'nchs':1,"
+        "'gc_erase_order':false}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+    g_test_message("%s", desc);
+    g_assert_nonnull(strstr(desc, "gc_erase_order must match"));
+    qobject_unref(rsp);
+
+    femu_shared_add(qts, "order-join", 6, 1);
+    qos_invalidate_command_line();
+}
+
 static void femu_test_shared_lifecycle(void *obj, void *data,
                                        QGuestAllocator *alloc)
 {
@@ -42597,6 +42733,10 @@ static void femu_test_cxl_nvme_link(void *obj, void *data,
     femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
                            "'gc_frontier':true",
                            "gc_frontier is not supported with cxl_ssd");
+    femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
+                           "'gc_erase_order':false",
+                           "gc_erase_order=off is not supported with "
+                           "cxl_ssd");
     /* the medium's FTL has no end-of-life reserve */
     femu_link_expect_error(qts, "'femu_mode':1,'cxl_ssd':'ssd',"
                            "'rain_parity':1,'rain_read_only':true,'mdts':4",
@@ -66532,6 +66672,69 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "read_reclaim_limit=2",
     });
+    /*
+     * gc_erase_order off: the old timing. Every count and the victim digest
+     * are those of ftl-trace-bbssd, so the order changes no WAF.
+     */
+    qos_add_test("ftl-trace-gc-erase-order-off", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+                       "1758358858069010501",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_erase_order=off",
+    });
+    qos_add_test("gc-erase-order-on", "femu", femu_test_gc_erase_order,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=gc-order,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2",
+    });
+    /* the planted control: the same workload books erases too early */
+    qos_add_test("gc-erase-order-off", "femu", femu_test_gc_erase_order,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=gc-order,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "gc_erase_order=off,pg_wr_lat=2000000",
+    });
+    qos_add_test("gc-erase-order-fdp-on", "femu", femu_test_gc_erase_order,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=gc-order,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub",
+    });
+    qos_add_test("gc-erase-order-fdp-off", "femu", femu_test_gc_erase_order,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts =
+            "id=gc-order,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,gc_erase_order=off,pg_wr_lat=2000000",
+    });
+    /* each copy program sealed: a read waits for it, so the fence holds */
+    qos_add_test("gc-erase-order-suspend", "femu", femu_test_gc_erase_order,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"suspend",
+        .edge.extra_device_opts =
+            "id=gc-order,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pe_suspend=1,tsusp_ns=5000",
+    });
+    /* each copy program sealed: a priority read does not pass it */
+    qos_add_test("gc-erase-order-prio", "femu", femu_test_gc_erase_order,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"prio",
+        .edge.extra_device_opts =
+            "id=gc-order,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "read_prio=1",
+    });
     qos_add_test("fdp-gc-strategy-refused", "femu",
                  femu_test_fdp_gc_strategy_refused, NULL);
     qos_add_test("query-bbssd", "femu", femu_test_query,
@@ -67918,6 +68121,9 @@ static void femu_register_nodes(void)
     qos_add_test("ns-shared-lifecycle", "femu", femu_test_shared_lifecycle,
                  &(QOSGraphTestOptions) { .before = femu_shared_before });
     qos_add_test("kv-model-shared", "femu", femu_test_kv_model_shared,
+                 &(QOSGraphTestOptions) { .before = femu_shared_before });
+    qos_add_test("gc-erase-order-shared", "femu",
+                 femu_test_gc_erase_order_shared,
                  &(QOSGraphTestOptions) { .before = femu_shared_before });
     qos_add_test("ns-mgmt-subsys", "femu", femu_test_ns_mgmt_subsys,
                  &(QOSGraphTestOptions) {

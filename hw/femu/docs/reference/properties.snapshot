@@ -386,6 +386,11 @@
     "kind": "static",
     "type": "bool"
    },
+   "gc_erase_order": {
+    "default": true,
+    "kind": "static",
+    "type": "bool"
+   },
    "gc_frontier": {
     "default": false,
     "kind": "static",

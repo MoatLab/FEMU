@@ -667,6 +667,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->wl_spread = n->bb_params.wl_spread;
     spp->gc_pace = n->bb_params.gc_pace;
     spp->gc_copyback = n->bb_params.gc_copyback;
+    spp->gc_erase_order = n->bb_params.gc_erase_order;
     spp->pd_edge_wls = n->bb_params.pd_edge_wls;
     spp->pd_edge_tiers = n->bb_params.pd_edge_tiers;
     spp->pd_open_tiers = n->bb_params.pd_open_tiers;

@@ -303,7 +303,7 @@ typedef struct NandBusResList {
 typedef struct NandSuspendState {
     uint64_t pe_end;
     uint64_t rd_end;
-    /* pe_suspend: no read starts before this (nand_media_seal()); 0 = none */
+    /* no read starts before this (nand_media_seal()); 0 = none */
     uint64_t seal;
     uint32_t nsusp;     /* suspensions of the program/erase in flight */
     uint64_t budget_end; /* the end of the work those suspensions shifted */
@@ -387,6 +387,13 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
  * nothing. The caller serializes it with the operations on the position.
  */
 uint64_t nand_media_seal(NandMedia *m, const NandLoc *loc, uint64_t t);
+
+/*
+ * nand_media_seal(), under pe_suspend or read_prio. With read_prio, a read
+ * that reaches the array at the seal or after it does not go ahead of the
+ * work booked before the seal. Returns 0 with neither policy.
+ */
+uint64_t nand_media_seal_any(NandMedia *m, const NandLoc *loc, uint64_t t);
 
 /*
  * pe_suspend: when the newest program or erase of all array positions ends,

@@ -2538,6 +2538,7 @@ typedef struct BbCtrlParams {
     int wl_spread;            /* wear gap that starts wear levelling; 0 = off */
     bool gc_pace;             /* collect a line a few pages per host write */
     bool gc_copyback;         /* collection moves pages on their die */
+    bool gc_erase_order;      /* a victim erase waits for its copies */
     int pd_edge_wls;          /* bottom wordlines with program disturb tiers */
     int pd_edge_tiers;        /* ECC tiers for a read of those wordlines */
     int pd_open_tiers;        /* ECC tiers, read of a part-programmed block */

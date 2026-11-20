@@ -2157,6 +2157,8 @@ void femu_cxl_start(FemuCxlMedia *s, void *payload, uint64_t size,
     p->onfi_mode = -1;
     p->gc_thres_pcent = s->gc_threshold;
     p->gc_thres_pcent_high = s->gc_threshold_high;
+    /* the default of the property: an erase waits for its copies */
+    p->gc_erase_order = true;
     s->ns.ctrl = n;
     s->ns.lbaf.lbads = 9;
     s->ns.ssd = g_new0(struct ssd, 1);

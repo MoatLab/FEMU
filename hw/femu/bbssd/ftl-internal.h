@@ -470,8 +470,13 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa);
 uint64_t ssd_erase_lun_block(struct ssd *ssd, int ch, int lun, int blk,
                              bool charge, int64_t stime);
 void mark_line_free(struct ssd *ssd, struct ppa *ppa);
-void gc_read_page(struct ssd *ssd, struct ppa *ppa);
-
+uint64_t gc_read_page(struct ssd *ssd, struct ppa *ppa);
+uint64_t ssd_merge_copy(struct ssd *ssd, struct ppa *old_ppa,
+                        struct ppa *new_ppa);
+void ssd_gc_fence(struct ssd *ssd, struct ppa *src, struct ppa *dst,
+                  uint64_t end);
+uint64_t ssd_gc_erase_start(struct ssd *ssd, struct line *victim,
+                            uint64_t *fence);
 /* how a mode marks pages when collection moves one (ssd_gc_move_page) */
 struct ssd_gc_move_ops {
     void (*mark_valid)(struct ssd *ssd, struct ppa *ppa, void *dest);
@@ -480,7 +485,8 @@ struct ssd_gc_move_ops {
 void ssd_gc_move_page(struct ssd *ssd, uint64_t lpn, struct ppa *old_ppa,
                       struct ppa *new_ppa, const struct ssd_gc_move_ops *ops,
                       void *dest);
-void ssd_gc_charge_move(struct ssd *ssd, struct ppa *new_ppa);
+void ssd_gc_charge_move(struct ssd *ssd, struct ppa *old_ppa,
+                        struct ppa *new_ppa, uint64_t ready);
 void ssd_gc_charge_copyback(struct ssd *ssd, struct ppa *old_ppa,
                             struct ppa *new_ppa);
 int do_gc(struct ssd *ssd, bool force);

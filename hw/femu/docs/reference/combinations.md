@@ -160,6 +160,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `cxl_ssd`
 
+- FEMU bbssd: gc_erase_order=off is not supported with cxl_ssd: the controller uses the FTL of the CXL medium, which keeps the order
 - cxl_ssd must name a realized femu-cxl-ssd
 - cxl_ssd requires %s
 - cxl_ssd requires the femu-cxl-ssd to have ftl=on
@@ -326,6 +327,11 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU bbssd: die_parity and rain_parity need two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - FEMU bbssd: prog_pass2_ns must not be negative, prog_pass2_lag is 0 to 16 and needs it, and neither works with mp_program, mp_read, onfi_cache_read, gc_copyback, KV, FDP, the pSLC tier or a mapping other than page or dftl
 - femu: gc_copyback is not supported with %s
+
+## `gc_erase_order`
+
+- FEMU bbssd: gc_erase_order=off is not supported with cxl_ssd: the controller uses the FTL of the CXL medium, which keeps the order
+- gc_erase_order must match the controller that owns the shared namespaces
 
 ## `gc_frontier`
 
@@ -654,6 +660,7 @@ own description allows. A message keeps its format directives (`%s`,
 - femu: the pd_* program disturb properties need bbssd, CSD or KV namespaces; namespace %u is not one
 - femu: the pd_* properties are not supported with ns_mgmt or shared namespaces
 - femu: throttle works with bbssd or CSD namespaces only
+- gc_erase_order must match the controller that owns the shared namespaces
 - gc_frontier must match the controller that owns the shared namespaces
 - hmb_mb needs bbssd or CSD namespaces; namespace %d is not
 - kv_index=lsm and the kv_lsm_* knobs need a key-value namespace; shared namespaces are NoSSD or bbssd

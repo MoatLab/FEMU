@@ -584,18 +584,19 @@ on when commands arrive.
       new = next page of the data pointer        (stream pointer for
             (takes a free line if it has none)    Streams data)
       none? requeue the victim, return -1
-      NAND read at the old page                  (GC_IO)
+      NAND read at the old page                  (GC_IO, from now)
       lpn = rmap[old]
       maptbl[lpn] = new, rmap[new] = lpn
       old page -> INVALID, rmap[old] = none
-      NAND program at the new page               (GC_IO)
+      NAND program at the new page               (GC_IO, from the read end)
+      victim fence = max(fence, program end)
       gc_write_pages++
     |
     v
   erase: for ch in 0..nchs-1, lun in 0..luns_per_ch-1:
     mark each plane's block free: erase_cnt++, read_cnt = 0
-    one multi-plane erase of the LUN's blocks    (GC_IO, tplebsy between
-                                                  planes)
+    one multi-plane erase of the LUN's blocks    (GC_IO, from the fence,
+                                                  tplebsy between planes)
     |
     v
   line -> free list tail
@@ -684,11 +685,58 @@ namespaces (their FTL comes from another device), and `namespace_modes`.
 
 ### How GC time is charged
 
-GC operations enter the NAND model with `stime = 0`, which the media bridge
-replaces with the current host time. Each one moves its LUN's
-next-available time forward, and the latency it returns is discarded. GC
-time therefore reaches the host only through the LUN timelines: a later host
-read or program on a LUN that GC is using starts when GC is done with it.
+A GC read starts at the current host time. Each GC operation moves its
+LUN's next-available time forward. GC time therefore reaches the host only
+through the LUN timelines: a later host read or program on a LUN that GC is
+using starts when GC is done with it.
+
+GC keeps the order of a real SSD (`gc_erase_order=on`, the default):
+
+- A copy program starts when its read ends, because its data must be in
+  DRAM first.
+- Each line has a fence: the latest end of a copy program of its pages.
+  The erases of the line start at the fence, or now if it is earlier.
+- With `pe_suspend` or `read_prio`, GC seals the LUN of the source page
+  before its read, so the read cannot suspend or pass the program that
+  wrote the page. It seals the LUN of the copy after its program, so a
+  later read cannot move the copy past the erase.
+- A read of a failed or offline die reads the other dies of its stripe,
+  so GC seals every die before such a read.
+
+```text
+  LUN 0  |--GC R--|                    |--erase of the victim block--|
+  LUN 1           |--GC W (the copy)--|
+                  ^ read end            ^ fence: the erase starts here
+```
+
+The fence lives in the line, so a victim that goes back to the queue, or a
+paced victim (`gc_pace`), keeps it until its erase. These copies set it:
+
+- line GC, and FDP GC with its refresh and pSLC pool fold;
+- DFTL translation page moves and copybacks;
+- the page copies of hybrid and fast merges.
+
+An FDP reset clears the fence. KV GC books the same order itself. It does
+not seal, so with `pe_suspend` or `read_prio` a read can move a KV copy.
+A controller with `cxl_ssd` uses the FTL of the CXL medium. That FTL keeps
+the order, so the controller refuses `gc_erase_order=off`.
+
+Two limits remain:
+
+- With `prog_pass2_ns` the fence is the end of the coarse pass. The model
+  keeps the data in the controller buffer until the fine pass.
+- `persist_ftl` does not save a fence, so a loaded FTL has none. The
+  property is not in the digest, as `pe_suspend` and `read_prio` are not.
+
+`gc_erase_order=off` restores the old timing of each path. A GC read,
+program and erase start at the time GC runs. So an erase on one LUN can
+start before a copy on another LUN ends. A DFTL translation page copy
+still programs after its read, as before.
+
+The property changes only timing. For a given sequence of victims the
+page counts and WAF are the same. A victim choice that depends on time
+(cost-benefit, retention refresh, idle maintenance) can pick other
+victims, and then the counts can differ.
 
 ```text
   LUN 3 timeline   |--host W--|--GC R--|--GC W--|--GC W--|--erase-------|--host R--|
