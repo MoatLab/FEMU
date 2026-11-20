@@ -1315,7 +1315,7 @@ static void nvme_cmb_write(void *opaque, hwaddr addr, uint64_t data, unsigned si
 
 static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
 {
-    uint64_t val;
+    uint64_t val = 0;
     FemuCtrl *n = (FemuCtrl *)opaque;
 
     memcpy(&val, &n->cmbuf[addr], size);

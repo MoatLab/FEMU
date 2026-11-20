@@ -907,9 +907,10 @@ static void femu_test_cq_churn(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
- * A byte access at the last byte of the controller memory buffer. The CMB
- * once had a 2-byte minimum access size, so QEMU widened this access and
- * the device copied one byte past its buffer. ASan builds stop there.
+ * Byte accesses at the end of the controller memory buffer. With a 2-byte
+ * minimum access size, QEMU widened each one. The write at the last byte
+ * then went past the buffer, which ASan reports. The write before it also
+ * cleared the last byte, so the word check fails in any build.
  */
 static void femu_test_cmb_last_byte(void *obj, void *data,
                                     QGuestAllocator *alloc)
