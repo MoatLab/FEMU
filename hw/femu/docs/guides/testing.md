@@ -176,9 +176,14 @@ reproducer:
 
 1. Run `./qemu-fuzz-x86_64 --fuzz-target=TARGET crash-<sha1>` alone.
 2. Set `QTEST_LOG=1 FUZZ_SERIALIZE_QTEST=1` and run it again into a file.
-3. Reorder that file with `scripts/oss-fuzz/reorder_fuzzer_qtest_trace.py`.
-4. Feed the result to `qemu-system-x86_64` with the logged arguments and
+3. Repair the file with `hw/femu/tests/fuzz/fix-qtest-trace.py IN OUT`.
+4. Reorder the output with `scripts/oss-fuzz/reorder_fuzzer_qtest_trace.py`.
+5. Feed the result to `qemu-system-x86_64` with the logged arguments and
    `-qtest stdio`.
+
+Step 3 is necessary. In the fuzzer, a GLib warning splits each `[DMA]`
+tag from its request line. The reorder script then drops the tag, and
+each DMA fill comes after the doorbell that reads it.
 
 Some state stays across inputs, as on a real drive: the namespace
 format, firmware slots and logs. A crash that does not come back in
@@ -194,10 +199,11 @@ The plant compares the key with a `memcmp()` call, so libFuzzer sees
 both operands. The near seed holds a CDW15 value that occurs once, so
 libFuzzer copies the key to the right bytes.
 
-Compare tracing alone found the key too late: once in 238969 inputs in
-a 600 s run. So the control run also gets the key from `control.dict`
-as a dictionary word. The control then checks one path: a one-word
-mutation, a report, a reproducer and a qtest replay.
+Compare tracing alone did not find the crash in a 600 s run. So the
+control run also gets the key from `control.dict` as a dictionary word.
+The control then checks this path: a mutation with the dictionary, a
+report, a replay alone, a qtest replay and a replay without the plant.
+It does not show that compare tracing finds a 4-byte key.
 
 ```sh
 ./qemu-fuzz-x86_64 --fuzz-target=generic-fuzz-femu-control \
