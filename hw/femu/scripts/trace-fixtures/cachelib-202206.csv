@@ -1,0 +1,5 @@
+key,op,size,op_count,key_size
+a,SET,1000,1,24
+a,GET,1000,3,24
+b,GET,0,1,24
+b,SET,5000,1,24

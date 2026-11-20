@@ -163,6 +163,153 @@ before the fetch is not in it. A fetch time is the time when a poller
 took the command, so one poller pass gives a small burst. Two commands
 that meet at one time count as an overlap.
 
+## Import a public trace
+
+`femu-trace-import.py` turns a public trace into an `io_trace` file.
+`femu-trace2fio.py` then reads it as it reads a capture of a live run.
+
+```
+ public trace --> femu-trace-import.py --> io_trace CSV --> femu-trace2fio.py --> fio I/O log
+                  one volume, whole blocks,                 report, time sort,
+                  fold to --device-size                     --time-scale
+```
+
+```sh
+femu-trace-import.py --format alibaba --volume 27 --block-size 512 \
+    --device-size 4g --fold scale --volume-sizes device_size.csv \
+    --out vol27.csv io_traces.csv.gz
+femu-trace2fio.py --block-size 512 --device-size 4g \
+    --filename /dev/nvme0n1 --iolog vol27.iolog vol27.csv
+```
+
+Use the same `--block-size` and `--device-size` for both tools. The
+tool reads a `.gz` file directly. It never writes over a file.
+
+### Formats
+
+| `--format` | Trace set | Columns, in order | Units |
+| --- | --- | --- | --- |
+| `msr` | MSR Cambridge, SNIA IOTTA | `Timestamp,Hostname,DiskNumber,Type,Offset,Size,ResponseTime` | Windows filetime (100 ns), bytes; `Type` is `Read` or `Write` |
+| `alibaba` | Alibaba block traces 2020 | `device_id,opcode,offset,length,timestamp` | bytes, microseconds; `opcode` is `R` or `W` |
+| `tencent` | Tencent CBS, SNIA IOTTA | `Timestamp,Offset,Size,IOType,VolumeID` | 512-byte sectors, time unit not confirmed; `IOType` 0 is read, 1 is write |
+| `cachelib` | Meta CacheLib key-value cache traces | by header name: `key`, `op`, `size`, `key_size`; optional `op_time`, `op_count`, `usecase` | bytes, time unit not confirmed |
+
+The column tables come from these pages:
+
+- the Alibaba README: https://github.com/alibaba/block-traces
+- the trace list of the cacheMon group: https://github.com/cacheMon/cache_dataset
+
+Read the page of your trace set before a study. The sources do not
+confirm the time unit of the Tencent and CacheLib sets. So for these
+formats, give the unit with `--time-unit` on the command line. The first three formats accept one optional header
+line with the names above. A CacheLib trace needs its header
+line, because the tool reads its columns by name.
+
+### Volumes and the device size
+
+A trace file can hold many volumes. The volume is `HOST:DISK` for `msr`
+(for example `usr:0`), `device_id` for `alibaba` and `VolumeID` for
+`tencent`. The tool uses one volume. With no `--volume` and two volumes
+in the file, it stops. `--list-volumes` prints each volume with its
+request count and its largest end byte.
+
+The tool rounds each byte range out to whole blocks and counts the
+unaligned ranges. It drops a request of size 0. It splits a long range
+into several commands at one time. A command holds at most 65536 blocks
+and less than 4 GiB, the limits of `femu-trace2fio.py` and fio.
+
+A volume can be larger than the FEMU namespace. `--fold` sets what
+happens then:
+
+```
+ --fold none   (default)  a range past --device-size is an error
+ --fold wrap              block modulo the device size: keeps the local order,
+                          puts two parts of the volume on one place (more overwrites);
+                          a range across the device end goes on at block 0
+ --fold scale             start block x device / volume, length kept: keeps the
+                          order of the volume, shrinks the gaps (ranges can overlap);
+                          a range across the device end moves down to end there
+ each fold                a range larger than the device is an error
+```
+
+`--fold scale` takes the volume size from `--volume-size`, from
+`--volume-sizes` (the Alibaba `device_size.csv` file), or from the
+largest end of the whole volume in the trace. The summary names the
+source. A range past a given volume size is an error. Both folds
+change the overwrite pattern, so a WAF from a folded trace is not the
+WAF of the original volume.
+
+### Time
+
+The tool runs its steps in this order:
+
+```
+ select the volume (whole file) --> sort by time (file order for equal times)
+   --> repeat a CacheLib line op_count times --> --spread
+   --> --duration, then --limit (in requests) --> whole blocks --> fold --> split
+```
+
+- The first request of the volume is time 0. The output is in time
+  order. The summary counts the requests that are out of order in the
+  file.
+- A trace with coarse times puts many requests at one time. `--spread`
+  places the k-th of n requests at one time t at t + k/n of one time
+  unit. The trace does not hold those times.
+- `--duration SEC` keeps the requests before the first time plus SEC.
+  `--limit N` then keeps the first N requests. A CacheLib miss counts as
+  a request.
+- `femu-trace2fio.py` starts the I/O log at the first command. A
+  request with no command (a miss, size 0) at the start does not move
+  the replay.
+- To replay faster or slower, use `femu-trace2fio.py --time-scale`.
+
+Only MSR has a latency (`ResponseTime`, from the original disk). Each
+piece of a split MSR request has it. For the other formats, the tool
+writes the submit time as the CQE time. In the shape report of an
+imported trace, the `depth` and `queues` lines do not show the original
+system. The tool puts each command on queue 1. Do not set the fio
+`iodepth` from them.
+
+### CacheLib traces
+
+A key-value trace has no block address. The tool puts the objects in a
+FIFO log over the namespace:
+
+```
+ SET k, size above 0  --> write ceil((key_size + size) / block) blocks at the
+                          log head; an older copy of k becomes dead space
+ SET k, size 0        --> no command; the log does not change
+ GET k, GET_LEASE k   --> k in the log: read its blocks; else a miss, no command
+ DELETE k             --> k leaves the log; no command (io_trace has no trim range)
+ object past the end  --> the rest of the device is skipped; the head goes to block 0
+ head reaches an old  --> each object that the new one overwrites, in whole
+ object                   or in part, leaves the log
+```
+
+- This is a simple model, not the CacheLib engine. It has no DRAM tier
+  and no small-object engine. It ignores `ttl` and `cache_hits`, and a
+  GET reads the stored extent, not the `size` of the GET line.
+- A line stands for `op_count` requests, as in the CacheBench replay of
+  CacheLib.
+- One key of two `usecase` values is two objects.
+- A trace with no `op_time` column needs `--rate N`. The tool then gives
+  line i the time i / N seconds, a synthetic clock.
+- `--max-bad` is not for CacheLib traces: a skipped line changes each
+  later state of the model.
+
+### Bad lines
+
+A bad line stops the tool with exit status 1 and the line number. A
+number field takes decimal digits only: no sign, no fraction.
+`--max-bad N` skips up to N bad lines and prints the count and the first
+line numbers. A bad header line always stops the tool. Exit status 2 is
+a usage or file error.
+
+The tool writes the output file only after a successful run, so a
+failed run leaves no file. The tool holds the selected volume in
+memory, and so does `femu-trace2fio.py`. For a large trace, select a
+short window with `--duration` or `--limit`.
+
 ## Replay
 
 Copy the I/O log to the guest, then run fio there:
@@ -175,7 +322,8 @@ sudo fio --name=replay --read_iolog=workload.iolog \
 - The I/O log names the device, so the job needs no `filename`. Use
   `--replay_redirect=/dev/nvme1n1` for another device.
 - Set `iodepth` to the `depth` maximum of the report or above. A lower
-  value makes fio fall behind the trace.
+  value makes fio fall behind the trace. For an imported trace, the
+  depth is not a measurement: use a high value such as 64.
 - fio follows the time stamps of the capture. Do not set
   `replay_no_stall`: it removes the time of the workload from the result.
 - fio needs version 3.31 or newer for this log format.
