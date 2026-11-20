@@ -1683,7 +1683,7 @@ void *oc20_ctrl_state_new(void)
 }
 
 const FemuExtCtrlOps femu_ocssd20_ext_ops = {
-    .name           = "ocssd",
+    .name           = "ocssd20",
     .init_ctrl_name = oc20_set_ctrl_str,
     .init           = oc20_init,
     .exit           = oc20_exit,

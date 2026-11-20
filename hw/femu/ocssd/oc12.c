@@ -1569,7 +1569,7 @@ static void oc12_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 }
 
 const FemuExtCtrlOps femu_ocssd12_ext_ops = {
-    .name           = "ocssd",
+    .name           = "ocssd12",
     .init_ctrl_name = oc12_set_ctrl_str,
     .init           = oc12_init,
     .exit           = oc12_exit,

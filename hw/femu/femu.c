@@ -733,6 +733,29 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
 }
 
 /*
+ * The table of each distinct mode on the controller, once: the controller's
+ * copy first, then the copies of the allocated namespaces in order. No two
+ * modes share a start_ctrl or an exit function, so one entry per mode name
+ * calls each of those hooks once.
+ */
+static size_t femu_ext_ops_modes(FemuCtrl *n, const FemuExtCtrlOps **out,
+                                 size_t max)
+{
+    g_autofree const FemuExtCtrlOps **list =
+        g_new(const FemuExtCtrlOps *, n->namespace_limit + 1);
+    size_t nr = 0;
+
+    list[nr++] = &n->ext_ops;
+    for (uint32_t i = 0; n->namespaces && i < n->namespace_limit; i++) {
+        if (n->namespaces[i].allocated) {
+            list[nr++] = &n->namespaces[i].ext_ops;
+        }
+    }
+
+    return femu_ext_ops_distinct(list, nr, out, max);
+}
+
+/*
  * Every distinct mode the controller serves gets a say in whether it can run
  * with the settings the host has chosen, and derives from them what it needs.
  * Only the controller's own hook was called, so a namespace whose mode differs
@@ -743,31 +766,11 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
  */
 static int femu_start_ctrl_extensions(FemuCtrl *n)
 {
-    int (*seen[FEMU_NR_MODES])(struct FemuCtrl *);
-    int nseen = 0, i, j;
+    const FemuExtCtrlOps *modes[FEMU_NR_MODES];
+    size_t nr = femu_ext_ops_modes(n, modes, ARRAY_SIZE(modes));
 
-    if (n->ext_ops.start_ctrl) {
-        seen[nseen++] = n->ext_ops.start_ctrl;
-    }
-
-    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
-        int (*sc)(struct FemuCtrl *) = n->namespaces[i].ext_ops.start_ctrl;
-
-        if (!n->namespaces[i].allocated || !sc) {
-            continue;
-        }
-        for (j = 0; j < nseen; j++) {
-            if (seen[j] == sc) {
-                break;
-            }
-        }
-        if (j == nseen && nseen < (int)ARRAY_SIZE(seen)) {
-            seen[nseen++] = sc;
-        }
-    }
-
-    for (j = 0; j < nseen; j++) {
-        if (seen[j](n)) {
+    for (size_t i = 0; i < nr; i++) {
+        if (modes[i]->start_ctrl && modes[i]->start_ctrl(n)) {
             return -1;
         }
     }
@@ -3391,7 +3394,7 @@ static bool femu_needs_ftl_thread(FemuCtrl *n)
  * The handler table of a mode. Open-Channel 1.2 and 2.0 share femu_mode and
  * differ by lver. A mode with no table gets none, and its copies stay empty.
  */
-static const FemuExtCtrlOps *femu_ext_ops_lookup(uint8_t mode, uint8_t lver)
+static const FemuExtCtrlOps *femu_ext_ops_table(uint8_t mode, uint8_t lver)
 {
     switch (mode) {
     case FEMU_OCSSD_MODE:
@@ -3410,6 +3413,34 @@ static const FemuExtCtrlOps *femu_ext_ops_lookup(uint8_t mode, uint8_t lver)
     default:
         return NULL;
     }
+}
+
+/*
+ * A table that breaks the rules of femu-ext-ops.h is a bug in its mode, so
+ * each lookup checks the tables and stops QEMU on a broken one.
+ */
+static const FemuExtCtrlOps *femu_ext_ops_lookup(uint8_t mode, uint8_t lver)
+{
+    static const FemuExtCtrlOps *const all[] = {
+        &femu_ocssd12_ext_ops, &femu_ocssd20_ext_ops, &femu_nossd_ext_ops,
+        &femu_bbssd_ext_ops, &femu_zns_ext_ops, &femu_csd_ext_ops,
+        &femu_kvssd_ext_ops,
+    };
+    const FemuExtCtrlOps *ops = femu_ext_ops_table(mode, lver);
+    const char *why = NULL;
+
+    for (size_t i = 0; i < ARRAY_SIZE(all); i++) {
+        if (!femu_ext_ops_check(all[i], &why)) {
+            error_report("femu: mode table %s: %s",
+                         all[i]->name ? all[i]->name : "?", why);
+            abort();
+        }
+    }
+    if (!femu_ext_ops_check_set(all, ARRAY_SIZE(all), &why)) {
+        error_report("femu: mode tables: %s", why);
+        abort();
+    }
+    return ops;
 }
 
 static FemuExtCtrlOps femu_ext_ops_copy(uint8_t mode, uint8_t lver)
@@ -5367,31 +5398,13 @@ static void femu_aer_bh(void *opaque)
 
 static void femu_exit_extensions(FemuCtrl *n)
 {
-    void (*seen[FEMU_NR_MODES])(struct FemuCtrl *);
-    int nseen = 0, i, j;
+    const FemuExtCtrlOps *modes[FEMU_NR_MODES];
+    size_t nr = femu_ext_ops_modes(n, modes, ARRAY_SIZE(modes));
 
-    if (n->ext_ops.exit) {
-        seen[nseen++] = n->ext_ops.exit;
-    }
-
-    for (i = 0; n->namespaces && i < n->namespace_limit; i++) {
-        void (*ex)(struct FemuCtrl *) = n->namespaces[i].ext_ops.exit;
-
-        if (!n->namespaces[i].allocated || !ex) {
-            continue;
+    for (size_t i = 0; i < nr; i++) {
+        if (modes[i]->exit) {
+            modes[i]->exit(n);
         }
-        for (j = 0; j < nseen; j++) {
-            if (seen[j] == ex) {
-                break;
-            }
-        }
-        if (j == nseen && nseen < (int)ARRAY_SIZE(seen)) {
-            seen[nseen++] = ex;
-        }
-    }
-
-    for (j = 0; j < nseen; j++) {
-        seen[j](n);
     }
 }
 
