@@ -36,11 +36,6 @@ static inline struct zns_blk *get_blk(struct zns_ssd *zns, struct ppa *ppa)
     return &(pl->blk[ppa->g.blk]);
 }
 
-static inline void check_addr(int a, int max)
-{
-   assert(a >= 0 && a < max);
-}
-
 static void zns_advance_write_pointer(struct zns_ssd *zns, uint32_t zone_idx)
 {
     if (zns->zone_wp_slot) {
@@ -397,7 +392,8 @@ static void zns_invalidate_zone_mappings(struct zns_ssd *zns, uint32_t zone_idx,
     uint64_t start_lpn = zone_start_lba / secs_per_pg;
     uint64_t end_lpn = zone_end_lba / secs_per_pg;
     uint64_t lpn;
-    uint64_t invalidated_count = 0;
+    /* read only by the ftl_debug() below, which FEMU_DEBUG_ZFTL turns on */
+    G_GNUC_UNUSED uint64_t invalidated_count = 0;
 
     for (lpn = start_lpn; lpn < end_lpn && lpn < zns->l2p_sz; lpn++) {
         if (zns->maptbl[lpn].ppa != UNMAPPED_PPA) {

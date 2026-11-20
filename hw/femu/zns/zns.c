@@ -905,11 +905,6 @@ static void zns_finalize_zoned_write(NvmeNamespace *ns, NvmeRequest *req, bool f
     }
 }
 
-static inline uint64_t zone_slba(NvmeNamespace *ns, uint32_t zone_idx)
-{
-    return (zone_idx) * ns->zone_size;
-}
-
 static uint64_t zns_advance_zone_wp(NvmeNamespace *ns, NvmeZone *zone, uint32_t nlb)
 {
     uint64_t result = zone->w_ptr;
@@ -2166,17 +2161,6 @@ static uint16_t zns_zone_mgmt_recv(FemuCtrl *n, NvmeRequest *req)
     g_free(buf);
 
     return status;
-}
-
-static inline bool nvme_csi_has_nvm_support(NvmeNamespace *ns)
-{
-    switch (ns->ctrl->csi) {
-    case NVME_CSI_NVM:
-    case NVME_CSI_ZONED:
-        return true;
-    }
-
-    return false;
 }
 
 static uint16_t zns_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)

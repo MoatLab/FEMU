@@ -1910,10 +1910,6 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
     NvmeDsmRange *ranges = req->dsm_ranges;
     int nr_ranges = req->dsm_nr_ranges;
 
-    int total_trimmed_pages = 0;
-    int total_already_invalid = 0;
-    int total_out_of_bounds = 0;
-
     if (!ranges || nr_ranges <= 0) {
         printf("TRIM: Invalid ranges or count\n");
         return 0;
@@ -1921,7 +1917,6 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
 
     for (int range_idx = 0; range_idx < nr_ranges; range_idx++) {
         uint64_t start_lpn, end_lpn;
-        int trimmed_pages;
         int already_invalid = 0;
 
         /* only the pages the range covers in full lose their mapping */
@@ -1936,16 +1931,11 @@ uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)
         if (end_lpn >= spp->tt_pgs) {
             ftl_err("TRIM: Range %d exceeds FTL capacity - end_lpn=%lu, tt_pgs=%d\n",
                    range_idx, end_lpn, spp->tt_pgs);
-            total_out_of_bounds++;
             continue;  /* Skip this range, continue with others */
         }
 
         /* Process each LPN in this range */
-        trimmed_pages = ssd_deallocate_lpns(ssd, start_lpn, end_lpn,
-                                            &already_invalid);
-
-        total_trimmed_pages += trimmed_pages;
-        total_already_invalid += already_invalid;
+        ssd_deallocate_lpns(ssd, start_lpn, end_lpn, &already_invalid);
     }
 
     /* Free the ranges array */

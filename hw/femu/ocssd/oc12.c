@@ -6,14 +6,6 @@ static inline int qemu_fls(int i)
     return 32 - clz32(i);
 }
 
-static inline bool is_oc12_admin_cmd(uint8_t opcode)
-{
-    return (opcode == OC12_ADM_CMD_IDENTITY ||
-            opcode == OC12_ADM_CMD_GET_L2P_TBL ||
-            opcode == OC12_ADM_CMD_GET_BB_TBL ||
-            opcode == OC12_ADM_CMD_SET_BB_TBL);
-}
-
 static void oc12_tbl_initialize(NvmeNamespace *ns)
 {
     uint32_t len = ns->tbl_entries;

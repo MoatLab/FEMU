@@ -3065,7 +3065,8 @@ static void ssd_trim_fdp_range(FemuCtrl *n, NvmeRequest *req)
     struct ssdparams *spp = &ssd->sp;
     NvmeDsmRange *ranges = req->dsm_ranges;
     int nr_ranges = req->dsm_nr_ranges;
-    int total_trimmed_pages = 0;
+    /* read only by the ftl_debug() below, which FEMU_DEBUG_FTL turns on */
+    G_GNUC_UNUSED int total_trimmed_pages = 0;
     int total_already_invalid = 0;
 
     if (!ranges || nr_ranges <= 0) {

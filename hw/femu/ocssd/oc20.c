@@ -5,12 +5,6 @@ static int64_t oc20_chip_op(FemuCtrl *n, int ch, int lun, uint8_t page_type,
                             int64_t now, int opcode);
 static uint8_t oc20_page_type(FemuCtrl *n, int sec);
 
-static inline bool is_oc20_admin_cmd(uint8_t opcode)
-{
-    return (opcode == OC20_ADM_CMD_IDENTIFY ||
-            opcode == OC20_ADM_CMD_SET_LOG_PAGE);
-}
-
 static uint16_t oc20_dma_read(FemuCtrl *n, uint8_t *ptr, uint32_t len,
                               NvmeCmd *cmd)
 {
@@ -730,14 +724,6 @@ static int oc20_writefail_load(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 
     fclose(fp);
     return 0;
-}
-
-static inline Oc20Namespace *cmd_lns(FemuCtrl *n, NvmeCmd *cmd)
-{
-    uint32_t nsid = le32_to_cpu(cmd->nsid);
-    NvmeNamespace *ns = &n->namespaces[nsid - 1];
-
-    return (ns->state);
 }
 
 static inline NvmeNamespace *cmd_ns(FemuCtrl *n, NvmeCmd *cmd)
