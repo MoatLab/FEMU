@@ -3389,6 +3389,19 @@ typedef struct FemuCtrl {
      */
     bool            stage_ns;
     FemuStageSet    *stage_ns_sets;
+    /* what query-femu-stages reset=true cleared, for query-stats */
+    FemuStageSet    *stage_cleared;
+    /*
+     * query-stats: each resume adds one to stats_epoch, as the FTL may
+     * have changed while paused. The rest is the FTL thread's own: when
+     * it last published, and the epoch that publish covered.
+     */
+    uint32_t        stats_epoch;
+    uint32_t        stats_epoch_seen;
+    bool            stats_dirty;
+    uint32_t        stats_passes;
+    int64_t         stats_pub_ns;
+    uint64_t        stats_pub_count;
     bool            print_log;
 
     uint8_t         multipoller_enabled;
@@ -4304,6 +4317,8 @@ uint8_t ssd_available_spare(struct ssd *ssd);
 uint8_t ssd_percentage_used(struct ssd *ssd);
 uint64_t ssd_media_errors(struct ssd *ssd);
 uint32_t ssd_page_size(struct ssd *ssd);
+/* copy the counters for query-stats; the FTL's writer only (ftl-query.c) */
+void ssd_stats_publish(struct ssd *ssd);
 uint64_t zns_media_errors(NvmeNamespace *ns);
 uint8_t zns_percentage_used(NvmeNamespace *ns);
 

@@ -649,6 +649,32 @@ enum ssd_reclaim_why {
 };
 
 /* the write counters of one namespace in an FTL that namespaces share */
+/*
+ * The counters query-stats reports, as of a point between two requests.
+ * The thread that runs the FTL writes them under ssd->stats_seq; the main
+ * loop reads them (femu-stats.c).
+ */
+struct ssd_stats_pub {
+    uint64_t host_pages;
+    uint64_t nand_pages;
+    uint64_t gc_pages;
+    uint64_t erases;
+    uint64_t pad_pages;
+    uint64_t map_pages;
+    uint64_t map_reads;
+    uint64_t parity_pages;
+    uint64_t degraded_reads;
+    uint64_t lost_pages;
+    uint64_t lost_blocks;
+    uint64_t idle_reclaims;
+    uint64_t idle_refreshes;
+    uint32_t free_lines;
+    uint32_t victim_lines;
+    uint32_t full_lines;
+    uint32_t retired_lines;
+    uint32_t spare_lines;
+};
+
 struct ssd_ns_ctr {
     uint64_t host_write_pages;
     uint64_t nand_write_pages;
@@ -933,6 +959,13 @@ struct ssd {
     uint64_t durable_waits;
     int64_t last_prog_done;
     struct ssd_ns_ctr *ns_ctr;
+    /* query-stats: see struct ssd_stats_pub and ssd_stats_publish() */
+    QemuSeqLock stats_seq;
+    struct ssd_stats_pub stats_pub;
+    /* the controller and pass that last published: one copy per pass */
+    const void *stats_pub_by;
+    uint64_t stats_pub_pass;
+    uint64_t *stats_ns_pub;     /* per slice: host, NAND and GC pages */
     uint64_t gc_copyback_pages; /* of those, pages moved on their die */
     /*
      * fw_gc_page_ns: when the GC firmware line is free (device time), the

@@ -2,9 +2,14 @@
 /*
  * bbssd state for query-femu. Runs on the controller's FTL thread between
  * two requests, so the lists, counters and pages it reads all describe the
- * same point in time.
+ * same point in time. ssd_stats_read() is the exception: query-stats calls
+ * it from the main loop, and it reads only the copy ssd_stats_publish()
+ * made.
  */
 #include "qemu/osdep.h"
+#include "qemu/atomic.h"
+#include "qemu/seqlock.h"
+#include "qemu/timer.h"
 #include "ftl.h"
 #include "ftl-internal.h"
 #include "../femu-query.h"
@@ -399,5 +404,108 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
         out->ipc = line->ipc;
         out->state = q->state[i];
         ssd_query_line_wear(ssd, i, out);
+    }
+}
+
+/*
+ * Copy the counters that query-stats reports into ssd->stats_pub. Only the
+ * thread that runs this FTL calls it, between two requests, so the copy is
+ * one point in time and a request's own steps (a host page credited, then
+ * given back when it finds no place) never show. Several controllers that
+ * share an FTL call it under the subsystem's namespace lock. Realize also
+ * calls it, before any FTL thread runs.
+ */
+void ssd_stats_publish(struct ssd *ssd)
+{
+    struct ssd_stats_pub *p = &ssd->stats_pub;
+    struct line_mgmt *lm = &ssd->lm;
+
+    seqlock_write_begin(&ssd->stats_seq);
+    qatomic_set(&p->host_pages, ssd->host_write_pages);
+    qatomic_set(&p->nand_pages, ssd->nand_write_pages);
+    qatomic_set(&p->gc_pages, ssd->gc_write_pages);
+    qatomic_set(&p->erases, ssd->total_erases);
+    qatomic_set(&p->pad_pages, ssd->pd_pad_pages);
+    qatomic_set(&p->map_pages, ssd->map_write_pages);
+    qatomic_set(&p->map_reads, ssd->map_read_pages);
+    qatomic_set(&p->parity_pages, ssd->parity_pages);
+    qatomic_set(&p->degraded_reads, qatomic_read(&ssd->degraded_reads));
+    qatomic_set(&p->lost_pages, ssd->rain_lost_pages);
+    qatomic_set(&p->lost_blocks, ssd->rain_lost_blocks);
+    qatomic_set(&p->idle_reclaims, ssd->idle_reclaims);
+    qatomic_set(&p->idle_refreshes, ssd->idle_refreshes);
+    if (!ssd->fdp_enabled && lm->victim_line_pq) {
+        qatomic_set(&p->free_lines, lm->free_line_cnt);
+        qatomic_set(&p->victim_lines, pqueue_size(lm->victim_line_pq));
+        qatomic_set(&p->full_lines, lm->full_line_cnt);
+        qatomic_set(&p->retired_lines, lm->retired_line_cnt);
+        qatomic_set(&p->spare_lines, ssd->spare_lines);
+    }
+    for (uint32_t i = 0; i < ssd->nr_ns_slices; i++) {
+        const struct ssd_ns_ctr *c = &ssd->ns_ctr[i];
+        uint64_t *out = &ssd->stats_ns_pub[3 * i];
+
+        qatomic_set(&out[0], c->host_write_pages);
+        qatomic_set(&out[1], c->nand_write_pages);
+        qatomic_set(&out[2], c->gc_write_pages);
+    }
+    seqlock_write_end(&ssd->stats_seq);
+}
+
+/*
+ * Read the copy ssd_stats_publish() made, from the main loop. The caller
+ * holds the BQL, so @ssd stays. The writer never waits for this reader;
+ * the reader tries again while the writer is inside the copy, until
+ * @deadline. The fields read outside the sequence are set at realize.
+ */
+bool ssd_stats_read(struct ssd *ssd, uint32_t nsid, FemuStatsNs *s,
+                    int64_t deadline)
+{
+    const struct ssd_stats_pub *p = &ssd->stats_pub;
+    bool slice = ssd->nr_ns_slices && nsid && nsid <= ssd->nr_ns_slices;
+    unsigned seq;
+
+    memset(s, 0, sizeof(*s));
+    s->page_size = ssd_page_size(ssd);
+    s->tp_on = ssd->tp_on;
+    s->parity_on = ssd_parity_on(&ssd->sp);
+    s->rain_on = ssd->sp.rain_parity != 0;
+    s->maint_on = ssd->maint_idle;
+    s->ns_ctr_on = slice;
+    s->fdp = ssd->fdp_enabled;
+    s->total_lines = s->fdp ? 0 : ssd->lm.tt_lines;
+    for (;;) {
+        seq = seqlock_read_begin(&ssd->stats_seq);
+        s->host_pages = qatomic_read(&p->host_pages);
+        s->nand_pages = qatomic_read(&p->nand_pages);
+        s->gc_pages = qatomic_read(&p->gc_pages);
+        s->erases = qatomic_read(&p->erases);
+        s->pad_pages = qatomic_read(&p->pad_pages);
+        s->map_pages = qatomic_read(&p->map_pages);
+        s->map_reads = qatomic_read(&p->map_reads);
+        s->parity_pages = qatomic_read(&p->parity_pages);
+        s->degraded_reads = qatomic_read(&p->degraded_reads);
+        s->lost_pages = qatomic_read(&p->lost_pages);
+        s->lost_blocks = qatomic_read(&p->lost_blocks);
+        s->idle_reclaims = qatomic_read(&p->idle_reclaims);
+        s->idle_refreshes = qatomic_read(&p->idle_refreshes);
+        s->free_lines = qatomic_read(&p->free_lines);
+        s->victim_lines = qatomic_read(&p->victim_lines);
+        s->full_lines = qatomic_read(&p->full_lines);
+        s->retired_lines = qatomic_read(&p->retired_lines);
+        s->spare_lines = qatomic_read(&p->spare_lines);
+        if (slice) {
+            const uint64_t *c = &ssd->stats_ns_pub[3 * (nsid - 1)];
+
+            s->ns_host_pages = qatomic_read(&c[0]);
+            s->ns_nand_pages = qatomic_read(&c[1]);
+            s->ns_gc_pages = qatomic_read(&c[2]);
+        }
+        if (!seqlock_read_retry(&ssd->stats_seq, seq)) {
+            return true;
+        }
+        if (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) > deadline) {
+            return false;
+        }
     }
 }

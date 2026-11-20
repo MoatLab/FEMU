@@ -1024,6 +1024,8 @@ bool ssd_persist_load(struct ssd *ssd, const uint8_t *buf, size_t len,
          ftlp_check(ssd, &s, errp);
     if (ok && commit) {
         ftlp_commit(ssd, &s);
+        /* realize: no FTL thread runs yet, so this thread may publish */
+        ssd_stats_publish(ssd);
     }
     ftlp_free(&s);
     return ok;

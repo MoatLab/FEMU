@@ -3194,6 +3194,7 @@ static void *femu_ftl_thread(void *arg)
     NvmeRequest *req = NULL;
     uint64_t lat;
     bool busy;
+    bool idle;
     uint32_t hold_req;
     uint32_t hold;
     int rc, i;
@@ -3304,12 +3305,17 @@ static void *femu_ftl_thread(void *arg)
                 uint64_t bytes = (uint64_t)req->nlb <<
                                  req->ns->id_ns.lbaf[idx].lbads;
 
+                /* query-stats reads these from the main loop */
                 if (req->cmd.opcode == NVME_CMD_WRITE) {
-                    ctr->nr_host_wr_cmds++;
-                    ctr->nr_host_wr_bytes += bytes;
+                    qatomic_set(&ctr->nr_host_wr_cmds,
+                                ctr->nr_host_wr_cmds + 1);
+                    qatomic_set(&ctr->nr_host_wr_bytes,
+                                ctr->nr_host_wr_bytes + bytes);
                 } else if (req->cmd.opcode == NVME_CMD_READ) {
-                    ctr->nr_host_rd_cmds++;
-                    ctr->nr_host_rd_bytes += bytes;
+                    qatomic_set(&ctr->nr_host_rd_cmds,
+                                ctr->nr_host_rd_cmds + 1);
+                    qatomic_set(&ctr->nr_host_rd_bytes,
+                                ctr->nr_host_rd_bytes + bytes);
                 }
             }
             if (nvme_ns_shared(n)) {
@@ -3334,8 +3340,9 @@ static void *femu_ftl_thread(void *arg)
          * No request this pass: the pSLC tier may fold, and idle
          * collection may run, in the idle time.
          */
-        if (unlikely(n->tier_idle || n->gc_idle || n->buffer_bg ||
-                     n->tier_upkeep || n->durable_at_done) && !busy) {
+        idle = unlikely(n->tier_idle || n->gc_idle || n->buffer_bg ||
+                        n->tier_upkeep || n->durable_at_done) && !busy;
+        if (idle) {
             if (n->tier_upkeep) {
                 bb_tier_upkeep(n);
             }
@@ -3348,6 +3355,12 @@ static void *femu_ftl_thread(void *arg)
             if (n->buffer_bg || n->durable_at_done) {
                 bb_buffer_idle(n);
             }
+        }
+
+        /* the query-stats copies of the counters this pass changed */
+        if (busy || idle || n->stats_dirty ||
+            qatomic_read(&n->stats_epoch) != n->stats_epoch_seen) {
+            femu_stats_tick(n, busy, idle);
         }
     }
 
@@ -5296,6 +5309,7 @@ static void nvme_destroy_poller(FemuCtrl *n)
     g_free(n->stage_sets);
     n->stage_sets = NULL;
     g_clear_pointer(&n->stage_ns_sets, g_free);
+    g_clear_pointer(&n->stage_cleared, g_free);
     g_free(n->nand_profile_name);
     n->nand_profile_name = NULL;
 }

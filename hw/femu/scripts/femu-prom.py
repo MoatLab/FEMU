@@ -13,10 +13,26 @@ Each scrape reads the device again, so the values are as fresh as the
 scrape. Counters (pages, erases) are monotonic; WAF and the line counts are
 gauges. Each series has the labels device (the QOM path) and nsid.
 
+With --source query-stats, one QMP query-stats call (target femu) gives
+the same series for every device, and femu_namespace_generation. That
+call does not wait for the FTL thread. It reads a copy that the FTL
+thread makes between two requests: about once a millisecond while the
+device is busy, and at once when it goes quiet.
+
+  --source query-femu  (default)   one query per device, waits for the FTL
+  --source query-stats             one call for all devices, no wait
+
+A namespace that shares the FTL of another (ftl-nsid) gets the series of
+that FTL, as query-femu reports them; a sum over namespaces then counts
+that FTL more than once. A namespace that query-stats leaves out (its
+copy stayed busy) has no series in that scrape, and femu_scrape_errors
+does not count it. When femu_namespace_generation changes, the namespace
+was created again and its counters started from 0.
+
 Usage:
-  femu-prom.py SOCKET [--port 9813] [--bind 127.0.0.1]
+  femu-prom.py SOCKET [--port 9813] [--bind 127.0.0.1] [--source S]
   femu-prom.py SOCKET --once        # one exposition to stdout
-  femu-prom.py --self-test          # render a canned reply, no QEMU
+  femu-prom.py --self-test          # render canned replies, no QEMU
 
 SOCKET is a Unix socket path or HOST:PORT of a QMP server, for example
 -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off on the QEMU command line.
@@ -75,6 +91,10 @@ def render(replies, errors=0):
             if "waf" in ctr:
                 rows.setdefault("femu_waf", []).append(
                     "femu_waf{%s} %.6f" % (labels, ctr["waf"]))
+            if "generation" in ns:
+                rows.setdefault("femu_namespace_generation", []).append(
+                    "femu_namespace_generation{%s} %d" %
+                    (labels, ns["generation"]))
             for key in LINES:
                 if key in ns.get("line-counts", {}):
                     rows.setdefault("femu_lines", []).append(
@@ -90,11 +110,70 @@ def render(replies, errors=0):
         out.append("# HELP femu_waf write amplification since the start")
         out.append("# TYPE femu_waf gauge")
         out.extend(rows["femu_waf"])
+    if "femu_namespace_generation" in rows:
+        out.append("# HELP femu_namespace_generation changes when the "
+                   "namespace is created again")
+        out.append("# TYPE femu_namespace_generation gauge")
+        out.extend(rows["femu_namespace_generation"])
     if "femu_lines" in rows:
         out.append("# HELP femu_lines lines in each state")
         out.append("# TYPE femu_lines gauge")
         out.extend(rows["femu_lines"])
     return "\n".join(out) + "\n"
+
+
+# the parts of the query-femu WAF: media pages over host pages
+WAF_PARTS = ("nand-write-pages", "gc-write-pages", "map-write-pages",
+             "pad-write-pages", "parity-write-pages")
+
+
+def from_stats(results):
+    """The query-femu shaped replies of a query-stats @results list. WAF
+    comes from the raw page counts with the query-femu formula, so both
+    sources give the same text."""
+    devices = {}
+    for res in results:
+        if res.get("provider") != "femu":
+            continue
+        vals = {st["name"]: st["value"] for st in res.get("stats", [])}
+        nsid = vals.get("nsid", 0)
+        if not nsid:
+            continue        # the controller: no namespace series
+        ctr = {k: vals[k] for k in COUNTERS if k in vals}
+        host = vals.get("host-write-pages", 0)
+        if host:
+            ctr["waf"] = float(sum(vals.get(k, 0) for k in WAF_PARTS)) / host
+        lines = {k: vals[k + "-lines"] for k in LINES if k + "-lines" in vals}
+        ns = {"nsid": nsid, "counters": ctr, "ftl-nsid": vals.get("ftl-nsid")}
+        if "generation" in vals:
+            ns["generation"] = vals["generation"]
+        if lines:
+            ns["line-counts"] = lines
+        devices.setdefault(res.get("qom-path"), {})[nsid] = ns
+    replies = []
+    for path, nss in devices.items():
+        out = []
+        for nsid in sorted(nss):
+            ns = nss[nsid]
+            owner = nss.get(ns.pop("ftl-nsid"))
+            if owner:       # a shared FTL: the series of its owner
+                ns["counters"] = owner["counters"]
+                if "line-counts" in owner:
+                    ns["line-counts"] = owner["line-counts"]
+            out.append(ns)
+        replies.append((path, {"namespaces": out}))
+    return replies
+
+
+def scrape_stats(stat, address):
+    """One query-stats call for every device."""
+    qmp = stat.QmpClient.connect(address)
+    try:
+        results = qmp.execute("query-stats", {
+            "target": "femu", "providers": [{"provider": "femu"}]})
+        return render(from_stats(results))
+    finally:
+        qmp.close()
 
 
 def scrape(stat, address):
@@ -131,21 +210,59 @@ def scrape(stat, address):
 def self_test():
     reply = {"namespaces": [{
         "nsid": 1,
-        "counters": {"host-write-pages": 40, "nand-write-pages": 48,
-                     "gc-write-pages": 8, "block-erases": 3, "waf": 1.4},
+        "counters": {"host-write-pages": 30, "nand-write-pages": 32,
+                     "gc-write-pages": 8, "block-erases": 3,
+                     "waf": 40.0 / 30},
         "line-counts": {"free": 10, "victim": 1, "full": 2, "retired": 0,
                         "spare": 0, "total": 13}}]}
     text = render([("/machine/peripheral/femu0", reply)])
     want = ['femu_host_write_pages_total{device="/machine/peripheral/femu0",'
-            'nsid="1"} 40',
+            'nsid="1"} 30',
             "# TYPE femu_nand_write_pages_total counter",
-            'femu_waf{device="/machine/peripheral/femu0",nsid="1"} 1.400000',
+            'femu_waf{device="/machine/peripheral/femu0",nsid="1"} 1.333333',
             'femu_lines{device="/machine/peripheral/femu0",nsid="1",'
             'state="free"} 10']
     for w in want:
         assert w in text, (w, text)
     assert "femu_pad_write_pages_total" not in text, text
     assert "femu_scrape_errors 0" in text, text
+
+    # the same namespace through query-stats gives the same text
+    path = "/machine/peripheral/femu0"
+    results = [
+        {"provider": "femu", "qom-path": path, "stats": [
+            {"name": "nsid", "value": 0},
+            {"name": "host-write-commands", "value": 7}]},
+        {"provider": "femu", "qom-path": path, "stats": [
+            {"name": "nsid", "value": 1},
+            {"name": "generation", "value": 0},
+            {"name": "page-size", "value": 4096},
+            {"name": "host-write-pages", "value": 30},
+            {"name": "nand-write-pages", "value": 32},
+            {"name": "gc-write-pages", "value": 8},
+            {"name": "block-erases", "value": 3},
+            {"name": "waf", "value": 1333}]
+            + [{"name": k + "-lines", "value": v} for k, v in
+               reply["namespaces"][0]["line-counts"].items()]},
+        {"provider": "kvm", "stats": [{"name": "nsid", "value": 9}]}]
+    got = render(from_stats(results))
+    gen = 'femu_namespace_generation{device="%s",nsid="1"} 0' % path
+    assert gen in got, got
+
+    def strip(t):
+        return "\n".join(x for x in t.split("\n")
+                         if "femu_namespace_generation" not in x)
+    assert strip(got) == text, (got, text)
+
+    # a second namespace on the same FTL gets the series of namespace 1
+    shared = dict(reply["namespaces"][0], nsid=2)
+    text2 = render([(path, {"namespaces": [reply["namespaces"][0], shared]})])
+    results.insert(2, {"provider": "femu", "qom-path": path, "stats": [
+        {"name": "nsid", "value": 2}, {"name": "page-size", "value": 4096},
+        {"name": "ftl-nsid", "value": 1},
+        {"name": "ns-host-write-pages", "value": 5}]})
+    got = render(from_stats(results))
+    assert strip(got) == text2, (got, text2)
     print("femu-prom: self-test passed")
 
 
@@ -155,6 +272,8 @@ def main():
     ap.add_argument("--port", type=int, default=9813)
     ap.add_argument("--bind", default="127.0.0.1")
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--source", choices=("query-femu", "query-stats"),
+                    default="query-femu")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     if args.self_test:
@@ -163,8 +282,9 @@ def main():
     if not args.socket:
         ap.error("SOCKET is required")
     stat = _load_stat()
+    read = scrape_stats if args.source == "query-stats" else scrape
     if args.once:
-        sys.stdout.write(scrape(stat, args.socket))
+        sys.stdout.write(read(stat, args.socket))
         return 0
 
     class Handler(BaseHTTPRequestHandler):
@@ -173,7 +293,7 @@ def main():
                 self.send_error(404)
                 return
             try:
-                body = scrape(stat, args.socket).encode()
+                body = read(stat, args.socket).encode()
             except Exception as e:  # report and keep serving
                 self.send_error(503, str(e))
                 return

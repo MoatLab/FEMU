@@ -91,6 +91,10 @@ static void print_stats_results(Monitor *mon, StatsTarget target,
         monitor_printf(mon, "provider: %s\n",
                        StatsProvider_str(result->provider));
     }
+    /* a FEMU device gives several results; name the device of each */
+    if (target == STATS_TARGET_FEMU && result->qom_path) {
+        monitor_printf(mon, "%s\n", result->qom_path);
+    }
 
     for (stats_list = result->stats; stats_list;
              stats_list = stats_list->next,
@@ -229,6 +233,7 @@ void hmp_info_stats(Monitor *mon, const QDict *qdict)
         filter = stats_filter(target, names, cpu_index, provider);
         break;
     case STATS_TARGET_CRYPTODEV:
+    case STATS_TARGET_FEMU:
         filter = stats_filter(target, names, -1, provider);
         break;
     default:

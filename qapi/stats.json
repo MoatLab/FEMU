@@ -63,10 +63,12 @@
 #
 # @cryptodev: since 8.0
 #
+# @femu: the FEMU NVMe device (since 11.1; FEMU only)
+#
 # Since: 7.1
 ##
 { 'enum': 'StatsProvider',
-  'data': [ 'kvm', 'cryptodev' ] }
+  'data': [ 'kvm', 'cryptodev', 'femu' ] }
 
 ##
 # @StatsTarget:
@@ -80,10 +82,15 @@
 #
 # @cryptodev: statistics that apply to a crypto device (since 8.0)
 #
+# @femu: statistics of a FEMU NVMe device: one result for its
+#     controller and one for each namespace, all with the device's
+#     QOM path and told apart by the statistic "nsid" (since 11.1;
+#     FEMU only)
+#
 # Since: 7.1
 ##
 { 'enum': 'StatsTarget',
-  'data': [ 'vm', 'vcpu', 'cryptodev' ] }
+  'data': [ 'vm', 'vcpu', 'cryptodev', 'femu' ] }
 
 ##
 # @StatsRequest:

@@ -676,15 +676,18 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
                     req->ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(req->ns->id_ns.flbas)].lbads;
             }
 
+            /* query-stats reads these from the main loop */
             switch (req->cmd_opcode) {
             case NVME_CMD_READ:
-                ctr->nr_host_rd_cmds++;
-                ctr->nr_host_rd_bytes += bytes;
+                qatomic_set(&ctr->nr_host_rd_cmds, ctr->nr_host_rd_cmds + 1);
+                qatomic_set(&ctr->nr_host_rd_bytes,
+                            ctr->nr_host_rd_bytes + bytes);
                 break;
             case NVME_CMD_WRITE:
             case NVME_CMD_ZONE_APPEND:
-                ctr->nr_host_wr_cmds++;
-                ctr->nr_host_wr_bytes += bytes;
+                qatomic_set(&ctr->nr_host_wr_cmds, ctr->nr_host_wr_cmds + 1);
+                qatomic_set(&ctr->nr_host_wr_bytes,
+                            ctr->nr_host_wr_bytes + bytes);
                 break;
             default:
                 break;

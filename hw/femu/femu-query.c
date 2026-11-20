@@ -1118,6 +1118,29 @@ out:
     return info;
 }
 
+/* one pass over the words of @set; the caller checks the sequence */
+static void femu_query_stage_load(FemuStageSet *set, FemuStageSet *out)
+{
+    for (int st = 0; st < FEMU_STAGE_NR; st++) {
+        const FemuStageHist *h = &set->st[st];
+
+        out->st[st].count = qatomic_read(&h->count);
+        out->st[st].sum_ns = qatomic_read(&h->sum_ns);
+        out->st[st].max_ns = qatomic_read(&h->max_ns);
+        for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+            out->st[st].buckets[b] = qatomic_read(&h->buckets[b]);
+        }
+    }
+    out->returned_after_due = qatomic_read(&set->returned_after_due);
+    for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+        const FemuStageBand *bd = &set->bands[b];
+
+        out->bands[b].count = qatomic_read(&bd->count);
+        out->bands[b].total_ns = qatomic_read(&bd->total_ns);
+        out->bands[b].past_due_ns = qatomic_read(&bd->past_due_ns);
+    }
+}
+
 /*
  * Copy the set of one poller between two of its commands. The poller adds
  * a command inside its sequence, so the copy never holds a command in one
@@ -1130,24 +1153,7 @@ static void femu_query_stage_copy(FemuStageSet *set, FemuStageSet *out)
 
     do {
         seq = seqlock_read_begin(&set->seq);
-        for (int st = 0; st < FEMU_STAGE_NR; st++) {
-            const FemuStageHist *h = &set->st[st];
-
-            out->st[st].count = qatomic_read(&h->count);
-            out->st[st].sum_ns = qatomic_read(&h->sum_ns);
-            out->st[st].max_ns = qatomic_read(&h->max_ns);
-            for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
-                out->st[st].buckets[b] = qatomic_read(&h->buckets[b]);
-            }
-        }
-        out->returned_after_due = qatomic_read(&set->returned_after_due);
-        for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
-            const FemuStageBand *bd = &set->bands[b];
-
-            out->bands[b].count = qatomic_read(&bd->count);
-            out->bands[b].total_ns = qatomic_read(&bd->total_ns);
-            out->bands[b].past_due_ns = qatomic_read(&bd->past_due_ns);
-        }
+        femu_query_stage_load(set, out);
     } while (seqlock_read_retry(&set->seq, seq));
 }
 
@@ -1167,6 +1173,28 @@ FemuEvents *qmp_query_femu_events(const char *path, Error **errp)
     return n ? femu_events_info(n, errp) : NULL;
 }
 
+/* add the stages, returned-after-due and bands of @from into @to */
+static void femu_query_stage_add(FemuStageSet *to, const FemuStageSet *from)
+{
+    for (int st = 0; st < FEMU_STAGE_NR; st++) {
+        FemuStageHist *d = &to->st[st];
+        const FemuStageHist *h = &from->st[st];
+
+        d->count += h->count;
+        d->sum_ns += h->sum_ns;
+        d->max_ns = MAX(d->max_ns, h->max_ns);
+        for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+            d->buckets[b] += h->buckets[b];
+        }
+    }
+    to->returned_after_due += from->returned_after_due;
+    for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+        to->bands[b].count += from->bands[b].count;
+        to->bands[b].total_ns += from->bands[b].total_ns;
+        to->bands[b].past_due_ns += from->bands[b].past_due_ns;
+    }
+}
+
 typedef FemuStageSet *(*FemuStageSetFn)(FemuCtrl *n, int p, void *opaque);
 
 /* add the set that @set gives for each poller into @sum */
@@ -1182,23 +1210,7 @@ static void femu_query_stage_sum(FemuCtrl *n, FemuStageSetFn set,
             continue;
         }
         femu_query_stage_copy(s, copy);
-        for (int st = 0; st < FEMU_STAGE_NR; st++) {
-            FemuStageHist *d = &sum->st[st];
-            const FemuStageHist *h = &copy->st[st];
-
-            d->count += h->count;
-            d->sum_ns += h->sum_ns;
-            d->max_ns = MAX(d->max_ns, h->max_ns);
-            for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
-                d->buckets[b] += h->buckets[b];
-            }
-        }
-        sum->returned_after_due += copy->returned_after_due;
-        for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
-            sum->bands[b].count += copy->bands[b].count;
-            sum->bands[b].total_ns += copy->bands[b].total_ns;
-            sum->bands[b].past_due_ns += copy->bands[b].past_due_ns;
-        }
+        femu_query_stage_add(sum, copy);
     }
 }
 
@@ -1206,6 +1218,7 @@ static FemuStageSet *femu_query_stage_all(FemuCtrl *n, int p, void *opaque)
 {
     return n->stage_sets ? &n->stage_sets[p] : NULL;
 }
+
 
 /* @opaque: the class in the low bit, the NSID above it */
 static FemuStageSet *femu_query_stage_ns(FemuCtrl *n, int p, void *opaque)
@@ -1261,6 +1274,39 @@ static FemuIoStageClass *femu_query_stage_class(const FemuStageSet *sum)
     femu_query_stage_lists(sum, &c->stages, &c->returned_after_due,
                            &c->bands);
     return c;
+}
+
+/*
+ * The controller's stages for query-stats: what reset=true cleared, plus
+ * each poller's set. A poller can stop inside its sequence (a preempted
+ * thread, or x-stage-hold-ms), and this runs under the BQL, so each copy
+ * gives up at @deadline instead of waiting for it.
+ */
+bool femu_query_stage_total(FemuCtrl *n, FemuStageSet *sum, int64_t deadline)
+{
+    g_autofree FemuStageSet *copy = g_new0(FemuStageSet, 1);
+
+    memset(sum, 0, sizeof(*sum));
+    if (n->stage_cleared) {
+        femu_query_stage_add(sum, n->stage_cleared);
+    }
+    for (int p = 1; n->stage_sets && p <= n->nr_pollers; p++) {
+        FemuStageSet *set = &n->stage_sets[p];
+        unsigned seq;
+
+        for (;;) {
+            seq = seqlock_read_begin(&set->seq);
+            femu_query_stage_load(set, copy);
+            if (!seqlock_read_retry(&set->seq, seq)) {
+                break;
+            }
+            if (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) > deadline) {
+                return false;
+            }
+        }
+        femu_query_stage_add(sum, copy);
+    }
+    return true;
 }
 
 FemuIoStages *qmp_query_femu_stages(const char *path, bool has_nsid,
@@ -1332,6 +1378,14 @@ FemuIoStages *qmp_query_femu_stages(const char *path, bool has_nsid,
                    sizeof(FemuStageSet) * FEMU_STAGE_CLASSES);
         }
     } else if (clear && n->stage_sets) {
+        /*
+         * query-stats reports lifetime values, so keep what is cleared. The
+         * pollers are stopped, and query-stats also runs under the BQL.
+         */
+        if (!n->stage_cleared) {
+            n->stage_cleared = g_new0(FemuStageSet, 1);
+        }
+        femu_query_stage_add(n->stage_cleared, sum);
         memset(n->stage_sets, 0, sizeof(FemuStageSet) * (n->nr_pollers + 1));
     }
     if (clear) {

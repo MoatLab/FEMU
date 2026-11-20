@@ -185,6 +185,8 @@ static void nvme_resume_controller(FemuCtrl *n, bool was_started)
         return;
     }
 
+    /* the FTL thread publishes the query-stats copies again */
+    qatomic_inc(&n->stats_epoch);
     smp_mb();   /* land every change before a poller can observe the flag */
     n->dataplane_started = true;
 }

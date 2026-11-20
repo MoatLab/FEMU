@@ -71,6 +71,9 @@ The guest kernel each mode needs is in
   of a bbssd namespace, the reclaim units of an FDP namespace, or the
   zones of a znssd namespace. `query-femu-stages` gives the time of
   each stage of an I/O command, with `io_stages=on`.
+- [QMP query-stats](reference/query-stats.md): the counters of every
+  `femu` device through QEMU's generic `query-stats` command, provider
+  and target `femu`, with types and units in `query-stats-schemas`.
 - [Changelog](CHANGELOG.md): what changed since femu-v9.0.1, including
   properties that are now refused and settings whose effect changed.
 - [Scripts and tools](reference/scripts.md): every shipped script and tool,

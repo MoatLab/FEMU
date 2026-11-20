@@ -753,6 +753,9 @@ void nvme_start_dataplane(FemuCtrl *n)
         nvme_init_poller(n);
         n->poller_on = true;
     }
+    /* the FTL thread publishes the query-stats copies again */
+    qatomic_inc(&n->stats_epoch);
+    smp_mb();   /* the epoch lands before the flag */
     n->dataplane_started = true;
 }
 

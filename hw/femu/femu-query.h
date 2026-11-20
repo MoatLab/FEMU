@@ -204,9 +204,46 @@ typedef struct FemuQueryZoned {
     FemuQueryZone *zones;       /* max_zones entries, or NULL for a summary */
 } FemuQueryZoned;
 
+/*
+ * One bbssd namespace for query-stats, from the copy that the FTL's
+ * thread publishes between two requests; see femu-stats.c.
+ */
+typedef struct FemuStatsNs {
+    uint32_t page_size;
+    uint64_t host_pages;
+    uint64_t nand_pages;
+    uint64_t gc_pages;
+    uint64_t erases;
+    uint64_t pad_pages;
+    bool tp_on;
+    uint64_t map_pages;
+    uint64_t map_reads;
+    bool parity_on;
+    uint64_t parity_pages;
+    uint64_t degraded_reads;
+    bool rain_on;
+    uint64_t lost_pages;
+    uint64_t lost_blocks;
+    bool maint_on;
+    uint64_t idle_reclaims;
+    uint64_t idle_refreshes;
+    bool ns_ctr_on;
+    uint64_t ns_host_pages;
+    uint64_t ns_nand_pages;
+    uint64_t ns_gc_pages;
+    bool fdp;                   /* the line counts below stay 0 */
+    uint32_t free_lines;
+    uint32_t victim_lines;
+    uint32_t full_lines;
+    uint32_t retired_lines;
+    uint32_t spare_lines;
+    uint32_t total_lines;
+} FemuStatsNs;
+
 struct FemuCtrl;
 struct ssd;
 struct NvmeNamespace;
+struct FemuStageSet;
 
 /* Run on the FTL thread between two requests. */
 void femu_query_service(struct FemuCtrl *n, FemuQueryReq *req);
@@ -215,6 +252,20 @@ void femu_query_cancel(FemuQueryReq *req);
 /* Copy one bbssd namespace into @q. FTL thread only. */
 void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q);
 uint32_t ssd_owner_nsid(struct ssd *ssd);
+/*
+ * Read the published counters of one bbssd namespace. Main loop, BQL.
+ * False when the writer held the copy until @deadline (realtime ns).
+ */
+bool ssd_stats_read(struct ssd *ssd, uint32_t nsid, FemuStatsNs *s,
+                    int64_t deadline);
+/*
+ * The stage sets of every poller, summed, with the seqlock copy. False when
+ * a poller held its set until @deadline (realtime ns); @sum is then partial.
+ */
+bool femu_query_stage_total(struct FemuCtrl *n, struct FemuStageSet *sum,
+                            int64_t deadline);
+/* FTL thread: publish the query-stats counters when they are due. */
+void femu_stats_tick(struct FemuCtrl *n, bool busy, bool idle);
 /*
  * Copy one zoned namespace into @q under its zone lock. Main loop only.
  * Returns false, with @q unchanged, when a poller holds the lock.

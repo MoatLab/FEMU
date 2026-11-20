@@ -65,6 +65,7 @@ static bool invoke_stats_cb(StatsCallbacks *entry,
         }
         break;
     case STATS_TARGET_CRYPTODEV:
+    case STATS_TARGET_FEMU:
         break;
     default:
         abort();

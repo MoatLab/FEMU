@@ -19,6 +19,7 @@ from a FEMU thread that did not get a core.
 | SMART log | `nvme smart-log` | every NVMe mode | data read and written, command counts, Percentage Used, Available Spare, media errors |
 | FDP statistics | `nvme fdp stats` | BlackBox with FDP | host and media bytes written |
 | `query-femu`, `query-femu-stages` | QMP on the host, or [`femu-stat.py`](#live-counters-on-the-host-femu-stat) | BlackBox (with or without FDP), ZNS; NAND timing for CSD, KV, OCSSD | host, NAND, GC and pad pages, WAF, line, reclaim unit and zone counts, I/O stage times |
+| `query-stats` (provider and target `femu`) | QMP on the host, [reference](../reference/query-stats.md) | BlackBox | the same page counters, WAF and line counts as `query-femu`, host commands and bytes, and I/O stage time histograms, for every device in one call |
 | QOM counters | QMP `qom-get` on the host | `femu-cxl-ssd` | cache hits and misses, media reads, programs and time, direct mapping |
 | fio | in the guest | every block mode | latency and throughput as the guest sees them |
 

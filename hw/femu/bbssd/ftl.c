@@ -170,6 +170,7 @@ static void ssd_init_ns_slices(FemuCtrl *n, struct ssd *ssd)
     }
     ssd->ns_slice_lo = g_new0(uint64_t, n->num_namespaces);
     ssd->ns_ctr = g_new0(struct ssd_ns_ctr, n->num_namespaces);
+    ssd->stats_ns_pub = g_new0(uint64_t, 3 * n->num_namespaces);
     for (uint32_t i = 0; i < n->num_namespaces; i++) {
         ssd->ns_slice_lo[i] = n->namespaces[i].backend_offset / pg;
     }
@@ -277,6 +278,7 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
     ssd->host_write_pages = 0;
     ssd->nand_write_pages = 0;
     ssd->gc_write_pages = 0;
+    seqlock_init(&ssd->stats_seq);
     ssd_init_ns_slices(n, ssd);
     ssd_durable_init(ssd);
     ssd->gc_copyback_pages = 0;
@@ -392,6 +394,8 @@ void ssd_init(FemuCtrl *n, NvmeNamespace *ns)
         /* non-FDP: use single write pointer */
         ssd_init_write_pointer(ssd);
     }
+    /* no FTL thread runs this FTL yet: the first copy is the empty one */
+    ssd_stats_publish(ssd);
 }
 
 /*
@@ -1462,6 +1466,7 @@ void ssd_free(struct ssd *ssd)
     ssd_rain_free(ssd);
     g_clear_pointer(&ssd->ns_slice_lo, g_free);
     g_clear_pointer(&ssd->ns_ctr, g_free);
+    g_clear_pointer(&ssd->stats_ns_pub, g_free);
     ssd->nr_ns_slices = 0;
 
     nand_media_destroy(&ssd->media);

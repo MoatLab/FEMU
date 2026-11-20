@@ -9,7 +9,7 @@ mode changes, and files that FEMU removes.
  QEMU v11.1.3 tree
    + hw/femu/            FEMU devices, tests, docs, scripts (FEMU only)
    + roms/               firmware sources (kept as FEMU ships them)
-   + 24 QEMU files       content changes, listed below
+   + 27 QEMU files       content changes, listed below
 ```
 
 ## Files that FEMU changes
@@ -37,6 +37,7 @@ mode changes, and files that FEMU removes.
 | `hw/cxl/cxl-device-utils.c`, `include/hw/cxl/cxl_device.h` | Atomic memory device status, read outside the BQL | Upstream candidate |
 | `hw/cxl/cxl-mailbox-utils.c`, `include/hw/cxl/cxl_device.h` | Hooks before and after each mailbox command | Upstream candidate |
 | `hw/cxl/cxl-host.c` | Turn off the 11.1 direct mapping of CXL decoders | Report the alias bugs first (below) |
+| `qapi/stats.json`, `stats/stats-qmp-cmds.c`, `stats/stats-hmp-cmds.c` | The `query-stats` provider and target `femu`; HMP `info stats` prints the QOM path of each `femu` result | FEMU only; QEMU takes a provider with an in-tree user |
 
 ### Changes that the 11.1 base already holds
 
