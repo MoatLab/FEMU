@@ -5165,6 +5165,9 @@ void nvme_mark_ns_queued(FemuCtrl *n, uint32_t nsid)
  * Abort commands still in the admin queue. Admin commands run one at a time,
  * so with the one running these are all the Aborts the host has submitted
  * and not yet seen complete.
+ *
+ * The count stops past ACL, which is all the caller needs. A full walk per
+ * Abort made a queue full of Aborts cost depth squared reads under the BQL.
  */
 static uint32_t nvme_aborts_queued(FemuCtrl *n)
 {
@@ -5172,7 +5175,7 @@ static uint32_t nvme_aborts_queued(FemuCtrl *n)
     uint32_t nr = 0;
     uint32_t index;
 
-    for (index = 0; index < sq->size; index++) {
+    for (index = 0; index < sq->size && nr <= n->acl; index++) {
         uint32_t slot = (sq->head + index) % sq->size;
         uint8_t opcode;
 

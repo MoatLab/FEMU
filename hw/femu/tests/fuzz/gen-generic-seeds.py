@@ -167,6 +167,24 @@ def create_io(qsize=QENTRIES):
                  cdw10=(qsize - 1) << 16 | 1, cdw11=1 << 16 | 1)]
 
 
+def abort_storm():
+    """
+    A full 4096-entry admin queue of Aborts, sent with one doorbell write.
+
+    Each Abort counts the Aborts queued behind it. A count that walks the
+    whole queue costs depth squared reads, and under the fuzzer's DMA hook
+    the replay runs past -timeout=25. The count must stop past ACL.
+    """
+    depth = 4096
+    asq, acq = 0x200000, 0x240000      # 256 KiB SQ, then the 64 KiB CQ
+    abort = cmd(ADM["abort"], prp1=0, cdw10=0xffff << 16, cid=1)
+    return [mmio_write(0x24, (depth - 1) << 16 | (depth - 1)),
+            mmio_write(0x28, asq), mmio_write(0x2c, 0),
+            mmio_write(0x30, acq), mmio_write(0x34, 0),
+            pattern(abort), mmio_write(0x14, CC_ENABLE), mmio_read(0x1c),
+            mmio_write(0x1000, depth - 1), mmio_read(0x1c)]
+
+
 def seeds(target):
     """(name, records) pairs for one target."""
     out = []
@@ -218,6 +236,7 @@ def seeds(target):
         dict(opcode=ADM["keep_alive"]), dict(opcode=ADM["self_test"],
                                               nsid=0xffffffff, cdw10=1),
         dict(opcode=ADM["self_test"], cdw10=0xf), dict(opcode=ADM["debug"])])))
+    out.append(("abort-storm", abort_storm()))
     out.append(("firmware", admin_seed([
         dict(opcode=ADM["fw_download"], cdw10=0x3ff, cdw11=0),
         dict(opcode=ADM["fw_download"], cdw10=0x3ff, cdw11=0x400),
