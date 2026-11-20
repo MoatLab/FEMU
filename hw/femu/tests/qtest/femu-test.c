@@ -39049,12 +39049,21 @@ static void femu_test_cxl_gc_stall_warn(void *obj, void *data,
 
 /*
  * Four-page blocks make a line four pages per LUN, and slow reads load only
- * the LUNs that hold a victim's valid pages. A write-back's own program can
- * then end before collection ends on another LUN, and it must still wait for
- * that. The probe writes pages never written before, so its fill reads are
- * free and its media time is the write-back alone. 1155 blocks per plane is
- * the least realize accepts, and gc-threshold=95 starts collection only at
- * the forced threshold. Few probe pages keep the spare NAND at that least.
+ * the LUNs that hold a victim's valid pages. A write-back must wait until
+ * forced collection ends on every LUN. The probe writes pages never written
+ * before, so its fill reads are free and its media time is the write-back
+ * alone. 1155 blocks per plane is the least realize accepts, and
+ * gc-threshold=95 starts collection only at the forced threshold. Few probe
+ * pages keep the spare NAND at that least.
+ *
+ * The medium keeps gc_erase_order: the erases of a victim start on every
+ * LUN when its last copy ends. The write-back program then queues behind
+ * the erase on its own LUN. It ends at most one tPROG after collection
+ * ends, and exactly one tPROG when the erases end together:
+ *
+ *   LUN a  [rd][rd]              [erase]
+ *   LUN b          [copy program][erase][program]   media = wait + tPROG
+ *                                ^fence ^ collection end (wait)
  */
 static void femu_test_cxl_gc_wait(void *obj, void *data,
                                   QGuestAllocator *alloc)
@@ -39105,11 +39114,12 @@ static void femu_test_cxl_gc_wait(void *obj, void *data,
         media = femu_cxl_stat(qts, "media-time-ns") - media;
         wait = femu_cxl_stat(qts, "gc-stall-ns") - wait;
         g_assert_cmpuint(media, >=, wait);
-        /* Collection on another LUN, not the program, set the end. */
-        bound += media == wait;
+        /* The program ends at most one tPROG (1000 ns) after collection. */
+        g_assert_cmpuint(media - wait, <=, 1000);
+        bound += media == wait + 1000;
     }
     g_test_message("probe write-backs that waited for collection: %" PRIu64
-                   ", ended by it: %" PRIu64, stalled, bound);
+                   ", programmed after its erase: %" PRIu64, stalled, bound);
     g_assert_cmpuint(stalled, >, 0);
     g_assert_cmpuint(bound, >, 0);
     g_assert_cmpuint(femu_cxl_stat(qts, "media-full"), ==, 0);
