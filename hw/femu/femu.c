@@ -4891,7 +4891,7 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         !femu_check_rain_ro_props(n, errp)) {
         return;
     }
-    if (!femu_check_copyback_props(n, errp)) {
+    if (!femu_check_copyback_props(n, errp) || !femu_precon_check(n, errp)) {
         return;
     }
     if (!femu_check_gc_fw_props(n, errp)) {
@@ -5184,7 +5184,13 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
     /* Validate retention before starting threads that would need unwinding. */
     /* the trace first: its failure leaves nothing of the others to undo */
     /* events before the PEL: a refused file leaves no PEL timer behind */
+    /*
+     * The plan runs after persist_file, whose saved FTL wins, and before
+     * the PEL, whose timer femu_realize_undo() does not stop, and before
+     * the FTL thread, so it runs alone on the FTL.
+     */
     if (!femu_iotrace_init(n, errp) || !femu_persist_init(n, errp) ||
+        !femu_precon_run(n, errp) ||
         !femu_events_init(n, errp) || !femu_pel_init(n, errp)) {
         femu_realize_undo(n);
         return;
@@ -5723,6 +5729,11 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("gc_strategy", FemuCtrl, bb_params.gc_strategy, 0),
     DEFINE_PROP_STRING("gc_policy", FemuCtrl, bb_params.gc_policy),
     DEFINE_PROP_UINT64("gc_seed", FemuCtrl, gc_seed, 0),
+    DEFINE_PROP_UINT8("precon_fill_pct", FemuCtrl, precon_fill_pct, 0),
+    DEFINE_PROP_UINT32("precon_overwrite_pct", FemuCtrl, precon_overwrite_pct,
+                       0),
+    DEFINE_PROP_STRING("precon_pattern", FemuCtrl, precon_pattern),
+    DEFINE_PROP_UINT64("precon_seed", FemuCtrl, precon_seed, 0),
     DEFINE_PROP_UINT32("read_cache_mb", FemuCtrl, read_cache_mb, 0),
     DEFINE_PROP_STRING("cache_evict", FemuCtrl, bb_params.cache_evict),
     DEFINE_PROP_STRING("mapping", FemuCtrl, bb_params.mapping_scheme),
@@ -6409,6 +6420,24 @@ static char *femu_test_ftl_trace(Object *obj, Error **errp)
  * the collection line holds (-1 for none), so a test can see where
  * collection copies land and read them.
  */
+/* qtest only: the FTL state hashes of namespace 1 (ssd_state_digest) */
+static char *femu_test_ftl_state(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    char *out;
+    bool resume;
+
+    if (!ns || !NS_BBSSD(ns) || !ns->ssd) {
+        error_setg(errp, "FTL state requires a bbssd namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    out = ssd_state_digest(ns->ssd);
+    nvme_resume_pollers(n, resume);
+    return out;
+}
+
 static char *femu_test_gc_frontier(Object *obj, Error **errp)
 {
     FemuCtrl *n = FEMU(obj);
@@ -7050,6 +7079,10 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-fdp-ns-mapped", femu_test_fdp_ns_mapped,
                                 NULL);
         object_property_add_str(obj, "x-ftl-trace", femu_test_ftl_trace, NULL);
+        object_property_add_str(obj, "x-ftl-state", femu_test_ftl_state, NULL);
+        object_property_add_uint32_ptr(obj, "x-precon-break",
+                                       &FEMU(obj)->test_precon_break,
+                                       OBJ_PROP_FLAG_READWRITE);
         object_property_add_str(obj, "x-gc-frontier", femu_test_gc_frontier,
                                 NULL);
         object_property_add_str(obj, "x-gc-idle", femu_test_gc_idle, NULL);

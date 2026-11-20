@@ -979,6 +979,24 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd, CSD: seed for the victims the random and d-choice gc_policy "
       "and the FDP random gc_strategy pick; the same seed and workload pick "
       "the same victims, so vary it to vary runs" },
+    { "precon_fill_pct",
+      "bbssd: at realize, write this percent of the namespace's logical "
+      "pages once, in order, through the FTL write and collection path "
+      "with no host time, so the device starts aged; the write counters "
+      "then start at zero and the wear stays. One namespace with page "
+      "mapping only, and not with knobs whose decisions read the clock or "
+      "data age (realize names them); a saved FTL (persist_ftl) wins. 0 "
+      "(default) is off" },
+    { "precon_overwrite_pct",
+      "bbssd with precon_fill_pct: page writes after the fill, in percent "
+      "of the filled pages, 0 to 1000; 0 (default) writes none" },
+    { "precon_pattern",
+      "bbssd with precon_fill_pct: order of the writes after the fill, "
+      "rand (uniform over the filled pages, default) or seq (in order, "
+      "round again)" },
+    { "precon_seed",
+      "bbssd with precon_fill_pct: seed of the rand order (splitmix64); "
+      "the same seed gives the same pages" },
     { "gc_strategy",
       "bbssd with FDP: reclaim unit victim strategy, 0 greedy, 1 "
       "cost-benefit, 2 random or 4 per-handle; a gc_policy other than "

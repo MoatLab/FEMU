@@ -1891,6 +1891,68 @@ static void test_die_stats(void)
     nand_media_destroy(&m);
 }
 
+/* three ops at @t0: a read, a program on the same LUN, a read on another */
+static void idle_ops(NandMedia *m, uint64_t t0, uint64_t out[3])
+{
+    NandLoc a = { 0 };
+    NandLoc b = { .lun = 1 };
+
+    out[0] = nand_media_op(m, &a, NAND_MEDIA_READ, t0).latency_ns;
+    out[1] = nand_media_op(m, &a, NAND_MEDIA_PROGRAM, t0).latency_ns;
+    out[2] = nand_media_op(m, &b, NAND_MEDIA_READ, t0).latency_ns;
+}
+
+/*
+ * nand_media_idle: after much booked work and a reset of the caller's
+ * timelines, the media times new ops as a new media does.
+ */
+static void test_media_idle(void)
+{
+    static NandDieStat st[8 * 8];
+    static const NandDieStat zero[8 * 8];
+    const uint64_t t0 = 1000000000ULL;
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandLoc a = { 0 };
+    NandLoc b = { .lun = 1 };
+    uint64_t fresh[3];
+    uint64_t after[3];
+
+    printf("# nand_media_idle\n");
+    bb_config(&cfg);
+    cfg.policy.channel_mode = NAND_CH_STAGED;
+    cfg.policy.bus_res_unbounded = true;
+    cfg.policy.pe_suspend = true;
+    cfg.timing.tsusp_ns = 5000;
+    cfg.timing.cmd_addr_ns = 300;
+    cfg.timing.page_xfer_ns = 20000;
+    cfg.timing.status_ns = 100;
+
+    nand_media_init(&m, &cfg);
+    idle_ops(&m, t0, fresh);
+    nand_media_destroy(&m);
+
+    reset_timelines();
+    nand_media_init(&m, &cfg);
+    m.die_stat = st;
+    for (int i = 0; i < 64; i++) {
+        nand_media_op(&m, &a, NAND_MEDIA_READ, t0);
+        nand_media_op(&m, &b, NAND_MEDIA_READ, t0);
+        nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0);
+    }
+    check_lt("work booked past t0", t0, nand_media_last_end(&m));
+    nand_media_idle(&m);
+    reset_timelines();
+    check("no window after idle", nand_media_last_end(&m), 0);
+    check("die_stats zero after idle", !memcmp(st, zero, sizeof(st)), 1);
+    m.die_stat = NULL;
+    idle_ops(&m, t0, after);
+    for (int i = 0; i < 3; i++) {
+        check("idle media: the latency of a new media", after[i], fresh[i]);
+    }
+    nand_media_destroy(&m);
+}
+
 int main(void)
 {
     /*
@@ -1919,6 +1981,7 @@ int main(void)
     test_plane_reads();
     test_die_slow();
     test_die_stats();
+    test_media_idle();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

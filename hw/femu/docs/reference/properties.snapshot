@@ -1016,6 +1016,26 @@
     "kind": "static",
     "type": "bool"
    },
+   "precon_fill_pct": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint8"
+   },
+   "precon_overwrite_pct": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "precon_pattern": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "precon_seed": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint64"
+   },
    "prog_pass2_lag": {
     "default": 0,
     "kind": "static",

@@ -363,6 +363,7 @@ typedef struct NandOpCompletion {
 
 void nand_media_init(NandMedia *m, const NandMediaConfig *cfg);
 void nand_media_destroy(NandMedia *m);
+void nand_media_idle(NandMedia *m);
 
 /* single-chip op; returns completion (done_ns absolute, latency_ns = done - stime) */
 /*

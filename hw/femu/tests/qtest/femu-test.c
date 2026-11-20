@@ -28,6 +28,7 @@
 #include "hw/cxl/cxl_component.h"
 #include "hw/cxl/cxl_device.h"
 #include "hw/femu/tests/unit/hybrid-oracle.h"
+#include "hw/femu/bbssd/ftl-precon-math.h"
 #include "hw/femu/cxlssd/cca-abi.h"
 #include "hw/femu/femu-hpke.h"
 #include "standard-headers/linux/pci_regs.h"
@@ -35343,6 +35344,366 @@ static void femu_test_persist_ftl(void *obj, void *data,
     rmdir(dir);
 }
 
+/*
+ * precon_fill_pct: device pre preconditions at realize, device ref takes
+ * the same page writes from the host, through the timed path. The FTL
+ * state hashes (x-ftl-state) must agree field by field, and so must the
+ * counter changes of the same follow-up writes on both.
+ */
+#define FEMU_PRECON_GEOM \
+    "devsz_mb=4,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=16," \
+    "blks_per_pl=40,pls_per_lun=1,luns_per_ch=1,nchs=2"
+/* logical pages of FEMU_PRECON_GEOM, 4 KiB each */
+#define FEMU_PRECON_PAGES   1024
+#define FEMU_PRECON_FOLLOW  2048
+
+typedef struct FemuPreconCase {
+    const char *opts;       /* more properties of both devices, or "" */
+    uint32_t fill;
+    uint32_t overwrite;
+    bool seq;
+    uint64_t seed;
+    bool flush;             /* ref ends with a Flush (write buffer) */
+    bool brk;               /* control: x-precon-break=1 on pre */
+    bool short_ref;         /* control: ref writes one page fewer */
+} FemuPreconCase;
+
+static const char *const femu_precon_fields[] = {
+    "map", "page", "block", "line", "pointer", "misc",
+};
+
+static gchar **femu_precon_state(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-ftl-state'}}", path);
+    gchar **v;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(v), ==, 6);
+    qobject_unref(rsp);
+    return v;
+}
+
+/* the fields where the states of ref and pre differ */
+static int femu_precon_diff(QTestState *qts, const char *when)
+{
+    g_auto(GStrv) r = femu_precon_state(qts, "ref");
+    g_auto(GStrv) p = femu_precon_state(qts, "pre");
+    int diff = 0;
+
+    for (int i = 0; i < 6; i++) {
+        if (strcmp(r[i], p[i])) {
+            g_test_message("precon %s: %s differs: ref %s pre %s", when,
+                           femu_precon_fields[i], r[i], p[i]);
+            diff++;
+        }
+    }
+    return diff;
+}
+
+/* the page counters of the WAF, and block erases, of device @id */
+#define FEMU_PRECON_CTRS 7
+static const char *const femu_precon_ctr_names[FEMU_PRECON_CTRS] = {
+    "host-write-pages", "nand-write-pages", "gc-write-pages",
+    "map-write-pages", "pad-write-pages", "parity-write-pages",
+    "block-erases",
+};
+
+static void femu_precon_ctrs(QTestState *qts, const char *id,
+                             uint64_t v[FEMU_PRECON_CTRS], QDict **pc,
+                             double *waf)
+{
+    g_autofree char *args = g_strdup_printf(
+        "'path':'/machine/peripheral/%s'", id);
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, args, &rsp);
+    QDict *ctr = qdict_get_qdict(ns, "counters");
+
+    for (int i = 0; i < FEMU_PRECON_CTRS; i++) {
+        /* map, pad and parity are absent where the device has none */
+        v[i] = qdict_get_try_int(ctr, femu_precon_ctr_names[i], 0);
+    }
+    if (waf) {
+        *waf = qdict_haskey(ctr, "waf") ? qdict_get_double(ctr, "waf") : 0;
+    }
+    if (pc) {
+        *pc = qdict_haskey(ns, "precondition") ?
+              qdict_get_qdict(ns, "precondition") : NULL;
+        if (*pc) {
+            qobject_ref(*pc);
+        }
+    }
+    qobject_unref(rsp);
+}
+
+/* the same random page writes on the device of @c */
+static void femu_precon_follow(FemuCtrlState *c, uint64_t buf)
+{
+    uint64_t s = 5;
+
+    for (int i = 0; i < FEMU_PRECON_FOLLOW; i++) {
+        uint64_t lpn = precon_scale(precon_rand_next(&s), FEMU_PRECON_PAGES);
+
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+}
+
+static void femu_test_precon(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const FemuPreconCase *k = data;
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults "
+        "-device femu,id=ref,addr=5," FEMU_PRECON_GEOM "%s "
+        "-device femu,id=pre,addr=6," FEMU_PRECON_GEOM "%s,"
+        "precon_fill_pct=%u,precon_overwrite_pct=%u,precon_pattern=%s,"
+        "precon_seed=%" PRIu64 "%s",
+        k->opts, k->opts, k->fill, k->overwrite, k->seq ? "seq" : "rand",
+        k->seed, k->brk ? ",x-precon-break=1" : "");
+    QTestState *qts = qs->qts;
+    QPCIDevice *rdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(6, 0));
+    FemuCtrlState rc = { 0 };
+    FemuCtrlState pc = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, FEMU_DATA_SIZE);
+    uint64_t r0[FEMU_PRECON_CTRS];
+    uint64_t r1[FEMU_PRECON_CTRS];
+    uint64_t p0[FEMU_PRECON_CTRS];
+    uint64_t p1[FEMU_PRECON_CTRS];
+    QDict *info;
+    double waf;
+    PreconPlan plan;
+    uint64_t lpn;
+    uint64_t skip;
+
+    qtest_memset(qts, buf, 0, FEMU_DATA_SIZE);
+    /* query-femu answers only for an enabled controller */
+    femu_enable(&rc, rdev, &qs->alloc);
+    femu_create_io_queues(&rc);
+    femu_enable(&pc, pdev, &qs->alloc);
+    femu_create_io_queues(&pc);
+    precon_plan_init(&plan, FEMU_PRECON_PAGES, k->fill, k->overwrite, k->seq,
+                     k->seed);
+    skip = k->short_ref ? 1 : 0;
+    while (precon_plan_total(&plan) - plan.done > skip &&
+           precon_plan_next(&plan, &lpn)) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&rc, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    if (k->flush) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&rc, NVME_CMD_FLUSH, 0, buf)), ==,
+                        NVME_SUCCESS);
+    }
+
+    if (k->brk) {
+        /* the control took out passes that would have run */
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                               "'path':'/machine/peripheral/pre',"
+                               "'property':'x-precon-break'}}");
+
+        g_test_message("precon control: %" PRId64 " passes taken out",
+                       qdict_get_int(rsp, "return") - 1);
+        g_assert_cmpint(qdict_get_int(rsp, "return"), >, 1);
+        qobject_unref(rsp);
+    }
+    if (k->brk || k->short_ref) {
+        /* the control: the check sees the wrong state */
+        g_assert_cmpint(femu_precon_diff(qts, "control"), >, 0);
+        goto out;
+    }
+    g_assert_cmpint(femu_precon_diff(qts, "after the fill"), ==, 0);
+
+    /* pre counts no host traffic, keeps the wear, reports the run */
+    femu_precon_ctrs(qts, "ref", r0, &info, &waf);
+    g_assert_null(info);
+    femu_precon_ctrs(qts, "pre", p0, &info, NULL);
+    g_assert_nonnull(info);
+    for (int i = 0; i < FEMU_PRECON_CTRS - 1; i++) {
+        g_assert_cmpuint(p0[i], ==, 0);
+    }
+    g_assert_cmpuint(p0[6], ==, r0[6]);
+    g_assert_cmpuint(r0[6], >, 0);
+    g_assert_cmpuint(qdict_get_int(info, "fill-pages"), ==, plan.fill);
+    g_assert_cmpuint(qdict_get_int(info, "overwrite-pages"), ==,
+                     plan.overwrite);
+    g_assert_cmpuint(plan.fill + plan.overwrite, ==, r0[0]);
+    g_assert_cmpuint(qdict_get_int(info, "nand-write-pages"), ==, r0[1]);
+    g_assert_cmpuint(qdict_get_int(info, "gc-write-pages"), ==, r0[2]);
+    g_assert_cmpuint(qdict_get_int(info, "map-write-pages"), ==, r0[3]);
+    g_assert_cmpuint(qdict_get_int(info, "pad-write-pages"), ==, r0[4]);
+    g_assert_cmpuint(qdict_get_int(info, "parity-write-pages"), ==, r0[5]);
+    g_assert_cmpuint(qdict_get_int(info, "block-erases"), ==, r0[6]);
+    g_assert_cmpuint(r0[2], >, 0);
+    g_assert_cmpfloat_with_epsilon(qdict_get_double(info, "waf"), waf,
+                                   0.000001);
+    qobject_unref(info);
+
+    /* the same workload after: the same counter changes and state */
+    femu_precon_follow(&rc, buf);
+    femu_precon_follow(&pc, buf);
+    femu_precon_ctrs(qts, "ref", r1, NULL, NULL);
+    femu_precon_ctrs(qts, "pre", p1, NULL, NULL);
+    for (int i = 0; i < FEMU_PRECON_CTRS; i++) {
+        g_test_message("precon follow-up %s: ref %" PRIu64 " pre %" PRIu64,
+                       femu_precon_ctr_names[i], r1[i] - r0[i],
+                       p1[i] - p0[i]);
+        g_assert_cmpuint(r1[i] - r0[i], ==, p1[i] - p0[i]);
+    }
+    g_assert_cmpuint(p1[2], >, 0);
+    g_assert_cmpint(femu_precon_diff(qts, "after the follow-up"), ==, 0);
+
+out:
+    femu_disable(&pc);
+    femu_queue_free(&pc, &pc.io);
+    femu_disable(&rc);
+    femu_queue_free(&rc, &rc.io);
+    guest_free(&qs->alloc, buf);
+    g_free(rdev);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+}
+
+static const FemuPreconCase femu_precon_base = {
+    .opts = "", .fill = 90, .overwrite = 300, .seed = 11,
+};
+static const FemuPreconCase femu_precon_seq = {
+    .opts = "", .fill = 100, .overwrite = 150, .seq = true,
+};
+static const FemuPreconCase femu_precon_policy = {
+    .opts = ",gc_policy=d-choice,gc_seed=7,hot_cold_sep=on,gc_frontier=on",
+    .fill = 90, .overwrite = 300, .seed = 11,
+};
+static const FemuPreconCase femu_precon_buffer = {
+    .opts = ",buffer_size=16,vwc=1", .fill = 90, .overwrite = 300,
+    .seed = 11, .flush = true,
+};
+static const FemuPreconCase femu_precon_wear = {
+    .opts = ",blk_pe_limit=200,eol_read_only=off,wl_spread=4",
+    .fill = 90, .overwrite = 300, .seed = 11,
+};
+static const FemuPreconCase femu_precon_pace = {
+    .opts = ",gc_pace=on", .fill = 90, .overwrite = 300, .seed = 11,
+};
+static const FemuPreconCase femu_precon_break = {
+    .opts = "", .fill = 90, .overwrite = 300, .seed = 11, .brk = true,
+};
+static const FemuPreconCase femu_precon_short = {
+    .opts = "", .fill = 90, .overwrite = 300, .seed = 11, .short_ref = true,
+};
+
+/* device_add with @args fails, and the message holds @want */
+static void femu_precon_refuse(QTestState *qts, const char *args,
+                               const char *want)
+{
+    g_autofree char *json = g_strdup_printf(
+        "{'driver':'femu','id':'pr','addr':'5','devsz_mb':16,%s}", args);
+    QObject *obj = qobject_from_json(json, &error_abort);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                           obj);
+    const char *desc;
+
+    g_assert_true(qdict_haskey(rsp, "error"));
+    desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+    g_test_message("precon refused {%s}: %s", args, desc);
+    g_assert_nonnull(strstr(desc, want));
+    qobject_unref(rsp);
+}
+
+/* properties precon_fill_pct refuses, each with a message naming why */
+static void femu_test_precon_refused(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+
+    femu_precon_refuse(qts, "'femu_mode':3,'precon_fill_pct':50",
+                       "a mode other than bbssd");
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_fill_pct':50,"
+                       "'gc_policy':'cost-benefit'", "gc_policy=cost-benefit");
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_fill_pct':50,"
+                       "'gc_idle_ms':10", "gc_idle_ms");
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_fill_pct':50,"
+                       "'pd_open_close_sec':5", "pd_open_close_sec");
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_fill_pct':50,"
+                       "'err_write_fail_ppm':10", "err_write_fail_ppm");
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_fill_pct':50,"
+                       "'mapping':'dftl'", "a mapping other than page");
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_fill_pct':50,"
+                       "'retention_limit_sec':60", "retention_limit_sec");
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_fill_pct':50,"
+                       "'blk_pe_limit':100", "eol_read_only");
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_fill_pct':50,"
+                       "'namespaces':2", "more than one namespace");
+    qos_invalidate_command_line();
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_fill_pct':101",
+                       "0 to 100");
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_overwrite_pct':100",
+                       "need precon_fill_pct");
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_fill_pct':50,"
+                       "'precon_overwrite_pct':1001", "0 to 1000");
+    femu_precon_refuse(qts, "'femu_mode':1,'precon_fill_pct':50,"
+                       "'precon_pattern':'zigzag'", "rand or seq");
+}
+
+/*
+ * persist_ftl: boot 1 preconditions and quits, which saves the FTL. Boot
+ * 2 with the same file loads it: no precondition runs, and the map, the
+ * pages and the blocks are the saved ones. A load rebuilds the lists and
+ * the victim heap, so their order is not compared.
+ */
+static void femu_test_precon_persist(void *obj, void *data,
+                                     QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-precon-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "data", NULL);
+    g_autofree char *lock = g_strconcat(path, ".lock", NULL);
+    g_autofree char *saved = NULL;
+
+    for (int run = 1; run <= 2; run++) {
+        QOSState *qs = qtest_pc_boot(
+            "-machine pc -nodefaults -device femu,id=pd,addr=5,"
+            FEMU_PRECON_GEOM ",persist_ftl=on,persist_file=%s,"
+            "precon_fill_pct=90,precon_overwrite_pct=200,precon_seed=3",
+            path);
+        QTestState *qts = qs->qts;
+        QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+        FemuCtrlState c = { 0 };
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                               "'path':'/machine/peripheral/pd',"
+                               "'property':'x-ftl-state'}}");
+        QDict *info;
+        uint64_t v[FEMU_PRECON_CTRS];
+
+        g_assert_true(qdict_haskey(rsp, "return"));
+        femu_enable(&c, pdev, &qs->alloc);
+        femu_precon_ctrs(qts, "pd", v, &info, NULL);
+        if (run == 1) {
+            /* the map, page and block hashes: 3 x 16 digits and 2 spaces */
+            saved = g_strndup(qdict_get_str(rsp, "return"), 50);
+            g_assert_nonnull(info);
+            qobject_unref(info);
+            femu_disable(&c);
+            g_free(pdev);
+            qtest_qmp_send(qts, "{'execute':'quit'}");
+            qtest_set_expected_status(qts, 0);
+            qtest_wait_qemu(qts);
+        } else {
+            g_assert_null(info);
+            g_assert_cmpint(strncmp(qdict_get_str(rsp, "return"), saved, 50),
+                            ==, 0);
+            femu_disable(&c);
+            g_free(pdev);
+        }
+        qobject_unref(rsp);
+        qtest_pc_shutdown(qs);
+    }
+    unlink(lock);
+    unlink(path);
+    rmdir(dir);
+}
+
 /* the byte of retention_refreshes in the FEMU statistics log */
 #define FEMU_PA_REFRESH_OFF 48
 /* the byte of rber_retry_reads */
@@ -65912,6 +66273,28 @@ static void femu_register_nodes(void)
     qos_add_test("pel-file", "femu", femu_test_pel_file, NULL);
     qos_add_test("persist-bbssd", "femu", femu_test_persist, NULL);
     qos_add_test("persist-ftl", "femu", femu_test_persist_ftl, NULL);
+    qos_add_test("precon-base", "femu", femu_test_precon,
+                 &(QOSGraphTestOptions) { .arg = (void *)&femu_precon_base });
+    qos_add_test("precon-seq", "femu", femu_test_precon,
+                 &(QOSGraphTestOptions) { .arg = (void *)&femu_precon_seq });
+    qos_add_test("precon-policy", "femu", femu_test_precon,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&femu_precon_policy });
+    qos_add_test("precon-buffer", "femu", femu_test_precon,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&femu_precon_buffer });
+    qos_add_test("precon-wear", "femu", femu_test_precon,
+                 &(QOSGraphTestOptions) { .arg = (void *)&femu_precon_wear });
+    qos_add_test("precon-pace", "femu", femu_test_precon,
+                 &(QOSGraphTestOptions) { .arg = (void *)&femu_precon_pace });
+    qos_add_test("precon-control-break", "femu", femu_test_precon,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&femu_precon_break });
+    qos_add_test("precon-control-short", "femu", femu_test_precon,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)&femu_precon_short });
+    qos_add_test("precon-refused", "femu", femu_test_precon_refused, NULL);
+    qos_add_test("precon-persist", "femu", femu_test_precon_persist, NULL);
     qos_add_test("persist-aging-wear", "femu", femu_test_persist_aging,
                  &(QOSGraphTestOptions) { .arg = (void *)"wear" });
     qos_add_test("persist-aging-eol", "femu", femu_test_persist_aging,

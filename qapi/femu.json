@@ -1024,6 +1024,43 @@
             'gc-write-pages': 'uint64', '*waf': 'number' } }
 
 ##
+# @FemuPreconInfo:
+#
+# What preconditioning at realize wrote on a namespace
+# (precon_fill_pct).  The write counters of @FemuWriteCounters start
+# at zero after it, as on a new drive; the wear it caused stays.
+#
+# @fill-pages: pages the first phase wrote, once each, in order
+#
+# @overwrite-pages: page writes of the second phase
+#
+# @nand-write-pages: pages it programmed
+#
+# @gc-write-pages: pages its garbage collection moved
+#
+# @map-write-pages: translation pages it programmed
+#
+# @pad-write-pages: pad pages it programmed
+#
+# @parity-write-pages: parity pages it programmed
+#
+# @block-erases: erases it caused
+#
+# @waf: its write amplification: programmed pages, with translation,
+#     pad and parity pages, over the pages it wrote
+#
+# @elapsed-ms: host time of the run, in milliseconds
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuPreconInfo',
+  'data': { 'fill-pages': 'uint64', 'overwrite-pages': 'uint64',
+            'nand-write-pages': 'uint64', 'gc-write-pages': 'uint64',
+            'map-write-pages': 'uint64', 'pad-write-pages': 'uint64',
+            'parity-write-pages': 'uint64', 'block-erases': 'uint64',
+            'waf': 'number', 'elapsed-ms': 'uint64' } }
+
+##
 # @FemuBbssdInfo:
 #
 # State of a blackbox namespace, copied by the FTL thread between two
@@ -1051,6 +1088,9 @@
 # @namespace-counters: the pages of this namespace alone, when several
 #     namespaces share the FTL (shared_ftl, or flexible data placement
 #     with more than one namespace)
+#
+# @precondition: what preconditioning at realize wrote, on a namespace
+#     this realize preconditioned (precon_fill_pct)
 #
 # @lines: with kind @lines, the lines from @offset, at most limit of
 #     them
@@ -1083,6 +1123,7 @@
             '*end-of-life': 'FemuEolInfo',
             '*shared-ftl-nsid': 'uint32',
             '*namespace-counters': 'FemuNamespaceWriteCounters',
+            '*precondition': 'FemuPreconInfo',
             '*lines': [ 'FemuLineInfo' ],
             '*blocks': [ 'FemuBlockInfo' ], '*dies': [ 'FemuDieInfo' ],
             '*most-waited': 'FemuDieInfo', '*offset': 'uint32',

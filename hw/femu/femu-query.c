@@ -734,6 +734,25 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
     geo->page_size = q->page_size;
     geo->pages_per_line = q->pgs_per_line;
     info->geometry = geo;
+    if (q->precon_on) {
+        FemuPreconInfo *pc = g_new0(FemuPreconInfo, 1);
+
+        pc->fill_pages = q->precon_fill;
+        pc->overwrite_pages = q->precon_overwrite;
+        pc->nand_write_pages = q->precon_nand;
+        pc->gc_write_pages = q->precon_gc;
+        pc->map_write_pages = q->precon_map;
+        pc->pad_write_pages = q->precon_pad;
+        pc->parity_write_pages = q->precon_parity;
+        pc->block_erases = q->precon_erases;
+        /* the same ratio as counters.waf, from the saved components */
+        pc->waf = q->precon_host ?
+                  (double)(q->precon_nand + q->precon_gc + q->precon_map +
+                           q->precon_pad + q->precon_parity) /
+                  q->precon_host : 0;
+        pc->elapsed_ms = q->precon_ms;
+        info->precondition = pc;
+    }
 
     ctr->host_write_pages = q->host_pages;
     ctr->nand_write_pages = q->nand_pages;

@@ -768,6 +768,7 @@ static bool persist_load(FemuCtrl *n, int fd, Error **errp)
     if (!persist_read(fd, n->mbe->logical_space, n->mbe->size, off)) {
         goto short_file;
     }
+    n->persist_file_loaded = true;
     off += n->mbe->size;
     for (uint32_t i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
@@ -793,9 +794,11 @@ static bool persist_load(FemuCtrl *n, int fd, Error **errp)
                    "model needs the media history", n->persist_path);
         return false;
     }
-    if (n->persist_ftl && (flags & PERSIST_F_FTL) &&
-        !persist_load_ftl(n, fd, off, errp)) {
-        return false;
+    if (n->persist_ftl && (flags & PERSIST_F_FTL)) {
+        if (!persist_load_ftl(n, fd, off, errp)) {
+            return false;
+        }
+        n->persist_ftl_loaded = true;
     }
     /* the device holds data again: not globally erased */
     qatomic_set(&nvme_sanitize_state(n)->sstat,

@@ -129,8 +129,10 @@ Device data lives only in host memory:
 - A snapshot of the guest's boot disk (for example with `qemu-img`) does not
   include the FEMU device.
 
-To start every run from the same state, write the data again after boot, or
-run a fixed preconditioning workload. Related issue: #52.
+To start every run from the same state, write the data again after boot,
+run a fixed preconditioning workload, or set `precon_fill_pct` on a bbssd
+device (see [preconditioning at realize](../design/ftl.md#preconditioning-at-realize-precon_fill_pct)).
+Related issue: #52.
 
 ## Property compatibility
 

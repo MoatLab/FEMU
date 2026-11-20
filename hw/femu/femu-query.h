@@ -115,6 +115,18 @@ typedef struct FemuQueryNs {
     uint64_t gc_fw_pages;
     uint64_t gc_fw_ns;
 
+    bool precon_on;             /* this realize preconditioned it */
+    uint64_t precon_fill;
+    uint64_t precon_overwrite;
+    uint64_t precon_nand;
+    uint64_t precon_gc;
+    uint64_t precon_map;
+    uint64_t precon_pad;
+    uint64_t precon_parity;
+    uint64_t precon_erases;
+    uint64_t precon_host;       /* pages the plan wrote */
+    uint64_t precon_ms;
+
     uint32_t free_lines;
     uint32_t victim_lines;
     uint32_t full_lines;
@@ -251,6 +263,7 @@ void femu_query_service(struct FemuCtrl *n, FemuQueryReq *req);
 void femu_query_cancel(FemuQueryReq *req);
 /* Copy one bbssd namespace into @q. FTL thread only. */
 void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q);
+void ssd_query_precon(struct ssd *ssd, FemuQueryNs *q);
 uint32_t ssd_owner_nsid(struct ssd *ssd);
 /*
  * Read the published counters of one bbssd namespace. Main loop, BQL.

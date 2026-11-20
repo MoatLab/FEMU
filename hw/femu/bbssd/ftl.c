@@ -1383,7 +1383,11 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     } else if (ssd->sp.gc_pace) {
         ssd_pace_tick(ssd);
     } else if (should_gc(ssd)) {
-        do_gc(ssd, false);
+        if (unlikely(ssd->precon_break)) {
+            ssd->precon_skipped++;
+        } else {
+            do_gc(ssd, false);
+        }
     }
 
     /* the pSLC tier's turn: a fold when its pool has no page left */

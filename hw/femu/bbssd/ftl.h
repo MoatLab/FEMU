@@ -681,6 +681,22 @@ struct ssd_ns_ctr {
     uint64_t gc_write_pages;
 };
 
+/* what preconditioning at realize did (precon_fill_pct) */
+struct ssd_precon {
+    bool done;
+    uint64_t fill;          /* phase 1 pages */
+    uint64_t overwrite;     /* phase 2 writes */
+    uint64_t host;          /* pages the plan wrote */
+    uint64_t nand;          /* pages it programmed */
+    uint64_t gc;            /* pages its collection moved */
+    uint64_t map;           /* translation pages it programmed */
+    uint64_t pad;           /* pad pages it programmed */
+    uint64_t parity;        /* parity pages it programmed */
+    uint64_t erases;
+    uint32_t waf_x1000;
+    uint64_t ms;            /* host time of the run */
+};
+
 struct ssd {
     char *ssdname;
     struct ssdparams sp;
@@ -1030,6 +1046,10 @@ struct ssd {
 
     /* the pSLC tier in front of the dense lines; NULL when it is off */
     struct ftl_tier *tier;
+    struct ssd_precon precon;
+    /* qtest control of preconditioning: background collection is off */
+    bool precon_break;
+    uint64_t precon_skipped;    /* background passes it took out */
 
     FemuCtrl *n;
     NvmeNamespace *ns;  /* the namespace whose blocks this FTL maps */
@@ -1101,6 +1121,7 @@ int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
                 Error **errp);
 void ssd_free_write_buffer(struct ssd *ssd);
 void ssd_free(struct ssd *ssd);
+char *ssd_state_digest(struct ssd *ssd);
 
 /* durable_at_done (ftl-durable.c) */
 bool ssd_durable_on(struct ssd *ssd);

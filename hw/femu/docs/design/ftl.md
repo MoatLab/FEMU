@@ -1545,6 +1545,62 @@ Rules:
   buffer, Streams, idle collection, open-block maintenance, the injected
   error rates and others; realize names the property).
 
+### Preconditioning at realize (`precon_fill_pct`)
+
+A new device has an empty map and only free lines, so a study that skips
+the fill measures a new drive. `precon_fill_pct` fills the namespace at
+realize, before the guest boots. Each planned page write goes through
+`bb_ftl_process_req()`, the call the FTL thread makes for a guest write.
+So the map, the lines, the write pointers, the wear and the collection
+end as after the same writes from the host.
+
+```text
+  realize: persist_file --> plan (no host time) --> PEL --> FTL thread
+  plan:    phase 1: logical pages 0 .. F-1, once, in order
+           phase 2: W more writes over the filled pages, seq or rand
+           every 1024 writes and at the end: booked NAND time to idle
+           end: Flush (write buffer), traffic counters to 0
+  F = pages * precon_fill_pct / 100,  W = F * precon_overwrite_pct / 100
+```
+
+| Property | Effect |
+| --- | --- |
+| `precon_fill_pct` | percent of the logical pages that phase 1 writes; 0 (default) is off |
+| `precon_overwrite_pct` | phase 2 writes in percent of the filled pages, 0 to 1000 |
+| `precon_pattern` | `rand` (default, uniform over the filled pages) or `seq` |
+| `precon_seed` | seed of the `rand` order (splitmix64) |
+
+Rules:
+
+- Factory writes are not host writes. The host, NAND, collection,
+  translation, pad and parity page counters start at zero, so the WAF
+  of log page C0h and `query-femu` counts the study only. The erase
+  counts and the rest of the wear stay. `query-femu` reports the run in
+  the `precondition` member.
+- The device data does not change: a filled LBA reads zeros, as after a
+  host write of zeros, and the LBA counts as written.
+- Line ages keep the realize time, as on a drive filled just before it
+  ships.
+- With `persist_ftl` and a file that holds FTL state, the saved state
+  wins and no plan runs. A file with data and no FTL state fails realize.
+- Each planned write is one flash page, so the LBA size must divide the
+  page, the namespace has no metadata, and one page fits `mdts`.
+- The first version takes one bbssd namespace with page mapping. Realize
+  refuses the knobs whose decisions read the clock or a data age
+  (`gc_policy=cost-benefit`, `gc_idle_ms`, `tier_mode`,
+  `pd_open_close_sec`, `retention_limit_sec`, `rber_ppb`, `gc_copyback`,
+  `buffer_low_pcent`), the end-of-life admission, `power_loss`,
+  `durable_at_done`, Streams and `err_write_fail_ppm`. It also refuses
+  other mappings, several namespaces, `namespace_modes`, `ns_mgmt`,
+  shared namespaces, `shared_ftl`, FDP and `cxl_ssd`.
+- Realize holds the QEMU main lock during the plan, and the time grows
+  with F + W. A log line reports each tenth of the plan.
+
+<!-- femu-example: ftl-precon -->
+```
+-device femu,femu_mode=1,nchs=2,luns_per_ch=4,blks_per_pl=64,op_pcent=25,precon_fill_pct=90,precon_overwrite_pct=200,precon_seed=1
+```
+
 ## Fault insertion
 
 `err_read_unc_ppm` and `err_write_fail_ppm` turn a rate into a period,

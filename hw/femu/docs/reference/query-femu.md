@@ -84,6 +84,7 @@ A `bbssd` entry has these members:
 | `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, `pad-write-pages` (only after a pad), `map-write-pages` and `map-read-pages` (only with `mapping=dftl` and no FDP), `parity-write-pages` and `degraded-reads` (only with `die_parity` or `rain_parity`), `failed-dies`, `rebuild-lines-left`, `rebuild-pages`, `lost-pages` and `lost-blocks` (only with `rain_parity`), `gc-fw-pages` and `gc-fw-ns` (only with `fw_gc_page_ns` above 0, bbssd only), and `waf` |
 | `media` | the NAND bus timing: see [Media timing](#media-timing) |
 | `line-counts` | lines that are `free`, `victim`, `full`, `retired` and `spare`, and the `total`; absent with FDP |
+| `precondition` | only on a namespace that `precon_fill_pct` filled at this realize: `fill-pages`, `overwrite-pages`, `nand-write-pages`, `gc-write-pages`, `map-write-pages`, `pad-write-pages`, `parity-write-pages`, `block-erases`, `waf` and `elapsed-ms` of that run; the `counters` start at zero after it. See [preconditioning](../design/ftl.md#preconditioning-at-realize-precon_fill_pct) |
 | `fdp` | with FDP only: see [FDP namespaces](#fdp-namespaces) |
 | `lines` | with `kind` `lines`: `id`, `state`, `vpc`, `ipc`, `erase-min` and `erase-max` of each line |
 | `offset`, `next-offset` | with `kind` `lines` or `reclaim-units`: the first record in the listing, and the offset of the next call; `next-offset` is absent after the last record |

@@ -3302,6 +3302,13 @@ typedef struct FemuCtrl {
      */
     uint32_t        health_pending;
     uint64_t        gc_seed; /* seed for the GC policies that sample victims */
+    /* preconditioning at realize; precon_fill_pct 0 is off */
+    uint8_t         precon_fill_pct;
+    uint32_t        precon_overwrite_pct;
+    char           *precon_pattern;
+    uint64_t        precon_seed;
+    bool            persist_ftl_loaded; /* realize loaded a saved FTL */
+    bool            persist_file_loaded; /* realize loaded a persist_file */
     uint32_t        op_pcent; /* bbssd over-provisioning percent (0 = use devsz_mb) */
     bool            debug_ftl; /* check bbssd FTL invariants on the GC path */
     uint32_t        err_read_unc_ppm;  /* uncorrectable reads per million; 0 = off */
@@ -3470,6 +3477,7 @@ typedef struct FemuCtrl {
     /* qtest only (x-stage-hold-ms): ms a poller waits inside a stage update */
     uint32_t        test_stage_hold_ms;
     uint32_t        test_cmt_slots; /* qtest: CMT slots instead of the MiB size */
+    uint32_t        test_precon_break; /* qtest: plan skips background GC */
     bool            test_tp_hold;   /* qtest: publish no pending TP */
     bool            tier_idle;      /* the FTL thread runs idle folds */
     bool            tier_upkeep;    /* the FTL thread runs owed pool folds */
@@ -4308,6 +4316,8 @@ int nvme_register_kvssd(FemuCtrl *n);
 
 /* per-namespace FTL entry points, dispatched by the controller's FTL thread */
 uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);
+bool femu_precon_check(FemuCtrl *n, Error **errp);
+bool femu_precon_run(FemuCtrl *n, Error **errp);
 uint64_t zns_ftl_process_req(NvmeNamespace *ns, NvmeRequest *req);
 
 #define NVME_NSATTR_CWP 0x01

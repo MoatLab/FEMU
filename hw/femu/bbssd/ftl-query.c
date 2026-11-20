@@ -367,6 +367,7 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
         q->eol_reqs = (w & ~(1ULL << 63)) >> 32;
     }
 
+    ssd_query_precon(ssd, q);
     ssd_query_blocks(ssd, q);
     ssd_query_dies(ssd, q);
     q->fdp = ssd->fdp_enabled;
