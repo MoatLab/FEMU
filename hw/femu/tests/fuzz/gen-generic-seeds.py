@@ -24,7 +24,8 @@ admin-fuzz qtest (femu_test_admin_fuzz in hw/femu/tests/qtest/femu-test.c).
 
 Usage:
     gen-generic-seeds.py --target {nossd,bbssd,zns,cmb} --out DIR
-    gen-generic-seeds.py --control DIR    trigger/ and near/ seeds
+    gen-generic-seeds.py --control DIR    trigger/ and near/ seeds, and
+                                          control.dict with the key
     gen-generic-seeds.py --self-test
 """
 
@@ -302,6 +303,12 @@ def control_seeds():
             "near": admin_seed([ident(1, cdw15=CONTROL_NEAR)])}
 
 
+def control_dict():
+    """A libFuzzer dictionary with the control key as its one word."""
+    key = struct.pack("<I", CONTROL_KEY)
+    return 'key="%s"\n' % "".join("\\x%02x" % b for b in key)
+
+
 def encode(records):
     for r in records:
         if not r or SEP in r:
@@ -337,6 +344,9 @@ def self_test():
         if key not in trig or key in near or len(trig) != len(near):
             print("self-test: the trigger and near seeds differ wrongly")
             return 1
+        if control_dict() != 'key="\\x5a\\xa5\\xc3\\x3c"\n':
+            print("self-test: the control dictionary is wrong")
+            return 1
         if near.count(struct.pack("<I", CONTROL_NEAR)) != 1:
             print("self-test: the near CDW15 is not unique in the seed")
             return 1
@@ -370,6 +380,8 @@ def main():
         write_dir(os.path.join(a.control, "trigger"),
                   [("trigger", c["trigger"])])
         write_dir(os.path.join(a.control, "near"), [("near", c["near"])])
+        with open(os.path.join(a.control, "control.dict"), "w") as f:
+            f.write(control_dict())
         return 0
     if not a.target or not a.out:
         ap.error("--target and --out, --control or --self-test")

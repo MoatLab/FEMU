@@ -194,6 +194,16 @@ The plant compares the key with a `memcmp()` call, so libFuzzer sees
 both operands. The near seed holds a CDW15 value that occurs once, so
 libFuzzer copies the key to the right bytes.
 
+Compare tracing alone found the key too late: once in 238969 inputs in
+a 600 s run. So the control run also gets the key from `control.dict`
+as a dictionary word. The control then checks one path: a one-word
+mutation, a report, a reproducer and a qtest replay.
+
+```sh
+./qemu-fuzz-x86_64 --fuzz-target=generic-fuzz-femu-control \
+    -dict=DIR/control.dict -max_total_time=600 -timeout=25 corpus
+```
+
 ## Documentation checks
 
 From the source tree, with the build above in `build/`:
