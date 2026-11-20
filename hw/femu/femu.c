@@ -1323,12 +1323,17 @@ static uint64_t nvme_cmb_read(void *opaque, hwaddr addr, unsigned size)
     return val;
 }
 
+/*
+ * The CMB takes byte accesses as they come. With a 2-byte minimum, QEMU
+ * widened a 1-byte access at the last CMB byte to 2 bytes at the same
+ * address, and the copy above went one byte past the buffer.
+ */
 static const MemoryRegionOps nvme_cmb_ops = {
     .read = nvme_cmb_read,
     .write = nvme_cmb_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .impl = {
-        .min_access_size = 2,
+        .min_access_size = 1,
         .max_access_size = 8,
     },
 };

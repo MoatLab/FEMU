@@ -907,6 +907,33 @@ static void femu_test_cq_churn(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * A byte access at the last byte of the controller memory buffer. The CMB
+ * once had a 2-byte minimum access size, so QEMU widened this access and
+ * the device copied one byte past its buffer. ASan builds stop there.
+ */
+static void femu_test_cmb_last_byte(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const uint64_t size = 0x400000;
+    QPCIBar cmb;
+    uint64_t last;
+
+    qpci_device_enable(&femu->dev);
+    cmb = qpci_iomap(&femu->dev, 2, NULL);
+    last = cmb.addr + size - 1;
+
+    qtest_writeb(qts, last - 2, 0x11);
+    qtest_writeb(qts, last, 0xa5);
+    g_assert_cmphex(qtest_readb(qts, last), ==, 0xa5);
+    qtest_writeb(qts, last - 1, 0x5a);
+    g_assert_cmphex(qtest_readw(qts, last - 1), ==, 0xa55a);
+    /* a byte write leaves its neighbour as it was */
+    g_assert_cmphex(qtest_readb(qts, last - 2), ==, 0x11);
+}
+
+/*
  * A data buffer inside the controller memory buffer is described by an iovec
  * rather than a scatter list, and the media path takes the scatter list, so the
  * transfer moves nothing. The assertion that the two agreed aborted the process
@@ -65030,6 +65057,10 @@ static void femu_register_nodes(void)
     qos_add_test("cmb-sgl", "femu", femu_test_cmb_sgl,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "sgl=on,cmbsz=0x400000,cmbloc=2"
+    });
+    qos_add_test("cmb-last-byte", "femu", femu_test_cmb_last_byte,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "cmbsz=0x400000,cmbloc=2"
     });
     qos_add_test("cmb-data-buffer", "femu", femu_test_cmb_data_buffer,
                  &(QOSGraphTestOptions) {

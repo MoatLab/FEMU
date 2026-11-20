@@ -457,6 +457,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Device threads copy guest memory through the translation they checked. A guest that mapped a ROM over a buffer between the check and the copy could make a poller wait for the BQL while a pause held it.
 - A ZNS zone report is built under the zone lock and sent after the lock is released, to directly reachable memory only. A report into ROM used to hang the VM when a Changed Zone List read waited for that lock.
 - An Abort stops its count of queued Aborts once the count passes `acl`. A full admin queue of Aborts used to read the queue depth squared times under the BQL.
+- A byte access at the last byte of the controller memory buffer no longer reads or writes one byte past it. The CMB took 2-byte accesses only, and QEMU widened the byte access.
 
 #### Data correctness
 

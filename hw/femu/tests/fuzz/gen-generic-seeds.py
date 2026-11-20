@@ -285,7 +285,10 @@ def seeds(target):
         out.append(("cmb", [
             mmio_read(0x38), mmio_read(0x3c),
             mmio_write(0, 0x1122334455667788, QUAD, CMB),
-            mmio_read(0, QUAD, CMB), mmio_write(0x3ffff8, 1, LONG, CMB)]
+            mmio_read(0, QUAD, CMB), mmio_write(0x3ffff8, 1, LONG, CMB),
+            # the last CMB byte, by a byte access (cmb-last-byte qtest)
+            mmio_write(0x3fffff, 0xff, BYTE, CMB),
+            mmio_read(0x3fffff, BYTE, CMB)]
             + admin_seed([dict(opcode=ADM["identify"], prp1=CMB_ADDR,
                                cdw10=1),
                           dict(opcode=ADM["get_log"], prp1=CMB_ADDR,
