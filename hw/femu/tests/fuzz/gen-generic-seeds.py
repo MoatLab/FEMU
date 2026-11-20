@@ -55,6 +55,9 @@ CMB = 1          # nvme-cmb, femu-cmb target only
 
 # the x-fuzz-control key (FEMU_FUZZ_CONTROL_KEY in hw/femu/nvme.h)
 CONTROL_KEY = 0x3cc3a55a
+# CDW15 of the near seed. Its 4 bytes occur once in the seed, so when
+# libFuzzer copies the key over the compared bytes, it writes CDW15.
+CONTROL_NEAR = 0x6b1d7e29
 
 # guest addresses, in RAM and clear of the legacy hole below 1 MiB
 ASQ = 0x200000
@@ -293,7 +296,7 @@ def seeds(target):
 def control_seeds():
     """The trigger hits the planted overflow; the near seed is one dword off."""
     return {"trigger": admin_seed([ident(1, cdw15=CONTROL_KEY)]),
-            "near": admin_seed([ident(1, cdw15=0)])}
+            "near": admin_seed([ident(1, cdw15=CONTROL_NEAR)])}
 
 
 def encode(records):
@@ -330,6 +333,9 @@ def self_test():
         key = struct.pack("<I", CONTROL_KEY)
         if key not in trig or key in near or len(trig) != len(near):
             print("self-test: the trigger and near seeds differ wrongly")
+            return 1
+        if near.count(struct.pack("<I", CONTROL_NEAR)) != 1:
+            print("self-test: the near CDW15 is not unique in the seed")
             return 1
         # one dword apart, so a compare-guided mutation can find the key
         diff = sum(a != b for a, b in zip(trig, near))

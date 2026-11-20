@@ -1747,10 +1747,20 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
     /* CNS is bits 7:0; the controller identifier sits above it */
     uint32_t cns  = le32_to_cpu(c->cns) & 0xff;
 
-    /* x-fuzz-control: a heap overflow that the generic fuzzer must find */
-    if (unlikely(n->fuzz_control_buf) && cns == NVME_ID_CNS_CTRL &&
-        le32_to_cpu(cmd->cdw15) == FEMU_FUZZ_CONTROL_KEY) {
-        n->fuzz_control_buf[FEMU_FUZZ_CONTROL_LEN] = 1;
+    /*
+     * x-fuzz-control: a heap overflow that the generic fuzzer must find.
+     * libFuzzer sees both memcmp() operands and can copy the key into the
+     * input. Its memcmp table gets far fewer entries than the table of
+     * 32-bit compares. The volatile pointer keeps the call in any build.
+     */
+    if (unlikely(n->fuzz_control_buf) && cns == NVME_ID_CNS_CTRL) {
+        static const uint8_t key[4] = FEMU_FUZZ_CONTROL_KEY_BYTES;
+        /* volatile keeps a real memcmp() call for libFuzzer to hook */
+        int (*volatile cmp)(const void *, const void *, size_t) = memcmp;
+
+        if (!cmp(&cmd->cdw15, key, sizeof(key))) {
+            n->fuzz_control_buf[FEMU_FUZZ_CONTROL_LEN] = 1;
+        }
     }
 
     switch (cns) {

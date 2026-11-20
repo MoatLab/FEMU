@@ -48,6 +48,8 @@ typedef struct NvmeBus {
  * a buffer of FEMU_FUZZ_CONTROL_LEN bytes, for the generic fuzzer control.
  */
 #define FEMU_FUZZ_CONTROL_KEY 0x3cc3a55a
+/* the key as CDW15 holds it in memory, little endian */
+#define FEMU_FUZZ_CONTROL_KEY_BYTES { 0x5a, 0xa5, 0xc3, 0x3c }
 #define FEMU_FUZZ_CONTROL_LEN 16
 
 #define NVME_FDP_MAX_EVENTS 63

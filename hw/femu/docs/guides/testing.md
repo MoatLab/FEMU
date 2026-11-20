@@ -188,7 +188,11 @@ The control target has `x-fuzz-control=on`. Identify Controller with
 CDW15 set to 0x3cc3a55a then writes one byte past a 16-byte buffer.
 `gen-generic-seeds.py --control DIR` writes a seed that hits it and a
 seed one dword away. A run from the second seed must find the crash in
-`nvme_identify`. If it does not, the fuzzer setup reaches nothing.
+`nvme_identify`. The trigger seed alone checks reach and the sanitizer
+report. The run from the near seed checks that the fuzzer finds the key.
+The plant compares the key with a `memcmp()` call, so libFuzzer sees
+both operands. The near seed holds a CDW15 value that occurs once, so
+libFuzzer copies the key to the right bytes.
 
 ## Documentation checks
 
