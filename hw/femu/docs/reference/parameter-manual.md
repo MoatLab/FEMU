@@ -198,6 +198,11 @@ Interactions:
   with `vwc=0`, though Linux sends no Flush to a controller that advertises
   no cache.
 - With ZNS, `mdts` also caps Zone Append when `zns_zasl_bs=0`.
+- With `nlbaf` 8 or more, one Read or Write of 65536 blocks of 64 KiB
+  moves 4 GiB. The data path refuses a transfer of 4 GiB or more. So at
+  realize, `mdts=0` or an `mdts` with a limit of 4 GiB or more becomes
+  `19 - mpsmin`, a limit of 2 GiB. QEMU prints one warning, and Identify
+  byte 77 reports the new value. A limit of 2 GiB or less stays.
 
 ### 3.3 LBA formats, metadata and protection
 

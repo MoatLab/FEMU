@@ -223,7 +223,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Information log keeps the newest elpe + 1 entries" },
     { "mdts",
       "Maximum Data Transfer Size as a power of two of the minimum memory "
-      "page size (2^(12 + mpsmin + mdts) bytes); 0 means no limit" },
+      "page size (2^(12 + mpsmin + mdts) bytes); 0 means no limit. With "
+      "nlbaf 8 or more, 0 or a limit of 4 GiB or more becomes "
+      "19 - mpsmin (2 GiB), with a warning" },
     { "io_stages",
       "Time each I/O command in five stages (submit, ftl, hold, "
       "post-delay, total) for the QMP command query-femu-stages; off by "

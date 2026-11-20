@@ -8,9 +8,7 @@ static inline int qemu_fls(int i)
 
 static void oc12_tbl_initialize(NvmeNamespace *ns)
 {
-    uint64_t i;
-
-    for (i = 0; i < ns->tbl_entries; i++) {
+    for (uint64_t i = 0; i < ns->tbl_entries; i++) {
         ns->tbl[i] = OC12_LBA_UNMAPPED;
     }
 }

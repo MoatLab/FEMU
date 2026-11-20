@@ -18,3 +18,4 @@ default femu-cxl-ssd cylon-revoke-batch 32 64 unreleased  # more pages share one
 type femu-cxl-ssd cylon-never-emulate "bool" "OnOffAuto" unreleased  # QMP takes "on", "off" or "auto", not a JSON bool
 default femu-cxl-ssd cylon-never-emulate false "auto" unreleased  # version 2 of the fault exit when the host kernel has it
 behavior femu gc_erase_order - true unreleased  # collection programs a copy after its read and erases a victim after its last copy; gc_erase_order=off keeps the old timing
+behavior femu mdts - - unreleased  # with nlbaf 8 or more, mdts 0 or a limit of 4 GiB or more becomes 19 - mpsmin (2 GiB), with a warning

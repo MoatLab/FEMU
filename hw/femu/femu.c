@@ -1836,6 +1836,19 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
         return false;
     }
     /*
+     * With blocks of 64 KiB (nlbaf 8 or more), one Read or Write can move
+     * 4 GiB, and the data path refuses that. Cap MDTS at 2 GiB, so that
+     * Identify agrees with the refusal. The limit is 2^(12 + mpsmin + mdts).
+     */
+    if (n->nlbaf >= 8 && n->mpsmin <= 15 &&
+        (!n->mdts || 12 + n->mpsmin + n->mdts >= 32)) {
+        uint8_t cap = 19 - n->mpsmin;
+
+        warn_report("femu: mdts %u allows 4 GiB or more with nlbaf %u; "
+                    "using mdts %u (2 GiB)", n->mdts, n->nlbaf, cap);
+        n->mdts = cap;
+    }
+    /*
      * Metadata is kept in a store of its own and moved either through MPTR
      * or interleaved with the data, as mc allows (checked below). Each block
      * size is offered with and without it; metadata formats take the second
