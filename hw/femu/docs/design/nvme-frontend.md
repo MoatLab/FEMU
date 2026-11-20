@@ -574,7 +574,7 @@ they read:
 
 ### Dispatch into modes
 
-A mode is a `FemuExtCtrlOps` table (`hw/femu/nvme.h`):
+A mode is a constant `FemuExtCtrlOps` table (`hw/femu/femu-ext-ops.h`):
 
 | Hook | Called from | For |
 | --- | --- | --- |
@@ -586,9 +586,9 @@ A mode is a `FemuExtCtrlOps` table (`hw/femu/nvme.h`):
 | `get_log` | vCPU, for log ids the frontend does not handle | OC 2.0 chunk information, the ZNS Changed Zone List |
 | `exit`, `ns_exit` | teardown, namespace deletion | free the mode's state |
 
-`nvme_register_extensions()` installs the table for the controller's
-`femu_mode`, and `nvme_register_extensions_ns()` gives each namespace the table
-of its own mode, so I/O dispatches on the namespace, not the controller.
+`nvme_register_extensions()` copies the table of the controller's
+`femu_mode`, and `nvme_register_extensions_ns()` gives each namespace a copy of
+the table of its own mode, so I/O dispatches on the namespace, not the controller.
 Admin commands go to the controller's table; Get Log Page tries the named
 namespace's table first, then the controller's.
 
@@ -1144,7 +1144,8 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | `hw/femu/intr.c` | `nvme_isr_notify_io()`, `nvme_isr_notify_admin()`, `nvme_irq_update()`, `nvme_irq_mask_changed()`, `nvme_setup_virq()`, vector notifiers |
 | `hw/femu/dma.c` | PRP and SGL mapping, `femu_dma_rw` |
 | `hw/femu/lib/rte_ring.c`, `hw/femu/lib/pqueue.c` | the rings and the completion heap |
-| `hw/femu/nvme.h` | `NvmeSQueue`, `NvmeCQueue`, `NvmeRequest`, `FemuCtrl`, `FemuExtCtrlOps`, `FemuPollerCtr`, register layout |
+| `hw/femu/nvme.h` | `NvmeSQueue`, `NvmeCQueue`, `NvmeRequest`, `FemuCtrl`, `FemuPollerCtr`, register layout |
+| `hw/femu/femu-ext-ops.h` | `FemuExtCtrlOps`, the mode handler table, and its rules |
 
 ## Related pages
 

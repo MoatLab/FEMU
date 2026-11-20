@@ -412,19 +412,11 @@ static void kvssd_exit(FemuCtrl *n)
     n->ext_ops.state = NULL;
 }
 
-int nvme_register_kvssd(FemuCtrl *n)
-{
-    n->ext_ops = (FemuExtCtrlOps) {
-        .state            = NULL,
-        .init_ctrl_name   = kvssd_init_ctrl_str,
-        .init             = kvssd_init,
-        .exit             = kvssd_exit,
-        .start_ctrl       = NULL,
-        .admin_cmd        = kvssd_admin_cmd,
-        .admin_cmd_cqe    = NULL,
-        .io_cmd           = kvssd_io_cmd,
-        .get_log          = NULL,
-    };
-
-    return 0;
-}
+const FemuExtCtrlOps femu_kvssd_ext_ops = {
+    .name           = "kvssd",
+    .init_ctrl_name = kvssd_init_ctrl_str,
+    .init           = kvssd_init,
+    .exit           = kvssd_exit,
+    .admin_cmd      = kvssd_admin_cmd,
+    .io_cmd         = kvssd_io_cmd,
+};

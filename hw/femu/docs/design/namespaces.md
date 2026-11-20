@@ -394,8 +394,8 @@ is also started under qtest and moves one block on namespace 1.
 
 ## How to extend it
 
-- A new mode token: add it to `nvme_mode_from_token()`, register its table in
-  `nvme_register_extensions()`, add any per-namespace restriction to
+- A new mode token: add it to `nvme_mode_from_token()`, return its table from
+  `femu_ext_ops_lookup()`, add any per-namespace restriction to
   `nvme_init_namespaces()`, and keep `hw/femu/docs/modes.py` in step.
 - A mode that keeps controller-wide state must refuse a second namespace of
   that mode, as CSD does, or move the state into the namespace.

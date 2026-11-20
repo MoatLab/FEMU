@@ -218,7 +218,7 @@ accesses do not reach QEMU at all (see the
 
 ## 3. Mode backends
 
-A mode is a table of handlers (`FemuExtCtrlOps` in `hw/femu/nvme.h`).
+A mode is a table of handlers (`FemuExtCtrlOps` in `hw/femu/femu-ext-ops.h`).
 `nvme_register_extensions()` in `hw/femu/femu.c` installs the table for the
 controller's `femu_mode`, and `nvme_register_extensions_ns()` gives each
 namespace the table for its own mode, so one controller can mix modes with

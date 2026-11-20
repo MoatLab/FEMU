@@ -61,7 +61,7 @@ collection or write amplification.
   not used by NoSSD namespaces:  FTL thread, struct ssd, NAND media model
 ```
 
-`nvme_register_nossd()` (`hw/femu/nossd/nop.c`) installs a handler table with
+`femu_nossd_ext_ops` (`hw/femu/nossd/nop.c`) is a handler table with
 three entries that do work: `init` and `init_ctrl_name`, which set the
 model and serial strings, and `io_cmd`, which sends Read and Write to the shared `nvme_rw()`
 and returns Invalid Opcode for anything else that reaches it. The optional
@@ -198,8 +198,8 @@ Refusal messages are listed in the
   command, or to `nvme_io_cmd()` in `hw/femu/nvme-io.c` when every block mode
   should get it.
 - **Starting point for a new mode.** `hw/femu/nossd/nop.c` is the smallest
-  complete mode. Copy it and register it in `nvme_register_extensions()` in
-  `hw/femu/femu.c`. Then add the new `femu_mode` value to the enum in
+  complete mode. Copy it, declare its table in `hw/femu/femu-ext-ops.h`, and
+  return the table from `femu_ext_ops_lookup()` in `hw/femu/femu.c`. Then add the new `femu_mode` value to the enum in
   `hw/femu/nvme.h`, raise the bound in the realize check
   (`nvme_check_constraints()`, which refuses values above the KV mode), teach
   `backend_rw()` in `hw/femu/backend/dram.c` the mode (it asserts on an

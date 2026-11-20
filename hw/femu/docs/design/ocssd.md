@@ -81,10 +81,10 @@ passes its `expire_time`. The
 completion step.
 
 Registration happens in `nvme_register_extensions()` in `hw/femu/femu.c`: with
-`femu_mode=0`, `lver=1` installs `nvme_register_ocssd12()` and `lver=2`
-installs `nvme_register_ocssd20()`. Each fills the controller's
-`FemuExtCtrlOps` table: `init`, `exit`, `io_cmd` and `admin_cmd`, plus
-`get_log` for 2.0.
+`femu_mode=0`, `lver=1` copies `femu_ocssd12_ext_ops` and `lver=2` copies
+`femu_ocssd20_ext_ops` into the controller. Each table has `init`, `exit`,
+`io_cmd` and `admin_cmd`, plus `get_log` for 2.0. For 2.0 the controller copy
+also gets its chunk state from `oc20_ctrl_state_new()`.
 
 ## Open-Channel 1.2
 

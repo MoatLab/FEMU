@@ -2783,18 +2783,13 @@ static uint16_t zns_get_log(FemuCtrl *n, NvmeCmd *cmd)
     return zns_changed_zone_list(n, ns, cmd, len, off, rae);
 }
 
-int nvme_register_znssd(FemuCtrl *n)
-{
-    n->ext_ops = (FemuExtCtrlOps) {
-        .state            = NULL,
-        .init_ctrl_name   = zns_set_ctrl_str,
-        .init             = zns_init,
-        .exit             = zns_exit,
-        .start_ctrl       = zns_start_ctrl,
-        .admin_cmd        = zns_admin_cmd,
-        .io_cmd           = zns_io_cmd,
-        .get_log          = zns_get_log,
-    };
-
-    return 0;
-}
+const FemuExtCtrlOps femu_zns_ext_ops = {
+    .name           = "znssd",
+    .init_ctrl_name = zns_set_ctrl_str,
+    .init           = zns_init,
+    .exit           = zns_exit,
+    .start_ctrl     = zns_start_ctrl,
+    .admin_cmd      = zns_admin_cmd,
+    .io_cmd         = zns_io_cmd,
+    .get_log        = zns_get_log,
+};

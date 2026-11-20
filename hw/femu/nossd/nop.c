@@ -38,17 +38,9 @@ static void nop_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
 }
 
-int nvme_register_nossd(FemuCtrl *n)
-{
-    n->ext_ops = (FemuExtCtrlOps) {
-        .state            = NULL,
-        .init_ctrl_name   = bb_init_ctrl_str,
-        .init             = nop_init,
-        .exit             = NULL,
-        .admin_cmd        = NULL,
-        .io_cmd           = nop_io_cmd,
-        .get_log          = NULL,
-    };
-
-    return 0;
-}
+const FemuExtCtrlOps femu_nossd_ext_ops = {
+    .name           = "nossd",
+    .init_ctrl_name = bb_init_ctrl_str,
+    .init           = nop_init,
+    .io_cmd         = nop_io_cmd,
+};

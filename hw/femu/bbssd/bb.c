@@ -928,19 +928,13 @@ static uint16_t bb_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
     }
 }
 
-int nvme_register_bbssd(FemuCtrl *n)
-{
-    n->ext_ops = (FemuExtCtrlOps) {
-        .state            = NULL,
-        .init_ctrl_name   = bb_init_ctrl_str,
-        .ns_exit          = bb_ns_exit,
-        .init             = bb_init,
-        .exit             = bb_exit,
-        .admin_cmd        = bb_admin_cmd,
-        .io_cmd           = bb_io_cmd,
-        .get_log          = NULL,
-    };
-
-    return 0;
-}
+const FemuExtCtrlOps femu_bbssd_ext_ops = {
+    .name           = "bbssd",
+    .init_ctrl_name = bb_init_ctrl_str,
+    .ns_exit        = bb_ns_exit,
+    .init           = bb_init,
+    .exit           = bb_exit,
+    .admin_cmd      = bb_admin_cmd,
+    .io_cmd         = bb_io_cmd,
+};
 

@@ -1676,19 +1676,19 @@ static void oc20_exit(FemuCtrl *n)
     n->ext_ops.state = NULL;
 }
 
-int nvme_register_ocssd20(FemuCtrl *n)
+/* OC 2.0 keeps its chunk state in the controller copy of the table */
+void *oc20_ctrl_state_new(void)
 {
-    Oc20Ctrl *ln = g_malloc0(sizeof(Oc20Ctrl));
-    n->ext_ops = (FemuExtCtrlOps) {
-        .state            = ln,
-        .init_ctrl_name   = oc20_set_ctrl_str,
-        .init             = oc20_init,
-        .exit             = oc20_exit,
-        .admin_cmd        = oc20_admin_cmd,
-        .io_cmd           = oc20_io_cmd,
-        .get_log          = oc20_get_log,
-    };
-
-    return 0;
+    return g_new0(Oc20Ctrl, 1);
 }
+
+const FemuExtCtrlOps femu_ocssd20_ext_ops = {
+    .name           = "ocssd",
+    .init_ctrl_name = oc20_set_ctrl_str,
+    .init           = oc20_init,
+    .exit           = oc20_exit,
+    .admin_cmd      = oc20_admin_cmd,
+    .io_cmd         = oc20_io_cmd,
+    .get_log        = oc20_get_log,
+};
 

@@ -13,6 +13,7 @@ is in [architecture](../concepts/architecture.md).
 | [`femu.c`](../../femu.c) | QOM types `femu` and `femu-subsys`, property definitions, realize and exit, the FTL thread, mode registration |
 | [`femu-props.c`](../../femu-props.c) | Help text for every `femu` and `femu-subsys` property (what `-device femu,help` prints) |
 | [`nvme.h`](../../nvme.h) | NVMe structures, the `femu_mode` enum and the controller state `FemuCtrl` |
+| [`femu-ext-ops.h`](../../femu-ext-ops.h) | `FemuExtCtrlOps`: the handler table each mode exports, and its rules |
 | [`nvme-admin.c`](../../nvme-admin.c) | Admin commands, starting the pollers, namespace management, asynchronous events |
 | [`nvme-caps.c`](../../nvme-caps.c) | What the controller advertises: the Commands Supported and Effects and Supported Log Pages entries, and the Identify bits derived from them |
 | [`nvme-io.c`](../../nvme-io.c) | I/O commands and the poller loop that fetches submissions and posts completions |
@@ -44,5 +45,5 @@ is in [architecture](../concepts/architecture.md).
 (`checkpatch.pl`), tests, sign-off and pull requests. For a new property,
 add its help text in `femu-props.c` and regenerate the property reference
 ([keeping the documentation correct](docs-maintenance.md)). For a new mode,
-add it to the `femu_mode` enum in `nvme.h`, register its handlers the way
-the existing modes do in `femu.c`, and add an entry to `docs/modes.py`.
+add it to the `femu_mode` enum in `nvme.h`, export its handler table as
+the existing modes do, return it from `femu_ext_ops_lookup()` in `femu.c`, and add an entry to `docs/modes.py`.

@@ -1590,19 +1590,12 @@ static uint16_t csd_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     }
 }
 
-int nvme_register_csd(FemuCtrl *n)
-{
-    n->ext_ops = (FemuExtCtrlOps) {
-        .state            = NULL,
-        .init_ctrl_name   = csd_init_ctrl_str,
-        .init             = csd_init,
-        .exit             = csd_exit,
-        .start_ctrl       = NULL,
-        .admin_cmd        = NULL,
-        .admin_cmd_cqe    = csd_admin_cmd,
-        .io_cmd           = csd_io_cmd,
-        .get_log          = csd_cp_get_log,
-    };
-
-    return 0;
-}
+const FemuExtCtrlOps femu_csd_ext_ops = {
+    .name           = "csd",
+    .init_ctrl_name = csd_init_ctrl_str,
+    .init           = csd_init,
+    .exit           = csd_exit,
+    .admin_cmd_cqe  = csd_admin_cmd,
+    .io_cmd         = csd_io_cmd,
+    .get_log        = csd_cp_get_log,
+};

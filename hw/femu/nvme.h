@@ -22,6 +22,7 @@
 #include "inc/rte_ring.h"
 #include "inc/pqueue.h"
 #include "nand/nand.h"
+#include "femu-ext-ops.h"
 
 typedef struct FemuCtrl FemuCtrl;
 typedef struct NvmeNamespace NvmeNamespace;
@@ -2247,19 +2248,6 @@ typedef struct Oc12Ctrl Oc12Ctrl;
 typedef struct NvmeIdNsZoned NvmeIdNsZoned;
 typedef struct NvmeZone NvmeZone;
 
-typedef struct FemuExtCtrlOps {
-    void     *state;
-    void     (*init_ctrl_name)(struct FemuCtrl *, struct NvmeNamespace *);
-    void     (*init)(struct FemuCtrl *, NvmeNamespace *, Error **);
-    void     (*exit)(struct FemuCtrl *);
-    void     (*ns_exit)(struct FemuCtrl *, NvmeNamespace *);
-    int      (*start_ctrl)(struct FemuCtrl *);
-    uint16_t (*admin_cmd)(struct FemuCtrl *, NvmeCmd *);
-    uint16_t (*admin_cmd_cqe)(struct FemuCtrl *, NvmeCmd *, NvmeCqe *);
-    uint16_t (*io_cmd)(struct FemuCtrl *, NvmeNamespace *, NvmeCmd *, NvmeRequest *);
-    uint16_t (*get_log)(struct FemuCtrl *, NvmeCmd *);
-} FemuExtCtrlOps;
-
 /*
  * A registrant of a namespace (Base 2.3, 8.1.24): a host and its key. With
  * Host Identifier 0 the host is @ctrl until its reset changes @epoch.
@@ -4294,12 +4282,7 @@ void nvme_fdp_record_event(FemuCtrl *n, NvmeEnduranceGroup *eg, bool host,
 uint64_t nvme_do_write_fdp(FemuCtrl *n, NvmeRequest *req,
                            uint64_t slba, uint32_t nlb);
 
-int nvme_register_ocssd12(FemuCtrl *n);
-int nvme_register_ocssd20(FemuCtrl *n);
-int nvme_register_nossd(FemuCtrl *n);
-int nvme_register_bbssd(FemuCtrl *n);
-int nvme_register_znssd(FemuCtrl *n);
-int nvme_register_csd(FemuCtrl *n);
+void *oc20_ctrl_state_new(void);
 void femu_csd_drain_sq(FemuCtrl *n, struct NvmeSQueue *sq);
 void femu_csd_req_done(FemuCtrl *n, NvmeRequest *req);
 void femu_csd_post_cqe(FemuCtrl *n, struct NvmeCQueue *cq, NvmeRequest *req);
@@ -4311,7 +4294,6 @@ uint16_t femu_csd_identify_ctrl(FemuCtrl *n, NvmeCmd *cmd);
 uint16_t femu_csd_slm_read(FemuCtrl *n, uint32_t nsid, uint64_t off,
                            uint64_t len, uint8_t *dst);
 uint64_t bb_ftl_read_ranges(FemuCtrl *n, NvmeRequest *req);
-int nvme_register_kvssd(FemuCtrl *n);
 
 /* per-namespace FTL entry points, dispatched by the controller's FTL thread */
 uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req);

@@ -1568,18 +1568,12 @@ static void oc12_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     }
 }
 
-int nvme_register_ocssd12(FemuCtrl *n)
-{
-    n->ext_ops = (FemuExtCtrlOps) {
-        .state            = NULL,
-        .init_ctrl_name   = oc12_set_ctrl_str,
-        .init             = oc12_init,
-        .exit             = oc12_exit,
-        .admin_cmd        = oc12_admin_cmd,
-        .io_cmd           = oc12_io_cmd,
-        .get_log          = NULL,
-    };
-
-    return 0;
-}
+const FemuExtCtrlOps femu_ocssd12_ext_ops = {
+    .name           = "ocssd",
+    .init_ctrl_name = oc12_set_ctrl_str,
+    .init           = oc12_init,
+    .exit           = oc12_exit,
+    .admin_cmd      = oc12_admin_cmd,
+    .io_cmd         = oc12_io_cmd,
+};
 

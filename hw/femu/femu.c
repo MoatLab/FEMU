@@ -3387,41 +3387,50 @@ static bool femu_needs_ftl_thread(FemuCtrl *n)
     return false;
 }
 
-static int nvme_register_extensions(FemuCtrl *n)
+/*
+ * The handler table of a mode. Open-Channel 1.2 and 2.0 share femu_mode and
+ * differ by lver. A mode with no table gets none, and its copies stay empty.
+ */
+static const FemuExtCtrlOps *femu_ext_ops_lookup(uint8_t mode, uint8_t lver)
 {
-    if (OCSSD(n)) {
-        switch (n->lver) {
-        case OCSSD12:
-            nvme_register_ocssd12(n);
-            break;
-        case OCSSD20:
-            nvme_register_ocssd20(n);
-            break;
-        default:
-            break;
-        }
-    } else if (NOSSD(n)) {
-        nvme_register_nossd(n);
-    } else if (BBSSD(n)) {
-        nvme_register_bbssd(n);
-    } else if (ZNSSD(n)) {
-        nvme_register_znssd(n);
-    } else if (CSD(n)) {
-        nvme_register_csd(n);
-    } else if (KVSSD(n)) {
-        nvme_register_kvssd(n);
-    } else {
-        /* TODO: For future extensions */
+    switch (mode) {
+    case FEMU_OCSSD_MODE:
+        return lver == OCSSD12 ? &femu_ocssd12_ext_ops :
+               lver == OCSSD20 ? &femu_ocssd20_ext_ops : NULL;
+    case FEMU_NOSSD_MODE:
+        return &femu_nossd_ext_ops;
+    case FEMU_BBSSD_MODE:
+        return &femu_bbssd_ext_ops;
+    case FEMU_ZNSSD_MODE:
+        return &femu_zns_ext_ops;
+    case FEMU_CSD_MODE:
+        return &femu_csd_ext_ops;
+    case FEMU_KVSSD_MODE:
+        return &femu_kvssd_ext_ops;
+    default:
+        return NULL;
     }
+}
 
-    return 0;
+static FemuExtCtrlOps femu_ext_ops_copy(uint8_t mode, uint8_t lver)
+{
+    const FemuExtCtrlOps *ops = femu_ext_ops_lookup(mode, lver);
+
+    return ops ? *ops : (FemuExtCtrlOps) { 0 };
+}
+
+/* The controller's copy, for the admin and start-up paths. */
+static void nvme_register_extensions(FemuCtrl *n)
+{
+    n->ext_ops = femu_ext_ops_copy(n->femu_mode, n->lver);
+    if (OCSSD(n) && n->lver == OCSSD20) {
+        n->ext_ops.state = oc20_ctrl_state_new();
+    }
 }
 
 /*
- * Select the handler table for one namespace. The per-mode registration writes
- * into the controller, so borrow it for the namespace's mode and take a copy;
- * the controller keeps the table for its own mode, which still answers the
- * admin and start-up paths.
+ * Select the handler table for one namespace: a copy of its own mode's
+ * table, so I/O dispatches on the namespace, not the controller.
  *
  * The state slot holds a per-namespace object and is left empty for the
  * namespace's own init to fill. Copying it gave the second namespace of a mode
@@ -3432,27 +3441,7 @@ static int nvme_register_extensions(FemuCtrl *n)
  */
 static void nvme_register_extensions_ns(FemuCtrl *n, NvmeNamespace *ns)
 {
-    FemuExtCtrlOps saved_ops = n->ext_ops;
-    uint8_t saved_mode = n->femu_mode;
-
-    if (ns->femu_mode == n->femu_mode) {
-        /*
-         * Registering the controller's own mode a second time would build the
-         * same table again, and for a mode that allocates controller-wide
-         * state it would allocate a second copy that nothing ever reads.
-         */
-        ns->ext_ops = n->ext_ops;
-        ns->ext_ops.state = NULL;
-        return;
-    }
-
-    n->femu_mode = ns->femu_mode;
-    nvme_register_extensions(n);
-    ns->ext_ops = n->ext_ops;
-    ns->ext_ops.state = NULL;
-
-    n->femu_mode = saved_mode;
-    n->ext_ops = saved_ops;
+    ns->ext_ops = femu_ext_ops_copy(ns->femu_mode, n->lver);
 }
 
 void nvme_ns_destroy(FemuCtrl *n, NvmeNamespace *ns)

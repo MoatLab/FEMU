@@ -609,7 +609,7 @@ math has unit tests in `hw/femu/tests/unit/test-nand-media.c`.
 | File | What is there |
 | --- | --- |
 | `hw/femu/zns/zns.h` | zone and zoned Identify structures, `struct zns_ssd`, write cache, built-in cell timings, open and active counters |
-| `hw/femu/zns/zns.c` | geometry checks, zone state machine, Read/Write/Append, Zone Management Send and Receive, ZRWA, Changed Zone List, Identify, mode registration (`nvme_register_znssd()`) |
+| `hw/femu/zns/zns.c` | geometry checks, zone state machine, Read/Write/Append, Zone Management Send and Receive, ZRWA, Changed Zone List, Identify, mode table (`femu_zns_ext_ops`) |
 | `hw/femu/zns/zftl.c` | zone-to-NAND placement, write cache, L2P table, zone reset and erase, media layer setup, `zns_ftl_process_req()` |
 | `hw/femu/zns/zftl.h` | `zns_zone_reset()`, debug and assert macros |
 | `hw/femu/femu.c` | `zns_` property definitions, per-namespace copies of the zone limits, FTL thread dispatch |
