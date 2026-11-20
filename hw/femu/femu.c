@@ -7230,9 +7230,31 @@ static void femu_instance_init(Object *obj)
     }
 }
 
+/*
+ * x-fuzz-control: each input starts with an enabled controller and an
+ * 8-entry admin queue pair, so an input needs only a submission queue
+ * entry and a doorbell write to reach the plant in nvme_admin_cmd().
+ * Without this, most inputs that the fuzzer kept had lost the enable
+ * writes. gen-generic-seeds.py uses the same addresses.
+ *
+ * A reset only marks the enable as pending. It runs when the fuzzer sets
+ * bus mastering at the start of the next input. The queues then map
+ * guest RAM, not a bounce buffer, and the fuzzer has removed the DMA
+ * patterns of the last input, so the map fills nothing in.
+ */
+static void femu_fuzz_control_enable(FemuCtrl *n)
+{
+    nvme_write_bar(n, 0x24, 0x00070007, 4);
+    nvme_write_bar(n, 0x28, 0x200000, 8);
+    nvme_write_bar(n, 0x30, 0x201000, 8);
+    nvme_write_bar(n, 0x14, 0x00460001, 4);
+}
+
 static void femu_pci_write_config(PCIDevice *dev, uint32_t addr,
                                   uint32_t val, int len)
 {
+    FemuCtrl *n = FEMU(dev);
+
     pci_default_write_config(dev, addr, val, len);
     /* AER keeps its first-error pointer and header log with the status */
     if (pcie_find_capability(dev, PCI_EXT_CAP_ID_ERR)) {
@@ -7240,6 +7262,11 @@ static void femu_pci_write_config(PCIDevice *dev, uint32_t addr,
     }
     /* a no-op unless pcie_cap_flr_init() made the FLR bit writable */
     pcie_cap_flr_write_config(dev, addr, val, len);
+    if (unlikely(n->fuzz_control_pending) &&
+        (pci_get_word(dev->config + PCI_COMMAND) & PCI_COMMAND_MASTER)) {
+        n->fuzz_control_pending = false;
+        femu_fuzz_control_enable(n);
+    }
 }
 
 /*
@@ -7251,21 +7278,6 @@ static void femu_pci_write_config(PCIDevice *dev, uint32_t addr,
  * guest memory the controller touched, so each input of the generic fuzzer
  * starts from the same controller and queue memory.
  */
-/*
- * x-fuzz-control: each input starts with an enabled controller and an
- * 8-entry admin queue pair, so an input needs only a submission queue
- * entry and a doorbell write to reach the plant in nvme_admin_cmd().
- * Without this, most inputs that the fuzzer kept had lost the enable
- * writes. gen-generic-seeds.py uses the same addresses.
- */
-static void femu_fuzz_control_enable(FemuCtrl *n)
-{
-    nvme_write_bar(n, 0x24, 0x00070007, 4);
-    nvme_write_bar(n, 0x28, 0x200000, 8);
-    nvme_write_bar(n, 0x30, 0x201000, 8);
-    nvme_write_bar(n, 0x14, 0x00460001, 4);
-}
-
 static void femu_pci_reset(DeviceState *dev)
 {
     FemuCtrl *n = FEMU(dev);
@@ -7299,9 +7311,7 @@ static void femu_pci_reset(DeviceState *dev)
             memset(n->cmbuf, 0, NVME_CMBSZ_GETSIZE(n->bar.cmbsz));
         }
         femu_fuzz_clear(n);
-        if (n->fuzz_control_buf) {
-            femu_fuzz_control_enable(n);
-        }
+        n->fuzz_control_pending = n->fuzz_control_buf != NULL;
     }
 }
 

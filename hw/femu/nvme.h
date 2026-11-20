@@ -2828,8 +2828,10 @@ typedef struct FemuCtrl {
     bool        test_fuzz;
     /* x-fuzz: the guest ranges the controller touched since the reset */
     GArray      *fuzz_touched;
-    /* x-fuzz-control: the buffer Identify writes past */
+    /* x-fuzz-control: the buffer the plant writes past */
     uint8_t     *fuzz_control_buf;
+    /* x-fuzz-control: enable the controller when bus mastering is set */
+    bool        fuzz_control_pending;
     uint32_t    changed_nsids[1024];
     uint16_t    changed_ns_count;
     bool        ns_notice_pending;
