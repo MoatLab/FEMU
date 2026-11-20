@@ -14,21 +14,34 @@ From `build-femu/` (after [the build](build.md)):
 
 The script:
 
-1. downloads the Ubuntu 24.04 cloud image and checks it against Ubuntu's
-   SHA256 sums (and their GPG signature when `gpgv` and the Ubuntu cloud-image
-   keyring are installed);
-2. boots it once without a display to create user `femu` with passwordless
-   `sudo`, install `nvme-cli` and `fio`, and turn on the serial console;
-3. powers the guest off and writes the result.
+1. downloads a pinned serial of the Ubuntu 24.04 cloud image;
+2. checks it against a pinned SHA-256 and against Ubuntu's SHA256 sums;
+3. boots it once without a display, creates user `femu` with passwordless
+   `sudo`, and installs `nvme-cli`, `fio` and your kernel;
+4. turns on the serial console and powers the guest off;
+5. boots it again, with the disk on virtio-scsi as the run scripts attach it;
+6. in that boot, checks the kernel, the tools and a writable root file system;
+7. writes a standalone qcow2 (no backing file), its SHA-256 and a manifest.
+
+It also checks the GPG signature of the sums when `gpgv` and the Ubuntu
+cloud-image keyring are installed.
 
 It writes these files to `~/images/`:
 
 | File | Purpose |
 | --- | --- |
 | `u20s.qcow2` | The guest disk the run scripts boot |
+| `u20s.qcow2.sha256` | Its SHA-256, in `sha256sum -c` format |
+| `u20s.qcow2.manifest` | The base serial and digest, the kernel release, tool versions and build options |
 | `femu-guest-key`, `femu-guest-key.pub` | SSH key for user `femu` |
-| `cache/` | The downloaded cloud image, reused on the next run |
-| `seed.iso`, `provision.log` | Provisioning input and serial log, kept for debugging |
+| `cache/` | The downloaded cloud image and kernel packages, reused on the next run |
+| `provision.log`, `check.log` | Serial logs of the two boots, kept for debugging |
+
+The cloud-init seed can hold a password, so it stays in a private work
+folder, and the script deletes it after a good build. After a failed build,
+the folder `.make-guest-image.*` keeps it for debugging; delete it when you
+are done. Build one image per output directory at a time, because the logs
+have fixed names.
 
 It takes a few minutes and needs no root access. The host needs `curl`,
 `sha256sum`, `ssh-keygen`, `timeout`, `qemu-img`, and one of `cloud-localds`,
@@ -53,6 +66,10 @@ Options:
 ./make-guest-image.sh --packages build-essential,git # extra Ubuntu packages
 ./make-guest-image.sh -o /data/images                # another output directory
 ./make-guest-image.sh --force                        # replace an existing image
+./make-guest-image.sh --kernel 6.12.40               # another guest kernel
+./make-guest-image.sh --compress                     # smaller file, same content
+./make-guest-image.sh --cache /data/cache            # share downloads
+./make-guest-image.sh --base-serial latest           # newest cloud image
 ```
 
 `./make-guest-image.sh --help` lists every option. The script refuses to
@@ -86,7 +103,56 @@ LightNVM in 5.15. See [the kernel table](requirements.md#kernel-per-mode) for
 every mode.
 
 To run OCSSD with LightNVM, install an older release (Ubuntu 20.04 ships 5.4)
-by hand as below, or use SPDK in the guest.
+by hand as below, or use SPDK in the guest. `--kernel` below can install an
+older kernel, but no test checks that its LightNVM driver works yet.
+
+## Choose a kernel
+
+`--kernel VERSION` installs one kernel and makes it the GRUB default:
+
+| `VERSION` | Source | `uname -r` in the guest |
+| --- | --- | --- |
+| `distro` (default) | the cloud image kernel | `6.8.0-147-generic` for the pinned serial |
+| Ubuntu ABI, such as `6.8.0-31` | the Ubuntu archive, `linux-image-6.8.0-31-generic` | `6.8.0-31-generic` |
+| mainline, such as `6.12.40`, `6.12` or `6.13-rc3` | `https://kernel.ubuntu.com/mainline/v6.12.40/amd64/` | `6.12.40-061240-generic` |
+
+```
+ --kernel 6.12.40
+   host:  CHECKSUMS --> image + modules debs (SHA-256 checked)
+          --> ISO volume FEMUKERNEL
+   guest: apt-get install the debs --> GRUB default = that kernel
+   check boot: uname -r must be 6.12.40-061240-generic
+```
+
+A mainline version also needs `genisoimage`, `xorriso` or `mkisofs` on the
+host, because the debs reach the guest on a small ISO volume.
+
+Mainline builds come from the Ubuntu kernel team. They are unsigned, so
+Secure Boot rejects them, and they get no security updates. Some versions
+have no amd64 build; the script then names the version and stops. The
+image gets no kernel headers, because recent mainline headers need a newer
+C library than Ubuntu 24.04 has.
+
+The SHA-256 of each deb comes from the `CHECKSUMS` file of the same server
+over HTTPS. The script does not check the signature of that file. The
+manifest records each deb and its digest.
+
+## Pinned base image
+
+The script pins one cloud image serial and its SHA-256, so two runs start
+from the same bytes. Cloud-init installs the packages from the Ubuntu
+archive of the build day, so an image is traceable, not reproducible.
+`/var/lib/femu-guest/packages.txt` in the image lists every package version.
+
+- `--base-serial latest` takes the newest cloud image instead. The script
+  then trusts Ubuntu's SHA256 sums.
+- `--base-serial YYYYMMDD` takes another serial from
+  <https://cloud-images.ubuntu.com/releases/noble/>.
+- `--base-sha256 HEX` adds a digest of your own. A mismatch stops the
+  script before any boot.
+
+If Ubuntu removes the pinned serial, the download fails with a message that
+names `--base-serial latest`.
 
 ## Log in with SSH
 
