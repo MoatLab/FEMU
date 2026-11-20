@@ -24,8 +24,9 @@ admin-fuzz qtest (femu_test_admin_fuzz in hw/femu/tests/qtest/femu-test.c).
 
 Usage:
     gen-generic-seeds.py --target {nossd,bbssd,zns,cmb} --out DIR
-    gen-generic-seeds.py --control DIR    trigger/ and near/ seeds, and
-                                          control.dict with the key
+    gen-generic-seeds.py --control DIR    trigger/ and near/ seeds,
+                                          control.dict with the key, and
+                                          enable.prefix for femu-nossd
     gen-generic-seeds.py --self-test
 """
 
@@ -305,6 +306,17 @@ def control_seed(cdw15):
     return [pattern(cmd(**ident(1, cdw15=cdw15))), mmio_write(0x1000, 1)]
 
 
+def control_prefix():
+    """
+    The enable writes that x-fuzz-control does at each reset. Put before a
+    control input, they give femu-nossd the same setup without the plant.
+    """
+    aqa = (QENTRIES - 1) << 16 | (QENTRIES - 1)
+    return encode([mmio_write(0x24, aqa), mmio_write(0x28, ASQ),
+                   mmio_write(0x30, ACQ),
+                   mmio_write(0x14, CC_ENABLE)]) + SEP
+
+
 def control_seeds():
     """The trigger hits the planted overflow; the near seed is one dword off."""
     return {"trigger": control_seed(CONTROL_KEY),
@@ -355,6 +367,11 @@ def self_test():
         if control_dict() != 'key="\\x5a\\xa5\\xc3\\x3c"\n':
             print("self-test: the control dictionary is wrong")
             return 1
+        pre = control_prefix()
+        if (pre + trig).split(SEP)[4:] != trig.split(SEP) or \
+                CONTROL_KEY.to_bytes(4, "little") in pre:
+            print("self-test: the enable prefix does not join a seed")
+            return 1
         # short, so few inputs the fuzzer keeps lose the path to the plant
         if len(near) > 96:
             print("self-test: the near seed has %d bytes" % len(near))
@@ -394,6 +411,8 @@ def main():
         write_dir(os.path.join(a.control, "near"), [("near", c["near"])])
         with open(os.path.join(a.control, "control.dict"), "w") as f:
             f.write(control_dict())
+        with open(os.path.join(a.control, "enable.prefix"), "wb") as f:
+            f.write(control_prefix())
         return 0
     if not a.target or not a.out:
         ap.error("--target and --out, --control or --self-test")

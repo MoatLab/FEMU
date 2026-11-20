@@ -199,13 +199,13 @@ trigger seed holds the key, and the near seed holds another CDW15.
 The trigger seed alone checks reach and the sanitizer report. A run
 from the near seed must find the crash. libFuzzer sees both `memcmp()`
 operands and can copy the key over the compared bytes. The run also
-gets the key from `control.dict` as a dictionary word. A changed copy
-of the found input, with the key bytes put back to the near value, must
-not crash.
+gets the key from `control.dict` as a dictionary word. The file
+`enable.prefix` holds the enable writes. Put before the found input, it
+must not crash femu-nossd, which has the same device without the plant.
 
-The setup keeps short the path from an input to the plant. In a longer
-seed, about 96 % of the inputs that the fuzzer kept had lost the enable
-writes or the CDW15 place. The control checks that the fuzzer places a
+The setup keeps short the path from an input to the plant. An older
+control used a 360-byte seed. A static count of its corpus found that
+most kept inputs had lost the enable writes or the CDW15 place. The control checks that the fuzzer places a
 4-byte key with its compare feedback or its dictionary. It does not
 check that the fuzzer finds the enable sequence.
 
