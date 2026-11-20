@@ -2633,27 +2633,17 @@ static void femu_fdp_rg_window(struct ssdparams *spp, int nrg, int g,
  */
 /*
  * The reclaim unit strategy under FDP. gc_policy names the line policies;
- * each has a unit version, and realize refuses it together with a
- * gc_strategy other than 0. Unset or greedy leaves gc_strategy in charge.
+ * each has a unit version (its fdp_strategy), and realize refuses it
+ * together with a gc_strategy other than 0. Unset or greedy leaves
+ * gc_strategy in charge.
  */
 static int femu_fdp_gc_strategy(const BbCtrlParams *p)
 {
-    static const struct {
-        const char *name;
-        int strategy;
-    } map[] = {
-        { "cost-benefit", GC_GLOBAL_CB },
-        { "random", GC_GLOBAL_RAND },
-        { "fifo", GC_GLOBAL_FIFO },
-        { "d-choice", GC_GLOBAL_DCHOICE },
-    };
+    const struct femu_ftl_policy_ops *pol =
+        femu_ftl_policy_lookup(p->gc_policy);
 
-    for (size_t i = 0; p->gc_policy && i < ARRAY_SIZE(map); i++) {
-        if (!strcmp(p->gc_policy, map[i].name)) {
-            return map[i].strategy;
-        }
-    }
-    return p->gc_strategy;
+    return pol->fdp_strategy == FEMU_FDP_FROM_GC_STRATEGY ? p->gc_strategy :
+           pol->fdp_strategy;
 }
 
 /*

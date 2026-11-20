@@ -3,6 +3,7 @@
 
 #include "../nvme.h"
 #include "../nand/nand-media.h"
+#include "ftl-ops.h"
 
 #define INVALID_PPA     (~(0ULL))
 #define INVALID_LPN     (~(0ULL))
@@ -552,76 +553,6 @@ struct FemuReclaimGroup {
     int nch;
     int lun0;
     int nlun;
-};
-
-/*
- * Pluggable GC victim-selection policy (vtable). Alternative policies coexist
- * without forking the GC path; the default ("greedy") is the original behavior
- * verbatim. Selected by the gc_policy device property. Under FDP the same
- * names select a reclaim unit strategy instead (femu_fdp_gc_strategy()).
- */
-struct femu_ftl_policy_ops {
-    const char *name;
-    struct line *(*select_victim_line)(struct ssd *ssd, bool force);
-    /* the victim queue is ordered by close_seq instead of valid pages */
-    bool by_close_order;
-};
-
-/*
- * Allocation class chosen for a new write. Page and dftl use DATA, or DATA and
- * HOT when hot/cold separation is on; a log-block scheme puts its overwrites in
- * LOG so they land in blocks of their own rather than mixed in with data.
- */
-enum { FEMU_MAP_CLASS_DATA = 0, FEMU_MAP_CLASS_LOG = 1,
-       FEMU_MAP_CLASS_HOT = 2, FEMU_MAP_CLASS_GC = 3 };
-
-struct map_write_plan {
-    int target_class;      /* allocation class for the new page */
-    bool may_need_reclaim; /* the scheme may have to reclaim before committing */
-};
-
-/*
- * Pluggable L2P mapping scheme (vtable). The default "page" scheme is the
- * original full-DRAM mapping, bit-identical; "dftl" adds a demand-cached
- * translation table (the CMT cost model in ftl-map-cmt.c). Selected by the
- * mapping device property. The flat maptbl/rmap stay the source of truth.
- */
-struct femu_mapping_ops {
-    const char *name;
-    bool uses_cmt;          /* dftl-style demand-cached translation table */
-    bool uses_log_class;    /* allocates through the LOG write pointer */
-    bool reclaim_per_page; /* merge before another page can consume log space */
-
-    /* allocate and release scheme-private state in ssd->map_priv */
-    void (*init)(struct ssd *ssd);
-    void (*exit)(struct ssd *ssd);
-
-    /* translate a read: lpn -> ppa (unmapped if absent) */
-    struct ppa (*translate)(struct ssd *ssd, uint64_t lpn);
-
-    /*
-     * write split: choose placement, then commit the new mapping and invalidate
-     * the old one
-     */
-    struct map_write_plan (*prepare_write)(struct ssd *ssd, uint64_t lpn,
-                                           int io_type);
-    void (*commit_write)(struct ssd *ssd, uint64_t lpn, struct ppa *new_ppa);
-
-    /*
-     * Reclaim of the scheme's own structures, such as a log-block merge. The
-     * NAND cost it incurs is charged inside reclaim(), which returns the latency
-     * to add to the request that triggered it. A scheme with nothing to reclaim
-     * leaves both hooks NULL.
-     */
-    bool (*needs_reclaim)(struct ssd *ssd);
-    uint64_t (*reclaim)(struct ssd *ssd, int budget);
-
-    /* GC relocation: point lpn at its relocated ppa (victim policy is separate) */
-    void (*gc_relocate_commit)(struct ssd *ssd, uint64_t lpn,
-                               struct ppa *old_ppa, struct ppa *new_ppa);
-
-    /* unmap an lpn on DSM deallocate; NULL falls back to the flat invalidation */
-    void (*trim)(struct ssd *ssd, uint64_t lpn);
 };
 
 /* one slot of the optional DRAM read cache (ftl-cache.c) */

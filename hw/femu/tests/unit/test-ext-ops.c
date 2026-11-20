@@ -1,14 +1,21 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * The table checks and the distinct mode walk of the mode handler tables
- * (femu-ext-ops.h). Each check meets good tables and one bad case per rule
- * it enforces, so a check that accepts everything fails here.
+ * The table checks and the distinct mode walk of the FEMU extension
+ * interface (femu-ext-ops.h, bbssd/ftl-ops.h). Each check meets good
+ * tables and one bad case per rule it enforces, so a check that accepts
+ * everything fails here.
  */
 
 #include "qemu/osdep.h"
 
+/* the FTL interface names struct ppa by value; the test needs a body */
+struct ppa {
+    uint64_t ppa;
+};
+
 #include "hw/femu/femu-ext-ops.h"
+#include "hw/femu/bbssd/ftl-ops.h"
 
 static uint16_t fake_io(struct FemuCtrl *n, struct NvmeNamespace *ns,
                         struct NvmeCmd *cmd, struct NvmeRequest *req)
@@ -177,11 +184,141 @@ static void test_ext_distinct(void)
     }
 }
 
+static struct ppa fake_translate(struct ssd *ssd, uint64_t lpn)
+{
+    return (struct ppa) { .ppa = lpn };
+}
+
+static struct map_write_plan fake_prepare(struct ssd *ssd, uint64_t lpn,
+                                          int io_type)
+{
+    return (struct map_write_plan) { .target_class = FEMU_MAP_CLASS_DATA };
+}
+
+static void fake_commit(struct ssd *ssd, uint64_t lpn, struct ppa *new_ppa)
+{
+}
+
+static void fake_relocate(struct ssd *ssd, uint64_t lpn, struct ppa *old_ppa,
+                          struct ppa *new_ppa)
+{
+}
+
+static bool fake_needs(struct ssd *ssd)
+{
+    return false;
+}
+
+static uint64_t fake_reclaim(struct ssd *ssd, int budget)
+{
+    return 0;
+}
+
+static const struct femu_mapping_ops good_map = {
+    .name = "page",
+    .translate = fake_translate,
+    .prepare_write = fake_prepare,
+    .commit_write = fake_commit,
+    .gc_relocate_commit = fake_relocate,
+};
+
+static void expect_map_refused(const struct femu_mapping_ops *ops,
+                               const char *rule)
+{
+    const char *why = NULL;
+
+    g_assert_false(femu_mapping_ops_check(ops, &why));
+    g_assert_cmpstr(why, ==, rule);
+}
+
+static void test_map_check(void)
+{
+    struct femu_mapping_ops t;
+
+    g_assert_true(femu_mapping_ops_check(&good_map, NULL));
+    expect_map_refused(NULL, "no table");
+
+    t = good_map;
+    t.name = NULL;
+    expect_map_refused(&t, "no name");
+
+    t = good_map;
+    t.translate = NULL;
+    expect_map_refused(&t, "a required hook is NULL");
+    t = good_map;
+    t.prepare_write = NULL;
+    expect_map_refused(&t, "a required hook is NULL");
+    t = good_map;
+    t.commit_write = NULL;
+    expect_map_refused(&t, "a required hook is NULL");
+    t = good_map;
+    t.gc_relocate_commit = NULL;
+    expect_map_refused(&t, "a required hook is NULL");
+
+    t = good_map;
+    t.needs_reclaim = fake_needs;
+    expect_map_refused(&t, "needs_reclaim and reclaim must come together");
+    t.needs_reclaim = NULL;
+    t.reclaim = fake_reclaim;
+    expect_map_refused(&t, "needs_reclaim and reclaim must come together");
+    t.needs_reclaim = fake_needs;
+    g_assert_true(femu_mapping_ops_check(&t, NULL));
+
+    t = good_map;
+    t.reclaim_per_page = true;
+    expect_map_refused(&t, "reclaim_per_page without reclaim");
+    t.needs_reclaim = fake_needs;
+    t.reclaim = fake_reclaim;
+    g_assert_true(femu_mapping_ops_check(&t, NULL));
+}
+
+static struct line *fake_select(struct ssd *ssd, bool force)
+{
+    return NULL;
+}
+
+static void test_policy_check(void)
+{
+    struct femu_ftl_policy_ops t = {
+        .name = "greedy",
+        .select_victim_line = fake_select,
+        .fdp_strategy = FEMU_FDP_FROM_GC_STRATEGY,
+    };
+    const char *why = NULL;
+
+    g_assert_true(femu_ftl_policy_ops_check(&t, NULL));
+    t.fdp_strategy = 6;
+    g_assert_true(femu_ftl_policy_ops_check(&t, NULL));
+
+    g_assert_false(femu_ftl_policy_ops_check(NULL, &why));
+    g_assert_cmpstr(why, ==, "no table");
+
+    /* an omitted fdp_strategy reads as 0 and is refused */
+    t.fdp_strategy = 0;
+    g_assert_false(femu_ftl_policy_ops_check(&t, &why));
+    g_assert_cmpstr(why, ==, "no fdp_strategy");
+    t.fdp_strategy = -2;
+    g_assert_false(femu_ftl_policy_ops_check(&t, &why));
+    g_assert_cmpstr(why, ==, "no fdp_strategy");
+    t.fdp_strategy = FEMU_FDP_FROM_GC_STRATEGY;
+
+    t.select_victim_line = NULL;
+    g_assert_false(femu_ftl_policy_ops_check(&t, &why));
+    g_assert_cmpstr(why, ==, "no select_victim_line");
+    t.select_victim_line = fake_select;
+
+    t.name = "";
+    g_assert_false(femu_ftl_policy_ops_check(&t, &why));
+    g_assert_cmpstr(why, ==, "no name");
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/femu/ext-ops/check", test_ext_check);
     g_test_add_func("/femu/ext-ops/check-set", test_ext_check_set);
     g_test_add_func("/femu/ext-ops/distinct", test_ext_distinct);
+    g_test_add_func("/femu/ftl-ops/mapping-check", test_map_check);
+    g_test_add_func("/femu/ftl-ops/policy-check", test_policy_check);
     return g_test_run();
 }

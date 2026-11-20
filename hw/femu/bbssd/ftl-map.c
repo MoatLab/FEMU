@@ -5,6 +5,7 @@
  * demand-cache cost model in ftl-map-cmt.c. Split out of ftl.c.
  */
 #include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "ftl.h"
 #include "ftl-internal.h"
 
@@ -133,51 +134,65 @@ static void femu_map_dftl_trim(struct ssd *ssd, uint64_t lpn)
     tp_note(ssd, lpn);
 }
 
-static const struct femu_mapping_ops femu_mapping_schemes[] = {
-    {
-        .name          = "page",
-        .uses_cmt      = false,
-        .translate     = femu_map_page_translate,
-        .prepare_write = femu_map_page_prepare_write,
-        .commit_write  = femu_map_page_commit_write,
-        .gc_relocate_commit = femu_map_page_gc_relocate_commit,
-    },
-    {
-        .name          = "dftl",
-        .uses_cmt      = true,
-        .translate     = femu_map_page_translate,
-        .prepare_write = femu_map_page_prepare_write,
-        .commit_write  = femu_map_dftl_commit_write,
-        .gc_relocate_commit = femu_map_dftl_gc_relocate_commit,
-        .trim          = femu_map_dftl_trim,
-    },
+static const struct femu_mapping_ops femu_mapping_page_ops = {
+    .name          = "page",
+    .uses_cmt      = false,
+    .translate     = femu_map_page_translate,
+    .prepare_write = femu_map_page_prepare_write,
+    .commit_write  = femu_map_page_commit_write,
+    .gc_relocate_commit = femu_map_page_gc_relocate_commit,
+};
+
+static const struct femu_mapping_ops femu_mapping_dftl_ops = {
+    .name          = "dftl",
+    .uses_cmt      = true,
+    .translate     = femu_map_page_translate,
+    .prepare_write = femu_map_page_prepare_write,
+    .commit_write  = femu_map_dftl_commit_write,
+    .gc_relocate_commit = femu_map_dftl_gc_relocate_commit,
+    .trim          = femu_map_dftl_trim,
 };
 
 /*
- * Schemes that keep their own state live in their own files and are spliced in
- * by name here, so the table above stays the plain page-mapping description.
+ * Every scheme the mapping property can name. Schemes that keep their own
+ * state live in their own files. Callers compare ssd->mapping with these
+ * addresses, so the list holds the tables themselves, not copies.
  */
-static const struct femu_mapping_ops * const femu_mapping_extra[] = {
+static const struct femu_mapping_ops * const femu_mapping_list[] = {
+    &femu_mapping_page_ops,
+    &femu_mapping_dftl_ops,
     &femu_mapping_hybrid_ops,
     &femu_mapping_fast_ops,
 };
 
-/* Resolve a mapping name to its ops; default to page for NULL/unknown. */
-const struct femu_mapping_ops *femu_mapping_scheme_lookup(const char *name)
+static const struct femu_mapping_ops *femu_mapping_find(const char *name)
 {
-    if (name) {
-        for (size_t i = 0; i < ARRAY_SIZE(femu_mapping_schemes); i++) {
-            if (!strcmp(name, femu_mapping_schemes[i].name)) {
-                return &femu_mapping_schemes[i];
-            }
-        }
-        for (size_t i = 0; i < ARRAY_SIZE(femu_mapping_extra); i++) {
-            if (!strcmp(name, femu_mapping_extra[i]->name)) {
-                return femu_mapping_extra[i];
-            }
+    for (size_t i = 0; name && i < ARRAY_SIZE(femu_mapping_list); i++) {
+        if (!strcmp(name, femu_mapping_list[i]->name)) {
+            return femu_mapping_list[i];
         }
     }
-    return &femu_mapping_schemes[0]; /* default: page-level */
+    return NULL;
+}
+
+/*
+ * Resolve a mapping name to its ops; default to page for NULL/unknown. A
+ * table that breaks the rules of ftl-ops.h is a bug, so it stops QEMU.
+ */
+const struct femu_mapping_ops *femu_mapping_scheme_lookup(const char *name)
+{
+    const struct femu_mapping_ops *ops = femu_mapping_find(name);
+    const char *why = NULL;
+
+    for (size_t i = 0; i < ARRAY_SIZE(femu_mapping_list); i++) {
+        if (!femu_mapping_ops_check(femu_mapping_list[i], &why)) {
+            error_report("femu: mapping scheme %s: %s",
+                         femu_mapping_list[i]->name ?
+                         femu_mapping_list[i]->name : "?", why);
+            abort();
+        }
+    }
+    return ops ? ops : &femu_mapping_page_ops;
 }
 
 /*
@@ -191,18 +206,7 @@ bool femu_mapping_scheme_known(const char *name)
     if (!name || !name[0]) {
         return true;                    /* unset means the default */
     }
-    for (size_t i = 0; i < ARRAY_SIZE(femu_mapping_schemes); i++) {
-        if (!strcmp(name, femu_mapping_schemes[i].name)) {
-            return true;
-        }
-    }
-    for (size_t i = 0; i < ARRAY_SIZE(femu_mapping_extra); i++) {
-        if (!strcmp(name, femu_mapping_extra[i]->name)) {
-            return true;
-        }
-    }
-
-    return false;
+    return femu_mapping_find(name);
 }
 
 bool femu_mapping_name_uses_log_class(const char *name)

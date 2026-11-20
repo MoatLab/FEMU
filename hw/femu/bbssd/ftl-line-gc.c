@@ -7,6 +7,7 @@
  * reclaim-unit machinery lives separately.
  */
 #include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include "ftl.h"
 #include "ftl-internal.h"
 #include "ftl-gc-fw-math.h"
@@ -1741,13 +1742,21 @@ static struct line *select_victim_line_dchoice(struct ssd *ssd, bool force)
     return best;
 }
 
+/*
+ * fdp_strategy is the reclaim unit strategy each name picks under FDP. Greedy
+ * leaves that choice to gc_strategy, as an unset gc_policy does.
+ */
 static const struct femu_ftl_policy_ops femu_ftl_policies[] = {
-    { .name = "greedy", .select_victim_line = select_victim_line },
-    { .name = "random", .select_victim_line = select_victim_line_random },
-    { .name = "cost-benefit", .select_victim_line = select_victim_line_cb },
+    { .name = "greedy", .select_victim_line = select_victim_line,
+      .fdp_strategy = FEMU_FDP_FROM_GC_STRATEGY },
+    { .name = "random", .select_victim_line = select_victim_line_random,
+      .fdp_strategy = GC_GLOBAL_RAND },
+    { .name = "cost-benefit", .select_victim_line = select_victim_line_cb,
+      .fdp_strategy = GC_GLOBAL_CB },
     { .name = "fifo", .select_victim_line = select_victim_line_fifo,
-      .by_close_order = true },
-    { .name = "d-choice", .select_victim_line = select_victim_line_dchoice },
+      .by_close_order = true, .fdp_strategy = GC_GLOBAL_FIFO },
+    { .name = "d-choice", .select_victim_line = select_victim_line_dchoice,
+      .fdp_strategy = GC_GLOBAL_DCHOICE },
 };
 
 /*
@@ -1763,17 +1772,34 @@ uint64_t ftl_gc_rand(struct ssd *ssd)
     return z ^ (z >> 31);
 }
 
-/* Resolve a gc_policy name to its ops; default to greedy for NULL/empty/unknown. */
-const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name)
+static const struct femu_ftl_policy_ops *femu_ftl_policy_find(const char *name)
 {
-    if (name && name[0]) {
-        for (size_t i = 0; i < ARRAY_SIZE(femu_ftl_policies); i++) {
-            if (strcmp(name, femu_ftl_policies[i].name) == 0) {
-                return &femu_ftl_policies[i];
-            }
+    for (size_t i = 0; name && i < ARRAY_SIZE(femu_ftl_policies); i++) {
+        if (!strcmp(name, femu_ftl_policies[i].name)) {
+            return &femu_ftl_policies[i];
         }
     }
-    return &femu_ftl_policies[0]; /* greedy */
+    return NULL;
+}
+
+/*
+ * Resolve a gc_policy name to its ops; default to greedy for NULL/empty/unknown.
+ * A table that breaks the rules of ftl-ops.h is a bug, so it stops QEMU.
+ */
+const struct femu_ftl_policy_ops *femu_ftl_policy_lookup(const char *name)
+{
+    const struct femu_ftl_policy_ops *ops = femu_ftl_policy_find(name);
+    const char *why = NULL;
+
+    for (size_t i = 0; i < ARRAY_SIZE(femu_ftl_policies); i++) {
+        if (!femu_ftl_policy_ops_check(&femu_ftl_policies[i], &why)) {
+            error_report("femu: gc_policy %s: %s",
+                         femu_ftl_policies[i].name ?
+                         femu_ftl_policies[i].name : "?", why);
+            abort();
+        }
+    }
+    return ops ? ops : &femu_ftl_policies[0];
 }
 
 /* Is this a collection policy the device has? See femu_mapping_scheme_known. */
@@ -1782,13 +1808,7 @@ bool femu_ftl_policy_known(const char *name)
     if (!name || !name[0]) {
         return true;
     }
-    for (size_t i = 0; i < ARRAY_SIZE(femu_ftl_policies); i++) {
-        if (!strcmp(name, femu_ftl_policies[i].name)) {
-            return true;
-        }
-    }
-
-    return false;
+    return femu_ftl_policy_find(name);
 }
 
 /* move a block's valid pages out; false when one had nowhere to go */

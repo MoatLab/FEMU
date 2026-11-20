@@ -1963,8 +1963,11 @@ calibrated against a specific commercial drive.
    top), which sets `line->pos` to 0. The victim count is the queue size,
    so there is no counter to keep. `reclaim_line()` expects a line that is
    in no list.
-4. Add `{ .name = "<name>", .select_victim_line = ... }` to
-   `femu_ftl_policies[]`. `femu_ftl_policy_known()` then accepts the name.
+4. Add `{ .name = "<name>", .select_victim_line = ..., .fdp_strategy = ... }`
+   to `femu_ftl_policies[]`. `fdp_strategy` is the reclaim unit strategy
+   that the name selects under FDP, or `FEMU_FDP_FROM_GC_STRATEGY`. The table
+   check refuses a policy without it. `femu_ftl_policy_known()` then accepts
+   the name.
 5. Describe it in the `gc_policy` description in `hw/femu/femu-props.c`,
    regenerate the property reference, and add a qtest that tells the policy
    apart from greedy.
@@ -1986,7 +1989,7 @@ calibrated against a specific commercial drive.
    instead of once per request. Allocate a destination before invalidating
    the source, so a full device never loses the only copy.
 5. Provide `trim` if the scheme keeps per-page state.
-6. Add the ops to `femu_mapping_extra[]` in `hw/femu/bbssd/ftl-map.c`, declare
+6. Add the ops to `femu_mapping_list[]` in `hw/femu/bbssd/ftl-map.c`, declare
    them in `ftl-internal.h`, and add the file to the FEMU source list in
    `hw/femu/meson.build`.
 
