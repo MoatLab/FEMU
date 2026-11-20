@@ -1575,7 +1575,6 @@ int nvme_register_ocssd12(FemuCtrl *n)
         .init_ctrl_name   = oc12_set_ctrl_str,
         .init             = oc12_init,
         .exit             = oc12_exit,
-        .rw_check_req     = NULL,
         .admin_cmd        = oc12_admin_cmd,
         .io_cmd           = oc12_io_cmd,
         .get_log          = NULL,

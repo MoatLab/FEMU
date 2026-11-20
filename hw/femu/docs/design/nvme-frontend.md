@@ -584,7 +584,6 @@ A mode is a `FemuExtCtrlOps` table (`hw/femu/nvme.h`):
 | `io_cmd` | poller, for opcodes the frontend does not handle | the mode's I/O commands |
 | `admin_cmd`, `admin_cmd_cqe` | vCPU, for admin opcodes the frontend does not handle | mode admin commands, such as the Open-Channel commands, BBSSD 0xEF and the CSD commands |
 | `get_log` | vCPU, for log ids the frontend does not handle | OC 2.0 chunk information, the ZNS Changed Zone List |
-| `rw_check_req` | not called through the table | OC 2.0 sets it and calls its checker directly |
 | `exit`, `ns_exit` | teardown, namespace deletion | free the mode's state |
 
 `nvme_register_extensions()` installs the table for the controller's

@@ -419,7 +419,6 @@ int nvme_register_kvssd(FemuCtrl *n)
         .init_ctrl_name   = kvssd_init_ctrl_str,
         .init             = kvssd_init,
         .exit             = kvssd_exit,
-        .rw_check_req     = NULL,
         .start_ctrl       = NULL,
         .admin_cmd        = kvssd_admin_cmd,
         .admin_cmd_cqe    = NULL,

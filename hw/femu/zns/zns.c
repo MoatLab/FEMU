@@ -2790,7 +2790,6 @@ int nvme_register_znssd(FemuCtrl *n)
         .init_ctrl_name   = zns_set_ctrl_str,
         .init             = zns_init,
         .exit             = zns_exit,
-        .rw_check_req     = NULL,
         .start_ctrl       = zns_start_ctrl,
         .admin_cmd        = zns_admin_cmd,
         .io_cmd           = zns_io_cmd,

@@ -2253,7 +2253,6 @@ typedef struct FemuExtCtrlOps {
     void     (*init)(struct FemuCtrl *, NvmeNamespace *, Error **);
     void     (*exit)(struct FemuCtrl *);
     void     (*ns_exit)(struct FemuCtrl *, NvmeNamespace *);
-    uint16_t (*rw_check_req)(struct FemuCtrl *, NvmeCmd *, NvmeRequest *);
     int      (*start_ctrl)(struct FemuCtrl *);
     uint16_t (*admin_cmd)(struct FemuCtrl *, NvmeCmd *);
     uint16_t (*admin_cmd_cqe)(struct FemuCtrl *, NvmeCmd *, NvmeCqe *);

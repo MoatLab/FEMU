@@ -936,7 +936,6 @@ int nvme_register_bbssd(FemuCtrl *n)
         .ns_exit          = bb_ns_exit,
         .init             = bb_init,
         .exit             = bb_exit,
-        .rw_check_req     = NULL,
         .admin_cmd        = bb_admin_cmd,
         .io_cmd           = bb_io_cmd,
         .get_log          = NULL,

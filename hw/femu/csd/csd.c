@@ -1597,7 +1597,6 @@ int nvme_register_csd(FemuCtrl *n)
         .init_ctrl_name   = csd_init_ctrl_str,
         .init             = csd_init,
         .exit             = csd_exit,
-        .rw_check_req     = NULL,
         .start_ctrl       = NULL,
         .admin_cmd        = NULL,
         .admin_cmd_cqe    = csd_admin_cmd,

@@ -518,49 +518,6 @@ static uint16_t oc20_chunk_set_free(FemuCtrl *n, NvmeNamespace *ns,
     return NVME_DNR | OC20_OFFLINE_CHUNK;
 }
 
-static uint16_t oc20_rw_check_req(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
-{
-    Oc20RwCmd *rw = (Oc20RwCmd *) cmd;
-    Oc20Params *params = &n->params.oc20;
-
-    uint16_t err;
-    uint16_t nlb  = le16_to_cpu(rw->nlb) + 1;
-    uint64_t slba = le64_to_cpu(rw->lbal);
-    int i;
-
-    switch (rw->opcode) {
-    case NVME_CMD_WRITE:
-        if (nlb < params->ws_min || nlb % params->ws_min != 0) {
-            return NVME_INVALID_FIELD | NVME_DNR;
-        }
-
-        err = oc20_rw_check_chunk_write(n, cmd, slba, nlb, req);
-        if (err) {
-            return err;
-        }
-        break;
-    case NVME_CMD_READ:
-        for (i = 0; i < nlb; i++) {
-            err = oc20_rw_check_chunk_read(n, cmd, req, slba + i);
-            if (err) {
-                if (err == NVME_DULB) {
-                    if (NVME_ERR_REC_DULBE(req->ns->err_rec)) {
-                        return NVME_DULB | NVME_DNR;
-                    }
-                    req->predef |= 1ULL << i;
-                    continue;
-                }
-
-                return err;
-            }
-        }
-
-        break;
-    }
-
-    return NVME_SUCCESS;
-}
-
 static unsigned get_unsigned(char *string, const char *key, unsigned int *value)
 {
     char *keyvalue = strstr(string, key);
@@ -1727,7 +1684,6 @@ int nvme_register_ocssd20(FemuCtrl *n)
         .init_ctrl_name   = oc20_set_ctrl_str,
         .init             = oc20_init,
         .exit             = oc20_exit,
-        .rw_check_req     = oc20_rw_check_req,
         .admin_cmd        = oc20_admin_cmd,
         .io_cmd           = oc20_io_cmd,
         .get_log          = oc20_get_log,

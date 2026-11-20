@@ -45,7 +45,6 @@ int nvme_register_nossd(FemuCtrl *n)
         .init_ctrl_name   = bb_init_ctrl_str,
         .init             = nop_init,
         .exit             = NULL,
-        .rw_check_req     = NULL,
         .admin_cmd        = NULL,
         .io_cmd           = nop_io_cmd,
         .get_log          = NULL,
