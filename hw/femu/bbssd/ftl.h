@@ -333,6 +333,7 @@ struct ssdparams {
     int iu_pages;               /* indirection unit, pages; 1 = per page */
     int l2p_dram_ns;            /* DRAM time of one mapping lookup, ns */
     int dram_hit_ns;            /* DRAM time of one page hit; 0: legacy */
+    int fw_gc_page_ns;          /* firmware time of one GC move; 0: none */
 
     /* buffer/cache effectiveness; 64-bit, a long run overflows an int */
     uint64_t read_hit_cnt;
@@ -934,6 +935,13 @@ struct ssd {
     struct ssd_ns_ctr *ns_ctr;
     uint64_t gc_copyback_pages; /* of those, pages moved on their die */
     /*
+     * fw_gc_page_ns: when the GC firmware line is free (device time), the
+     * moves that took a slot on it, and the firmware time of those slots.
+     */
+    uint64_t gc_fw_free;
+    uint64_t gc_fw_pages;
+    uint64_t gc_fw_ns;
+    /*
      * Lines that forced collection freed with GC delay on, and when the NAND
      * work of the last of them ends on every LUN. A front end that blocks
      * writes until collection is done waits until then.
@@ -1160,7 +1168,7 @@ uint64_t ssd_advance_status_seq(struct ssd *ssd, const NandLoc *locs, int n,
                                 uint64_t stime);
 bool ssd_copyback_ok(struct ssd *ssd, struct ppa *src, struct ppa *dst);
 uint64_t ssd_advance_copyback(struct ssd *ssd, struct ppa *src,
-                              struct ppa *dst);
+                              struct ppa *dst, uint64_t start);
 
 #ifdef FEMU_DEBUG_FTL
 #define ftl_debug(fmt, ...) \

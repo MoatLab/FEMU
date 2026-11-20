@@ -21,6 +21,7 @@ femu_unit_tests = {
   'test-femu-hpke': files('unit/test-hpke.c', '../femu-hpke.c'),
   'test-femu-tier-math': files('unit/test-tier-math.c'),
   'test-femu-rber-math': files('unit/test-rber-math.c'),
+  'test-femu-gc-fw': files('unit/test-gc-fw.c', '../nand/nand-media.c'),
 }
 
 foreach test_name, test_src : femu_unit_tests

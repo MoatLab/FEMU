@@ -659,6 +659,7 @@ void ssd_init_params(struct ssdparams *spp, FemuCtrl *n)
     spp->iu_pages = MAX(n->bb_params.iu_pages, 1);
     spp->l2p_dram_ns = n->bb_params.l2p_dram_ns;
     spp->dram_hit_ns = n->bb_params.dram_hit_ns;
+    spp->fw_gc_page_ns = n->bb_params.fw_gc_page_ns;
     spp->hot_cold_sep = n->bb_params.hot_cold_sep;
     spp->gc_frontier = n->bb_params.gc_frontier;
     spp->read_reclaim_limit = n->bb_params.read_reclaim_limit;

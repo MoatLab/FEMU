@@ -1388,7 +1388,9 @@ typedef struct FemuStatsLog {
     uint64_t    rber_soft_reads;  /* host page reads with a soft decode */
     uint64_t    rber_limit_reads; /* host page reads past the decode limit */
     uint64_t    erase_failures;   /* blocks an erase failure killed */
-    uint8_t     rsvd336[176];
+    uint64_t    gc_fw_pages;      /* GC moves with a firmware slot */
+    uint64_t    gc_fw_ns;         /* firmware time of those slots, ns */
+    uint8_t     rsvd352[160];
 } FemuStatsLog;
 
 /*
@@ -2551,6 +2553,7 @@ typedef struct BbCtrlParams {
     int iu_pages;             /* mapping unit in pages; 0 or 1 = a page */
     int l2p_dram_ns;          /* controller DRAM time of a mapping lookup */
     int dram_hit_ns;          /* DRAM time of a buffer or cache page hit */
+    int fw_gc_page_ns;        /* firmware time of one GC page move */
     int gc_strategy; /* FDP GC strategy: 0=greedy, 1=cost-benefit, 2=random */
     int fdp_trim_erase_all; /* FDP DSM: 1 = reset whole device (test only); 0 = range */
     char *gc_policy; /* base-path GC victim policy name (NULL/"" => greedy) */
@@ -4412,6 +4415,7 @@ static inline void nvme_eol_release(NvmeRequest *req)
 uint64_t ssd_wl_relocations(struct ssd *ssd);
 uint64_t ssd_wl_pages(struct ssd *ssd);
 uint64_t ssd_gc_copyback_pages(struct ssd *ssd);
+void ssd_gc_fw_stats(struct ssd *ssd, uint64_t *pages, uint64_t *ns);
 void ssd_pace_stats(struct ssd *ssd, uint64_t *copies, uint64_t *lines,
                     uint64_t *takeovers);
 uint64_t ssd_partial_page_writes(struct ssd *ssd);

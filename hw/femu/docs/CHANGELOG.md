@@ -241,6 +241,7 @@ listed one by one.
 - With `ocp=on`, OCP features C3h, C6h, C8h and CAh answer Get and Set Features with current, default and saved values. FEMU stores the values; it models no PLP circuit or idle mode.
 - `gen-property-docs.py --schema FILE` writes a JSON Schema of the device properties from the binary, for tools that write device lines.
 - `dram_hit_ns` (bbssd, CSD, 0 by default): the controller DRAM time of a page that the write buffer or the read cache answers, in place of `pg_rd_lat / 16`.
+- `fw_gc_page_ns` (bbssd, CSD, 0 by default): the controller firmware time of each page that GC, read reclaim, refresh or wear levelling moves. The moves take turns on one GC firmware line per FTL, and the program of a move starts after its read and its slot. It needs `gc_erase_order`, so the erase of a victim waits for the delayed copies. Log page C0h (offsets 336 and 344) counts the slots and their time; for bbssd, `query-femu` also gives them.
 - CI runs QEMU's checkpatch on each new commit (`check-patches.sh`); `femu-compile.sh --werror` builds with `--enable-werror`.
 - I/O trace export (`io_trace=FILE`, off by default): one CSV line per completed I/O command, with its submit and completion times, range and status, in every mode.
 - `mode=NAME` (ocssd, bbssd, nossd, zns, csd, kv) sets the emulated SSD type by name; `femu_mode` keeps taking the number.

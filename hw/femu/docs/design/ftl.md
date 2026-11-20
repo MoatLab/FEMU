@@ -758,6 +758,41 @@ victims, and then the counts can differ.
 The LUN field `gc_endtime` is updated as GC programs and erases, and the
 channel field is never written; nothing reads either.
 
+#### Firmware time of a move (`fw_gc_page_ns`)
+
+A real controller runs each move on a core: it takes the read completion,
+checks it, picks the destination and updates the map. With
+`fw_gc_page_ns` above 0, each FTL has one GC firmware line. Each timed
+move takes one slot on it, after its read and before its program.
+
+```text
+  LUN s     |--GC R--|
+  GC fw              |--slot A--|--slot B--|      one line per FTL
+  LUN d                         |--GC W A--|
+  LUN e                                    |--GC W B--|
+```
+
+- An off-chip move: the slot starts at the latest of the read end, the end
+  of the slot before it, and now. The program starts at the slot end.
+- A copyback takes its slot first, then the die operation.
+- GC, paced GC, read reclaim, refresh, wear levelling, the RAIN rebuild,
+  FDP collection and DFTL translation page moves all take slots on the
+  same line. Merges, tier folds and KV collection are refused.
+- The line is apart from `fw_cores`. The host sees the slot only through
+  the LUNs, as all GC time: a busy destination LUN hides it.
+- Untimed GC (admin 0xEF code 2) takes no slot.
+- Log page C0h offsets 336 and 344 count the slots and their time from
+  realize. For bbssd, `query-femu` also gives `gc-fw-pages` and
+  `gc-fw-ns`.
+
+The slot delays copy programs, so the erase of a victim must wait for
+them. Thus a value above 0 needs `gc_erase_order` (the default) and is
+refused with `gc_erase_order=off`.
+
+Limit of the model: the line serves moves in the order the FTL books
+them. A move with a slow read can hold up a move whose read ended before
+it.
+
 ### Paced collection (`gc_pace`)
 
 A whole-line pass books every copy of the victim at one instant, so the next
@@ -1669,6 +1704,7 @@ lists the offsets.
 | buffer reads and read hits | `sp.read_cnt`, `sp.read_hit_cnt` | host read pages, and those the buffer held |
 | buffer writes and write hits | `sp.write_cnt`, `sp.write_hit_cnt` | host write pages, and those already buffered |
 | hybrid switch, full merges, merge erases | `struct femu_map_hybrid` | `mapping=hybrid` only |
+| GC firmware slots and their ns | `gc_fw_pages`, `gc_fw_ns` | a timed move with `fw_gc_page_ns` above 0 |
 
 The buffer read and write counts move with or without a buffer, so their
 ratio is the hit rate. Telemetry log 07h captures the same 512 bytes.

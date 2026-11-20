@@ -379,6 +379,7 @@ bool tp_move(struct ssd *ssd, struct ppa *old_ppa)
     bool timed = ssd->sp.enable_gc_delay;
     struct ppa ppa;
     uint64_t done;
+    uint64_t fw = 0;
     int32_t slot;
     uint64_t rd;
 
@@ -394,8 +395,16 @@ bool tp_move(struct ssd *ssd, struct ppa *old_ppa)
     }
     /* the copy reaches DRAM before the program can start */
     rd = tp_read(ssd, tp, 0, timed);
+    /* fw_gc_page_ns: then the firmware slot of the move, taken on success */
+    if (timed && ssd->sp.fw_gc_page_ns) {
+        fw = ssd_gc_fw_slot(ssd, rd);
+        rd = fw;
+    }
     if (!tp_program(ssd, tp, true, rd, timed, &done)) {
         return false;
+    }
+    if (fw) {
+        ssd_gc_fw_take(ssd, fw);
     }
     clear_bit(tp, ssd->tp_pending);
     slot = cmt_slot_of(ssd, tp);

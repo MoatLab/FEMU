@@ -316,6 +316,11 @@ own description allows. A message keeps its format directives (`%s`,
 
 - fw_cores must be 1 to 64, got %u
 
+## `fw_gc_page_ns`
+
+- femu: fw_gc_page_ns is not supported with %s
+- femu: fw_gc_page_ns must not be negative
+
 ## `fw_slots`
 
 - fw_slots above 1%s does not work with a femu-subsys or a CXL device yet

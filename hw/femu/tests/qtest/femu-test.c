@@ -8764,6 +8764,38 @@ static void femu_tp_check(QTestState *qts, const char *id, uint64_t v[7])
 }
 
 /*
+ * fw_gc_page_ns counters once collection is quiet: in @v the C0h GC pages
+ * (offset 16), the moves with a firmware slot (336), their time (344) and,
+ * with the device path @id, the TP moves of x-ftl-check. A background pass
+ * can still run after the last command, so read until two reads 50 ms
+ * apart agree.
+ */
+static void femu_gc_fw_counts(FemuCtrlState *c, uint64_t log, const char *id,
+                              uint64_t v[4])
+{
+    uint64_t last[4] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
+    int k;
+
+    for (k = 0; k < 40; k++) {
+        uint64_t t[7] = { 0 };
+
+        v[0] = femu_c0h_field(c, log, 16);
+        v[1] = femu_c0h_field(c, log, 336);
+        v[2] = femu_c0h_field(c, log, 344);
+        if (id) {
+            femu_tp_check(c->pdev->bus->qts, id, t);
+        }
+        v[3] = t[5];
+        if (!memcmp(v, last, sizeof(last))) {
+            return;
+        }
+        memcpy(last, v, sizeof(last));
+        g_usleep(50000);
+    }
+    g_assert_not_reached();
+}
+
+/*
  * mapping=dftl keeps its translation pages (TPs) on flash. 2048 pages of
  * 4 KiB are 4 TPs of 512 mappings, and the CMT holds one TP (x-cmt-slots),
  * so each write to another TP evicts a dirty one.
@@ -8859,6 +8891,18 @@ static void femu_test_dftl_tp(void *obj, void *data, QGuestAllocator *alloc)
     if (!g_str_equal(data, "csd")) {
         femu_query_matches_c0h(&c, log);
         femu_query_check_lines(qts, id, pages);
+    }
+    /* fw_gc_page_ns=1000: each data move and each TP move takes one slot */
+    if (g_str_equal(data, "fw")) {
+        uint64_t f[4];
+
+        femu_gc_fw_counts(&c, log, id, f);
+        g_test_message("gc_fw dftl: %" PRIu64 " moved, %" PRIu64 " slots, %"
+                       PRIu64 " fw ns, %" PRIu64 " TP moves",
+                       f[0], f[1], f[2], f[3]);
+        g_assert_cmpuint(f[3], >, 0);
+        g_assert_cmpuint(f[1], ==, f[0] + f[3]);
+        g_assert_cmpuint(f[2], ==, f[1] * 1000);
     }
 
     guest_free(alloc, log);
@@ -53323,6 +53367,164 @@ static void femu_test_dram_hit(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
+/*
+ * fw_gc_page_ns: the firmware time of a collection move. The device has one
+ * channel, one LUN and one plane, so every move and every host operation
+ * share one die, and each move adds its firmware slot to that die:
+ *
+ *   die  [read][slot ......][program][read][slot ......][program]
+ *
+ * The workload writes every page, overwrites 600 seeded pages, which is
+ * more than the raw capacity, and reads one page; that read waits for the
+ * collection work left on the die. C0h gives the GC pages (16), the moves
+ * with a slot (336) and their firmware time (344); x-ftl-trace field 1 is
+ * the summed modelled time of the host commands. @data names the case:
+ *
+ *   on        each move takes one 5 ms slot; the host waits about that
+ *             time per move in all. A background pass loses the host gap
+ *             before the next command, so the bound is half to 1.5 times.
+ *   off       the control: the same workload with no slot stays far below
+ *             half of the GC pages times 5 ms
+ *   copyback  every move is a copyback on the die and takes one slot
+ *   pace      paced moves take one slot each
+ *   fdp       FDP collection on the trace geometry, 1 us slots
+ *
+ * The time bounds are smoke checks: host time between commands can hide
+ * collection work. The exact time math is in the unit test test-gc-fw.c.
+ */
+#define FEMU_GC_FW_NS 5000000ULL
+
+static void femu_test_gc_fw(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool on = strcmp(mode, "off") != 0;
+    bool fdp = !strcmp(mode, "fdp");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    const uint32_t pages = fdp ? 256 : 768;
+    uint32_t seed = 11;
+    uint64_t gc, fw_pages, fw_ns, cb, model, f;
+    uint64_t v[4];
+    QDict *rsp;
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x47, 16 * 4096);
+    for (i = 0; i < pages; i += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 600; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (seed >> 8) % pages, 1,
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-fw',"
+                    "'property':'fw_gc_page_ns'}}");
+    f = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    femu_gc_fw_counts(&c, log, NULL, v);
+    gc = v[0];
+    fw_pages = v[1];
+    fw_ns = v[2];
+    cb = femu_c0h_field(&c, log, 248);
+    model = femu_ftl_trace_id(qts, "gc-fw", 1);
+    g_test_message("gc_fw %s: %" PRIu64 " moved, %" PRIu64 " slots, %" PRIu64
+                   " fw ns, %" PRIu64 " by copyback, %" PRIu64 " model ns",
+                   mode, gc, fw_pages, fw_ns, cb, model);
+    g_assert_cmpuint(gc, >, 0);
+    if (!on) {
+        g_assert_cmpuint(f, ==, 0);
+        g_assert_cmpuint(fw_pages, ==, 0);
+        g_assert_cmpuint(fw_ns, ==, 0);
+        g_assert_cmpuint(model, <, gc * FEMU_GC_FW_NS / 2);
+    } else {
+        g_assert_cmpuint(f, >, 0);
+        g_assert_cmpuint(fw_pages, ==, gc);
+        g_assert_cmpuint(fw_ns, ==, fw_pages * f);
+        if (!strcmp(mode, "copyback")) {
+            g_assert_cmpuint(cb, ==, gc);
+        }
+        /*
+         * One die and F far above the NAND times: the host waits for nearly
+         * every slot. Host gaps and the pass after the last read hide a
+         * part, so the bounds are wide. They catch a dropped or doubled
+         * slot, as the controls K1, K2 and K5 show.
+         */
+        if (!strcmp(mode, "on") || !strcmp(mode, "copyback")) {
+            g_assert_cmpuint(model, >=, fw_pages * f / 4);
+            g_assert_cmpuint(model, <=, fw_pages * f * 3 / 2);
+        }
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/* fw_gc_page_ns refuses a negative time and the settings it cannot time */
+static void femu_test_gc_fw_refused(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const struct {
+        int ns;
+        const char *extra;
+        const char *why;
+    } cases[] = {
+        { -1, "'femu_mode':1", "must not be negative" },
+        { 1000, "'femu_mode':1,'gc_erase_order':false",
+          "gc_erase_order=off" },
+        { 1000, "'femu_mode':1,'pe_suspend':1", "with pe_suspend" },
+        { 1000, "'femu_mode':1,'mapping':'hybrid'",
+          "a mapping other than page or dftl" },
+        { 1000, "'femu_mode':1,'mapping':'fast'",
+          "a mapping other than page or dftl" },
+        { 1000, "'femu_mode':1,'tier_mode':'static'", "the pSLC tier" },
+        { 1000, "'femu_mode':0", "a mode other than bbssd or CSD" },
+        { 1000, "'femu_mode':3", "a mode other than bbssd or CSD" },
+    };
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *args = g_strdup_printf(
+            "{'driver':'femu','id':'fw-refused','addr':'5','devsz_mb':16,"
+            "'fw_gc_page_ns':%d,%s}", cases[i].ns, cases[i].extra);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                               qobject_from_json(args, &error_abort));
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i].extra, desc);
+        g_assert_nonnull(strstr(desc, "fw_gc_page_ns"));
+        g_assert_nonnull(strstr(desc, cases[i].why));
+        qobject_unref(rsp);
+    }
+    /* an empty namespace_modes is the default, so the slot is allowed */
+    {
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                               "'driver':'femu','id':'fw-ok','addr':'5',"
+                               "'devsz_mb':16,'femu_mode':1,"
+                               "'namespace_modes':'','fw_gc_page_ns':1000}}");
+
+        g_assert_false(qdict_haskey(rsp, "error"));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}
+
 /* Set Features 12h (Read Recovery Level): @sv, @nsid, CDW11, CDW12 */
 static uint16_t femu_rrl_set_full(FemuCtrlState *c, bool sv, uint32_t nsid,
                                   uint32_t dw11, uint32_t dw12)
@@ -64588,6 +64790,41 @@ static void femu_register_nodes(void)
             "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
             "pg_rd_lat=100000000,read_cache_mb=1"
     });
+#define FEMU_GC_FW_GEO \
+    "id=gc-fw,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,pgs_per_blk=16," \
+    "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,pg_rd_lat=10000," \
+    "pg_wr_lat=10000,blk_er_lat=100000"
+    qos_add_test("gc-fw-on", "femu", femu_test_gc_fw,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts = FEMU_GC_FW_GEO ",fw_gc_page_ns=5000000"
+    });
+    qos_add_test("gc-fw-off", "femu", femu_test_gc_fw,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts = FEMU_GC_FW_GEO
+    });
+    qos_add_test("gc-fw-copyback", "femu", femu_test_gc_fw,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"copyback",
+        .edge.extra_device_opts =
+            FEMU_GC_FW_GEO ",fw_gc_page_ns=5000000,gc_copyback=on"
+    });
+    qos_add_test("gc-fw-pace", "femu", femu_test_gc_fw,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pace",
+        .edge.extra_device_opts =
+            FEMU_GC_FW_GEO ",fw_gc_page_ns=5000000,gc_pace=on"
+    });
+    qos_add_test("gc-fw-fdp", "femu", femu_test_gc_fw,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fdp",
+        .edge.extra_device_opts =
+            "id=gc-fw,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,fw_gc_page_ns=1000",
+    });
+    qos_add_test("gc-fw-refused", "femu", femu_test_gc_fw_refused, NULL);
     qos_add_test("rrl", "femu", femu_test_rrl,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
@@ -66553,6 +66790,28 @@ static void femu_register_nodes(void)
             "subsys=fdpsub",
     });
     /*
+     * fw_gc_page_ns of 1 ns: the program of each move waits for its read and
+     * a slot, which changes no count, no victim order and no WAF
+     */
+    qos_add_test("ftl-trace-gc-fw", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+                       "1758358858069010501",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "fw_gc_page_ns=1",
+    });
+    qos_add_test("ftl-trace-fdp-gc-fw", "femu", femu_test_ftl_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"732 1990000000 10306 10306 4416 3616 4544 14722 3616 "
+                       "5667387085002007720",
+        .edge.extra_device_opts =
+            "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "subsys=fdpsub,fw_gc_page_ns=1",
+    });
+    /*
      * The victim order of each collection policy, on the workload above.
      * Cost-benefit has no pin: it ages victims by the host's real-time clock.
      * The counts alone can hide a changed draw: with gc_seed=7, FDP random
@@ -67624,6 +67883,14 @@ static void femu_register_nodes(void)
             });
         }
     }
+    qos_add_test("dftl-tp-gc-fw", "femu", femu_test_dftl_tp,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fw",
+        .edge.extra_device_opts =
+            "id=tp,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "mapping=dftl,x-cmt-slots=1,femu_mode=1,fw_gc_page_ns=1000",
+    });
     qos_add_test("fdp-dftl", "femu", femu_test_fdp_dftl,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"dftl",

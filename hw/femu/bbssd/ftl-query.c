@@ -347,6 +347,9 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->maint_on = ssd->maint_idle;
     q->idle_reclaims = ssd->idle_reclaims;
     q->idle_refreshes = ssd->idle_refreshes;
+    q->gc_fw_on = ssd->sp.fw_gc_page_ns != 0;
+    q->gc_fw_pages = ssd->gc_fw_pages;
+    q->gc_fw_ns = ssd->gc_fw_ns;
 
     q->eol_mode = ssd->eol_ro_mode;
     q->media_ro = ssd->media_ro;

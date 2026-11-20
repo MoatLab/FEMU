@@ -246,6 +246,16 @@
 #     or
 #     a queued age reclaim.  Present only with maint_idle.
 #
+# @gc-fw-pages: page moves of garbage collection, read reclaim,
+#     refresh and wear levelling that took a firmware slot,
+#     translation page moves included, since realize.  Present only
+#     with fw_gc_page_ns above 0, and only for bbssd: a CSD namespace
+#     reports them in vendor log page C0h.
+#
+# @gc-fw-ns: the controller firmware time of those slots in ns, the
+#     core time and not the host wait.  Present only with
+#     fw_gc_page_ns above 0.
+#
 # @waf: write amplification factor, (@nand-write-pages +
 #     @gc-write-pages + @map-write-pages + @pad-write-pages +
 #     @parity-write-pages) / @host-write-pages.  Absent until the host
@@ -262,7 +272,8 @@
             '*rebuild-lines-left': 'uint64', '*rebuild-pages': 'uint64',
             '*lost-pages': 'uint64', '*lost-blocks': 'uint64',
             '*idle-reclaims': 'uint64',
-            '*idle-refreshes': 'uint64', '*waf': 'number' } }
+            '*idle-refreshes': 'uint64', '*gc-fw-pages': 'uint64',
+            '*gc-fw-ns': 'uint64', '*waf': 'number' } }
 
 ##
 # @FemuLineCounts:

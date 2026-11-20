@@ -20,13 +20,17 @@ PKG_CONFIG ?= pkg-config
 HAVE_GLIB := $(shell $(PKG_CONFIG) --exists glib-2.0 && echo 1)
 UNIT_TESTS = test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-spte \
              test-femu-cxl-cca-ring test-femu-kv-model test-femu-onfi-timing \
-             test-femu-kv-lsm test-femu-kv-pack
+             test-femu-kv-lsm test-femu-kv-pack test-femu-gc-fw
 ifeq ($(HAVE_GLIB),1)
 UNIT_TESTS += test-femu-cxl-cache
 endif
 
 test-femu-nand-media: $(TEST_SRC) nand-media.o ../nand/nand-media.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $(TEST_SRC) nand-media.o
+
+test-femu-gc-fw: unit/test-gc-fw.c nand-media.o ../nand/nand-media.h \
+                 ../bbssd/ftl-gc-fw-math.h
+	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ unit/test-gc-fw.c nand-media.o
 
 nand-media.o: ../nand/nand-media.c ../nand/nand-media.h
 	$(CC) $(CFLAGS_LIB) $(INCLUDES) -c -o $@ ../nand/nand-media.c
@@ -102,6 +106,7 @@ check-tools:
 clean:
 	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte \
 	      test-femu-cxl-cca-ring test-femu-kv-model test-femu-onfi-timing \
-	      test-femu-kv-lsm test-femu-kv-pack nand-media.o onfi.o
+	      test-femu-kv-lsm test-femu-kv-pack test-femu-gc-fw nand-media.o \
+	      onfi.o
 
 .PHONY: check check-docs check-tools clean

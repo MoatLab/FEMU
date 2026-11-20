@@ -3100,6 +3100,7 @@ typedef struct FemuMediaStats {
     uint64_t wl_relocations;
     uint64_t wl_pages;
     uint64_t gc_copyback_pages;
+    uint64_t gc_fw[2];          /* GC firmware slots and their ns */
     uint64_t pd[3];             /* open reclaims, pad pages, pad closes */
     uint64_t parity;            /* die parity programs */
     uint64_t pace[3];           /* copies, lines, takeovers */
@@ -3216,6 +3217,13 @@ static void nvme_collect_media_stats_ns(FemuCtrl *n, FemuMediaStats *st,
         st->wl_pages += ssd_wl_pages(ns->ssd);
         st->gc_copyback_pages += ssd_gc_copyback_pages(ns->ssd);
         {
+            uint64_t pages, fw_ns;
+
+            ssd_gc_fw_stats(ns->ssd, &pages, &fw_ns);
+            st->gc_fw[0] += pages;
+            st->gc_fw[1] += fw_ns;
+        }
+        {
             uint64_t c, l, t;
 
             ssd_pace_stats(ns->ssd, &c, &l, &t);
@@ -3317,6 +3325,8 @@ static void nvme_femu_stats_fill_ns(FemuCtrl *n, FemuStatsLog *log, int only)
     stats.rber_soft_reads = cpu_to_le64(st.rber[2]);
     stats.rber_limit_reads = cpu_to_le64(st.rber[3]);
     stats.erase_failures = cpu_to_le64(st.erase_fails);
+    stats.gc_fw_pages = cpu_to_le64(st.gc_fw[0]);
+    stats.gc_fw_ns = cpu_to_le64(st.gc_fw[1]);
     *log = stats;
 }
 

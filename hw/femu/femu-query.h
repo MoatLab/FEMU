@@ -111,6 +111,9 @@ typedef struct FemuQueryNs {
     bool maint_on;              /* maint_idle */
     uint64_t idle_reclaims;
     uint64_t idle_refreshes;
+    bool gc_fw_on;              /* fw_gc_page_ns */
+    uint64_t gc_fw_pages;
+    uint64_t gc_fw_ns;
 
     uint32_t free_lines;
     uint32_t victim_lines;

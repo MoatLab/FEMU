@@ -924,14 +924,15 @@ uint64_t ssd_advance_status_seq(struct ssd *ssd, const NandLoc *locs, int n,
  * @ssd: the device
  * @src: the page read into the page register
  * @dst: the page programmed from it
+ * @start: when the move may start, 0 for now
  *
  * Counts as one read of the source block and one program, like the off-chip
  * move it replaces, and returns when the program ends.
  */
 uint64_t ssd_advance_copyback(struct ssd *ssd, struct ppa *src,
-                              struct ppa *dst)
+                              struct ppa *dst, uint64_t start)
 {
-    uint64_t stime = ssd_now(ssd);
+    uint64_t stime = start ? start : ssd_now(ssd);
     NandLoc sloc;
     NandLoc dloc;
 

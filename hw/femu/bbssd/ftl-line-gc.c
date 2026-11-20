@@ -9,6 +9,7 @@
 #include "qemu/osdep.h"
 #include "ftl.h"
 #include "ftl-internal.h"
+#include "ftl-gc-fw-math.h"
 #include "../trace.h"
 
 /* victim-line priority-queue callbacks */
@@ -1269,6 +1270,30 @@ uint64_t gc_read_page(struct ssd *ssd, struct ppa *ppa)
 }
 
 /**
+ * ssd_gc_fw_slot - when the firmware slot of one collection move ends
+ * @ssd: the device
+ * @ready: when the move can start: its read end, or 0 for now
+ *
+ * fw_gc_page_ns: the FTL has one GC firmware line, and each move takes
+ * one slot on it after its data is in DRAM. This only computes the end;
+ * ssd_gc_fw_take() takes the slot once the move is booked, so a move
+ * that fails pays nothing.
+ */
+uint64_t ssd_gc_fw_slot(struct ssd *ssd, uint64_t ready)
+{
+    return gc_fw_slot_end(ready, ssd_now(ssd), ssd->gc_fw_free,
+                          ssd->sp.fw_gc_page_ns);
+}
+
+/* take the slot that ends at @end, from ssd_gc_fw_slot(), and count it */
+void ssd_gc_fw_take(struct ssd *ssd, uint64_t end)
+{
+    ssd->gc_fw_free = end;
+    ssd->gc_fw_pages++;
+    ssd->gc_fw_ns += ssd->sp.fw_gc_page_ns;
+}
+
+/**
  * ssd_gc_fence - note the end of a copy for the erase of its source line
  * @ssd: the device
  * @src: the page collection copied
@@ -1381,7 +1406,8 @@ void ssd_gc_move_page(struct ssd *ssd, uint64_t lpn, struct ppa *old_ppa,
  *
  * Charges the program when collection is timed and moves the LUN's collection
  * end to its busy-until time. With gc_erase_order the program starts when
- * its data is in DRAM; without it, now.
+ * its data is in DRAM; without it, now. With fw_gc_page_ns (which needs
+ * gc_erase_order) it starts when the firmware slot of the move ends.
  */
 void ssd_gc_charge_move(struct ssd *ssd, struct ppa *old_ppa,
                         struct ppa *new_ppa, uint64_t ready)
@@ -1389,11 +1415,15 @@ void ssd_gc_charge_move(struct ssd *ssd, struct ppa *old_ppa,
     struct nand_lun *lun = get_lun(ssd, new_ppa);
 
     if (ssd->sp.enable_gc_delay) {
+        uint64_t start = MAX(ready, ssd_now(ssd));
         uint64_t lat;
 
+        if (ssd->sp.fw_gc_page_ns) {
+            start = ssd_gc_fw_slot(ssd, ready);
+            ssd_gc_fw_take(ssd, start);
+        }
         ssd_gc_fence(ssd, old_ppa, new_ppa,
-                     gc_book(ssd, new_ppa, NAND_WRITE,
-                             MAX(ready, ssd_now(ssd)), &lat));
+                     gc_book(ssd, new_ppa, NAND_WRITE, start, &lat));
     }
     lun->gc_endtime = nand_lun_end(lun);
 }
@@ -1435,7 +1465,8 @@ uint64_t ssd_merge_copy(struct ssd *ssd, struct ppa *old_ppa,
  *
  * The copyback counterpart of gc_read_page() plus ssd_gc_charge_move(): the
  * read and the program run on one die and the data never crosses the
- * channel.
+ * channel. With fw_gc_page_ns the firmware slot comes first: the data stays
+ * on the die, so the slot does not wait for a read.
  */
 void ssd_gc_charge_copyback(struct ssd *ssd, struct ppa *old_ppa,
                             struct ppa *new_ppa)
@@ -1443,8 +1474,14 @@ void ssd_gc_charge_copyback(struct ssd *ssd, struct ppa *old_ppa,
     struct nand_lun *lun = get_lun(ssd, new_ppa);
 
     if (ssd->sp.enable_gc_delay) {
+        uint64_t stime = 0;
+
+        if (ssd->sp.fw_gc_page_ns) {
+            stime = ssd_gc_fw_slot(ssd, 0);
+            ssd_gc_fw_take(ssd, stime);
+        }
         ssd_gc_fence(ssd, old_ppa, new_ppa,
-                     ssd_advance_copyback(ssd, old_ppa, new_ppa));
+                     ssd_advance_copyback(ssd, old_ppa, new_ppa, stime));
     }
     lun->gc_endtime = nand_lun_end(lun);
     ssd->gc_copyback_pages++;

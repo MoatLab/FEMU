@@ -4341,6 +4341,54 @@ static bool femu_check_copyback_props(FemuCtrl *n, Error **errp)
 }
 
 /*
+ * fw_gc_page_ns runs where line and reclaim unit collection move pages
+ * through the shared move helpers of the bbssd and CSD FTL this controller
+ * builds. The refused settings move pages some other way (merges, tier
+ * folds), use an FTL another device made, or let a read suspend a program
+ * whose firmware slot has not ended.
+ */
+static bool femu_check_gc_fw_props(FemuCtrl *n, Error **errp)
+{
+    const BbCtrlParams *bp = &n->bb_params;
+    const char *map = bp->mapping_scheme;
+    const char *tier = bp->tier_mode;
+    const char *why = NULL;
+
+    if (bp->fw_gc_page_ns < 0) {
+        error_setg(errp, "femu: fw_gc_page_ns must not be negative");
+        return false;
+    }
+    if (!bp->fw_gc_page_ns) {
+        return true;
+    }
+    if (!BBSSD(n) && !CSD(n)) {
+        why = "a mode other than bbssd or CSD";
+    } else if (!bp->gc_erase_order) {
+        /* a delayed copy program must end before its victim erases */
+        why = "gc_erase_order=off";
+    } else if (n->namespace_modes && n->namespace_modes[0]) {
+        why = "namespace_modes";
+    } else if (nvme_ns_shared(n) || n->ns_mgmt) {
+        why = "ns_mgmt or shared namespaces";
+    } else if (n->cxl_dev) {
+        /* a linked controller borrows the medium's FTL and its settings */
+        why = "cxl_ssd";
+    } else if (bp->pe_suspend) {
+        why = "pe_suspend";
+    } else if (map && *map && strcmp(map, "page") && strcmp(map, "dftl")) {
+        why = "a mapping other than page or dftl";
+    } else if (tier && (!strcmp(tier, "static") ||
+                        !strcmp(tier, "dynamic"))) {
+        why = "the pSLC tier";
+    }
+    if (why) {
+        error_setg(errp, "femu: fw_gc_page_ns is not supported with %s", why);
+        return false;
+    }
+    return true;
+}
+
+/*
  * nand_profile: read the file and write its base timing into the timing
  * properties of each mode, before any check reads them. Every property a
  * profile sets, or that would change the same times another way, must hold
@@ -4831,6 +4879,9 @@ static void femu_realize(PCIDevice *pci_dev, Error **errp)
         return;
     }
     if (!femu_check_copyback_props(n, errp)) {
+        return;
+    }
+    if (!femu_check_gc_fw_props(n, errp)) {
         return;
     }
     if (!bb_tier_check_props(n, errp)) {
@@ -5803,6 +5854,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("iu_pages", FemuCtrl, bb_params.iu_pages, 0),
     DEFINE_PROP_INT32("l2p_dram_ns", FemuCtrl, bb_params.l2p_dram_ns, 0),
     DEFINE_PROP_INT32("dram_hit_ns", FemuCtrl, bb_params.dram_hit_ns, 0),
+    DEFINE_PROP_INT32("fw_gc_page_ns", FemuCtrl, bb_params.fw_gc_page_ns, 0),
     /* the pSLC tier in front of the dense lines; off unless tier_mode is set */
     DEFINE_PROP_STRING("tier_mode", FemuCtrl, bb_params.tier_mode),
     DEFINE_PROP_STRING("tier_full_policy", FemuCtrl,

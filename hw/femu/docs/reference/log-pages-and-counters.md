@@ -54,8 +54,10 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 312 | 8 | Host page reads with a soft decode, passed or failed (`rber_ppb`) |
 | 320 | 8 | Host page reads past the decode limit: soft decode failed, or failed with it off (`rber_ppb`) |
 | 328 | 8 | Blocks an erase failure killed (`erase_fail_ppm`); each one also counts as a grown bad block when it leaves service |
+| 336 | 8 | Page moves that took a GC firmware slot (`fw_gc_page_ns`): GC, read reclaim, refresh, wear levelling and translation page moves |
+| 344 | 8 | Firmware time of those slots in ns: core time, not the host wait (`fw_gc_page_ns`). Offsets 336 and 344 are read live and count from realize; `persist_ftl` does not keep them |
 
-Bytes 4-7 and 336-511 are reserved and read as zero. The counters are summed
+Bytes 4-7 and 352-511 are reserved and read as zero. The counters are summed
 over the controller's bbssd, CSD and KV namespaces (the block read count is the
 largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.
