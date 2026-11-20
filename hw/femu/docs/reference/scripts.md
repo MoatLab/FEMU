@@ -237,6 +237,22 @@ explains each.
 | `check-unit-tests.py` | no argument, `--meson-names`, `--listed FILE` or `--self-test`; checks that each `tests/unit/test-*.c` is in `tests/meson.build` or `tests/Makefile`, and that the `femu-unit` suite lists every meson unit test |
 | `check-doc-examples.py` | `--lint`, `--list`, `--self-test`, `--qemu BINARY`, `--qos-test BINARY`, `--only NAME`, `--timeout SEC`, `[PATH...]`; checks every code block's tag and runs the tagged examples |
 
+## Teaching labs: `hw/femu/scripts/labs/`
+
+The scripts of the [teaching labs](../labs/README.md). The `lab-*.sh`
+scripts run in the guest, as root, on a fresh device. Each one prints a
+last line that starts with `LAB` and the lab number. They need fio,
+nvme-cli and Python 3.
+
+| Script | Arguments and environment | What it does |
+| --- | --- | --- |
+| `lab-common.sh` | sourced by the others; `LAB_CTRL` (default `/dev/nvme0`), `LAB_NS` (default `/dev/nvme0n1`), `LAB_DIR` (default `./lab-out`) | Reads the C0h counters, prints their differences and the WAF of an interval, switches the NAND time off with vendor command 0xEF, and checks the host page count against the bytes fio wrote |
+| `lab-gc-waf.sh` | `[fio options]`; `LAB_TIME=on` keeps the NAND time, `LAB_IO` (default `4G`) | Lab 1: fill, age, then measure one run of random 4 KiB writes |
+| `lab-hot-cold.sh` | `uniform`, `zipf` or `hot80` | Lab 2: the method of lab 1 with one of three write distributions |
+| `lab-dftl.sh` | `LAB_WS` (default `256 768 1024`), `LAB_WARM_MB` (32), `LAB_READ_MB` (128), `LAB_WRITE_MB` (256) | Lab 3: fill, then random reads over each working set, then random writes; prints the translation page reads and programs, the miss ratio and the read latency |
+| `lab-fdp.sh` | `fdp` or `untagged`, then `all`, `prefill` or `run`; `LAB_NG` (default `/dev/ng0n1`) | Lab 4: the two-region job of tutorial 04, with or without placement |
+| `lab-waf-model.py` | `uniform`, `classes`, `dftl` or `--self-test`; runs on the host | The paper models of the labs: the FIFO log with the FEMU GC thresholds, the classes model, and the CMT miss ratio |
+
 ## CXL caching API tools: `hw/femu/tools/cca/`
 
 Guest code for `femu-cxl-ssd,cca=on`. `make -C hw/femu/tools/cca` in the

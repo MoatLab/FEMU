@@ -63,6 +63,9 @@ export SSH_PORT=8080               # host port forwarded to the guest's SSH
 
 ## Where to go next
 
+- [The teaching labs](../labs/README.md) turn tutorials 02 and 04 into
+  graded exercises with a prediction step, plus a lab on DFTL.
+
 - [Measuring](../guides/measuring.md) and
   [performance tuning](../guides/performance-tuning.md) explain how to get
   numbers that repeat.

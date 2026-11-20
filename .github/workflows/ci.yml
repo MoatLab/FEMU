@@ -621,6 +621,7 @@ jobs:
         python3 hw/femu/scripts/femu-steady-state.py --self-test
         python3 hw/femu/scripts/femu-prom.py --self-test
         python3 hw/femu/scripts/femu-trace2csv.py --self-test
+        python3 hw/femu/scripts/labs/lab-waf-model.py --self-test
 
     - name: Check build system consistency
       run: |

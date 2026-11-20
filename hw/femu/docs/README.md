@@ -23,6 +23,13 @@ guest, with the output each step should print: a first SSD, GC and WAF,
 ZNS, FDP, latency tuning, several namespaces, KV, CXL memory and
 configuration files.
 
+## I teach a course
+
+The [teaching labs](labs/README.md) are four graded labs: GC and WAF,
+hot and cold data, DFTL, and FDP. In each one, a student predicts a
+number, measures it on a VM in under 30 minutes, and explains the gap.
+Each lab has an answer key for the instructor.
+
 ## I want a specific kind of SSD
 
 [Choosing a mode](concepts/choosing-a-mode.md) has the full decision table:
