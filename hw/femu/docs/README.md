@@ -144,6 +144,9 @@ two differ.
 
 - [Testing](guides/testing.md): unit tests, the qtests, the documentation
   checks, guest-side tests, and how to add a test.
+- [Porting an old fork](guides/porting-old-forks.md): move a fork of
+  femu-v5.2 to femu-v9.0.1 onto master, with a symbol map from git, the
+  hook points, old and current command lines, and the checks to run.
 - [Keeping the documentation correct](development/docs-maintenance.md): the
   generated references, the mode table and the example checks.
 - [QEMU base](development/qemu-base.md): the QEMU version under FEMU, and

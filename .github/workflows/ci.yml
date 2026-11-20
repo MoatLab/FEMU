@@ -632,6 +632,8 @@ jobs:
         # each fio job file keeps its rate limit
         python3 hw/femu/scripts/check-fio-jobs.py --self-test
         python3 hw/femu/scripts/check-fio-jobs.py
+        # the symbol map of the porting guide: a small git fixture
+        python3 hw/femu/scripts/femu-symbol-map.py --self-test
 
     - name: Check build system consistency
       run: |
