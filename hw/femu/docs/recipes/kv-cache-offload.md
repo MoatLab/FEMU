@@ -1,10 +1,10 @@
 # Recipe: LLM KV-cache offload on a raw namespace with FDP
 
-> **Status: not yet validated on a host.** This recipe has not run on
-> FEMU. The device lines pass the lint of the documentation check,
-> which starts no device. fio 3.36 parses
-> the job file. No run confirms the guest script or the expected
-> behaviour. The LMCache commands in section 7 come from the LMCache
+> **Status: partly validated on d760 (2026-11-19).** Runs 398c (FDP) and
+> 398d (control) used the device lines of section 1. They measured a WAF
+> of 1.230 and 1.748, inside the model bands. Earlier recipe runs 396r
+> and 396s passed on d760. No run has checked the per-handle counters
+> of section 4. The LMCache commands in section 7 come from the LMCache
 > documents and have not run at all.
 
 An inference server keeps the key-value cache of a session, so that a
@@ -52,8 +52,8 @@ With FDP:
     -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
     -drive file=$OSIMGF,if=none,cache=none,format=qcow2,id=hd0 \
     -net user,hostfwd=tcp::$SSH_PORT-:22 -net nic,model=virtio \
-    -device femu-subsys,id=fdp0,fdp=on,fdp.nruh=4 \
-    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=128,subsys=fdp0,io_stages=on \
+    -device femu-subsys,id=fdp0,fdp=on,fdp.nruh=4,fdp.nru=192 \
+    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=192,subsys=fdp0,io_stages=on \
     -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off \
     -nographic
 ```
@@ -67,7 +67,7 @@ The control has the same device with no FDP subsystem:
     -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
     -drive file=$OSIMGF,if=none,cache=none,format=qcow2,id=hd0 \
     -net user,hostfwd=tcp::$SSH_PORT-:22 -net nic,model=virtio \
-    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=128,io_stages=on \
+    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=192,io_stages=on \
     -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off \
     -nographic
 ```
@@ -76,9 +76,10 @@ The control has the same device with no FDP subsystem:
 | --- | --- |
 | `femu-subsys,id=fdp0,fdp=on` | a subsystem with FDP; it must come before the controller that names it |
 | `fdp.nruh=4` | four reclaim unit handles, so placement identifiers 0 to 3 |
+| `fdp.nru=192` | 192 reclaim units, one for each line; the default is 128 |
 | `femu_mode=1` | BlackBox mode: the device runs its own FTL, GC and NAND timing |
-| `nchs=4,luns_per_ch=4,blks_per_pl=128` | 2 GiB of NAND in 128 lines of 16 MiB; each line is one reclaim unit |
-| `devsz_mb=1536` | a 1.5 GiB namespace, 75% of the NAND |
+| `nchs=4,luns_per_ch=4,blks_per_pl=192` | 3 GiB of NAND in 192 lines of 16 MiB; each line is one reclaim unit |
+| `devsz_mb=1536` | a 1.5 GiB namespace, 50% of the NAND |
 | `subsys=fdp0` | the controller joins the subsystem |
 | `io_stages=on` | stage times for `femu-stat.py` and `query-femu-stages` |
 
@@ -97,7 +98,7 @@ The guest image from `make-guest-image.sh` has fio 3.36 and nvme-cli
 | fio has FDP placement (`fdp`, `fdp_pli`) from version 3.34 | the fio commit history | checked |
 | NVMe passthrough through io_uring needs Linux 5.19 or newer | the Linux source at v5.19 and v5.18 | checked |
 | fio 3.36 parses `gpu-kv-offload-fdp.fio` with `FEMU_FDP` 0 and 1 | a local `fio --parse-only` | checked |
-| The job runs on a FEMU device | none | not confirmed |
+| The job runs on a FEMU device and the WAF matches the model | runs 398c and 398d on d760 | checked |
 
 ## 3. Run
 
@@ -213,19 +214,21 @@ job stays on one CPU.
 
 ## 5. Expected behaviour
 
-No run has confirmed these predictions.
+Runs 398c and 398d on d760 measured the WAF of the FDP run and of the
+control run. No run has measured the other rows.
 
 | Prediction | Reason |
 | --- | --- |
-| The control run has a WAF above 1. | The prefill makes the whole namespace valid, which is 75% of the NAND. The stores then write 5 times the namespace size in 240 s. Background GC starts at 32 free lines or fewer, which is the state after the prefill. Its victim lines still hold valid pages. |
-| The FDP run has a lower WAF than the control run, when GC waits for free space to run low. | With no placement, short and long entries share lines, so a victim line holds long entries that GC must copy. With placement, the reclaim units of the short tenant hold its entries only. On the device lines of section 1, GC does not wait (see "When GC starts"). |
+| The control run has a WAF above 1. Measured: 1.748 (398d). | The prefill makes the namespace valid, which is 50% of the NAND. The stores then write 5 times the namespace size in 240 s. GC starts when free lines fall to 48. Its victim lines still hold valid pages. |
+| The FDP run has a lower WAF than the control run. Measured: 1.230 (398c). | With no placement, short and long entries share lines, so a victim line holds long entries that GC must copy. With placement, the reclaim units of the short tenant hold its entries only. |
 | With FDP, the short tenant handle has a lower WAF than the long tenant handle. | The short tenant writes the size of its region about each 8 s. Its pages thus become invalid sooner on average. |
 | The host bytes of handle 0 grow about 3 times as fast as the host bytes of handle 1 during the run. | The store rates are 24 MiB/s and 8 MiB/s. The prefill is not in this ratio. |
 | The 99th percentile latency of a load is above its median in both runs. | A load waits when GC or a store keeps its die busy. |
 
-The size of the WAF difference is not predicted. It depends on the fill
-level, the region sizes and the GC options. A run at another fill level
-can show no difference.
+The WAF difference depends on the fill level, the region sizes and the
+GC options. A run at another fill level can show no difference. On the
+`base` device line of the variants, GC does not wait for free space, and
+the WAF is near 8 in both runs.
 
 ### When GC starts
 
@@ -234,16 +237,16 @@ thresholds are counts of free lines. With FDP, the same rules count free
 reclaim units.
 
 ```
- lines            = blks_per_pl                              = 128
+ lines            = blks_per_pl                              = 192
  valid data       = 1536 MiB / 16 MiB for each line          = 96 lines
- background GC    = (1 - gc_thres_pcent / 100) x 128         = 32 free lines
- forced GC        = (1 - gc_thres_pcent_high / 100) x 128    = 6 free lines
- free lines after the prefill = 128 - 96                     = 32 at most
+ background GC    = (1 - gc_thres_pcent / 100) x 192         = 48 free lines
+ forced GC        = (1 - gc_thres_pcent_high / 100) x 192    = 9 free lines
+ free lines after the prefill = 192 - 96                     = 96 at most
 
- free lines   128 ........ 32 ................. 6 ...... 0
-                           |<-- background GC -->|<- forced GC ->|
-                           ^
-                           the device of section 1 starts the run here
+ free lines   192 ..... 96 ........ 48 ............ 9 ...... 0
+                         ^          |<- background ->|<- forced ->|
+                         |          |      GC        |     GC     |
+                         the device of section 1 starts the run here
 ```
 
 | Rule | What the FTL does | Source |
@@ -252,40 +255,74 @@ reclaim units.
 | 1/8 rule | A background attempt takes the line with the fewest valid pages. It takes that line only when 1/8 or more of its pages are invalid. | `bbssd/ftl-line-gc.c`, and `bbssd/ftl-fdp.c` for reclaim units |
 | forced rule | A write collects, with no 1/8 test, while the free lines are at or below the forced threshold. | `bbssd/ftl-datapath.c` |
 
-The fill of the namespace is 75% of the lines, and `gc_thres_pcent` is
-75 by default. The device of section 1 is thus at the background
-threshold from the end of the prefill. It stays there, because the valid
-data alone needs 96 lines. A background attempt then follows each
-command.
+The fill of the namespace is 50% of the lines. The device of section 1
+has 96 free lines after the prefill, which is 48 above the background
+threshold. GC starts only after the stores use those 48 lines. A victim
+then holds mostly invalid pages, and placement can change the WAF.
 
 Under the 1/8 rule, a background victim can hold up to 7/8 valid pages.
 Collection of such a victim copies 7 pages for each page that it frees.
-The background rule can thus set the WAF in both runs, and placement has
-little room to change it. This statement comes from the source. No run
-on a host has confirmed it.
+A device that sits at the background threshold from the end of the
+prefill meets this rule at each command. The `base` variant is such a
+device, and its WAF is near 8 in both runs.
 
 ### Device variants
 
-> **Status: not yet validated on a host.** The four device lines below
-> have not run on FEMU. They pass the lint of the documentation check,
-> which starts no device.
+> **Status: partly validated on d760 (2026-11-19).** The `thres` lines
+> ran as 398a (FDP, WAF 1.712) and 398b (control, WAF 2.556). Both
+> are inside the model bands. The `spare` lines are the lines of
+> section 1. The `base` lines pass the lint of the documentation check,
+> which starts no device. The WAF of `base` comes from the analysis of
+> the runs, and no run of these exact lines is on record.
 
-The variants make GC wait for free space to run low. Each one keeps the
-1.5 GiB namespace, so the guest script and the fio job do not change.
+The variants change when GC starts. Each one keeps the 1.5 GiB
+namespace, so the guest script and the fio job do not change.
 
 ```
  variant  change                         background GC   forced GC      free after prefill
  -------  -----------------------------  --------------  -------------  ------------------
- none     (section 1)                    32 free lines   6 free lines   32 of 128 at most
- thres    gc_thres_pcent=95              6 free lines    6 free lines   32 of 128 at most
- spare    blks_per_pl=192, fdp.nru=192   48 free lines   9 free lines   96 of 192 at most
+ spare    (section 1) blks_per_pl=192,   48 free lines   9 free lines   96 of 192 at most
+          fdp.nru=192
+ base     blks_per_pl=128 (old default)  32 free lines   6 free lines   32 of 128 at most
+ thres    base, gc_thres_pcent=95        6 free lines    6 free lines   32 of 128 at most
 ```
 
-Variant `thres` moves the background threshold to the forced threshold.
+Variant `base` has no spare capacity. It sits at the background threshold
+from the end of the prefill, and the WAF is near 8 in both runs, as the
+analysis states. Variant `thres` moves the background threshold to the forced threshold.
 `gc_thres_pcent` must not be above `gc_thres_pcent_high`, which is 95 by
 default.
 
-With FDP:
+With FDP, `base`:
+
+<!-- femu-example: recipe-kv-fdp-base-boot -->
+```bash
+./qemu-system-x86_64 -name femu-recipe-kv,debug-threads=on \
+    -enable-kvm -cpu host -smp 4 -m 4G \
+    -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
+    -drive file=$OSIMGF,if=none,cache=none,format=qcow2,id=hd0 \
+    -net user,hostfwd=tcp::$SSH_PORT-:22 -net nic,model=virtio \
+    -device femu-subsys,id=fdp0,fdp=on,fdp.nruh=4 \
+    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=128,subsys=fdp0,io_stages=on \
+    -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off \
+    -nographic
+```
+
+The `base` control:
+
+<!-- femu-example: recipe-kv-control-base-boot -->
+```bash
+./qemu-system-x86_64 -name femu-recipe-kv,debug-threads=on \
+    -enable-kvm -cpu host -smp 4 -m 4G \
+    -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
+    -drive file=$OSIMGF,if=none,cache=none,format=qcow2,id=hd0 \
+    -net user,hostfwd=tcp::$SSH_PORT-:22 -net nic,model=virtio \
+    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=128,io_stages=on \
+    -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off \
+    -nographic
+```
+
+With FDP, `thres`:
 
 <!-- femu-example: recipe-kv-fdp-thres-boot -->
 ```bash
@@ -300,7 +337,7 @@ With FDP:
     -nographic
 ```
 
-The control:
+The `thres` control:
 
 <!-- femu-example: recipe-kv-control-thres-boot -->
 ```bash
@@ -314,40 +351,12 @@ The control:
     -nographic
 ```
 
-Variant `spare` keeps the default thresholds and gives the device 3 GiB
-of NAND in 192 lines. The namespace is then 50% of the NAND. An FDP
+Variant `spare` is the device of section 1. It keeps the default
+thresholds and gives the device 3 GiB of NAND in 192 lines. An FDP
 subsystem has `fdp.nru` reclaim units, and the default is 128. The FTL
 uses the smaller of that count and the line count, as `bbssd/bb.c`
-shows. Set `fdp.nru=192`, so that FDP uses each line.
-
-With FDP:
-
-<!-- femu-example: recipe-kv-fdp-spare-boot -->
-```bash
-./qemu-system-x86_64 -name femu-recipe-kv,debug-threads=on \
-    -enable-kvm -cpu host -smp 4 -m 4G \
-    -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
-    -drive file=$OSIMGF,if=none,cache=none,format=qcow2,id=hd0 \
-    -net user,hostfwd=tcp::$SSH_PORT-:22 -net nic,model=virtio \
-    -device femu-subsys,id=fdp0,fdp=on,fdp.nruh=4,fdp.nru=192 \
-    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=192,subsys=fdp0,io_stages=on \
-    -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off \
-    -nographic
-```
-
-The control:
-
-<!-- femu-example: recipe-kv-control-spare-boot -->
-```bash
-./qemu-system-x86_64 -name femu-recipe-kv,debug-threads=on \
-    -enable-kvm -cpu host -smp 4 -m 4G \
-    -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
-    -drive file=$OSIMGF,if=none,cache=none,format=qcow2,id=hd0 \
-    -net user,hostfwd=tcp::$SSH_PORT-:22 -net nic,model=virtio \
-    -device femu,id=femu0,femu_mode=1,devsz_mb=1536,nchs=4,luns_per_ch=4,blks_per_pl=192,io_stages=on \
-    -qmp unix:/tmp/femu-qmp.sock,server=on,wait=off \
-    -nographic
-```
+shows. The lines of section 1 set `fdp.nru=192`, so that FDP uses each
+line. Runs 398c and 398d measured a WAF of 1.230 and 1.748.
 
 Run the guest script of section 3 on each variant. Read two more
 counters of log page C0h before and after the run. They tell whether
@@ -369,7 +378,7 @@ can thus keep valid pages.
 
 ## 6. Limits
 
-- No run exists. Section 5 is a set of predictions.
+- Only the WAF of the device lines of section 1 has a measured value (runs 398c and 398d). The other rows of section 5 are predictions.
 - The job is a stand-in. It has two mean lifetimes, a fixed entry size,
   no fixed entry slots and no eviction policy.
 - The job has no deallocate. A server that trims evicted entries gives
