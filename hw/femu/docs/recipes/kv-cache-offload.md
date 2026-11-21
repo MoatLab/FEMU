@@ -1,9 +1,9 @@
 # Recipe: LLM KV-cache offload on a raw namespace with FDP
 
-> **Status: partly validated on d760 (2026-11-19).** Runs 398c (FDP) and
-> 398d (control) used the device lines of section 1. They measured a WAF
-> of 1.230 and 1.748, inside the model bands. Earlier recipe runs 396r
-> and 396s passed on d760. No run has checked the per-handle counters
+> **Status: partly validated on a host (2026-11-19).** One FDP run and
+> one control run on an x86 host with KVM used the device lines of
+> section 1. They measured a WAF of 1.230 and 1.748, inside the model
+> bands. Two earlier runs of the recipe also passed. No run has checked the per-handle counters
 > of section 4. The LMCache commands in section 7 come from the LMCache
 > documents and have not run at all.
 
@@ -98,7 +98,7 @@ The guest image from `make-guest-image.sh` has fio 3.36 and nvme-cli
 | fio has FDP placement (`fdp`, `fdp_pli`) from version 3.34 | the fio commit history | checked |
 | NVMe passthrough through io_uring needs Linux 5.19 or newer | the Linux source at v5.19 and v5.18 | checked |
 | fio 3.36 parses `gpu-kv-offload-fdp.fio` with `FEMU_FDP` 0 and 1 | a local `fio --parse-only` | checked |
-| The job runs on a FEMU device and the WAF matches the model | runs 398c and 398d on d760 | checked |
+| The job runs on a FEMU device and the WAF matches the model | one FDP run and one control run on a host | checked |
 
 ## 3. Run
 
@@ -214,13 +214,13 @@ job stays on one CPU.
 
 ## 5. Expected behaviour
 
-Runs 398c and 398d on d760 measured the WAF of the FDP run and of the
+One FDP run and one control run on a host measured the WAF of the FDP run and of the
 control run. No run has measured the other rows.
 
 | Prediction | Reason |
 | --- | --- |
-| The control run has a WAF above 1. Measured: 1.748 (398d). | The prefill makes the namespace valid, which is 50% of the NAND. The stores then write 5 times the namespace size in 240 s. GC starts when free lines fall to 48. Its victim lines still hold valid pages. |
-| The FDP run has a lower WAF than the control run. Measured: 1.230 (398c). | With no placement, short and long entries share lines, so a victim line holds long entries that GC must copy. With placement, the reclaim units of the short tenant hold its entries only. |
+| The control run has a WAF above 1. Measured: 1.748. | The prefill makes the namespace valid, which is 50% of the NAND. The stores then write 5 times the namespace size in 240 s. GC starts when free lines fall to 48. Its victim lines still hold valid pages. |
+| The FDP run has a lower WAF than the control run. Measured: 1.230. | With no placement, short and long entries share lines, so a victim line holds long entries that GC must copy. With placement, the reclaim units of the short tenant hold its entries only. |
 | With FDP, the short tenant handle has a lower WAF than the long tenant handle. | The short tenant writes the size of its region about each 8 s. Its pages thus become invalid sooner on average. |
 | The host bytes of handle 0 grow about 3 times as fast as the host bytes of handle 1 during the run. | The store rates are 24 MiB/s and 8 MiB/s. The prefill is not in this ratio. |
 | The 99th percentile latency of a load is above its median in both runs. | A load waits when GC or a store keeps its die busy. |
@@ -268,8 +268,8 @@ device, and its WAF is near 8 in both runs.
 
 ### Device variants
 
-> **Status: partly validated on d760 (2026-11-19).** The `thres` lines
-> ran as 398a (FDP, WAF 1.712) and 398b (control, WAF 2.556). Both
+> **Status: partly validated on a host (2026-11-19).** The `thres` lines
+> ran once each: FDP gave a WAF of 1.712 and control gave 2.556. Both
 > are inside the model bands. The `spare` lines are the lines of
 > section 1. The `base` lines pass the lint of the documentation check,
 > which starts no device. The WAF of `base` comes from the analysis of
@@ -356,7 +356,7 @@ thresholds and gives the device 3 GiB of NAND in 192 lines. An FDP
 subsystem has `fdp.nru` reclaim units, and the default is 128. The FTL
 uses the smaller of that count and the line count, as `bbssd/bb.c`
 shows. The lines of section 1 set `fdp.nru=192`, so that FDP uses each
-line. Runs 398c and 398d measured a WAF of 1.230 and 1.748.
+line. The two runs measured a WAF of 1.230 and 1.748.
 
 Run the guest script of section 3 on each variant. Read two more
 counters of log page C0h before and after the run. They tell whether
@@ -378,7 +378,7 @@ can thus keep valid pages.
 
 ## 6. Limits
 
-- Only the WAF of the device lines of section 1 has a measured value (runs 398c and 398d). The other rows of section 5 are predictions.
+- Only the WAF of the device lines of section 1 has a measured value, from one run of each. The other rows of section 5 are predictions.
 - The job is a stand-in. It has two mean lifetimes, a fixed entry size,
   no fixed entry slots and no eviction policy.
 - The job has no deallocate. A server that trims evicted entries gives
