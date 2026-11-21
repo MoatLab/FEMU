@@ -333,10 +333,12 @@ than its background GC threshold of 19. The low spare device has 32
 spare lines, and its result is not known. The recipe now runs five
 overwrite passes for this reason.
 
-GC copies a page only when a victim line still holds valid data. A
-line that holds only deleted table files gives an erase and no GC page.
-The WAL, the journal and two background jobs mix data in each line, so
-the prediction is that most victims hold some valid pages.
+GC copies a page only when a victim line still holds valid data. The
+FTL does not see a deleted table file, so its pages stay valid until
+ext4 writes those blocks again. A line whose blocks ext4 has all written
+again gives an erase and no GC page. The WAL, the journal and two
+background jobs mix data in each line. So the prediction is that most
+victims hold some valid pages.
 
 When both devices show the same `device_waf`, ext4 may have written only
 a part of the namespace. Each device then has more spare capacity than

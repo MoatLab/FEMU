@@ -4,12 +4,12 @@ A recipe runs the storage side of one AI or database workload on a FEMU
 device. The guest needs no accelerator. A sleep, a CPU program or an fio
 job stands for the accelerator.
 
-> **Status: partly validated on a host (2026-11-21).** RocksDB
-> completed one run on an x86 host with KVM, with the device line of
-> section 1 of its page. The guest script gave `PASS`. The low spare
-> device of RocksDB has not run, and no run has checked the control
-> mode of its guest script. The page of each other recipe states its
-> own status. One run is one sample.
+> **Status: partly validated on a host (2026-11-21).** DLIO, DiskANN
+> and RocksDB each completed one run on an x86 host with KVM, with the
+> device lines of their pages. Each guest script gave `PASS`. The
+> KV-cache recipe is partly validated: its page states what ran. The
+> low spare device of RocksDB has not run. No run has checked the
+> control mode of a guest script. One run is one sample.
 
 | Recipe | Workload | Device | Guest script |
 | --- | --- | --- | --- |
