@@ -82,7 +82,7 @@ make -j"$(nproc)" DEBUG_LEVEL=0 PORTABLE=1 DISABLE_WARNING_AS_ERROR=1 db_bench
 | Fact | Source | State |
 | --- | --- | --- |
 | Tag `v9.10.0` builds with `make DEBUG_LEVEL=0 DISABLE_WARNING_AS_ERROR=1` on the guest image | `zenfs-crash-guest.sh` uses the same tag and options; one run of this recipe | confirmed by one run, with `PORTABLE=1` |
-| GCC 13 reports a false array-bounds error in RocksDB 9.10 | the comment in `zenfs-crash-guest.sh`; one run of this recipe | one run showed one `-Warray-bounds` warning in `memtable/wbwi_memtable.h`, and the build ended; the guest image has GCC 13.3.0 |
+| GCC 13 reports a false array-bounds error in RocksDB 9.10 | the comment in `zenfs-crash-guest.sh`; one run of this recipe | one run showed one `-Warray-bounds` warning in `memtable/wbwi_memtable.h`, and the build ended; the log does not show whether the warning is false or name the compiler |
 | `db_bench` needs gflags; without it the tool prints a note and exits | the RocksDB `INSTALL.md` | not checked against the tag; one build with `libgflags-dev` 2.2.2 passed |
 | The names of the statistics counters and the format of the result line | the `db_bench` source at `v9.10.0` | checked by a review; in one run the script read each value |
 
@@ -230,8 +230,10 @@ device reads. The trace gives the device latency of each command as
 past-due share that `femu-stat.py` prints. A high share means that FEMU
 did not keep up, so the latency is not the latency of the model.
 
-For the mixed phase, expect this shape report: mostly reads in the
-`4096` size line, with large writes from flush and compaction.
+For the mixed phase, the first draft of this page expected most reads
+in the `4096` size line. One run contradicts it. Of 208109 reads in the
+whole trace, 202599 were 4608 bytes long, so the report puts most reads
+in the `8192` line. Writes from flush and compaction are large.
 
 ## 5. The contrast pair: spare capacity
 
@@ -284,7 +286,7 @@ device has not run, so no run confirms a difference between the two.
 | The read P99 of the mixed phase is higher on the low spare device. | A read waits when GC or a flush keeps its die busy. | No run confirms it. Section 1 device: P99 103.15 us. |
 | GC runs on both devices. | The phases write about 5 GB, more than three times the namespace. ext4 can write the same blocks again, so this does not prove that it writes most blocks. | Contradicted on the section 1 device: 0 GC pages and 0 block erases. The phases wrote 1651412992 host bytes, not about 5 GB. 90 of 192 lines were free at the end. |
 
-The host bytes of the run were about 1.03 times the namespace of
+The host bytes of the three phases were about 1.03 times the namespace of
 1610612736 bytes. The section 1 device thus kept far more free lines
 than its background GC threshold of 19. The low spare device has 32
 spare lines, and its result is not known.
