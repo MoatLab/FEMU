@@ -1,11 +1,12 @@
 # Recipe: DLIO training and checkpoint I/O
 
-> **Status: not yet validated on a host.** This recipe has not run on
-> FEMU. The device line passes the lint of the documentation check,
-> which starts no device. The DLIO
-> commands come from the DLIO repository at tag `v2.0.1`. No run
-> confirms the guest script, the install on Ubuntu 24.04 or the
-> expected behaviour.
+> **Status: one run passed on a host (2026-11-21).** One run on an x86
+> host with KVM used the device line of section 1, with `io_trace`
+> added. The guest ran Ubuntu 24.04.5 with kernel 6.8.0-139-generic.
+> The install of DLIO `v2.0.1` and the guest script worked, and the
+> verdict was `PASS`. Section 5 lists each prediction with the measured
+> value. No run has checked `DLIO_CONTROL=page-cache`, other option
+> values or the repeatability of the numbers.
 
 [DLIO](https://github.com/argonne-lcf/dlio_benchmark) gives the storage
 I/O of a deep learning training job. It writes a dataset, reads it in
@@ -68,10 +69,10 @@ python3 -m venv ~/dlio-venv
 | Tag `v2.0.1` is commit `b56c74183c64` | the tag list of the repository | checked on 2026-11-19 |
 | `git clone`, then `pip install .` | `docs/source/install.rst` at the tag | checked |
 | `mpi4py` is necessary, so an MPI library is necessary | `setup.py` at the tag | checked |
-| The OpenMPI packages | the CI file of the repository, on Ubuntu 22.04 | checked for 22.04 only |
+| The OpenMPI packages | the CI file of the repository, on Ubuntu 22.04 | checked for 22.04; OpenMPI 4.1.6 installed on Ubuntu 24.04 in one run |
 | The install brings TensorFlow, PyTorch and a DALI package | `setup.py` at the tag | checked; the size on disk is not known |
-| Python 3.12 of Ubuntu 24.04 | the CI tests Python 3.9 to 3.11 | not confirmed |
-| A run with no `mpirun` | `README.md` at the tag | checked; not run here |
+| Python 3.12 of Ubuntu 24.04 | the CI tests Python 3.9 to 3.11; one run on FEMU | confirmed by one run with Python 3.12.3 |
+| A run with no `mpirun` | `README.md` at the tag | checked; confirmed by one run |
 | `checkpoint.fsync` has no effect | `utils/config.py` and `checkpointing/base_checkpointing.py` at the tag | checked |
 
 The install is large. Keep several GiB free on the guest disk.
@@ -190,15 +191,15 @@ For the shape report, give the trace to `femu-trace2fio.py` with
 
 ## 5. Expected behaviour
 
-No run has confirmed these predictions.
+One run on 2026-11-21 measured these values. One run is one sample.
 
-| Prediction | Reason |
-| --- | --- |
-| The generate phase has a WAF near 1.0. | The dataset fills 1.1 GiB of an empty 3 GiB namespace. GC finds no line to collect. |
-| The checkpoint writes reach the device in bursts, at times that the guest writeback sets. | DLIO writes a checkpoint to the page cache with no `fsync` at this tag. The kernel writes it out afterwards, and the last part at the `sync` of the script. |
-| The WAF of the train phase stays near 1.0 with the default options. | Two checkpoints of 256 MiB do not fill the free space. |
-| The read sizes follow the block layer, not the 16 MiB file. | The guest splits a large `O_DIRECT` read at the request size limit of the block layer. |
-| A longer `DLIO_COMPUTE_SEC` raises the accelerator utilization. | The sleep hides the read time of a batch. |
+| Prediction | Reason | Run of 2026-11-21 |
+| --- | --- | --- |
+| The generate phase has a WAF near 1.0. | The dataset fills 1.1 GiB of an empty 3 GiB namespace. GC finds no line to collect. | Confirmed: WAF 1.000, 0 GC pages, 295061 host pages. |
+| The checkpoint writes reach the device in bursts, at times that the guest writeback sets. | DLIO writes a checkpoint to the page cache with no `fsync` at this tag. The kernel writes it out afterwards, and the last part at the `sync` of the script. | Partly confirmed: the trace has no write during the training reads. Both checkpoints reached the device together, 537067520 bytes in one burst of 0.5 s after the training reads. |
+| The WAF of the train phase stays near 1.0 with the default options. | Two checkpoints of 256 MiB do not fill the free space. | Confirmed: WAF 1.000, 0 GC pages, 131115 host pages. |
+| The read sizes follow the block layer, not the 16 MiB file. | The guest splits a large `O_DIRECT` read at the request size limit of the block layer. | Confirmed: no read is above 2 MiB, and 1546 of 2096 reads are in the `2097152` size line. |
+| A longer `DLIO_COMPUTE_SEC` raises the accelerator utilization. | The sleep hides the read time of a batch. | No run confirms it. The run used 0.05 s only and gave 70.40%. |
 
 More epochs do not predict a higher WAF. A new checkpoint file takes
 new blocks, and the old checkpoint stays valid for the FTL. GC gains
@@ -207,7 +208,11 @@ a workload that writes over the same blocks, which this recipe is not.
 
 ## 6. Limits
 
-- No run exists. Section 5 is a set of predictions.
+- One run exists. It confirms three predictions of section 5 and a
+  part of a fourth. One prediction has no run.
+- DLIO marks the utilization of 70.40% as below its own expectation
+  (`train_au_meet_expectation` is `fail`). The guest script does not
+  check this value.
 - The dataset is small. A dataset below the guest memory size gives
   real device reads only with `O_DIRECT`. DLIO supports `O_DIRECT` for
   the `npy` and `npz` formats only.

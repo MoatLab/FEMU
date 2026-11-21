@@ -4,12 +4,12 @@ A recipe runs the storage side of one AI or database workload on a FEMU
 device. The guest needs no accelerator. A sleep, a CPU program or an fio
 job stands for the accelerator.
 
-> **Status: not yet validated on a host.** No recipe on these pages has
-> run on FEMU. The device lines pass the lint of the documentation
-> check, which reads the tags and starts no device. No QEMU has started
-> these device lines yet. Each page lists what a primary source confirms
-> and what no run confirms. Treat each command as a draft until this
-> note goes away.
+> **Status: partly validated on a host (2026-11-21).** DLIO and
+> DiskANN each ran once on an x86 host with KVM, with the device lines
+> of their pages. Both guest scripts gave `PASS`. The KV-cache recipe
+> is partly validated: its page states what ran. No run of DLIO or
+> DiskANN has checked the control mode of its guest script. One run is
+> one sample. Each page marks each prediction with the measured value.
 
 | Recipe | Workload | Device | Guest script |
 | --- | --- | --- | --- |

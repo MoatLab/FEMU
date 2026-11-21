@@ -1,11 +1,13 @@
 # Recipe: DiskANN vector search on the SSD
 
-> **Status: not yet validated on a host.** This recipe has not run on
-> FEMU. The device line passes the lint of the documentation check,
-> which starts no device. The DiskANN
-> commands come from the DiskANN repository at tag `0.7.0`. No run
-> confirms the guest script, the build on Ubuntu 24.04 or the expected
-> behaviour.
+> **Status: one run passed on a host (2026-11-21).** One run on an x86
+> host with KVM used the device line of section 1, with `io_trace`
+> added. The guest ran Ubuntu 24.04.5 with kernel 6.8.0-139-generic.
+> Tag `0.7.0` built with GCC 13.3.0 and the `-include cstdint` flag of
+> section 2, and the verdict was `PASS`. Section 5 lists each prediction
+> with the measured value. No run has checked
+> `DISKANN_CONTROL=index-off-device`, a read reclaim after a write, or
+> the repeatability of the numbers.
 
 [DiskANN](https://github.com/microsoft/DiskANN) keeps a graph index of
 vectors in one file on the SSD. A query walks the graph. Each step
@@ -76,10 +78,10 @@ in `include/ann_exception.h` without the header.
 | The C++ tools are on tag `0.7.0` and branch `cpp_main`; `main` is Rust | `README.md` on `main` | checked on 2026-11-19 |
 | Tag `0.7.0` is commit `df225d32da81` | the tag list of the repository | checked |
 | The `apt` packages and the `cmake` line | `README.md` at the tag, section for Ubuntu 20.04 or newer | checked |
-| A build with GCC 13 on Ubuntu 24.04 | none | not confirmed |
-| `libmkl-full-dev` on Ubuntu 24.04 | none | not confirmed |
+| A build with GCC 13 on Ubuntu 24.04 | one run on FEMU | GCC 13.3.0 stops at `uint32_t` without the flag; with `-include cstdint` the build passed in one run |
+| `libmkl-full-dev` on Ubuntu 24.04 | one run on FEMU | confirmed by one run: version 2020.4.304-4 installed |
 | The tool options | `workflows/SSD_index.md` and the tool sources at the tag | checked |
-| The tool paths `apps/` and `apps/utils/` in the build directory | the examples in `workflows/SSD_index.md` | checked; `rand_data_gen` not confirmed |
+| The tool paths `apps/` and `apps/utils/` in the build directory | the examples in `workflows/SSD_index.md` | checked; one run used `rand_data_gen` from `apps/utils/` |
 | `search_disk_index` opens the index with `O_DIRECT` and reads sectors of 4096 bytes with libaio | `src/linux_aligned_file_reader.cpp` at the tag | checked |
 
 When the tag does not build, try `DISKANN_REF=cpp_main`. That branch is
@@ -195,16 +197,28 @@ For the search phase, expect this shape report:
 
 ## 5. Expected behaviour
 
-No run has confirmed these predictions.
+One run on 2026-11-21 measured these values. One run is one sample.
+The search ran 2000 queries at each of three list sizes, so 6000
+queries in total.
 
-| Prediction | Reason |
-| --- | --- |
-| `Mean IOs` grows with the list size L. | A longer list makes the search visit more nodes, and each node is a sector read. |
-| The mean query latency grows with L by about the added reads times the read time of the model. | Each step waits for its sector reads before the next step. |
-| The 99.9th percentile latency of a query is well above the mean. | Reads of one die wait for each other, and four threads read at random. |
-| `max_block_reads` grows by about one read for each query. | Each query starts at the same entry point, so one flash block takes a read for each query. |
-| `read_reclaim_lines` rises only when a write follows the reads. | FEMU queues at most one line on a read and rewrites it on a following write. The search writes no data, apart from file system writes. |
-| The search phase has no useful WAF. | The search writes no data. The script prints `-`, or a value from a few file system writes. |
+| Prediction | Reason | Run of 2026-11-21 |
+| --- | --- | --- |
+| `Mean IOs` grows with the list size L. | A longer list makes the search visit more nodes, and each node is a sector read. | Confirmed: 32.34, 56.53 and 100.55 at L 20, 40 and 80. |
+| The mean query latency grows with L by about the added reads times the read time of the model. | Each step waits for its sector reads before the next step. | Partly confirmed: 1146.36, 1930.96 and 3407.18 us. That is 32 to 34 us for each added read. The p50 band of `femu-stat.py` gives 42.5 us for each command, with a past-due share of 2.0%. |
+| The 99.9th percentile latency of a query is well above the mean. | Reads of one die wait for each other, and four threads read at random. | Confirmed: 4557, 4120 and 6015 us, 4.0, 2.1 and 1.8 times the mean. |
+| `max_block_reads` grows by about one read for each query. | Each query starts at the same entry point, so one flash block takes a read for each query. | Not confirmed: it reached 9194 over 6000 queries, about 1.5 reads for each query. The run does not show the cause. |
+| `read_reclaim_lines` rises only when a write follows the reads. | FEMU queues at most one line on a read and rewrites it on a following write. The search writes no data, apart from file system writes. | Partly confirmed: it stayed 0 in the search, with 9194 reads of one block and no host write. No write followed the search. |
+| The search phase has no useful WAF. | The search writes no data. The script prints `-`, or a value from a few file system writes. | Confirmed: 0 host pages, and the script printed `-`. |
+
+The run also gave this shape report for the whole trace, build and
+search together:
+
+- 379173 reads (99.9%) and 211 writes;
+- 379055 reads in the `4096` size line and 13 in the `8192` line;
+- 26 of 379173 reads sequential (0.0%);
+- a depth maximum of 60, in a time slice that holds the index writes
+  and the search. The run kept no trace file to split the two, so the
+  depth of the search alone is not known.
 
 To see the read reclaim, write to the namespace after the search and
 read log page C0h again. A write rewrites at most one queued line. FEMU
@@ -214,7 +228,9 @@ the same. A rewrite shows as write amplification.
 
 ## 6. Limits
 
-- No run exists. Section 5 is a set of predictions.
+- One run exists. It confirms three predictions of section 5, and a
+  part of two more. It does not confirm the prediction on the entry
+  point reads.
 - The prediction on the entry point reads follows from the search
   algorithm. No source states the read count of one block.
 - The vectors are random, so the recall has no meaning.
