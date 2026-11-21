@@ -9853,8 +9853,11 @@ void femu_test_memory_parts(void *obj, void *data,
         { "", ",mapping=fast", { 96 + 49 + 4096 * 8, 0, 0 } },
         /* a 32-byte statistics entry per die */
         { "", ",die_stats=on", { 0, 4 * 32, 0 } },
-        /* two namespace slices of one shared FTL: an offset, 3 counters */
-        { "", ",namespaces=2,shared_ftl=on", { 0, 0, 2 * 32 } },
+        /*
+         * two namespace slices of one shared FTL: an offset, 3 counters
+         * and 3 query-stats copies
+         */
+        { "", ",namespaces=2,shared_ftl=on", { 0, 0, 2 * (32 + 24) } },
     };
 
     for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {

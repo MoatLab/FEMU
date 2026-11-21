@@ -2889,8 +2889,8 @@ void femu_test_ftl_fail_sweep(void *obj, void *data,
         { "femu_mode=1,mapping=fast," FEMU_FAIL_GEO, 16 + 3 },
         { "femu_mode=1,die_stats=on," FEMU_FAIL_GEO, 16 + 1 },
         { "femu_mode=1,pg_xfer_lat=1000," FEMU_FAIL_GEO, 16 + 1 },
-        /* one FTL with two slices */
-        { "femu_mode=1,namespaces=2,shared_ftl=on," FEMU_FAIL_GEO, 16 + 2 },
+        /* one FTL with two slices: the table, counters, query-stats copies */
+        { "femu_mode=1,namespaces=2,shared_ftl=on," FEMU_FAIL_GEO, 16 + 3 },
         /*
          * 2^20 pages: the page states, the L2P and the reverse map each
          * reach 1 MiB and get their own mapping
