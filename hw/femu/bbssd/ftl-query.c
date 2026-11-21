@@ -358,6 +358,8 @@ void ssd_query_collect(struct ssd *ssd, FemuQueryNs *q)
     q->gc_fw_on = ssd->sp.fw_gc_page_ns != 0;
     q->gc_fw_pages = ssd->gc_fw_pages;
     q->gc_fw_ns = ssd->gc_fw_ns;
+    q->buffer_on = spp->buffer_size > 0;
+    q->buffer_bg_pages = ssd->buffer_bg_pages;
 
     q->eol_mode = ssd->eol_ro_mode;
     q->media_ro = ssd->media_ro;

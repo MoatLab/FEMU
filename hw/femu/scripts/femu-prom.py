@@ -53,6 +53,7 @@ COUNTERS = {
     "map-write-pages": "translation pages programmed",
     "map-read-pages": "translation pages read",
     "block-erases": "block erases",
+    "idle-write-back-pages": "buffered pages written back while idle",
 }
 LINES = ("free", "victim", "full", "retired", "spare", "total")
 
@@ -225,6 +226,7 @@ def self_test():
     for w in want:
         assert w in text, (w, text)
     assert "femu_pad_write_pages_total" not in text, text
+    assert "femu_idle_write_back_pages_total" not in text, text
     assert "femu_scrape_errors 0" in text, text
 
     # the same namespace through query-stats gives the same text
@@ -263,6 +265,12 @@ def self_test():
         {"name": "ns-host-write-pages", "value": 5}]})
     got = render(from_stats(results))
     assert strip(got) == text2, (got, text2)
+    for idle in (24, 0):
+        reply["namespaces"][0]["counters"]["idle-write-back-pages"] = idle
+        text = render([("/machine/peripheral/femu0", reply)])
+        w = ('femu_idle_write_back_pages_total{device="/machine/peripheral/'
+             'femu0",nsid="1"} %d' % idle)
+        assert w in text, (w, text)
     print("femu-prom: self-test passed")
 
 

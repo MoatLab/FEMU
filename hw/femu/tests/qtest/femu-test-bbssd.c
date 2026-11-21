@@ -904,8 +904,9 @@ static void femu_query_check_blocks(QTestState *qts)
  * Background write-back (buffer_low_pcent=25 of a 64-page buffer, so the
  * low mark is 16 pages, the high one 57). 40 one-page writes stay below
  * the high mark, so no write writes back on its own. Idle, the FTL thread
- * writes 24 pages back and stops at 16. Without buffer_low_pcent (@data
- * NULL) all 40 stay held.
+ * writes 24 pages back and stops at 16, and query-femu counts them as
+ * idle-write-back-pages. Without buffer_low_pcent (@data NULL) all 40
+ * stay held and the count reads 0.
  */
 void femu_test_buffer_bg(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -916,6 +917,7 @@ void femu_test_buffer_bg(void *obj, void *data, QGuestAllocator *alloc)
     QDict *rsp;
     QDict *ns;
     QDict *ctr;
+    gint64 deadline;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
@@ -925,11 +927,26 @@ void femu_test_buffer_bg(void *obj, void *data, QGuestAllocator *alloc)
                                         i * (FEMU_DATA_SIZE / c.lba_size),
                                         buf)), ==, NVME_SUCCESS);
     }
-    g_usleep(300 * 1000);
-    ns = femu_query_ns(qts, "", &rsp);
-    ctr = qdict_get_qdict(ns, "counters");
+    /*
+     * The idle passes run on their own schedule: poll up to 5 s for the
+     * full count, then check the last reply.
+     */
+    deadline = g_get_monotonic_time() + 5 * G_USEC_PER_SEC;
+    for (;;) {
+        g_usleep(data ? 50 * 1000 : 300 * 1000);
+        ns = femu_query_ns(qts, "", &rsp);
+        ctr = qdict_get_qdict(ns, "counters");
+        g_assert_true(qdict_haskey(ctr, "idle-write-back-pages"));
+        if (!data || qdict_get_int(ctr, "idle-write-back-pages") >= 24 ||
+            g_get_monotonic_time() > deadline) {
+            break;
+        }
+        qobject_unref(rsp);
+    }
     g_assert_cmpuint(qdict_get_int(ctr, "host-write-pages"), ==, 40);
     g_assert_cmpuint(qdict_get_int(ctr, "nand-write-pages"), ==,
+                     data ? 24 : 0);
+    g_assert_cmpuint(qdict_get_int(ctr, "idle-write-back-pages"), ==,
                      data ? 24 : 0);
     qobject_unref(rsp);
     femu_queue_free(&c, &c.io);

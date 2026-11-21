@@ -118,6 +118,9 @@ typedef struct FemuQueryNs {
     uint64_t gc_fw_pages;
     uint64_t gc_fw_ns;
 
+    bool buffer_on;             /* buffer_size */
+    uint64_t buffer_bg_pages;
+
     bool precon_on;             /* this realize preconditioned it */
     uint64_t precon_fill;
     uint64_t precon_overwrite;

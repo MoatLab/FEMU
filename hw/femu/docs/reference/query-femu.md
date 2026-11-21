@@ -81,7 +81,7 @@ A `bbssd` entry has these members:
 | Member | Content |
 | --- | --- |
 | `geometry` | `channels`, `luns-per-channel`, `planes-per-lun`, `blocks-per-plane`, `pages-per-block`, `page-size` (bytes), `pages-per-line`, and the totals `total-sectors`, `total-pages` and `total-blocks` |
-| `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, `pad-write-pages` (only after a pad), `map-write-pages` and `map-read-pages` (only with `mapping=dftl` and no FDP), `parity-write-pages` and `degraded-reads` (only with `die_parity` or `rain_parity`), `failed-dies`, `rebuild-lines-left`, `rebuild-pages`, `lost-pages` and `lost-blocks` (only with `rain_parity`), `gc-fw-pages` and `gc-fw-ns` (only with `fw_gc_page_ns` above 0, bbssd only), and `waf` |
+| `counters` | `host-write-pages`, `nand-write-pages`, `gc-write-pages`, `block-erases`, `pad-write-pages` (only after a pad), `map-write-pages` and `map-read-pages` (only with `mapping=dftl` and no FDP), `parity-write-pages` and `degraded-reads` (only with `die_parity` or `rain_parity`), `failed-dies`, `rebuild-lines-left`, `rebuild-pages`, `lost-pages` and `lost-blocks` (only with `rain_parity`), `gc-fw-pages` and `gc-fw-ns` (only with `fw_gc_page_ns` above 0, bbssd only), `idle-write-back-pages` (only with `buffer_size`; 0 while `buffer_low_pcent` is 0), and `waf` |
 | `media` | the NAND bus timing: see [Media timing](#media-timing) |
 | `line-counts` | lines that are `free`, `victim`, `full`, `retired` and `spare`, and the `total`; absent with FDP |
 | `precondition` | only on a namespace that `precon_fill_pct` filled at this realize: `fill-pages`, `overwrite-pages`, `nand-write-pages`, `gc-write-pages`, `map-write-pages`, `pad-write-pages`, `parity-write-pages`, `block-erases`, `waf` and `elapsed-ms` of that run; the `counters` start at zero after it. See [preconditioning](../design/ftl.md#preconditioning-at-realize-precon_fill_pct) |
@@ -91,6 +91,8 @@ A `bbssd` entry has these members:
 
 The page counters are the counters of [log page C0h](log-pages-and-counters.md#vendor-log-page-c0h)
 for one namespace. C0h adds them over the namespaces of the controller.
+C0h has no field for `idle-write-back-pages`. These pages are a part of
+`nand-write-pages`, so `waf` does not add them again.
 `waf` is (`nand-write-pages` + `gc-write-pages` + `map-write-pages` +
 `pad-write-pages` + `parity-write-pages`) / `host-write-pages` as a
 real number, and it is absent until the host writes a page. C0h reports the

@@ -1030,6 +1030,8 @@ handle's reclaim unit (`fdp_buffer_destage()` in
 `host_write_pages` counts pages when the host writes them and
 `nand_write_pages` when they are programmed, so a buffer that absorbs
 overwrites makes the write amplification factor drop below 1.
+`query-femu` reports the pages of the idle write-back apart, as
+`idle-write-back-pages`. Log page C0h has no field for them.
 
 ### Power loss
 

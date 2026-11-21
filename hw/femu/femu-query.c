@@ -773,6 +773,10 @@ static FemuNamespaceInfo *femu_query_ns_info(FemuQueryNs *q, bool lines)
         ctr->has_gc_fw_ns = true;
         ctr->gc_fw_ns = q->gc_fw_ns;
     }
+    if (q->buffer_on) {
+        ctr->has_idle_write_back_pages = true;
+        ctr->idle_write_back_pages = q->buffer_bg_pages;
+    }
     if (q->pad_pages) {
         ctr->has_pad_write_pages = true;
         ctr->pad_write_pages = q->pad_pages;

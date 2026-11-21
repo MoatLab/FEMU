@@ -200,7 +200,7 @@
 #
 # Write and erase counters of a namespace.  The page counters are the
 # ones vendor log page C0h reports, there summed over the namespaces
-# of the controller.
+# of the controller, except @idle-write-back-pages.
 #
 # @host-write-pages: pages the host asked to program
 #
@@ -263,6 +263,11 @@
 #     core time and not the host wait.  Present only with
 #     fw_gc_page_ns above 0.
 #
+# @idle-write-back-pages: buffered pages the idle FTL thread wrote
+#     back to NAND (buffer_low_pcent), a part of @nand-write-pages; 0
+#     when buffer_low_pcent is 0.  C0h has no field for it.  Present
+#     only with buffer_size.
+#
 # @waf: write amplification factor, (@nand-write-pages +
 #     @gc-write-pages + @map-write-pages + @pad-write-pages +
 #     @parity-write-pages) / @host-write-pages.  Absent until the host
@@ -280,7 +285,8 @@
             '*lost-pages': 'uint64', '*lost-blocks': 'uint64',
             '*idle-reclaims': 'uint64',
             '*idle-refreshes': 'uint64', '*gc-fw-pages': 'uint64',
-            '*gc-fw-ns': 'uint64', '*waf': 'number' } }
+            '*gc-fw-ns': 'uint64', '*idle-write-back-pages': 'uint64',
+            '*waf': 'number' } }
 
 ##
 # @FemuLineCounts:

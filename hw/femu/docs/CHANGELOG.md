@@ -271,6 +271,7 @@ listed one by one.
 - Read priority (`read_prio`, 0 by default): a read goes ahead of the programs and erases queued on its die. It waits only for the one that runs, and the queued ones slide by its array time.
 - Suspend limits (`pe_suspend_max`, `tresume_ns`, both 0 by default): a program or erase allows that many suspensions, then reads wait for it; each resume adds `tresume_ns` to it.
 - Background write-back (`buffer_low_pcent`, 0 by default): an idle FTL thread writes buffered pages back, one per die once all dies are free, until the buffer is at the low watermark. Writes then find room, and reads meet the die time the write-back used.
+- `query-femu` reports `idle-write-back-pages`, the pages the idle write-back wrote, for each bbssd namespace with a write buffer. It reads 0 while `buffer_low_pcent` is 0.
 - QEMU trace points for FEMU (`hw/femu/trace-events`): I/O and admin commands, completions with their modelled time, events, garbage collection victims, block erases, sanitize and power states. Turn them on with `-trace femu_*` or QMP `trace-event-set-state`; off, each costs one branch.
 - `query-femu` kind `blocks`: the erase count, P/E limit and overworn state of every flash block of a BlackBox namespace, paged with `offset` and `limit`.
 - PCI power management (`pci_pm=on`, off by default): a PM capability with D0 and D3hot. Outside D0 the BARs are off; back in D0 the controller keeps its state (No_Soft_Reset).
