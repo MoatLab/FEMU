@@ -16,6 +16,9 @@ Read these in order:
 4. [Quick start](getting-started/quick-start.md): build, boot a BlackBox SSD,
    run fio and read the write amplification factor.
 
+To build in a container instead, or to work in a devcontainer, see
+[Container](getting-started/container.md).
+
 ## I want to learn by doing
 
 The [tutorials](tutorials/README.md) walk through nine tasks in a real

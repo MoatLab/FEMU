@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+name: Container image
+
+# A full QEMU build in Docker takes about 20 minutes, so this runs only when
+# the container files or the build scripts change, once a week, and on a
+# manual start.
+on:
+  push:
+    branches: [ master, main ]
+    paths:
+      - 'hw/femu/container/**'
+      - '.devcontainer/**'
+      - '.dockerignore'
+      - '.github/workflows/container.yml'
+      - 'hw/femu/scripts/femu-compile.sh'
+      - 'hw/femu/scripts/femu-copy-scripts.sh'
+      - 'hw/femu/scripts/qtest-shard.py'
+  pull_request:
+    branches: [ master, main ]
+    paths:
+      - 'hw/femu/container/**'
+      - '.devcontainer/**'
+      - '.dockerignore'
+      - '.github/workflows/container.yml'
+      - 'hw/femu/scripts/femu-compile.sh'
+      - 'hw/femu/scripts/femu-copy-scripts.sh'
+      - 'hw/femu/scripts/qtest-shard.py'
+  schedule:
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+
+# The job builds and tests the image only. It logs in to no registry and
+# pushes nothing.
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+    - name: Build the image
+      run: docker build -f hw/femu/container/Containerfile -t femu-ci .
+
+    - name: Check the package snapshot
+      run: |
+        # the install used the snapshot that the Containerfile names
+        want=$(sed -n 's/^ARG UBUNTU_SNAPSHOT=//p' hw/femu/container/Containerfile)
+        got=$(docker run --rm femu-ci cat /etc/apt/apt.conf.d/50femu-snapshot)
+        echo "$got"
+        test "$got" = "APT::Snapshot \"$want\";"
+        docker run --rm femu-ci dpkg-query -W > packages.txt
+        wc -l packages.txt
+
+    - name: Check that the FEMU devices are registered
+      run: |
+        out=$(docker run --rm femu-ci ./qemu-system-x86_64 -device help)
+        for dev in femu femu-cxl-ssd femu-subsys; do
+          echo "$out" | grep -q "name \"$dev\"" || {
+            echo "-device help does not list $dev"; exit 1; }
+        done
+
+    - name: Run the FEMU qtests in the image
+      run: |
+        # No /dev/kvm: the qtests use the qtest accelerator. qos-test exits
+        # 0 whatever the results, so qtest-shard checks from the TAP output
+        # that each listed test has a result and none failed.
+        q=(docker run --rm -e QTEST_QEMU_BINARY=./qemu-system-x86_64 femu-ci)
+        "${q[@]}" ./tests/qtest/qos-test -l > qos.list
+        python3 hw/femu/scripts/qtest-shard.py --shards 1 --check < qos.list
+        "${q[@]}" ./tests/qtest/qos-test -m quick --tap \
+          -p /x86_64/pc/i440FX-pcihost/pci-bus-pc/pci-bus/femu/femu-tests \
+          > qtests.tap
+        tail -n 5 qtests.tap
+        python3 hw/femu/scripts/qtest-shard.py --shards 1 --index 0 \
+          --ran qtests.tap < qos.list
+
+    - name: Keep the package list
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+      with:
+        name: femu-image-packages
+        path: packages.txt
+        if-no-files-found: ignore
+        retention-days: 7

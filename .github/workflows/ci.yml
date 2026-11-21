@@ -635,6 +635,27 @@ jobs:
         # the symbol map of the porting guide: a small git fixture
         python3 hw/femu/scripts/femu-symbol-map.py --self-test
 
+    - name: Check the container files
+      run: |
+        # The image must install the build list of the build job, and each
+        # outside image must carry a digest. The self-test plants each fault.
+        python3 hw/femu/scripts/check-container.py --self-test
+        python3 hw/femu/scripts/check-container.py
+        # hadolint fails on any finding (threshold style). It must reject a
+        # planted bad file with status 1 and the expected rules, so a pull
+        # error or a bad invocation cannot pass as a rejection.
+        lint=hadolint/hadolint:v2.12.0@sha256:30a8fd2e785ab6176eed53f74769e04f125afb2f74a6c52aef7d463583b6d45e
+        printf 'FROM ubuntu:latest\nRUN apt-get install curl\n' > bad.Containerfile
+        rc=0
+        docker run --rm -i -e HADOLINT_FAILURE_THRESHOLD=style "$lint" \
+          < bad.Containerfile > bad.out 2>&1 || rc=$?
+        cat bad.out
+        test "$rc" -eq 1
+        grep -q DL3007 bad.out
+        grep -q DL3014 bad.out
+        docker run --rm -i -e HADOLINT_FAILURE_THRESHOLD=style "$lint" \
+          < hw/femu/container/Containerfile
+
     - name: Check build system consistency
       run: |
         # Verify FEMU is properly integrated in build system

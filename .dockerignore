@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Keep git metadata and host build trees out of the image build context.
+.git
+build
+build-*
+**/*.o
+**/*.pyc
+**/__pycache__
+**/*.qcow2
+**/*.log
+cc-session.md
+.cache
+.vscode

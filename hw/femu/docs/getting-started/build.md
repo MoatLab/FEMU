@@ -16,6 +16,9 @@ subprojects (for example `keycodemapdb` and `berkeley-softfloat-3`) during
 
 ## Dependencies
 
+On a host where these packages are hard to get, build in a container
+instead: see [container.md](container.md).
+
 On Debian and Ubuntu, `pkgdep.sh` installs what the build needs. It must run as
 root:
 

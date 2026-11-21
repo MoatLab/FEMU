@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+{
+  "name": "FEMU",
+  "build": {
+    "dockerfile": "../hw/femu/container/Containerfile",
+    "context": "..",
+    "target": "deps"
+  },
+  "remoteUser": "ubuntu",
+  "updateRemoteUserUID": true,
+  "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "mesonbuild.mesonbuild"
+      ]
+    }
+  }
+}

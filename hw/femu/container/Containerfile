@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# FEMU build image. Build it from the root of a clean clone:
+#   podman build -f hw/femu/container/Containerfile -t femu .
+# hw/femu/docs/getting-started/container.md explains how to run it.
+
+# The digest is the linux/amd64 image, not the multi-platform index, so the
+# image is x86_64 on every host.
+FROM docker.io/library/ubuntu:24.04@sha256:9a04f13b3f80ef056361e30868593b1cfd2279fe19e4081cb93a90bf56819d6a AS deps
+
+# Packages come from the Ubuntu archive as it was at this time. An empty
+# value takes the current archive, for example to get security fixes.
+ARG UBUNTU_SNAPSHOT=20261101T000000Z
+ARG DEBIAN_FRONTEND=noninteractive
+
+# The snapshot service needs HTTPS, so ca-certificates comes from the base
+# archive first; the second install takes the snapshot's version of it.
+# That list is the CI build list without ccache, plus the extras that
+# check-container.py names; the check fails when the lists differ.
+# The snapshot pins the versions, so DL3008 does not apply. preserve_groups
+# keeps the host kvm group that rootless podman passes in when the launchers
+# run QEMU through sudo.
+# hadolint ignore=DL3008
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    if [ -n "$UBUNTU_SNAPSHOT" ]; then \
+        echo "APT::Snapshot \"$UBUNTU_SNAPSHOT\";" > /etc/apt/apt.conf.d/50femu-snapshot; \
+    fi && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends --allow-downgrades \
+        build-essential pkg-config libglib2.0-dev \
+        libpixman-1-dev libfdt-dev zlib1g-dev libaio-dev \
+        libcap-ng-dev libattr1-dev ninja-build python3-pip \
+        libslirp-dev libseccomp-dev libcurl4-gnutls-dev \
+        libiscsi-dev libnfs-dev librbd-dev librados-dev \
+        libssh-dev liblzo2-dev libsnappy-dev libbz2-dev \
+        liblzma-dev libzstd-dev libgcrypt20-dev libgnutls28-dev \
+        uuid-dev libcap-dev libxml2-dev libmount-dev \
+        liburing-dev flex bison \
+        ca-certificates git python3 python3-venv libdw-dev libnuma-dev sudo && \
+    rm -rf /var/lib/apt/lists/* && \
+    echo "Defaults preserve_groups" > /etc/sudoers.d/femu-groups && \
+    chmod 0440 /etc/sudoers.d/femu-groups
+
+FROM deps AS femu
+
+COPY . /femu
+WORKDIR /femu/build-femu
+
+# The same steps as getting-started/build.md. femu-compile.sh starts with
+# "make clean", which finds no Makefile here and is harmless. The launchers
+# must be here, since femu-copy-scripts.sh exits 0 when a source is missing.
+RUN cp ../femu-scripts/femu-copy-scripts.sh . && \
+    ./femu-copy-scripts.sh && \
+    test -x run-blackbox.sh && test -x run-guest-ssh.sh && \
+    ./femu-compile.sh && \
+    test -x qemu-system-x86_64 && test -x tests/qtest/qos-test
+
+CMD ["/bin/bash"]

@@ -36,6 +36,7 @@ is in [architecture](../concepts/architecture.md).
 | [`lib/`](../../lib), [`inc/`](../../inc) | Lock-free rings and the priority queue, and their headers |
 | [`scripts/`](../../scripts) | Build and launch scripts, configs, guest tools, documentation tooling ([scripts reference](../reference/scripts.md)) |
 | [`tools/`](../../tools) | Guest tools for the CXL caching API |
+| [`container/`](../../container) | The Containerfile for the build image and the devcontainer ([container](../getting-started/container.md)) |
 | [`tests/`](../../tests) | Unit tests, the qtest file, CSD guest tests ([testing](../guides/testing.md)) |
 | [`docs/`](..) | This documentation ([doc map](../README.md)) |
 
