@@ -151,8 +151,11 @@ else
         setup_fail "checkout-$ref"
     commit=$(git -C "$src" rev-parse HEAD)
     mkdir -p "$src/build" "$bin" || setup_fail mkdir-build
+    # DiskANN 0.7.0 uses uint32_t in ann_exception.h without <cstdint>;
+    # GCC 13 (Ubuntu 24.04) no longer brings it in through <string>.
     (cd "$src/build" &&
-        bounded "$install_limit" cmake -DCMAKE_BUILD_TYPE=Release .. &&
+        bounded "$install_limit" cmake -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-include cstdint" .. &&
         bounded "$install_limit" make -j "$jobs") \
         >"$workdir/build.log" 2>&1 || {
         tail -n 20 "$workdir/build.log"

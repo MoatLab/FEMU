@@ -63,8 +63,13 @@ sudo apt install libmkl-full-dev
 git clone https://github.com/microsoft/DiskANN
 cd DiskANN
 git checkout 0.7.0
-mkdir build && cd build && cmake -DCMAKE_BUILD_TYPE=Release .. && make -j
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-include cstdint" ..
+make -j
 ```
+
+GCC 13 needs the `-include cstdint` flag: tag `0.7.0` uses `uint32_t`
+in `include/ann_exception.h` without the header.
 
 | Fact | Source | State |
 | --- | --- | --- |
