@@ -9,7 +9,9 @@ FROM docker.io/library/ubuntu:24.04@sha256:9a04f13b3f80ef056361e30868593b1cfd227
 
 # Packages come from the Ubuntu archive as it was at this time. An empty
 # value takes the current archive, for example to get security fixes.
-ARG UBUNTU_SNAPSHOT=20261101T000000Z
+# The time must not be older than the base image (built 2026-11-10):
+# apt does not downgrade the base packages, so the install then fails.
+ARG UBUNTU_SNAPSHOT=20261111T000000Z
 ARG DEBIAN_FRONTEND=noninteractive
 
 # The snapshot service needs HTTPS, so ca-certificates comes from the base
