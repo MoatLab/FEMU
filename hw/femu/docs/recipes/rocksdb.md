@@ -7,6 +7,10 @@
 > `PASS`. The low spare device of section 5 has not run, so no run
 > tests the predictions of section 6 that compare the two devices. No
 > run has checked `ROCKSDB_CONTROL=db-off-device`.
+>
+> That run had one overwrite pass. It wrote 1.71 GB, and GC did not
+> start. The overwrite phase now runs five passes, so that the device
+> passes its GC threshold. No run has tested this change yet.
 
 [RocksDB](https://github.com/facebook/rocksdb) is a key-value store
 with a log-structured merge tree (LSM tree). `db_bench` is its
@@ -108,7 +112,8 @@ cover the same finished work.
  phase      benchmark               options of the phase
  ---------  ----------------------  ---------------------------------------
  fill       fillrandom              --use_existing_db=0
- overwrite  overwrite               --use_existing_db=1
+ overwrite  overwrite               --use_existing_db=1 --writes=2000000
+                                    (5 passes of 400000 writes)
  mixed      readrandomwriterandom   --use_existing_db=1 --readwritepercent=90
                                     --threads=2 --reads=150000
 
@@ -131,7 +136,8 @@ db_bench --db=MNT/db --num=400000 --key_size=16 --value_size=1000 \
 
 | Option | Meaning |
 | --- | --- |
-| `--num=400000 --value_size=1000` | about 406 MB of keys and values; the fill writes random keys, so some keys repeat. One Put is 1032 bytes of write batch, so the user bytes are about 413 MB for each write phase |
+| `--num=400000 --value_size=1000` | about 406 MB of keys and values; the fill writes random keys, so some keys repeat. One Put is 1032 bytes of write batch, so the user bytes are about 413 MB for the fill and for each overwrite pass |
+| `--writes=2000000` (overwrite only) | `ROCKSDB_OVERWRITE_PASSES` x `--num` random writes over the same `--num` keys, in one process |
 | `--compression_type=none` | the byte counts do not depend on the data |
 | `--seed=42` | the same keys in each run, so two runs compare |
 | `--write_buffer_size`, `--target_file_size_base` | 32 MiB memtables and table files |
@@ -144,7 +150,8 @@ db_bench --db=MNT/db --num=400000 --key_size=16 --value_size=1000 \
 | `ROCKSDB_REF` | `v9.10.0` | tag, branch or commit of RocksDB |
 | `ROCKSDB_PREFIX` | `/opt/femu-rocksdb` | the build; a build of the same ref is used again |
 | `ROCKSDB_JOBS` | the number of CPUs | build jobs |
-| `ROCKSDB_NUM` | 400000 | keys of the fill and writes of the overwrite |
+| `ROCKSDB_NUM` | 400000 | keys of the fill, and writes of each overwrite pass |
+| `ROCKSDB_OVERWRITE_PASSES` | 5 | overwrite passes; the overwrite phase does this many times `ROCKSDB_NUM` writes |
 | `ROCKSDB_VALUE_SIZE` | 1000 | value bytes |
 | `ROCKSDB_MIXED_READS` | 150000 | operations of each thread in the mixed phase |
 | `ROCKSDB_THREADS` | 2 | threads of the mixed phase |
@@ -156,7 +163,7 @@ db_bench --db=MNT/db --num=400000 --key_size=16 --value_size=1000 \
 The last line of the script is the verdict:
 
 ```text
-ROCKSDB_RESULT=PASS recipe=rocksdb ref=v9.10.0 num=400000 value_size=1000 user_bytes=N lsm_write_bytes=N lsm_wa=N device_waf=N control=none
+ROCKSDB_RESULT=PASS recipe=rocksdb ref=v9.10.0 num=400000 overwrite_passes=5 value_size=1000 user_bytes=N lsm_write_bytes=N lsm_wa=N device_waf=N control=none
 ```
 
 The verdict is `PASS`, `FAIL` or `SETUP-ERROR`, and the exit status is
@@ -171,7 +178,7 @@ file `DONE` in its scratch directory.
 | each | the result line has the planned operation count | the phase stopped early, or ran with other options |
 | each | the log has no `get error:` line | a read found a checksum or I/O error, and the phase continued |
 | each | the statistics hold the user, flush, compaction and keys-written counts | the tool printed no statistics |
-| fill, overwrite | each operation wrote a key | the phase ran with other options |
+| fill, overwrite | each operation wrote a key; the overwrite does `ROCKSDB_OVERWRITE_PASSES` x `ROCKSDB_NUM` operations | the phase ran with other options |
 | fill, overwrite | the block layer writes and the C0h host pages each count 90% of the flush and compaction bytes | the table files did not reach the device |
 | overwrite | compaction wrote bytes | the LSM tree did not compact, so `lsm_wa` shows flushes only |
 | mixed | 5% to 15% of the operations wrote a key | the phase ran with other options |
@@ -189,6 +196,40 @@ answer an absent key with no read.
 
 `ROCKSDB_CONTROL=db-off-device` shows that the device checks can fail.
 The verdict must then be `FAIL`.
+
+### Why five overwrite passes
+
+Background GC starts when the free lines fall to the threshold. Before
+GC, each host page goes to a new NAND page. So GC starts after a fixed
+count of host bytes, whatever ext4 does with its blocks.
+
+```
+ device       lines  free at start  GC at    host bytes before GC starts
+ section 1    192    191            19 free  (191 - 19) x 16 MiB = 2.89 GB
+ low spare    128    127            12 free  (127 - 12) x 16 MiB = 1.93 GB
+```
+
+The first run gives the host bytes of each part. mkfs and the file
+system wrote 0.06 GB, the fill 0.75 GB, one overwrite pass 0.87 GB and
+the mixed phase 0.03 GB. Thus N passes write about 0.84 + 0.87 x N GB.
+
+```
+ passes  host bytes  section 1 device         low spare device
+ 1       1.71 GB     no GC (the first run)    no GC
+ 5       5.18 GB     GC from pass 2.4 on      GC from pass 1.3 on
+
+ free lines, section 1 device
+ 191 |*.
+     |   *.  1 pass
+  90 |------x
+     |          *.
+  19 |==============*======== GC threshold ==========  GC keeps the free lines near 19
+     +-------------+--------------------------------> host bytes
+     0           2.89 GB                    5.18 GB (5 passes)
+```
+
+Five passes start GC on the section 1 device even with 40% fewer bytes
+in each pass. These are predictions from one run, not measured values.
 
 ## 4. What to measure
 
@@ -284,12 +325,18 @@ device has not run, so no run confirms a difference between the two.
 | `end_to_end_wa` follows `device_waf`. | It is `host_wa x device_waf`, and `host_wa` changes less than `device_waf`. | No run confirms it. Section 1 device: `host_wa` 1.928, `end_to_end_wa` 1.928. |
 | The write P99 and P99.9 of fill and overwrite are higher on the low spare device. | GC keeps the dies busy, compaction falls behind, and RocksDB stalls the writes. | No run confirms it. Section 1 device: P99 6.21 and 6.94 us, P99.9 14.29 and 14.36 us. |
 | The read P99 of the mixed phase is higher on the low spare device. | A read waits when GC or a flush keeps its die busy. | No run confirms it. Section 1 device: P99 103.15 us. |
-| GC runs on both devices. | The phases write about 5 GB, more than three times the namespace. ext4 can write the same blocks again, so this does not prove that it writes most blocks. | Contradicted on the section 1 device: 0 GC pages and 0 block erases. The phases wrote 1651412992 host bytes, not about 5 GB. 90 of 192 lines were free at the end. |
+| GC runs on both devices. | Five overwrite passes write about 5.2 GB of host bytes, and GC starts after 2.89 GB (section 1 device) or 1.93 GB (low spare device). See section 3. | Contradicted with one overwrite pass on the section 1 device: 0 GC pages and 0 block erases. The phases wrote 1651412992 host bytes, and 90 of 192 lines were free at the end. No run has used five passes. |
 
 The host bytes of the three phases were about 1.03 times the namespace of
 1610612736 bytes. The section 1 device thus kept far more free lines
 than its background GC threshold of 19. The low spare device has 32
-spare lines, and its result is not known.
+spare lines, and its result is not known. The recipe now runs five
+overwrite passes for this reason.
+
+GC copies a page only when a victim line still holds valid data. A
+line that holds only deleted table files gives an erase and no GC page.
+The WAL, the journal and two background jobs mix data in each line, so
+the prediction is that most victims hold some valid pages.
 
 When both devices show the same `device_waf`, ext4 may have written only
 a part of the namespace. Each device then has more spare capacity than
@@ -298,9 +345,10 @@ the NAND, and read the free lines with `query-femu`.
 
 ## 7. Limits
 
-- One run exists, on the device of section 1 only. It contradicts the
-  prediction that GC runs on that device. The other predictions of
-  section 6 need the low spare device.
+- One run exists, on the device of section 1 only, with one overwrite
+  pass. It contradicts the prediction that GC runs on that device. No
+  run has used five passes. The other predictions of section 6 need
+  the low spare device.
 - One run is one sample. Background compaction makes the timing of a
   run vary, so compare more than one run of each device.
 - The database is small, about 406 MB of data.

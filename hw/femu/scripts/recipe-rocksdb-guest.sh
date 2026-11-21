@@ -15,7 +15,8 @@
 # this script.
 #
 #   fill       fillrandom: ROCKSDB_NUM random keys into a new database
-#   overwrite  overwrite: ROCKSDB_NUM random writes over the database
+#   overwrite  overwrite: ROCKSDB_OVERWRITE_PASSES x ROCKSDB_NUM random
+#              writes over the ROCKSDB_NUM keys, in one process
 #   mixed      readrandomwriterandom: 90% reads, 10% writes, a fixed
 #              count of operations on ROCKSDB_THREADS threads
 #   counters   log page C0h and the block layer, around each phase
@@ -44,8 +45,11 @@
 #   ROCKSDB_PREFIX     directory of the build (default /opt/femu-rocksdb);
 #                      a build of the same ref is used again
 #   ROCKSDB_JOBS       build jobs (default: the number of CPUs)
-#   ROCKSDB_NUM        keys of fill and writes of overwrite (default
-#                      400000)
+#   ROCKSDB_NUM        keys of fill and writes of each overwrite pass
+#                      (default 400000)
+#   ROCKSDB_OVERWRITE_PASSES  overwrite passes (default 5). Five passes
+#                      write about 5 GB, which takes the namespace of
+#                      the recipe page past its GC threshold.
 #   ROCKSDB_VALUE_SIZE value bytes (default 1000); keys have 16 bytes
 #   ROCKSDB_MIXED_READS  operations of each thread in the mixed phase
 #                      (default 150000)
@@ -216,6 +220,7 @@ ref=${ROCKSDB_REF:-v9.10.0}
 prefix=${ROCKSDB_PREFIX:-/opt/femu-rocksdb}
 jobs=${ROCKSDB_JOBS:-$(nproc)}
 num=${ROCKSDB_NUM:-400000}
+passes=${ROCKSDB_OVERWRITE_PASSES:-5}
 vsize=${ROCKSDB_VALUE_SIZE:-1000}
 mixed_reads=${ROCKSDB_MIXED_READS:-150000}
 threads=${ROCKSDB_THREADS:-2}
@@ -225,7 +230,7 @@ install_limit=${ROCKSDB_INSTALL_TIMEOUT:-3600}
 control=${ROCKSDB_CONTROL:-}
 parent=${WORKDIR:-/tmp}
 
-need_number jobs num vsize mixed_reads threads seed limit install_limit
+need_number jobs num vsize mixed_reads threads seed limit install_limit passes
 case $control in
 '' | db-off-device) ;;
 *) setup_fail "bad-control-$control" ;;
@@ -356,7 +361,11 @@ run_phase() {
 }
 
 run_phase fill fillrandom write "$num" --use_existing_db=0
-run_phase overwrite overwrite rewrite "$num" --use_existing_db=1
+# Before GC, each host page takes a new NAND page, so GC starts after a
+# fixed count of host bytes. One pass did not reach it on the device of
+# the recipe page. --writes repeats the pass over the same keys.
+run_phase overwrite overwrite rewrite "$((passes * num))" --use_existing_db=1 \
+    "--writes=$((passes * num))"
 run_phase mixed readrandomwriterandom mixed "$((threads * mixed_reads))" \
     --use_existing_db=1 \
     --readwritepercent=90 "--threads=$threads" "--reads=$mixed_reads"
@@ -380,6 +389,7 @@ echo "ROCKSDB_EFFECT=user_bytes=$tot_user payload_bytes=$tot_payload" \
     "nand_bytes=$(((tot_nand + tot_gc) * PAGE)) device_waf=$device_waf" \
     "end_to_end_wa=$e2e"
 
-recipe_finish "recipe=rocksdb" "ref=$ref" "num=$num" "value_size=$vsize" \
+recipe_finish "recipe=rocksdb" "ref=$ref" "num=$num" \
+    "overwrite_passes=$passes" "value_size=$vsize" \
     "user_bytes=$tot_user" "lsm_write_bytes=$tot_lsm" "lsm_wa=$lsm_wa" \
     "device_waf=$device_waf" "control=${control:-none}"
