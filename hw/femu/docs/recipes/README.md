@@ -5,11 +5,12 @@ device. The guest needs no accelerator. A sleep, a CPU program or an fio
 job stands for the accelerator.
 
 > **Status: partly validated on a host (2026-11-21).** DLIO and
-> DiskANN each ran once on an x86 host with KVM, with the device lines
-> of their pages. Both guest scripts gave `PASS`. The KV-cache recipe
-> is partly validated: its page states what ran. No run of DLIO or
-> DiskANN has checked the control mode of its guest script. One run is
-> one sample. Each page marks each prediction with the measured value.
+> DiskANN each completed one run on an x86 host with KVM, with the
+> device lines of their pages. Both guest scripts gave `PASS`. The
+> KV-cache recipe is partly validated: its page states what ran. No run
+> of DLIO or DiskANN has checked the control mode of its guest script.
+> One run is one sample. Each page tells measured results from
+> untested predictions.
 
 | Recipe | Workload | Device | Guest script |
 | --- | --- | --- | --- |
