@@ -1,11 +1,12 @@
 # Recipe: RocksDB db_bench on the SSD
 
-> **Status: not yet validated on a host.** This recipe has not run on
-> FEMU. The device lines pass the lint of the documentation check,
-> which starts no device. The build steps are those of
-> `zenfs-crash-guest.sh` at the same RocksDB tag. A review checked the
-> output formats against the v9.10.0 source. No run confirms the guest
-> script, those formats or the expected behaviour.
+> **Status: partly validated on a host (2026-11-21).** One run on an
+> x86 host with KVM used the device line of section 1, with `io_trace`
+> added. The guest ran Ubuntu 24.04.5 with kernel 6.8.0-139-generic.
+> RocksDB `v9.10.0` built, the three phases ran and the verdict was
+> `PASS`. The low spare device of section 5 has not run, so no run
+> tests the predictions of section 6 that compare the two devices. No
+> run has checked `ROCKSDB_CONTROL=db-off-device`.
 
 [RocksDB](https://github.com/facebook/rocksdb) is a key-value store
 with a log-structured merge tree (LSM tree). `db_bench` is its
@@ -80,10 +81,10 @@ make -j"$(nproc)" DEBUG_LEVEL=0 PORTABLE=1 DISABLE_WARNING_AS_ERROR=1 db_bench
 
 | Fact | Source | State |
 | --- | --- | --- |
-| Tag `v9.10.0` builds with `make DEBUG_LEVEL=0 DISABLE_WARNING_AS_ERROR=1` on the guest image | `zenfs-crash-guest.sh` uses the same tag and options | not confirmed by this recipe |
-| GCC 13 reports a false array-bounds error in RocksDB 9.10 | the comment in `zenfs-crash-guest.sh` | not confirmed by this recipe |
-| `db_bench` needs gflags; without it the tool prints a note and exits | the RocksDB `INSTALL.md` | not checked against the tag |
-| The names of the statistics counters and the format of the result line | the `db_bench` source at `v9.10.0` | checked by a review, not by a run |
+| Tag `v9.10.0` builds with `make DEBUG_LEVEL=0 DISABLE_WARNING_AS_ERROR=1` on the guest image | `zenfs-crash-guest.sh` uses the same tag and options; one run of this recipe | confirmed by one run, with `PORTABLE=1` |
+| GCC 13 reports a false array-bounds error in RocksDB 9.10 | the comment in `zenfs-crash-guest.sh`; one run of this recipe | one run showed one `-Warray-bounds` warning in `memtable/wbwi_memtable.h`, and the build ended; the guest image has GCC 13.3.0 |
+| `db_bench` needs gflags; without it the tool prints a note and exits | the RocksDB `INSTALL.md` | not checked against the tag; one build with `libgflags-dev` 2.2.2 passed |
+| The names of the statistics counters and the format of the result line | the `db_bench` source at `v9.10.0` | checked by a review; in one run the script read each value |
 
 `DEBUG_LEVEL=0` makes a release build. The default build of the
 Makefile keeps the assertions and runs slower. `PORTABLE=1` leaves out
@@ -271,16 +272,22 @@ the namespace.
 
 ## 6. Expected behaviour
 
-No run has confirmed these predictions.
+One run on 2026-11-21 used the device of section 1 only. The low spare
+device has not run, so no run confirms a difference between the two.
 
-| Prediction | Reason |
-| --- | --- |
-| Hypothesis: `lsm_wa` is about the same on both devices. | The keys, the options and the file system size are the same. But the device speed can change which files a compaction picks, so measure the difference. |
-| `device_waf` is higher on the low spare device, if ext4 writes most blocks of the namespace. | The file system has no `discard` option, so the FTL keeps the pages of deleted table files as valid until ext4 writes those blocks again. GC copies the valid pages of a victim, and with less spare capacity a victim holds more of them. |
-| `end_to_end_wa` follows `device_waf`. | It is `host_wa x device_waf`, and `host_wa` changes less than `device_waf`. |
-| The write P99 and P99.9 of fill and overwrite are higher on the low spare device. | GC keeps the dies busy, compaction falls behind, and RocksDB stalls the writes. |
-| The read P99 of the mixed phase is higher on the low spare device. | A read waits when GC or a flush keeps its die busy. |
-| GC runs on both devices. | The phases write about 5 GB, more than three times the namespace. ext4 can write the same blocks again, so this does not prove that it writes most blocks. |
+| Prediction | Reason | Run of 2026-11-21 |
+| --- | --- | --- |
+| Hypothesis: `lsm_wa` is about the same on both devices. | The keys, the options and the file system size are the same. But the device speed can change which files a compaction picks, so measure the difference. | No run confirms it. Section 1 device: `lsm_wa` 1.922. |
+| `device_waf` is higher on the low spare device, if ext4 writes most blocks of the namespace. | The file system has no `discard` option, so the FTL keeps the pages of deleted table files as valid until ext4 writes those blocks again. GC copies the valid pages of a victim, and with less spare capacity a victim holds more of them. | No run confirms it. Section 1 device: `device_waf` 1.000. |
+| `end_to_end_wa` follows `device_waf`. | It is `host_wa x device_waf`, and `host_wa` changes less than `device_waf`. | No run confirms it. Section 1 device: `host_wa` 1.928, `end_to_end_wa` 1.928. |
+| The write P99 and P99.9 of fill and overwrite are higher on the low spare device. | GC keeps the dies busy, compaction falls behind, and RocksDB stalls the writes. | No run confirms it. Section 1 device: P99 6.21 and 6.94 us, P99.9 14.29 and 14.36 us. |
+| The read P99 of the mixed phase is higher on the low spare device. | A read waits when GC or a flush keeps its die busy. | No run confirms it. Section 1 device: P99 103.15 us. |
+| GC runs on both devices. | The phases write about 5 GB, more than three times the namespace. ext4 can write the same blocks again, so this does not prove that it writes most blocks. | Contradicted on the section 1 device: 0 GC pages and 0 block erases. The phases wrote 1651412992 host bytes, not about 5 GB. 90 of 192 lines were free at the end. |
+
+The host bytes of the run were about 1.03 times the namespace of
+1610612736 bytes. The section 1 device thus kept far more free lines
+than its background GC threshold of 19. The low spare device has 32
+spare lines, and its result is not known.
 
 When both devices show the same `device_waf`, ext4 may have written only
 a part of the namespace. Each device then has more spare capacity than
@@ -289,7 +296,9 @@ the NAND, and read the free lines with `query-femu`.
 
 ## 7. Limits
 
-- No run exists. Section 6 is a set of predictions.
+- One run exists, on the device of section 1 only. It contradicts the
+  prediction that GC runs on that device. The other predictions of
+  section 6 need the low spare device.
 - One run is one sample. Background compaction makes the timing of a
   run vary, so compare more than one run of each device.
 - The database is small, about 406 MB of data.
