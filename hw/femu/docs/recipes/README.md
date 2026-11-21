@@ -1,8 +1,8 @@
 # Workload recipes
 
-A recipe runs the storage side of one AI workload on a FEMU device. The
-guest needs no accelerator. A sleep, a CPU program or an fio job stands
-for the accelerator.
+A recipe runs the storage side of one AI or database workload on a FEMU
+device. The guest needs no accelerator. A sleep, a CPU program or an fio
+job stands for the accelerator.
 
 > **Status: not yet validated on a host.** No recipe on these pages has
 > run on FEMU. The device lines pass the lint of the documentation
@@ -16,6 +16,7 @@ for the accelerator.
 | [DLIO](dlio.md) | dataset write, training reads, checkpoint writes | BBSSD, 3 GiB namespace | `recipe-dlio-guest.sh` |
 | [DiskANN](diskann.md) | build a vector index on the SSD, then search it | BBSSD, 1.5 GiB namespace, read reclaim | `recipe-diskann-guest.sh` |
 | [KV-cache offload](kv-cache-offload.md) | store and load cache entries of two tenants on a raw namespace | BBSSD with FDP, and a control with no FDP | `recipe-kv-offload-guest.sh` |
+| [RocksDB](rocksdb.md) | fill, overwrite and mixed reads and writes of an LSM key-value store | BBSSD, 1.5 GiB namespace, and a control with less spare capacity | `recipe-rocksdb-guest.sh` |
 
 ```
  host                                   guest (KVM, no accelerator)
@@ -70,17 +71,19 @@ shell variables of the tutorials:
 [Before you start](../tutorials/README.md#before-you-start).
 
 Copy the scripts of a recipe to the guest from `build-femu/` on the
-host. This command copies the scripts of all three recipes:
+host. This command copies the scripts of all four recipes:
 
 ```sh
 tar -C ../femu-scripts -c recipe-guest-lib.sh recipe-dlio-guest.sh \
     recipe-diskann-guest.sh recipe-kv-offload-guest.sh \
-    fio/gpu-kv-offload-fdp.fio | ./run-guest-ssh.sh tar -x
+    recipe-rocksdb-guest.sh fio/gpu-kv-offload-fdp.fio |
+    ./run-guest-ssh.sh tar -x
 ```
 
 Each script needs `recipe-guest-lib.sh` in its own directory. Each
-script needs `--yes`, because it writes over the namespace. Two of the
-scripts download and build a tool, so the guest needs network access.
+script needs `--yes`, because it writes over the namespace. Three of
+the scripts download and build a tool, so the guest needs network
+access.
 
 ## The counters that each script reads
 
