@@ -643,9 +643,19 @@ static void pel_establish(FemuCtrl *n)
     stq_le_p(h + 44, n->pel_power_cycles);       /* PWRCC */
     memcpy(h + 52, &id->vid, 2);
     memcpy(h + 54, &id->ssvid, 2);
-    memcpy(h + 56, id->sn, sizeof(id->sn));
-    memcpy(h + 76, id->mn, sizeof(id->mn));
-    memcpy(h + 116, id->subnqn, sizeof(id->subnqn));
+    /*
+     * Byte loops avoid a GCC 15 -Warray-bounds false positive on memcpy
+     * with the UBSan nonnull checks.
+     */
+    for (i = 0; i < sizeof(id->sn); i++) {
+        h[56 + i] = id->sn[i];
+    }
+    for (i = 0; i < sizeof(id->mn); i++) {
+        h[76 + i] = id->mn[i];
+    }
+    for (i = 0; i < sizeof(id->subnqn); i++) {
+        h[116 + i] = id->subnqn[i];
+    }
     pel->gnum++;                                /* wraps FFFFh to 0 */
     if (pel->write_bh) {
         qemu_bh_schedule(pel->write_bh);
