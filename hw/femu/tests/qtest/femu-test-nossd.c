@@ -2203,6 +2203,7 @@ void femu_test_intc_shared(void *obj, void *data,
     FemuCtrlState c = { 0 };
     bool del = g_str_equal(data, "delete");
     uint64_t buf = guest_alloc(alloc, 4096);
+    bool early;
     FemuQueue q2;
     NvmeCmd cmd;
     uint8_t cap;
@@ -2226,10 +2227,12 @@ void femu_test_intc_shared(void *obj, void *data,
     /*
      * Two of three completions: nothing fires before the 25.5 ms time.
      * A slow host (a sanitizer build) can take that long for two reads,
-     * and then the time has rightly fired the vector.
+     * and then the time has rightly fired the vector. Read the bit first:
+     * a read that ended within 20 ms also started within 20 ms.
      */
+    early = qpci_msix_pending(dev, 1);
     if ((g_get_monotonic_time() - t0) / 1000 < 20) {
-        g_assert_false(qpci_msix_pending(dev, 1));
+        g_assert_false(early);
     }
     if (del) {
         memset(&cmd, 0, sizeof(cmd));
