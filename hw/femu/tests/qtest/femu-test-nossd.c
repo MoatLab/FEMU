@@ -1421,6 +1421,39 @@ void femu_test_rw_atomic_split(void *obj, void *data,
 }
 
 /*
+ * The shortest of @tries rounds, each of @nr commands @op sent together from
+ * @slba on, in microseconds. A round completes before the next starts, so
+ * the engine is idle at its start. A host stall slows one round; time the
+ * device adds to every command slows each round.
+ */
+static int64_t femu_crypto_min_us(FemuCtrlState *c, uint8_t op, uint64_t slba,
+                                  uint64_t buf, int nr, bool ok, int tries)
+{
+    int64_t best = INT64_MAX;
+
+    for (int t = 0; t < tries; t++) {
+        int64_t t0 = g_get_monotonic_time();
+
+        for (int i = 0; i < nr; i++) {
+            femu_crypto_submit(c, op, slba + 16 * i, buf, 0);
+        }
+        for (int i = 0; i < nr; i++) {
+            uint16_t sc = FEMU_SC(femu_complete(c, &c->io, NULL, NULL));
+
+            if (ok) {
+                g_assert_cmpint(sc, ==, NVME_SUCCESS);
+            } else {
+                g_assert_cmpint(sc, !=, NVME_SUCCESS);
+            }
+        }
+        best = MIN(best, g_get_monotonic_time() - t0);
+    }
+    return best;
+}
+
+#define FEMU_CRYPTO_TRIES 5
+
+/*
  * Inline encryption engine on NoSSD, where nothing else adds time. At
  * crypto_mbps=1 an 8 KiB write, read or Write Zeroes holds the engine for
  * 8.192 ms. Two writes in one ring share the one engine and take 16.384 ms.
@@ -1428,6 +1461,12 @@ void femu_test_rw_atomic_split(void *obj, void *data,
  * time of the commands it discards (eight writes, 65.5 ms). Off, each command
  * takes well under 4 ms. An untimed first write pays the start cost of the
  * first I/O.
+ *
+ * Each figure is the shortest of FEMU_CRYPTO_TRIES rounds. Engine time is in
+ * every round, so the minimum keeps it, and a lower bound on the minimum
+ * holds for each round. A busy host slows some rounds, so an upper bound
+ * needs only one quick round. The write after a reset is one round, as only
+ * the first write meets the discarded engine time.
  */
 void femu_test_crypto(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -1447,11 +1486,8 @@ void femu_test_crypto(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 64, buf)), ==,
                     NVME_SUCCESS);
     for (size_t i = 0; i < ARRAY_SIZE(ops); i++) {
-        t0 = g_get_monotonic_time();
-        femu_crypto_submit(&c, ops[i], 0, buf, 0);
-        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
-                        NVME_SUCCESS);
-        us = g_get_monotonic_time() - t0;
+        us = femu_crypto_min_us(&c, ops[i], 0, buf, 1, true,
+                                FEMU_CRYPTO_TRIES);
         g_test_message("crypto %s: opcode 0x%x %" PRId64 " us",
                        on ? "on" : "off", ops[i], us);
         if (on) {
@@ -1462,14 +1498,8 @@ void femu_test_crypto(void *obj, void *data, QGuestAllocator *alloc)
     }
 
     /* two writes in one ring wait for each other at the engine */
-    t0 = g_get_monotonic_time();
-    femu_crypto_submit(&c, NVME_CMD_WRITE, 0, buf, 0);
-    femu_crypto_submit(&c, NVME_CMD_WRITE, 16, buf, 0);
-    for (int i = 0; i < 2; i++) {
-        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
-                        NVME_SUCCESS);
-    }
-    us = g_get_monotonic_time() - t0;
+    us = femu_crypto_min_us(&c, NVME_CMD_WRITE, 0, buf, 2, true,
+                            FEMU_CRYPTO_TRIES);
     g_test_message("crypto %s: two writes %" PRId64 " us", on ? "on" : "off",
                    us);
     if (on) {
@@ -1480,18 +1510,15 @@ void femu_test_crypto(void *obj, void *data, QGuestAllocator *alloc)
 
     /*
      * A read past the end fails and books no engine time. Reads first fill
-     * every request slot of the queue with a block count, so the rejected
+     * every request slot of the queue with a block count, so each rejected
      * read reuses one.
      */
     for (int i = 0; i < FEMU_QSIZE; i++) {
         g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
                         NVME_SUCCESS);
     }
-    t0 = g_get_monotonic_time();
-    femu_crypto_submit(&c, NVME_CMD_READ, 1ull << 40, buf, 0);
-    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), !=,
-                    NVME_SUCCESS);
-    us = g_get_monotonic_time() - t0;
+    us = femu_crypto_min_us(&c, NVME_CMD_READ, 1ull << 40, buf, 1, false,
+                            FEMU_CRYPTO_TRIES);
     g_test_message("crypto %s: rejected read %" PRId64 " us",
                    on ? "on" : "off", us);
     g_assert_cmpint(us, <, 4000);
@@ -1509,11 +1536,16 @@ void femu_test_crypto(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
-    t0 = g_get_monotonic_time();
-    femu_crypto_submit(&c, NVME_CMD_WRITE, 0, buf, 0);
-    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
-                    NVME_SUCCESS);
-    us = g_get_monotonic_time() - t0;
+    if (on) {
+        t0 = g_get_monotonic_time();
+        femu_crypto_submit(&c, NVME_CMD_WRITE, 0, buf, 0);
+        g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+        us = g_get_monotonic_time() - t0;
+    } else {
+        us = femu_crypto_min_us(&c, NVME_CMD_WRITE, 0, buf, 1, true,
+                                FEMU_CRYPTO_TRIES);
+    }
     g_test_message("crypto %s: write after reset %" PRId64 " us",
                    on ? "on" : "off", us);
     if (on) {
