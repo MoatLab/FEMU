@@ -24,10 +24,21 @@
 # Each phase ends with a memtable flush and a wait for compaction, so
 # the statistics and the counters cover the same finished work.
 #
+# The LSM options stop the writes at 12 L0 files and at 128 MiB of
+# pending compaction bytes, so that the database stays small.
+# lsm_space_need models the peak use that this allows, and the file
+# system must have that much free space. The model counts three levels,
+# so the keys must fit in the L2 target. A phase does not
+# run when an earlier db_bench failed, because the database it left can
+# make a flush or a compaction wait with no time limit.
+#
 # Pass criterion:
 #   - each db_bench phase exits 0 inside its time limit, prints its
 #     result line with the planned operation count, prints no
 #     "get error:" line, and prints its statistics;
+#   - each phase: the peak use of the file system stays at or below
+#     the model of lsm_space_need (one sample a second, and at least
+#     one sample from the sampler);
 #   - fill and overwrite: each operation writes a key, and the block
 #     layer writes and the C0h host pages each count at least 90% of
 #     the flush and compaction bytes of the phase;
@@ -48,8 +59,8 @@
 #   ROCKSDB_NUM        keys of fill and writes of each overwrite pass
 #                      (default 400000)
 #   ROCKSDB_OVERWRITE_PASSES  overwrite passes (default 5). Five passes
-#                      write about 5 GB, which takes the namespace of
-#                      the recipe page past its GC threshold.
+#                      take the namespace of the recipe page past its
+#                      GC threshold.
 #   ROCKSDB_VALUE_SIZE value bytes (default 1000); keys have 16 bytes
 #   ROCKSDB_MIXED_READS  operations of each thread in the mixed phase
 #                      (default 150000)
@@ -68,6 +79,9 @@
 # 16-byte key and a 1000-byte value. payload_bytes is the keys written
 # times the key and value size.
 #
+# ROCKSDB_SPACE=fs gives the free bytes of the new file system and the
+# model; ROCKSDB_SPACE=PHASE gives the peak use of each phase.
+#
 # Summary lines start with ROCKSDB_. The last line is
 # ROCKSDB_RESULT=PASS|FAIL|SETUP-ERROR with key=value fields. The exit
 # status is 0 when each check passed, 1 when one failed and 2 when the
@@ -79,6 +93,16 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 readonly RECIPE=ROCKSDB
 readonly PAGE=4096
 readonly KEY_SIZE=16
+# The LSM options of the space model: memtable and file size, memtables,
+# the L0 compaction trigger, the L0 slowdown and stop triggers, the L1
+# target and the pending compaction bytes at which writes stop.
+readonly WB=33554432
+readonly MAXWB=2
+readonly L0_TRIGGER=4
+readonly L0_SLOWDOWN=12
+readonly L0_STOP=12
+readonly L1_BYTES=134217728
+readonly PENDING_STOP=134217728
 
 # shellcheck source-path=SCRIPTDIR source=recipe-guest-lib.sh
 source "$SCRIPT_DIR/recipe-guest-lib.sh" || {
@@ -86,12 +110,110 @@ source "$SCRIPT_DIR/recipe-guest-lib.sh" || {
     exit 2
 }
 
+# lsm_space_need: a model of the peak bytes of the database on the file
+# system, from raw (keys x key and value size) and the LSM options. It
+# assumes one compaction at a time, flush and compaction files of about
+# WB bytes and uniform keys. d is L2, each key once, with 5% for the
+# index and filters. The writes stop when the pending compaction
+# estimate of RocksDB reaches PENDING_STOP:
+#   x  L1 when L2 holds d and the estimate (L1 - L1_BYTES) x
+#      (1 + L2 / L1) reaches PENDING_STOP; a smaller L2 allows a larger
+#      L1, but then L1 + L2 is smaller
+#   l0 L0 after the flush that reaches the trigger, plus the MAXWB
+#      memtables that flush after the stop
+#   a  an L0-L1 compaction from l0 and x: its output is at most its
+#      input, which stays until the output ends
+#   k  an L0-L1 compaction while L0 + L1 stays below PENDING_STOP
+#   e  an L1-L2 compaction after a compaction of case a: one L1 file,
+#      the L2 key range of that file and two edge files
+# Each case adds MAXWB memtables of WAL. 64 MiB covers the MANIFEST,
+# the LOG files and the ext4 directory and extent blocks. A sampled peak
+# above the model fails the phase. A pass does not prove the model,
+# because the sampler can miss a short peak.
+lsm_space_need() {
+    awk -v raw="$raw" -v wb="$WB" -v m="$MAXWB" -v t="$L0_TRIGGER" \
+        -v b="$L1_BYTES" -v h="$PENDING_STOP" 'BEGIN {
+        d = raw + int(raw / 20)
+        c = b + h - d
+        x = (c + sqrt(c * c + 4 * b * d)) / 2
+        l0 = (t + m) * wb
+        a = 2 * l0 + 2 * x + d + m * wb
+        k = 2 * (h + m * wb) + d + m * wb
+        e = 2 * l0 + x + d + 3 * wb + d * wb / b + m * wb
+        n = a
+        if (k > n) n = k
+        if (e > n) n = e
+        printf "%.0f\n", n + 67108864
+    }'
+}
+
+# lsm_three_levels: true when the keys fit below the L2 target (L1_BYTES
+# x 10). L2 holds each key once, so the database then has no L3, which
+# lsm_space_need does not count.
+lsm_three_levels() {
+    ((raw + raw / 20 < L1_BYTES * 10))
+}
+
+# used_bytes: the used bytes of the mount, or nothing.
+used_bytes() {
+    local u
+
+    u=$(timeout 10 df -B1 --output=used "$recipe_mnt" 2>/dev/null |
+        tail -n 1) || u=
+    u=${u//[[:space:]]/}
+    [[ $u =~ ^[0-9]+$ ]] && echo "$u"
+    return 0
+}
+
+# space_watch FILE: once a second, write the peak used bytes of the
+# mount and the count of samples to FILE. A rename puts each record in
+# place, so a kill never leaves a part record. It ends when it is killed
+# or when the script ends.
+space_watch() {
+    local out=$1 max=0 n=0 u
+
+    while kill -0 "$$" 2>/dev/null; do
+        u=$(used_bytes)
+        if [[ -n $u ]]; then
+            n=$((n + 1))
+            ((u <= max)) || max=$u
+            { echo "$max $n" >"$out.new" && mv -f "$out.new" "$out"; } || true
+        fi
+        sleep 1
+    done
+}
+
+# space_check PHASE: print ROCKSDB_SPACE= for the phase. One more sample
+# at the end of the phase joins the samples of space_watch. The phase
+# fails when space_watch wrote no sample or when the peak is above the
+# model. The sampler can miss a short peak, so the peak can be low,
+# never high.
+space_check() {
+    local phase=$1 peak=0 n=0 bn u
+
+    if [[ -r $workdir/$phase.space ]]; then
+        read -r peak n <"$workdir/$phase.space" || true
+    fi
+    [[ $peak =~ ^[0-9]+$ && $n =~ ^[0-9]+$ ]] || peak=0 n=0
+    bn=$n
+    u=$(used_bytes)
+    if [[ -n $u ]]; then
+        n=$((n + 1))
+        ((u <= peak)) || peak=$u
+    fi
+    echo "${RECIPE}_SPACE=$phase peak_used_bytes=$peak samples=$n" \
+        "model_bytes=$need fs_avail_bytes=$fs_avail"
+    ((bn > 0)) || check_fail "$phase-no-watch-samples"
+    ((peak <= need)) || check_fail "$phase-space-above-model"
+}
+
 # dbb_parse LOG PHASE BENCH: read one db_bench log. Print the line
 # ROCKSDB_BENCH= and one ROCKSDB_LATENCY= line for each histogram, and
 # set b_result (1 when the result line of BENCH is there), b_ops,
-# b_micros, b_nops, b_user, b_flush, b_compact, b_wal, b_keys, b_kw and
-# b_gerr. A value that the log does not hold is "-". b_gerr counts the
-# "get error:" lines. The values come from these lines:
+# b_micros, b_nops, b_user, b_flush, b_compact, b_wal, b_keys, b_kw,
+# b_gerr and b_stall. A value that the log does not hold is "-". b_gerr
+# counts the "get error:" lines. b_stall is the time that RocksDB held
+# writes back. The values come from these lines:
 #
 #   fillrandom   :       2.345 micros/op 426439 ops/sec 0.938 seconds
 #                        400000 operations; ...   (one line)
@@ -102,12 +224,12 @@ dbb_parse() {
     local log=$1 phase=$2 bench=$3 line nlat=0 _
 
     b_result=0 b_ops=- b_micros=- b_nops=- b_user=- b_flush=-
-    b_compact=- b_wal=- b_keys=- b_kw=- b_gerr=0
+    b_compact=- b_wal=- b_keys=- b_kw=- b_gerr=0 b_stall=-
     while IFS= read -r line; do
         case $line in
         "V "*)
             read -r _ b_result b_ops b_micros b_nops b_user b_flush \
-                b_compact b_wal b_keys b_kw b_gerr <<<"$line"
+                b_compact b_wal b_keys b_kw b_gerr b_stall <<<"$line"
             ;;
         "L "*)
             echo "${RECIPE}_LATENCY=$phase ${line#L }"
@@ -118,7 +240,8 @@ dbb_parse() {
         BEGIN {
             res = 0; ops = "-"; us = "-"; nops = "-"; gerr = 0
             split("bytes.written flush.write.bytes compact.write.bytes " \
-                "wal.bytes number.keys.read number.keys.written", names, " ")
+                "wal.bytes number.keys.read number.keys.written " \
+                "stall.micros", names, " ")
             for (i in names) val[names[i]] = "-"
         }
         $1 == bench && $2 == ":" && $4 == "micros/op" && $3 ~ /^[0-9.]+$/ &&
@@ -147,12 +270,12 @@ dbb_parse() {
             print "V", res, ops, us, nops, val["bytes.written"],
                 val["flush.write.bytes"], val["compact.write.bytes"],
                 val["wal.bytes"], val["number.keys.read"],
-                val["number.keys.written"], gerr
+                val["number.keys.written"], gerr, val["stall.micros"]
         }' "$log" 2>/dev/null)
     echo "${RECIPE}_BENCH=$phase ops_per_sec=$b_ops micros_per_op=$b_micros" \
         "operations=$b_nops user_bytes=$b_user flush_bytes=$b_flush" \
         "compact_bytes=$b_compact wal_bytes=$b_wal keys_read=$b_keys" \
-        "keys_written=$b_kw get_errors=$b_gerr"
+        "keys_written=$b_kw get_errors=$b_gerr stall_micros=$b_stall"
     ((nlat > 0)) || echo "${RECIPE}_NOTE=no-percentiles-$phase"
 }
 
@@ -242,10 +365,11 @@ done
 
 resolve_namespace "${1:-nvme0n1}"
 size=$(blockdev --getsize64 "$ns_dev") || setup_fail no-size
-# Obsolete files wait for compaction, and a compaction writes its output
-# before it deletes its input, so the file system needs room.
+# The namespace check comes before the build, so wrong sizes fail fast.
+# The free space of the file system is checked after the mount.
 raw=$((num * (KEY_SIZE + vsize)))
-need=$((raw * 3))
+lsm_three_levels || setup_fail "keys-above-l2-target-$((L1_BYTES * 10))"
+need=$(lsm_space_need)
 ((size >= need)) || setup_fail "namespace-below-$need"
 workdir=$(mktemp -d "$parent/femu-rocksdb.XXXXXX") || setup_fail mktemp
 recipe_workdir=$workdir
@@ -308,6 +432,12 @@ rm -rf "$workdir/smoke"
 echo "ROCKSDB_REF=$(<"$stamp")"
 
 mount_fresh "$workdir/mnt"
+fs_avail=$(timeout 10 df -B1 --output=avail "$recipe_mnt" | tail -n 1) ||
+    setup_fail no-fs-avail
+fs_avail=${fs_avail//[[:space:]]/}
+[[ $fs_avail =~ ^[0-9]+$ ]] || setup_fail no-fs-avail
+((fs_avail >= need)) || setup_fail "fs-avail-$fs_avail-below-$need"
+echo "ROCKSDB_SPACE=fs avail_bytes=$fs_avail model_bytes=$need"
 db=$recipe_mnt/db
 if [[ $control == db-off-device ]]; then
     db=$workdir/db
@@ -316,11 +446,20 @@ fi
 # The options that each phase shares. No compression, so the byte
 # counts do not depend on the data. Small memtables and files give a
 # small database several levels. Reads use O_DIRECT, so each read that
-# the block cache does not hold goes to the device.
+# the block cache does not hold goes to the device. The trigger and
+# limit options are the inputs of lsm_space_need: RocksDB stops writes
+# instead of filling the file system. Each slowdown option equals its
+# stop option, so RocksDB stops writes and does not delay them.
 common=("--db=$db" "--num=$num" "--key_size=$KEY_SIZE"
     "--value_size=$vsize" --compression_type=none "--seed=$seed"
-    --statistics=1 --histogram=1 --write_buffer_size=33554432
-    --target_file_size_base=33554432 --max_bytes_for_level_base=134217728
+    --statistics=1 --histogram=1 "--write_buffer_size=$WB"
+    "--max_write_buffer_number=$MAXWB"
+    "--target_file_size_base=$WB" "--max_bytes_for_level_base=$L1_BYTES"
+    "--level0_file_num_compaction_trigger=$L0_TRIGGER"
+    "--level0_slowdown_writes_trigger=$L0_SLOWDOWN"
+    "--level0_stop_writes_trigger=$L0_STOP"
+    "--soft_pending_compaction_bytes_limit=$PENDING_STOP"
+    "--hard_pending_compaction_bytes_limit=$PENDING_STOP"
     --max_background_jobs=2 --bloom_bits=10 --cache_size=8388608
     --use_direct_reads=1)
 echo "ROCKSDB_OPTIONS=${common[*]}"
@@ -331,25 +470,43 @@ tot_lsm=0
 tot_host=0
 tot_nand=0
 tot_gc=0
+db_failed=
 # run_phase NAME BENCH KIND OPS ARGS...: one db_bench process between
 # two counter samples. The flush and waitforcompaction benchmarks run
 # before db_bench prints its statistics. A db_bench that fails is a
-# check failure: the smoke run showed that the binary works.
+# check failure: the smoke run showed that the binary works. After such
+# a failure the next phases do not run: the database can be on a full
+# file system, where flush and waitforcompaction wait with no limit.
 run_phase() {
-    local name=$1 bench=$2 kind=$3 ops=$4 rc=0
+    local name=$1 bench=$2 kind=$3 ops=$4 rc=0 watch
     shift 4
 
+    if [[ -n $db_failed ]]; then
+        check_fail "$name-not-run-after-$db_failed"
+        return 0
+    fi
     drop_caches
     sample "s0_$name"
+    space_watch "$workdir/$name.space" </dev/null >/dev/null 2>&1 &
+    watch=$!
     bounded "$limit" "$bin" "${common[@]}" \
         "--benchmarks=$bench,flush,waitforcompaction" "$@" \
         >"$workdir/$name.log" 2>&1 || rc=$?
-    ((rc == 0)) || tail -n 20 "$workdir/$name.log"
+    kill "$watch" 2>/dev/null || true
+    wait "$watch" 2>/dev/null || true
+    if ((rc != 0)); then
+        tail -n 20 "$workdir/$name.log"
+        db_failed=$name
+        # RocksDB keeps its own LOG in the database directory, and the
+        # export takes the *.log files of the scratch directory.
+        tail -n 400 "$db/LOG" >"$workdir/$name-db-LOG.log" 2>/dev/null || true
+    fi
     flush_device
     sample "s1_$name"
     counter_change "$name" "s0_$name" "s1_$name"
     dbb_parse "$workdir/$name.log" "$name" "$bench"
     phase_check "$name" "$kind" "$rc" "$ops"
+    space_check "$name"
     [[ $b_user =~ ^[0-9]+$ ]] && tot_user=$((tot_user + b_user))
     [[ $b_kw =~ ^[0-9]+$ ]] &&
         tot_payload=$((tot_payload + b_kw * (KEY_SIZE + vsize)))

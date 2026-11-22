@@ -9,8 +9,16 @@
 > run has checked `ROCKSDB_CONTROL=db-off-device`.
 >
 > That run had one overwrite pass. It wrote 1.71 GB, and GC did not
-> start. The overwrite phase now runs five passes, so that the device
-> passes its GC threshold. No run has tested this change yet.
+> start. The overwrite phase then got five passes.
+>
+> A second run with five passes failed. Compaction fell behind, L0
+> grew, and RocksDB filled the ext4 file system ("No space left on
+> device"). The last progress line before the error was 1800000
+overwrites. The mixed phase then waited on the
+> full file system until its time limit. GC ran on the device (1184
+> block erases) but copied no page. The script now keeps the LSM tree
+> small and checks the peak disk use against a model of it (section 3,
+> "Disk space"). No run has tested this change yet.
 
 [RocksDB](https://github.com/facebook/rocksdb) is a key-value store
 with a log-structured merge tree (LSM tree). `db_bench` is its
@@ -128,8 +136,13 @@ The options of all phases:
 ```sh
 db_bench --db=MNT/db --num=400000 --key_size=16 --value_size=1000 \
     --compression_type=none --seed=42 --statistics=1 --histogram=1 \
-    --write_buffer_size=33554432 --target_file_size_base=33554432 \
-    --max_bytes_for_level_base=134217728 --max_background_jobs=2 \
+    --write_buffer_size=33554432 --max_write_buffer_number=2 \
+    --target_file_size_base=33554432 --max_bytes_for_level_base=134217728 \
+    --level0_file_num_compaction_trigger=4 \
+    --level0_slowdown_writes_trigger=12 --level0_stop_writes_trigger=12 \
+    --soft_pending_compaction_bytes_limit=134217728 \
+    --hard_pending_compaction_bytes_limit=134217728 \
+    --max_background_jobs=2 \
     --bloom_bits=10 --cache_size=8388608 --use_direct_reads=1 \
     --benchmarks=BENCHMARK,flush,waitforcompaction OPTIONS-OF-THE-PHASE
 ```
@@ -142,6 +155,10 @@ db_bench --db=MNT/db --num=400000 --key_size=16 --value_size=1000 \
 | `--seed=42` | the same keys in each run, so two runs compare |
 | `--write_buffer_size`, `--target_file_size_base` | 32 MiB memtables and table files |
 | `--max_bytes_for_level_base` | a level 1 of 128 MiB, so a small database gets several levels |
+| `--max_write_buffer_number=2`, `--level0_file_num_compaction_trigger=4` | the defaults, set on the command line because the space model uses them |
+| `--level0_slowdown_writes_trigger=12`, `--level0_stop_writes_trigger=12` | writes stop at 12 L0 files, with no delay before; the defaults are 20 and 36 |
+| `--soft_pending_compaction_bytes_limit`, `--hard_pending_compaction_bytes_limit` | RocksDB stops writes while it estimates 128 MiB or more of pending compaction bytes; the `db_bench` defaults are 64 GiB and 128 GiB |
+| `--max_background_jobs=2` | one flush thread and one compaction thread |
 | `--use_direct_reads=1` | reads use `O_DIRECT`, so a read that the 8 MiB block cache does not hold goes to the device |
 | `--reads=150000 --threads=2` | the mixed phase does 300000 operations; a count, not a duration, so the run time and the trace stay small |
 
@@ -150,7 +167,7 @@ db_bench --db=MNT/db --num=400000 --key_size=16 --value_size=1000 \
 | `ROCKSDB_REF` | `v9.10.0` | tag, branch or commit of RocksDB |
 | `ROCKSDB_PREFIX` | `/opt/femu-rocksdb` | the build; a build of the same ref is used again |
 | `ROCKSDB_JOBS` | the number of CPUs | build jobs |
-| `ROCKSDB_NUM` | 400000 | keys of the fill, and writes of each overwrite pass |
+| `ROCKSDB_NUM` | 400000 | keys of the fill, and writes of each overwrite pass; the keys must fit below the L2 target (see "Disk space") |
 | `ROCKSDB_OVERWRITE_PASSES` | 5 | overwrite passes; the overwrite phase does this many times `ROCKSDB_NUM` writes |
 | `ROCKSDB_VALUE_SIZE` | 1000 | value bytes |
 | `ROCKSDB_MIXED_READS` | 150000 | operations of each thread in the mixed phase |
@@ -159,6 +176,66 @@ db_bench --db=MNT/db --num=400000 --key_size=16 --value_size=1000 \
 | `ROCKSDB_TIMEOUT` | 1800 | seconds for each phase |
 | `ROCKSDB_INSTALL_TIMEOUT` | 3600 | seconds for all install steps together |
 | `ROCKSDB_CONTROL` | none | `db-off-device`: put the database in the scratch directory, so the device checks must fail |
+
+### Disk space
+
+The ext4 file system on the 1.5 GiB namespace has 1466499072 bytes free
+for a user (mke2fs 1.47.0). With the `db_bench` defaults, L0 can grow to
+36 files of 32 MiB, 1.21 GB. A compaction writes its output before it
+deletes its input. So the defaults can fill the file system, and one
+run did.
+
+The trigger and limit options above keep the LSM tree small. Each
+slowdown option equals its stop option, so RocksDB stops writes and
+does not delay them. The stop ends when compaction lowers the estimate.
+
+```
+ Put --> memtable --flush--> L0 files --compaction--> L1 --> L2
+                               |
+            pending compaction bytes >= 128 MiB  or  12 L0 files
+                               |
+                               v
+                        writes stop until compaction catches up
+```
+
+The function `lsm_space_need` of the script models the peak use under
+these options. It is a model, not a proof. It assumes one compaction at
+a time, table files of about 32 MiB and uniform keys. It takes the
+largest of three cases and adds 64 MiB for the MANIFEST, the LOG files
+and the ext4 metadata:
+
+```
+ wb = 32 MiB, M = 2, T = 4, B = 128 MiB (L1 target), H = 128 MiB (stop)
+ d  = 1.05 x num x (16 + value size)       L2: each key once, plus index and filters
+ x  = L1 when L2 holds d and the estimate reaches H: (x - B) (1 + d / x) = H
+ l0 = (T + M) wb                           L0 after the trigger flush and the
+                                           memtables that flush after the stop
+
+ a: L0-L1 compaction from l0 and x     2 l0 + 2 x + d + M wb       = 1242327995 B
+ k: L0-L1 compaction, L0 + L1 below H  2 (H + M wb) + d + M wb     =  896482048 B
+ e: L1-L2 compaction after case a      2 l0 + x + d + 3 wb + d wb / B + M wb
+                                                                   = 1276748318 B
+ model (defaults of the recipe)        e + 64 MiB                  = 1343857182 B (1.34 GB)
+```
+
+The model counts L0, L1 and L2 only. The keys must therefore fit
+below the L2 target of 1280 MiB (10 x B), about 1250000 keys of 1000
+bytes. The namespace must hold the model before the build. The free
+space of the new file system must hold it after the mount. Else the verdict is
+`SETUP-ERROR` and no phase runs.
+
+In each phase, the script reads the used bytes of
+the file system once a second and once at the end. A phase fails when
+the sampler wrote no sample. A sampled peak above the model fails the
+phase, and that disproves the model. The check comes after the phase,
+so it does not prevent a full disk. A pass does not prove the model,
+because the sampler can miss a short peak.
+
+When a `db_bench` phase exits with an error, the next phases do not run.
+A database on a full file system can make `flush` or
+`waitforcompaction` wait with no time limit. The script copies the last
+400 lines of the RocksDB `LOG` to `PHASE-db-LOG.log` in its scratch
+directory.
 
 The last line of the script is the verdict:
 
@@ -178,6 +255,8 @@ file `DONE` in its scratch directory.
 | each | the result line has the planned operation count | the phase stopped early, or ran with other options |
 | each | the log has no `get error:` line | a read found a checksum or I/O error, and the phase continued |
 | each | the statistics hold the user, flush, compaction and keys-written counts | the tool printed no statistics |
+| each | the sampler wrote at least one use sample, and the sampled peak use stays at or below the model of "Disk space" (`ROCKSDB_SPACE=`) | the sampler did not run, the LSM options did not keep the tree small, or the model is wrong |
+| each | an earlier phase did not fail (else the check `PHASE-not-run-after-EARLIER`) | an earlier `db_bench` failed, so the database is in an unknown state |
 | fill, overwrite | each operation wrote a key; the overwrite does `ROCKSDB_OVERWRITE_PASSES` x `ROCKSDB_NUM` operations | the phase ran with other options |
 | fill, overwrite | the block layer writes and the C0h host pages each count 90% of the flush and compaction bytes | the table files did not reach the device |
 | overwrite | compaction wrote bytes | the LSM tree did not compact, so `lsm_wa` shows flushes only |
@@ -212,6 +291,10 @@ count of host bytes, whatever ext4 does with its blocks.
 The first run gives the host bytes of each part. mkfs and the file
 system wrote 0.06 GB, the fill 0.75 GB, one overwrite pass 0.87 GB and
 the mixed phase 0.03 GB. Thus N passes write about 0.84 + 0.87 x N GB.
+That run had the `db_bench` defaults, and most compaction ran after the
+writes ended. With the options of "Disk space", compaction keeps pace
+with the writes, so a pass can write more host bytes. The table below is
+an estimate from that run.
 
 ```
  passes  host bytes  section 1 device         low spare device
@@ -229,7 +312,38 @@ the mixed phase 0.03 GB. Thus N passes write about 0.84 + 0.87 x N GB.
 ```
 
 Five passes start GC on the section 1 device even with 40% fewer bytes
-in each pass. These are predictions from one run, not measured values.
+in each pass. The second run confirmed that GC starts on the section 1
+device. It showed 1184 block erases (74 lines) and 20 free lines at the
+end.
+
+### What GC must show on each device
+
+GC can start and still copy nothing. The valid data is at most the
+namespace, 96 lines, because mkfs trims the namespace and the mount has
+no `discard` option. ext4 writes each table file as one large extent.
+When ext4 writes the blocks of deleted files again, whole lines can
+become invalid, and greedy GC takes such a line first. It erases the
+line and copies no page.
+
+```
+ device       lines closed at the GC start   valid data at most   lines that can hold no valid page
+ section 1    172                            96                   76 or more
+ low spare    115                            96                   19 or more
+```
+
+The section 1 device has room for many lines with no valid page. The
+second run showed it: GC erased 74 lines, copied 0 pages, and the WAF
+was 1.000. That is a correct result.
+
+The low spare device has less room for such lines. The prediction is
+that GC copies valid pages there. Valid pages can spread over all closed lines, but a region that ext4
+writes again and again can also give empty victims. Only a run can
+show which case occurs.
+
+| Device | What the harness of the recipe needs | Status |
+| --- | --- | --- |
+| section 1 | block erases above 0: GC freed lines | measured: 1184 erases, 0 GC pages |
+| low spare | GC pages above 0: GC copied valid data | predicted; no run |
 
 ## 4. What to measure
 
@@ -243,6 +357,8 @@ in each pass. These are predictions from one run, not measured values.
  ROCKSDB_COUNTERS= (guest script)  pages, WAF, plane reads, block bytes
  ROCKSDB_EFFECT= (guest script)    LSM, host and device write amplification
                                    over the three phases
+ ROCKSDB_SPACE= (guest script)     free bytes of the file system, the model,
+                                   and the peak use of each phase
  femu-stat.py (host)               stage times and the past-due share
  io_trace + femu-trace2fio.py      size mix, queues, depth, bursts
 ```
@@ -265,7 +381,12 @@ metadata. So `host_wa` is above `lsm_wa`, and `end_to_end_wa` is not
 
 The latency of `db_bench` is the time of one operation in the guest. A
 write latency is mostly memtable time, except when RocksDB stalls the
-writes because compaction is behind. A read latency holds one or more
+writes because compaction is behind. The options of "Disk space" stop
+the writes often, so the write tail of fill and overwrite can show those
+stops. `stall_micros=` on the `ROCKSDB_BENCH=` line is the total time
+that RocksDB held writes back.
+
+A read latency holds one or more
 device reads. The trace gives the device latency of each command as
 `t_cqe_ns - t_submit_ns` in nanoseconds. Before you compare latencies, read the
 past-due share that `femu-stat.py` prints. A high share means that FEMU
@@ -315,8 +436,10 @@ the namespace.
 
 ## 6. Expected behaviour
 
-One run on 2026-11-21 used the device of section 1 only. The low spare
+Two runs on 2026-11-21 used the device of section 1 only. The low spare
 device has not run, so no run confirms a difference between the two.
+The column below holds the first run, except where a row names the
+second.
 
 | Prediction | Reason | Run of 2026-11-21 |
 | --- | --- | --- |
@@ -325,7 +448,10 @@ device has not run, so no run confirms a difference between the two.
 | `end_to_end_wa` follows `device_waf`. | It is `host_wa x device_waf`, and `host_wa` changes less than `device_waf`. | No run confirms it. Section 1 device: `host_wa` 1.928, `end_to_end_wa` 1.928. |
 | The write P99 and P99.9 of fill and overwrite are higher on the low spare device. | GC keeps the dies busy, compaction falls behind, and RocksDB stalls the writes. | No run confirms it. Section 1 device: P99 6.21 and 6.94 us, P99.9 14.29 and 14.36 us. |
 | The read P99 of the mixed phase is higher on the low spare device. | A read waits when GC or a flush keeps its die busy. | No run confirms it. Section 1 device: P99 103.15 us. |
-| GC runs on both devices. | Five overwrite passes write about 5.2 GB of host bytes, and GC starts after 2.89 GB (section 1 device) or 1.93 GB (low spare device). See section 3. | Contradicted with one overwrite pass on the section 1 device: 0 GC pages and 0 block erases. The phases wrote 1651412992 host bytes, and 90 of 192 lines were free at the end. No run has used five passes. |
+| GC runs on both devices. | Five overwrite passes write about 5.2 GB of host bytes, and GC starts after 2.89 GB (section 1 device) or 1.93 GB (low spare device). See section 3. | Contradicted with one overwrite pass on the section 1 device: 0 GC pages and 0 block erases. The phases wrote 1651412992 host bytes, and 90 of 192 lines were free at the end. |
+| GC erases lines on the section 1 device, and may copy no page. | Section 3, "What GC must show on each device". | Second run, five passes, section 1 device: 1184 block erases, 0 GC pages, `device_waf` 1.000, 20 of 192 lines free. The overwrite phase failed on a full file system, so the run is not a pass. |
+| GC copies pages on the low spare device. | Section 3, "What GC must show on each device". | No run. |
+| The peak use of the file system stays below the model, 1.34 GB. | Section 3, "Disk space". | No run with the new options. With the defaults, the second run filled the file system. |
 
 The host bytes of the three phases were about 1.03 times the namespace of
 1610612736 bytes. The section 1 device thus kept far more free lines
@@ -347,10 +473,14 @@ the NAND, and read the free lines with `query-femu`.
 
 ## 7. Limits
 
-- One run exists, on the device of section 1 only, with one overwrite
-  pass. It contradicts the prediction that GC runs on that device. No
-  run has used five passes. The other predictions of section 6 need
+- Two runs exist, on the device of section 1 only. The first had one
+  overwrite pass, and GC did not start. The second had five passes and
+  the `db_bench` defaults, and it filled the file system. No run has
+  used the options of section 3. The other predictions of section 6 need
   the low spare device.
+- The options of section 3 make RocksDB stop writes often. The write
+  tail latency then shows RocksDB stops, which a real deployment with
+  more disk space would not have.
 - One run is one sample. Background compaction makes the timing of a
   run vary, so compare more than one run of each device.
 - The database is small, about 406 MB of data.
