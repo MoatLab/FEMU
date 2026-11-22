@@ -22772,8 +22772,8 @@ void femu_test_tier_idle_write(void *obj, void *data,
 /*
  * A Format while an idle fold is part way through a line. The Format waits
  * for the step, unmaps every page, and the idle folds then erase the lines
- * with nothing to move. The idle folds may already run when the check
- * after the Format comes, so it counts each folded line as a closed one,
+ * with nothing to move. The idle folds can go on as soon as the Format
+ * ends, so the check after it counts each folded line as a closed one,
  * as in femu_test_tier_idle_sanitize().
  */
 void femu_test_tier_idle_format(void *obj, void *data,
@@ -22821,10 +22821,10 @@ void femu_test_tier_idle_format(void *obj, void *data,
  * takes the same pause as Format: it waits for the step and unmaps every
  * page, and the idle folds then erase the lines with nothing to move.
  *
- * The idle folds resume 20 ms after the Sanitize, and a fold of an empty
- * line is quick. So the check after the Sanitize may already see some
- * lines folded. A pool line leaves the closed list only by a fold, and
- * only an idle fold runs here:
+ * The idle folds can go on as soon as the Sanitize ends, and a fold of an
+ * empty line is quick. So the check after the Sanitize may already see
+ * some lines folded. A pool line leaves the closed list only by a fold,
+ * and only an idle fold runs here:
  *
  *   closed now + folds since the snapshot == 3 closed at the snapshot
  *   folds since the snapshot == idle folds since the snapshot
