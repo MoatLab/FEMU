@@ -5425,7 +5425,7 @@ static void femu_register_nodes(void)
             "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
             "nchs=2,gc_thres_pcent=50,gc_thres_pcent_high=94,"
             "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
-            "pg_xfer_lat=2000000,subsys=fdpsub,gc_copyback=on"
+            "pg_xfer_lat=2000000,subsys=fdpsub,gc_copyback=on,io_stages=on"
     });
     qos_add_test("fdp-copyback-ii-off", "femu", femu_test_fdp_copyback,
                  &(QOSGraphTestOptions) {
@@ -5445,7 +5445,7 @@ static void femu_register_nodes(void)
             "pgs_per_blk=32,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
             "nchs=2,gc_thres_pcent=50,gc_thres_pcent_high=94,"
             "pg_rd_lat=100000,pg_wr_lat=100000,blk_er_lat=100000,"
-            "pg_xfer_lat=2000000,subsys=fdpsub-ii,gc_copyback=on"
+            "pg_xfer_lat=2000000,subsys=fdpsub-ii,gc_copyback=on,io_stages=on"
     });
     qos_add_test("fdp-events-gc-pi", "femu", femu_test_fdp_move_events,
                  &(QOSGraphTestOptions) {

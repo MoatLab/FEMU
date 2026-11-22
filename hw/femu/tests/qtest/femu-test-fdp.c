@@ -1847,6 +1847,11 @@ void femu_test_fdp_buffer(void *obj, void *data, QGuestAllocator *alloc)
  * move finds its
  * destination die; off, every move puts two transfers on the channels. The
  * media byte counters must show the moves.
+ *
+ * "on" times the writes on the device (io_stages=on), as gc-copyback does:
+ * the hold stage runs from the return from the FTL to the due time. A busy
+ * host can shorten hold, not lengthen it. A move that still books its
+ * channel transfers adds up to 128 ms to the write behind it.
  */
 void femu_test_fdp_copyback(void *obj, void *data,
                             QGuestAllocator *alloc)
@@ -1864,6 +1869,8 @@ void femu_test_fdp_copyback(void *obj, void *data,
     uint64_t lpn, gc0, gc = 0, cb, mbmw, hbmw, mbe;
     uint64_t mapped, lost, orphans;
     int64_t max_ms = 0;
+    int64_t hold_ms = 0;
+    int writes = 0;
     uint8_t st[64];
     int n;
 
@@ -1877,6 +1884,10 @@ void femu_test_fdp_copyback(void *obj, void *data,
     }
     g_assert_cmphex(femu_dealloc_pages(&c, 0, 64, list), ==, NVME_SUCCESS);
     gc0 = femu_c0h_field(&c, log, 16);
+    if (on) {
+        qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                                "'arguments':{'reset':true}}"));
+    }
     /* at most up to the end of the 11 MiB namespace */
     for (n = 0; n < 160 && gc < 64; n++) {
         int64_t t0 = g_get_monotonic_time();
@@ -1884,6 +1895,7 @@ void femu_test_fdp_copyback(void *obj, void *data,
         g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, lpn, 16, buf, list,
                                                         1)), ==, NVME_SUCCESS);
         max_ms = MAX(max_ms, (g_get_monotonic_time() - t0) / 1000);
+        writes++;
         lpn += 16;
         gc = femu_c0h_field(&c, log, 16) - gc0;
     }
@@ -1894,12 +1906,17 @@ void femu_test_fdp_copyback(void *obj, void *data,
         g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, lpn, 16, buf, list,
                                                         1)), ==, NVME_SUCCESS);
         max_ms = MAX(max_ms, (g_get_monotonic_time() - t0) / 1000);
+        writes++;
+    }
+    if (on) {
+        hold_ms = femu_stage_hold_max_ms(qts, writes);
     }
     gc = femu_c0h_field(&c, log, 16) - gc0;
     cb = femu_c0h_field(&c, log, 248);
     g_test_message("FDP gc_copyback %s: %" PRIu64 " moved, %" PRIu64
-                   " by copyback, slowest write %" PRId64 " ms",
-                   (const char *)data, gc, cb, max_ms);
+                   " by copyback, slowest write %" PRId64 " ms, longest "
+                   "media wait %" PRId64 " ms", (const char *)data, gc, cb,
+                   max_ms, hold_ms);
     g_assert_cmpuint(gc, ==, 64);
 
     /* every live page still maps to the one copy that holds it */
@@ -1922,7 +1939,9 @@ void femu_test_fdp_copyback(void *obj, void *data,
 
     if (on) {
         g_assert_cmpuint(cb, ==, 64);
-        g_assert_cmpint(max_ms, <, 60);
+        /* each write books about 16 ms of its own transfers */
+        g_assert_cmpint(hold_ms, >=, 4);
+        g_assert_cmpint(hold_ms, <, 60);
     } else {
         g_assert_cmpuint(cb, ==, 0);
         g_assert_cmpint(max_ms, >, 100);

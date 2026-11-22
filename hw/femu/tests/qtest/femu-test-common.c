@@ -1416,6 +1416,36 @@ QDict *femu_stage(QDict *ret, const char *name)
     g_assert_not_reached();
 }
 
+/*
+ * The longest hold stage, in ms, of the @count I/O commands timed since
+ * the last reset of io_stages. The poller posts the entry before it times
+ * the command, so wait until the last one is in.
+ */
+int64_t femu_stage_hold_max_ms(QTestState *qts, int count)
+{
+    QDict *rsp = NULL;
+    QDict *ret = NULL;
+    int64_t ms;
+    int n;
+
+    for (n = 0; n < FEMU_POLL_LIMIT_MS; n++) {
+        qobject_unref(rsp);
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+        ret = qdict_get_qdict(rsp, "return");
+        if (qdict_get_int(femu_stage(ret, "total"), "count") >= count) {
+            break;
+        }
+        g_usleep(1000);
+    }
+    g_assert_cmpint(qdict_get_int(femu_stage(ret, "total"), "count"), ==,
+                    count);
+    g_assert_cmpint(qdict_get_int(femu_stage(ret, "hold"), "count"), ==,
+                    count);
+    ms = qdict_get_int(femu_stage(ret, "hold"), "max-ns") / 1000000;
+    qobject_unref(rsp);
+    return ms;
+}
+
 /* the count in bucket @b of a stage */
 uint64_t femu_stage_bucket(QDict *st, int b)
 {

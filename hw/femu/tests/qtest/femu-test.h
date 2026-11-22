@@ -565,6 +565,7 @@ void femu_burst_queue(FemuCtrlState *c, FemuQueue *q, uint16_t qid);
 void femu_create_io_queues_irq(FemuCtrlState *c, uint16_t vector);
 void femu_read_unconsumed(FemuCtrlState *c, uint64_t buf);
 QDict *femu_stage(QDict *ret, const char *name);
+int64_t femu_stage_hold_max_ms(QTestState *qts, int count);
 uint64_t femu_stage_bucket(QDict *st, int b);
 void femu_stage_check_buckets(QDict *st);
 void femu_stages_check_sum(QDict *ret);

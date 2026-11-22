@@ -1957,31 +1957,9 @@ void femu_test_gc_copyback(void *obj, void *data,
         max_ms = MAX(max_ms, (g_get_monotonic_time() - t0) / 1000);
         writes++;
     }
-    /*
-     * Each write of the loop is one command, timed in every stage. The
-     * poller posts the entry before it times the command, so wait for the
-     * last one.
-     */
+    /* each write of the loop is one command, timed in every stage */
     if (stages) {
-        QDict *rsp = NULL;
-        QDict *ret = NULL;
-        QDict *hold;
-
-        for (n = 0; n < FEMU_POLL_LIMIT_MS; n++) {
-            qobject_unref(rsp);
-            rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
-            ret = qdict_get_qdict(rsp, "return");
-            if (qdict_get_int(femu_stage(ret, "total"), "count") >= writes) {
-                break;
-            }
-            g_usleep(1000);
-        }
-        hold = femu_stage(ret, "hold");
-        g_assert_cmpint(qdict_get_int(femu_stage(ret, "total"), "count"), ==,
-                        writes);
-        g_assert_cmpint(qdict_get_int(hold, "count"), ==, writes);
-        hold_ms = qdict_get_int(hold, "max-ns") / 1000000;
-        qobject_unref(rsp);
+        hold_ms = femu_stage_hold_max_ms(qts, writes);
     }
     g_assert_cmpstr(st, ==, "free");
     /* every live page still maps to the one copy that holds it */
