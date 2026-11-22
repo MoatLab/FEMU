@@ -353,6 +353,26 @@ int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq)
             femu_err("nvme: msix_set_vector_notifiers failed\n");
             return -1;
         }
+        return 0;
+    }
+
+    /*
+     * The notifiers attach an irqfd only when a vector is unmasked. A host
+     * that unmasks its vectors before it creates the queues (FreeBSD does)
+     * sends no unmask for this queue, so attach the irqfd here.
+     */
+    if (cq->cqid && cq->irq_enabled && cq->virq > 0 &&
+        !msix_is_masked(&n->parent_obj, cq->vector)) {
+        cq->msg = msix_get_message(&n->parent_obj, cq->vector);
+        ret = kvm_irqchip_add_irqfd_notifier_gsi(kvm_state, &cq->guest_notifier,
+                                                 NULL, cq->virq);
+        if (ret < 0) {
+            /* with no irqfd, notify through the PCI core instead */
+            femu_err("MSI add irqfd gsi vector %u failed, ret %d",
+                     cq->vector, ret);
+            nvme_remove_kvm_msi_virq(cq);
+            return ret;
+        }
     }
 
     return 0;

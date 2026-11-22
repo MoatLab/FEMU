@@ -543,6 +543,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 - Commands complete on the completion queue they were bound to, and submission queues that share a completion queue are served (7a3f1d9fa, dc4289f91).
 - Completions are not posted into a full queue and the phase tag is written last (6f998742f, 04ce8b1a7).
 - I/O interrupts are delivered without a KVM route, and pin interrupts work with shadow doorbells (8ebffbaa4, 34621540e, 4ca1be945).
+- With KVM, an I/O completion queue now gets its MSI-X interrupts when the host unmasks the vector before it creates the queue. FreeBSD does this. Its nvme(4) driver found the completions only when a command timed out ("System interrupt issues?"), so the boot stalled. Linux unmasks the vector after it creates the queue.
 - Create SQ/CQ reject out-of-range queue IDs and invalid interrupt vectors, and return the specified statuses (b3bbaedb0, 7580dd341, edefcd7c5).
 - Fixed controller configuration and admin queue registers, feature reset on controller reset, and the fatal status cleared on disable (330ed2aab, f2ea41361, ab63717c5).
 - Get Log Page reads its identifier and offset correctly and serves every log from the requested offset (a6b0d5897, ef8b755ee, 23fc538ea).
