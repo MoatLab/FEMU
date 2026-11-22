@@ -3952,6 +3952,16 @@ static int64_t femu_timed_rw(FemuCtrlState *c, FemuQueue *q, NvmeRwCmd *rw,
  * the writes before it do not. With lag 1, a read of page 0 before its
  * fine pass comes from the buffer at once and after it pays the array
  * read. Off, no write waits and every read pays the array read.
+ *
+ * The program of write lag - 1 books the fine pass when it ends, before
+ * that write completes to the host. So the 50 ms run from inside write
+ * lag - 1, and host time between the two writes hides part of them. The
+ * wait is thus measured from the start of write lag - 1 to the end of
+ * write lag:
+ *
+ *   host   |-- write lag-1 --|  gap  |------ write lag ------|
+ *   LUN      [prog][======= fine pass 50 ms =======][prog]
+ *            ^ span start                                  ^ span end
  */
 void femu_test_prog_pass2(void *obj, void *data,
                           QGuestAllocator *alloc)
@@ -3965,6 +3975,7 @@ void femu_test_prog_pass2(void *obj, void *data,
     NvmeRwCmd rw;
     uint64_t buf;
     int64_t us;
+    int64_t t_pre = 0;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_zap_create_queue(&c, &q, 1);
@@ -3979,14 +3990,24 @@ void femu_test_prog_pass2(void *obj, void *data,
     /* the first I/O pays a start cost: an untimed write takes wordline 0 */
     femu_timed_rw(&c, &q, &rw, NVME_CMD_WRITE, 7);
     for (int pg = 0; pg <= 3; pg++) {
+        int64_t t_w = g_get_monotonic_time();
+
         us = femu_timed_rw(&c, &q, &rw, NVME_CMD_WRITE, pg);
         g_test_message("prog_pass2 %s: write %d took %" PRId64 " us",
                        (char *)data, pg, us);
         /* page pg sits on wordline pg + 1; wordline lag completes first */
         if (!off && pg == lag) {
-            g_assert_cmpint(us, >=, 40000);
+            int64_t span = g_get_monotonic_time() - t_pre;
+
+            g_test_message("prog_pass2 %s: write %d to the end of write %d "
+                           "%" PRId64 " us", (char *)data, lag - 1, lag,
+                           span);
+            g_assert_cmpint(span, >=, 40000);
         } else if (off || pg < lag) {
             g_assert_cmpint(us, <, 40000);
+        }
+        if (pg == lag - 1) {
+            t_pre = t_w;
         }
         if (pg == 0 && lag == 1) {
             us = femu_timed_rw(&c, &q, &rw, NVME_CMD_READ, 0);
