@@ -1865,6 +1865,18 @@ void femu_test_gc_pace_timing(void *obj, void *data,
  *   "oneddie": only pages with k % 4 == 0 stay, all 32 on channel 0 LUN 0.
  *     The destination steps through the four dies, so a quarter of the 32
  *     moves land on that die and go by copyback; the rest go off-chip.
+ *
+ * "on" and "off" also time the writes on the device (io_stages=on). The
+ * hold stage of a command runs from its return from the FTL to its due
+ * time: the model's media wait that remains at the return. A busy host
+ * delays the return and the post, so it can shorten hold, not lengthen it:
+ *
+ *   wall  |submit|  ftl  |======== hold ========|post|
+ *                        ^ return               ^ due
+ *
+ * A host write's own 16 transfers hold it about 16 ms. A move that puts
+ * its transfers on the channels adds up to 128 ms to the write behind it.
+ * "off" only logs hold: a stall before the return can use up its wait.
  */
 void femu_test_gc_copyback(void *obj, void *data,
                            QGuestAllocator *alloc)
@@ -1880,6 +1892,9 @@ void femu_test_gc_copyback(void *obj, void *data,
     uint64_t lpn, vpc = 0, gc0, cb, gc;
     uint64_t mapped, lost, orphans, dealloc;
     int64_t max_ms = 0;
+    int64_t hold_ms = 0;
+    bool stages = !strcmp(mode, "on") || !strcmp(mode, "off");
+    int writes = 0;
     char *st = NULL;
     int n;
 
@@ -1915,12 +1930,17 @@ void femu_test_gc_copyback(void *obj, void *data,
         lpn += 4;
     }
     gc0 = femu_c0h_field(&c, log, 16);
+    if (stages) {
+        qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                                "'arguments':{'reset':true}}"));
+    }
     for (n = 0; n < 216; n++) {
         int64_t t0 = g_get_monotonic_time();
 
         g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn, 16, buf, list)), ==,
                         NVME_SUCCESS);
         max_ms = MAX(max_ms, (g_get_monotonic_time() - t0) / 1000);
+        writes++;
         lpn += 16;
         g_free(st);
         st = femu_line_state(qts, path, 0, &vpc);
@@ -1935,6 +1955,33 @@ void femu_test_gc_copyback(void *obj, void *data,
         g_assert_cmphex(FEMU_SC(femu_write_pages(&c, lpn, 16, buf, list)), ==,
                         NVME_SUCCESS);
         max_ms = MAX(max_ms, (g_get_monotonic_time() - t0) / 1000);
+        writes++;
+    }
+    /*
+     * Each write of the loop is one command, timed in every stage. The
+     * poller posts the entry before it times the command, so wait for the
+     * last one.
+     */
+    if (stages) {
+        QDict *rsp = NULL;
+        QDict *ret = NULL;
+        QDict *hold;
+
+        for (n = 0; n < FEMU_POLL_LIMIT_MS; n++) {
+            qobject_unref(rsp);
+            rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+            ret = qdict_get_qdict(rsp, "return");
+            if (qdict_get_int(femu_stage(ret, "total"), "count") >= writes) {
+                break;
+            }
+            g_usleep(1000);
+        }
+        hold = femu_stage(ret, "hold");
+        g_assert_cmpint(qdict_get_int(femu_stage(ret, "total"), "count"), ==,
+                        writes);
+        g_assert_cmpint(qdict_get_int(hold, "count"), ==, writes);
+        hold_ms = qdict_get_int(hold, "max-ns") / 1000000;
+        qobject_unref(rsp);
     }
     g_assert_cmpstr(st, ==, "free");
     /* every live page still maps to the one copy that holds it */
@@ -1947,8 +1994,8 @@ void femu_test_gc_copyback(void *obj, void *data,
     gc = femu_c0h_field(&c, log, 16) - gc0;
     cb = femu_c0h_field(&c, log, 248);
     g_test_message("gc_copyback %s: %" PRIu64 " moved, %" PRIu64
-                   " by copyback, slowest write %" PRId64 " ms",
-                   mode, gc, cb, max_ms);
+                   " by copyback, slowest write %" PRId64 " ms, longest "
+                   "media wait %" PRId64 " ms", mode, gc, cb, max_ms, hold_ms);
     if (!strcmp(mode, "off")) {
         /* a device that does not ask for copyback has it off */
         QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
@@ -1963,7 +2010,12 @@ void femu_test_gc_copyback(void *obj, void *data,
     } else if (!strcmp(mode, "on")) {
         g_assert_cmpuint(gc, ==, 64);
         g_assert_cmpuint(cb, ==, 64);
-        g_assert_cmpint(max_ms, <, 60);
+        /*
+         * Each write books about 16 ms of its own transfers, so some of
+         * the many writes are expected to keep part of that in hold.
+         */
+        g_assert_cmpint(hold_ms, >=, 4);
+        g_assert_cmpint(hold_ms, <, 60);
     } else if (!strcmp(mode, "pd")) {
         /* pages 16-19 of each block are edge wordlines with an ECC cost */
         g_assert_cmpuint(gc, ==, 64);
