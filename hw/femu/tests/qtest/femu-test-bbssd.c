@@ -18230,6 +18230,8 @@ static uint64_t femu_rrl_media_errors(FemuCtrlState *c, uint64_t log)
  * holds; "cache" reads a page twice, so the read cache answers the second
  * read. Device lines ending in "on" set dram_hit_ns to 20 ms, so a hit
  * takes 20 to 100 ms; without it the hit takes pg_rd_lat / 16, 6.25 ms.
+ * The page stays in the buffer or the cache, so the test reads it 5 times
+ * and keeps the shortest: a busy host only adds to each read.
  */
 void femu_test_dram_hit(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -18240,6 +18242,8 @@ void femu_test_dram_hit(void *obj, void *data, QGuestAllocator *alloc)
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 4096);
     int64_t us;
+    int64_t t;
+    int i;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
@@ -18252,8 +18256,12 @@ void femu_test_dram_hit(void *obj, void *data, QGuestAllocator *alloc)
         g_test_message("dram_hit %s: miss %" PRId64 " us", mode, us);
         g_assert_cmpint(us, >=, 100000);
     }
-    us = femu_timed_read(&c, 0, buf);
-    g_test_message("dram_hit %s: hit %" PRId64 " us", mode, us);
+    us = INT64_MAX;
+    for (i = 0; i < 5; i++) {
+        t = femu_timed_read(&c, 0, buf);
+        g_test_message("dram_hit %s: hit %" PRId64 " us", mode, t);
+        us = MIN(us, t);
+    }
     if (on) {
         g_assert_cmpint(us, >=, 20000);
         g_assert_cmpint(us, <, 100000);
