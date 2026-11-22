@@ -3836,12 +3836,18 @@ void femu_test_zns_slc_zones(void *obj, void *data,
     ms = femu_zns_ms(&c, NVME_CMD_READ, 2 * zsze, buf);
     g_test_message("native read %" PRId64 " ms", ms);
     g_assert_cmpint(ms, >=, types ? 20 : 95);
-    /* LBA 0 is on page 0; LBA 520 is in the 9th flush, on page 8 */
+    /*
+     * LBA 0 is on page 0; LBA 520 is in the 9th flush, on page 8. A host
+     * stall can only add time, so keep the shortest of 5 reads.
+     */
     for (int k = 0; k < 2; k++) {
-        ms = femu_zns_ms(&c, NVME_CMD_READ, k ? 520 : 0, buf);
+        ms = INT64_MAX;
+        for (int i = 0; i < 5; i++) {
+            ms = MIN(ms, femu_zns_ms(&c, NVME_CMD_READ, k ? 520 : 0, buf));
+            g_assert_cmphex(qtest_readb(qts, buf), ==, 0x5a);
+        }
         g_test_message("SLC read %" PRId64 " ms", ms);
         g_assert_cmpint(ms, <, 15);
-        g_assert_cmphex(qtest_readb(qts, buf), ==, 0x5a);
     }
 
     err = femu_ckpt_try_add(qts, "s1", 7, ",'femu_mode':3,'zns_flash_type':1,"
