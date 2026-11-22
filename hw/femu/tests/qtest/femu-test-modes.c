@@ -957,9 +957,14 @@ static int64_t femu_msi_wait_ms(QTestState *qts, uint64_t msi_addr, int64_t t0)
  * The shortest of FEMU_INTC_TRIES rounds, in ms from the submit to the MSI.
  * A round sends @nr reads, or with @err one read past the end, and reaps
  * them. A held interrupt is in every round, so the minimum keeps it; a
- * busy host slows only some rounds. With @held, no MSI may come before the
- * entry is posted, which the test can only check when it read the MSI
- * address within 19 ms of the submit.
+ * busy host slows only some rounds. With @held, no MSI may come in the
+ * aggregation time after the post. The test can check that only when it
+ * read the MSI address within 19 ms of the submit.
+ *
+ * Each round starts with an admin command (Get Features 08h). The admin
+ * queue shares the vector, and its completion signals the vector at once,
+ * with the CQE: what the vector still holds goes with it. So no entry or
+ * interrupt of an earlier round reaches the round.
  */
 static int64_t femu_intc_min_ms(FemuCtrlState *c, uint64_t msi_addr,
                                 uint64_t buf, int nr, bool err, bool held)
@@ -971,6 +976,8 @@ static int64_t femu_intc_min_ms(FemuCtrlState *c, uint64_t msi_addr,
     for (int t = 0; t < FEMU_INTC_TRIES; t++) {
         int64_t t0;
 
+        g_assert_cmpint(femu_get_feature(c, 0x08, 0, 0, 0, NULL), ==,
+                        NVME_SUCCESS);
         qtest_writel(qts, msi_addr, 0);
         t0 = g_get_monotonic_time();
         if (err) {
