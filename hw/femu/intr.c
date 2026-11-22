@@ -38,9 +38,41 @@ static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
     return 0;
 }
 
+/*
+ * Attach or detach the irqfd of @cq at most once each way: KVM refuses a
+ * second attach of the same eventfd, and the MSI-X core asserts on that.
+ */
+static int nvme_irqfd_attach(NvmeCQueue *cq)
+{
+    int ret;
+
+    if (cq->irqfd_on) {
+        return 0;
+    }
+    ret = kvm_irqchip_add_irqfd_notifier_gsi(kvm_state, &cq->guest_notifier,
+                                             NULL, cq->virq);
+    if (ret < 0) {
+        return ret;
+    }
+    qatomic_set(&cq->irqfd_on, true);
+    return 0;
+}
+
+static void nvme_irqfd_detach(NvmeCQueue *cq)
+{
+    if (!cq->irqfd_on) {
+        return;
+    }
+    qatomic_set(&cq->irqfd_on, false);
+    if (kvm_irqchip_remove_irqfd_notifier_gsi(kvm_state, &cq->guest_notifier,
+                                              cq->virq)) {
+        femu_err("remove_irqfd_notifier_gsi failed");
+    }
+}
+
 void nvme_remove_kvm_msi_virq(NvmeCQueue *cq)
 {
-    kvm_irqchip_remove_irqfd_notifier_gsi(kvm_state, &cq->guest_notifier, cq->virq);
+    nvme_irqfd_detach(cq);
     kvm_irqchip_release_virq(kvm_state, cq->virq);
     event_notifier_set_handler(&cq->guest_notifier, NULL);
     event_notifier_cleanup(&cq->guest_notifier);
@@ -86,7 +118,6 @@ static int nvme_vector_unmask(PCIDevice *dev, unsigned vector, MSIMessage msg)
 {
     FemuCtrl *n = container_of(dev, FemuCtrl, parent_obj);
     NvmeCQueue *cq;
-    EventNotifier *e;
     int qid;
     int ret;
 
@@ -97,13 +128,13 @@ static int nvme_vector_unmask(PCIDevice *dev, unsigned vector, MSIMessage msg)
             continue;
         }
 
-        e = &cq->guest_notifier;
         if (cq->vector == vector) {
             if (cq->msg.data != msg.data || cq->msg.address != msg.address) {
                 ret = kvm_irqchip_update_msi_route(kvm_state, cq->virq, msg, dev);
                 if (ret < 0) {
+                    /* the queue notifies through the PCI core instead */
                     femu_err("MSI irq update vector %u failed", vector);
-                    return ret;
+                    continue;
                 }
 
                 kvm_irqchip_commit_routes(kvm_state);
@@ -111,11 +142,10 @@ static int nvme_vector_unmask(PCIDevice *dev, unsigned vector, MSIMessage msg)
                 cq->msg = msg;
             }
 
-            ret = kvm_irqchip_add_irqfd_notifier_gsi(kvm_state, e,
-                                                     NULL, cq->virq);
+            ret = nvme_irqfd_attach(cq);
             if (ret < 0) {
+                /* the queue notifies through the PCI core instead */
                 femu_err("MSI add irqfd gsi vector %u failed, ret %d", vector, ret);
-                return ret;
             }
         }
     }
@@ -127,8 +157,6 @@ static void nvme_vector_mask(PCIDevice *dev, unsigned vector)
 {
     FemuCtrl *n = container_of(dev, FemuCtrl, parent_obj);
     NvmeCQueue *cq;
-    EventNotifier *e;
-    int ret;
 
     for (uint32_t qid = 1; qid <= n->nr_io_queues; qid++) {
         cq = n->cq[qid];
@@ -138,11 +166,7 @@ static void nvme_vector_mask(PCIDevice *dev, unsigned vector)
 
         /* every queue on the vector, as unmask adds them all back */
         if (cq->vector == vector) {
-            e = &cq->guest_notifier;
-            ret = kvm_irqchip_remove_irqfd_notifier_gsi(kvm_state, e, cq->virq);
-            if (ret != 0) {
-                femu_err("remove_irqfd_notifier_gsi failed");
-            }
+            nvme_irqfd_detach(cq);
         }
     }
 }
@@ -302,8 +326,13 @@ void nvme_isr_notify_io(void *opaque)
         return;
     }
 
-    /* the queue's own KVM route, when it could be set up */
-    if (cq->virq > 0) {
+    /*
+     * The queue's own KVM route, while its irqfd is attached and MSI-X is on.
+     * Disabling MSI-X sends no release, so check the mode too. Otherwise the
+     * PCI core notifies, and holds the vector pending while it is masked.
+     */
+    if (cq->virq > 0 && qatomic_read(&cq->irqfd_on) &&
+        msix_enabled(&cq->ctrl->parent_obj)) {
         event_notifier_set(&cq->guest_notifier);
         return;
     }
@@ -347,12 +376,13 @@ int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq)
     }
 
     if (cq->irq_enabled && !n->vector_poll_started) {
-        n->vector_poll_started = true;
+        /* the flag tells teardown to unset them, so set it on success only */
         if (msix_set_vector_notifiers(&n->parent_obj, nvme_vector_unmask,
                                       nvme_vector_mask, nvme_vector_poll)) {
             femu_err("nvme: msix_set_vector_notifiers failed\n");
             return -1;
         }
+        n->vector_poll_started = true;
         return 0;
     }
 
@@ -364,8 +394,7 @@ int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq)
     if (cq->cqid && cq->irq_enabled && cq->virq > 0 &&
         !msix_is_masked(&n->parent_obj, cq->vector)) {
         cq->msg = msix_get_message(&n->parent_obj, cq->vector);
-        ret = kvm_irqchip_add_irqfd_notifier_gsi(kvm_state, &cq->guest_notifier,
-                                                 NULL, cq->virq);
+        ret = nvme_irqfd_attach(cq);
         if (ret < 0) {
             /* with no irqfd, notify through the PCI core instead */
             femu_err("MSI add irqfd gsi vector %u failed, ret %d",

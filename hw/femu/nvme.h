@@ -2235,6 +2235,7 @@ typedef struct NvmeCQueue {
     QTAILQ_HEAD(sq_list, NvmeSQueue) sq_list;
     QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
     int32_t     virq;
+    bool        irqfd_on;       /* guest_notifier is attached to virq */
     MSIMessage  msg;
     uint64_t    db_addr;
     uint64_t    db_addr_hva;

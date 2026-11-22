@@ -1040,6 +1040,7 @@ uint16_t nvme_init_cq(NvmeCQueue *cq, FemuCtrl *n, uint64_t dma_addr, uint16_t
     cq->head = cq->tail = 0;
     cq->phys_contig = contig;
     cq->virq = -1;
+    cq->irqfd_on = false;
     qemu_spin_init(&cq->post_lock);
 
     uint8_t stride = n->db_stride;
