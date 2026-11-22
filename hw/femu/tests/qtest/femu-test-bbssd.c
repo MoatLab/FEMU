@@ -22772,7 +22772,9 @@ void femu_test_tier_idle_write(void *obj, void *data,
 /*
  * A Format while an idle fold is part way through a line. The Format waits
  * for the step, unmaps every page, and the idle folds then erase the lines
- * with nothing to move.
+ * with nothing to move. The idle folds may already run when the check
+ * after the Format comes, so it counts each folded line as a closed one,
+ * as in femu_test_tier_idle_sanitize().
  */
 void femu_test_tier_idle_format(void *obj, void *data,
                                 QGuestAllocator *alloc)
@@ -22783,6 +22785,8 @@ void femu_test_tier_idle_format(void *obj, void *data,
     uint64_t buf = guest_alloc(alloc, 4096);
     uint64_t list = guest_alloc(alloc, 4096);
     uint64_t v[TIER_FIELDS];
+    uint64_t folds0;
+    uint64_t idle0;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
@@ -22792,12 +22796,16 @@ void femu_test_tier_idle_format(void *obj, void *data,
     /* a line takes at least 16 steps of 20 ms, so this sees it part way */
     femu_tier_wait(qts, v, 4, TIER_FOLD_OPEN, 1);
     g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    folds0 = v[TIER_FOLDS];
+    idle0 = v[TIER_IDLE_FOLDS];
 
     g_assert_cmpint(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
     g_assert_cmpuint(femu_tier_check(qts, v), ==, 0);
     g_assert_cmpuint(v[TIER_VALID], ==, 0);
-    /* Format unmaps; the pool lines and the stopped fold stay */
-    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    /* Format unmaps; the pool lines and the stopped fold stay until folded */
+    g_assert_cmpuint(v[TIER_CLOSED] + v[TIER_FOLDS] - folds0, ==, 3);
+    g_assert_cmpuint(v[TIER_FOLDS] - folds0, ==, v[TIER_IDLE_FOLDS] - idle0);
     femu_tier_wait(qts, v, 4, TIER_CLOSED, 0);
     g_assert_cmpuint(v[TIER_FOLDS], ==, 3);
 
@@ -22812,6 +22820,14 @@ void femu_test_tier_idle_format(void *obj, void *data,
  * A Sanitize block erase while an idle fold is part way through a line. It
  * takes the same pause as Format: it waits for the step and unmaps every
  * page, and the idle folds then erase the lines with nothing to move.
+ *
+ * The idle folds resume 20 ms after the Sanitize, and a fold of an empty
+ * line is quick. So the check after the Sanitize may already see some
+ * lines folded. A pool line leaves the closed list only by a fold, and
+ * only an idle fold runs here:
+ *
+ *   closed now + folds since the snapshot == 3 closed at the snapshot
+ *   folds since the snapshot == idle folds since the snapshot
  */
 void femu_test_tier_idle_sanitize(void *obj, void *data,
                                   QGuestAllocator *alloc)
@@ -22822,6 +22838,8 @@ void femu_test_tier_idle_sanitize(void *obj, void *data,
     uint64_t buf = guest_alloc(alloc, 4096);
     uint64_t list = guest_alloc(alloc, 4096);
     uint64_t v[TIER_FIELDS];
+    uint64_t folds0;
+    uint64_t idle0;
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
@@ -22831,11 +22849,15 @@ void femu_test_tier_idle_sanitize(void *obj, void *data,
     /* a line takes at least 16 steps of 20 ms, so this sees it part way */
     femu_tier_wait(qts, v, 4, TIER_FOLD_OPEN, 1);
     g_assert_cmpuint(v[TIER_IDLE_FOLDS], ==, 0);
+    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    folds0 = v[TIER_FOLDS];
+    idle0 = v[TIER_IDLE_FOLDS];
 
     g_assert_cmpint(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
     g_assert_cmpuint(femu_tier_check(qts, v), ==, 0);
     g_assert_cmpuint(v[TIER_VALID], ==, 0);
-    g_assert_cmpuint(v[TIER_CLOSED], ==, 3);
+    g_assert_cmpuint(v[TIER_CLOSED] + v[TIER_FOLDS] - folds0, ==, 3);
+    g_assert_cmpuint(v[TIER_FOLDS] - folds0, ==, v[TIER_IDLE_FOLDS] - idle0);
     femu_tier_wait(qts, v, 4, TIER_CLOSED, 0);
     g_assert_cmpuint(v[TIER_FOLDS], ==, 3);
 
