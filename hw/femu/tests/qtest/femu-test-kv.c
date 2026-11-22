@@ -1154,36 +1154,28 @@ static int64_t femu_kv_timed(FemuCtrlState *c, uint8_t opcode, uint64_t buf,
     return g_get_monotonic_time() - t0;
 }
 
-static int femu_cmp_i64(const void *a, const void *b)
-{
-    int64_t x = *(const int64_t *)a;
-    int64_t y = *(const int64_t *)b;
-
-    return x < y ? -1 : x > y;
-}
-
 /*
- * Run @n commands and return the median wall time in microseconds of the
- * last four, when the window holds only this kind of command.
+ * Run @n commands and return the shortest wall time in microseconds of the
+ * last eight, when the window holds only this kind of command. A busy host
+ * only adds to each command, so the shortest is the closest to the model.
  */
-static int64_t femu_kv_median(FemuCtrlState *c, uint8_t opcode, uint64_t buf,
-                              uint64_t list, uint64_t key0, bool same_key,
-                              uint32_t len, int n)
+static int64_t femu_kv_min(FemuCtrlState *c, uint8_t opcode, uint64_t buf,
+                           uint64_t list, uint64_t key0, bool same_key,
+                           uint32_t len, int n)
 {
-    int64_t t[4];
+    int64_t min = INT64_MAX;
     int i;
 
-    g_assert_cmpint(n, >=, 16 + 4);
+    g_assert_cmpint(n, >=, 16 + 8);
     for (i = 0; i < n; i++) {
         int64_t us = femu_kv_timed(c, opcode, buf, list,
                                    same_key ? key0 : key0 + i, len);
 
-        if (i >= n - 4) {
-            t[i - (n - 4)] = us;
+        if (i >= n - 8) {
+            min = MIN(min, us);
         }
     }
-    qsort(t, 4, sizeof(t[0]), femu_cmp_i64);
-    return (t[1] + t[2]) / 2;
+    return min;
 }
 
 void femu_test_kv_model(void *obj, void *data, QGuestAllocator *alloc)
@@ -1208,16 +1200,16 @@ void femu_test_kv_model(void *obj, void *data, QGuestAllocator *alloc)
         qtest_memwrite(femu->dev.bus->qts, list + (i - 1) * 8, &prp, 8);
     }
 
-    ins = femu_kv_median(&c, FEMU_KV_CMD_STORE, buf, list, 0x1000, false,
-                         4096, 20);
+    ins = femu_kv_min(&c, FEMU_KV_CMD_STORE, buf, list, 0x1000, false,
+                      4096, 24);
     /* stores over one key that the inserts made: every one an update */
-    upd = femu_kv_median(&c, FEMU_KV_CMD_STORE, buf, list, 0x1000, true,
-                         4096, 20);
-    rd = femu_kv_median(&c, FEMU_KV_CMD_RETRIEVE, buf, list, 0x1000, true,
-                        4096, 20);
-    big = femu_kv_median(&c, FEMU_KV_CMD_STORE, buf, list, 0x2000, false,
-                         65536, 20);
-    g_test_message("kv_timing %s: median us insert %" PRId64 " update %"
+    upd = femu_kv_min(&c, FEMU_KV_CMD_STORE, buf, list, 0x1000, true,
+                      4096, 24);
+    rd = femu_kv_min(&c, FEMU_KV_CMD_RETRIEVE, buf, list, 0x1000, true,
+                     4096, 24);
+    big = femu_kv_min(&c, FEMU_KV_CMD_STORE, buf, list, 0x2000, false,
+                      65536, 24);
+    g_test_message("kv_timing %s: shortest us insert %" PRId64 " update %"
                    PRId64 " read %" PRId64 " 64KiB insert %" PRId64,
                    on ? "model" : "media", ins, upd, rd, big);
 
@@ -1225,8 +1217,8 @@ void femu_test_kv_model(void *obj, void *data, QGuestAllocator *alloc)
         /*
          * The model time is a floor; a loaded host only adds to it. The
          * ceiling, 1.5 times the model time plus the 1 ms poll of the test,
-         * catches a model that is wrong by half. Each median is of the two
-         * middle commands of the last four, so one late command passes.
+         * catches a model that is wrong by half. Each value is the shortest
+         * of the last eight commands, so seven slow commands pass.
          */
         g_assert_cmpint(ins, >=, KV_MODEL_INSERT_MS * 1000);
         g_assert_cmpint(upd, >=, KV_MODEL_UPDATE_MS * 1000);
