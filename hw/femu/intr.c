@@ -1,5 +1,8 @@
 #include "./nvme.h"
+#include "qemu/range.h"
 #include "system/accel-irq.h"
+
+static void nvme_isr_notify_legacy(void *opaque);
 
 static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
 {
@@ -33,46 +36,130 @@ static int nvme_add_kvm_msi_virq(FemuCtrl *n, NvmeCQueue *cq)
     }
     accel_irqchip_commit_route_changes(&c);
     cq->virq = virq;
+    cq->msg = msix_get_message(&n->parent_obj, vector_n);
     femu_debug("%s,cq[%d]->virq=%d\n", __func__, cq->cqid, virq);
 
     return 0;
 }
 
 /*
- * Attach or detach the irqfd of @cq at most once each way: KVM refuses a
- * second attach of the same eventfd, and the MSI-X core asserts on that.
+ * Stop the irqfd fast path of @cq. Called with the BQL held.
+ *
+ * A poller may have read irqfd_on just before it went false, so wait for
+ * it to leave. Then remove the irqfd: KVM must not deliver through a mask
+ * or an old route. A signal that came after KVM stopped reading the
+ * eventfd stays in it; with @drain, send it through the PCI core, which
+ * holds the vector pending while it is masked.
  */
-static int nvme_irqfd_attach(NvmeCQueue *cq)
+static void nvme_irqfd_stop(NvmeCQueue *cq, bool drain)
 {
-    int ret;
+    qatomic_set(&cq->irqfd_on, false);
+    /*
+     * Order the irqfd_on store before the irqfd_users loads. Pairs with
+     * smp_mb__after_rmw() in nvme_isr_notify_io(): a poller that has not
+     * yet been counted here sees irqfd_on false.
+     */
+    smp_mb();
+    while (qatomic_read(&cq->irqfd_users)) {
+        cpu_relax();
+    }
 
-    if (cq->irqfd_on) {
-        return 0;
+    /* a removal that fails keeps the flag, so the next stop tries again */
+    if (cq->irqfd_attached) {
+        if (kvm_irqchip_remove_irqfd_notifier_gsi(kvm_state,
+                                                  &cq->guest_notifier,
+                                                  cq->virq)) {
+            femu_err("remove_irqfd_notifier_gsi failed");
+        } else {
+            cq->irqfd_attached = false;
+        }
     }
-    ret = kvm_irqchip_add_irqfd_notifier_gsi(kvm_state, &cq->guest_notifier,
-                                             NULL, cq->virq);
-    if (ret < 0) {
-        return ret;
+
+    if (event_notifier_test_and_clear(&cq->guest_notifier) && drain) {
+        nvme_isr_notify_legacy(cq);
     }
-    qatomic_set(&cq->irqfd_on, true);
-    return 0;
 }
 
-static void nvme_irqfd_detach(NvmeCQueue *cq)
+/*
+ * Make the irqfd of @cq match the MSI-X state. Called with the BQL held,
+ * after each change that can matter: a vector mask or unmask, a write of
+ * the MSI-X control byte, and the creation of the queue.
+ *
+ * The fast path is on only while MSI-X is enabled, the vector and the
+ * function are not masked, the route holds the vector's current message,
+ * and the irqfd is attached. In every other state the queue notifies
+ * through the PCI core.
+ */
+static void nvme_irqfd_sync(FemuCtrl *n, NvmeCQueue *cq)
 {
-    if (!cq->irqfd_on) {
+    PCIDevice *pci = &n->parent_obj;
+    MSIMessage msg;
+
+    if (!cq->irq_enabled || cq->virq <= 0) {
         return;
     }
-    qatomic_set(&cq->irqfd_on, false);
-    if (kvm_irqchip_remove_irqfd_notifier_gsi(kvm_state, &cq->guest_notifier,
-                                              cq->virq)) {
-        femu_err("remove_irqfd_notifier_gsi failed");
+    if (!msix_enabled(pci) || msix_is_masked(pci, cq->vector)) {
+        nvme_irqfd_stop(cq, true);
+        return;
+    }
+
+    msg = msix_get_message(pci, cq->vector);
+    if (cq->msg.data != msg.data || cq->msg.address != msg.address) {
+        nvme_irqfd_stop(cq, true);
+        if (kvm_irqchip_update_msi_route(kvm_state, cq->virq, msg, pci) < 0) {
+            femu_err("MSI irq update vector %u failed", cq->vector);
+            return;
+        }
+        kvm_irqchip_commit_routes(kvm_state);
+        cq->msg = msg;
+    }
+
+    if (!cq->irqfd_attached) {
+        if (kvm_irqchip_add_irqfd_notifier_gsi(kvm_state, &cq->guest_notifier,
+                                               NULL, cq->virq) < 0) {
+            femu_err("MSI add irqfd gsi vector %u failed", cq->vector);
+            return;
+        }
+        cq->irqfd_attached = true;
+    }
+    qatomic_set(&cq->irqfd_on, true);
+}
+
+/* sync every queue on @vector, or every queue when @vector is negative */
+static void nvme_irqfd_sync_vector(FemuCtrl *n, int vector)
+{
+    /* a config write can come before realize allocates the queues */
+    if (!n->cq) {
+        return;
+    }
+    for (uint32_t qid = 1; qid <= n->nr_io_queues; qid++) {
+        NvmeCQueue *cq = n->cq[qid];
+
+        if (cq && (vector < 0 || cq->vector == vector)) {
+            nvme_irqfd_sync(n, cq);
+        }
+    }
+}
+
+/*
+ * A config write that reaches the MSI-X Enable or Function Mask bit. The
+ * PCI core sends no mask notifier when MSI-X goes off, and none when it
+ * comes back on with the function masked, so sync every queue here.
+ */
+void nvme_irqfd_config_written(FemuCtrl *n, uint32_t addr, int len)
+{
+    PCIDevice *pci = &n->parent_obj;
+
+    if (msix_present(pci) &&
+        range_covers_byte(addr, len, pci->msix_cap + PCI_MSIX_FLAGS + 1)) {
+        nvme_irqfd_sync_vector(n, -1);
     }
 }
 
 void nvme_remove_kvm_msi_virq(NvmeCQueue *cq)
 {
-    nvme_irqfd_detach(cq);
+    /* the queue goes away: a stranded signal has no queue to notify */
+    nvme_irqfd_stop(cq, false);
     kvm_irqchip_release_virq(kvm_state, cq->virq);
     event_notifier_set_handler(&cq->guest_notifier, NULL);
     event_notifier_cleanup(&cq->guest_notifier);
@@ -117,58 +204,17 @@ static void nvme_clear_guest_notifier(FemuCtrl *n)
 static int nvme_vector_unmask(PCIDevice *dev, unsigned vector, MSIMessage msg)
 {
     FemuCtrl *n = container_of(dev, FemuCtrl, parent_obj);
-    NvmeCQueue *cq;
-    int qid;
-    int ret;
 
-    for (qid = 1; qid <= n->nr_io_queues; qid++) {
-        cq = n->cq[qid];
-        /* a queue with no route of its own has no notifier to move either */
-        if (!cq || !cq->irq_enabled || cq->virq <= 0) {
-            continue;
-        }
-
-        if (cq->vector == vector) {
-            if (cq->msg.data != msg.data || cq->msg.address != msg.address) {
-                ret = kvm_irqchip_update_msi_route(kvm_state, cq->virq, msg, dev);
-                if (ret < 0) {
-                    /* the queue notifies through the PCI core instead */
-                    femu_err("MSI irq update vector %u failed", vector);
-                    continue;
-                }
-
-                kvm_irqchip_commit_routes(kvm_state);
-
-                cq->msg = msg;
-            }
-
-            ret = nvme_irqfd_attach(cq);
-            if (ret < 0) {
-                /* the queue notifies through the PCI core instead */
-                femu_err("MSI add irqfd gsi vector %u failed, ret %d", vector, ret);
-            }
-        }
-    }
-
+    /* a queue that cannot use its irqfd notifies through the PCI core */
+    nvme_irqfd_sync_vector(n, vector);
     return 0;
 }
 
 static void nvme_vector_mask(PCIDevice *dev, unsigned vector)
 {
     FemuCtrl *n = container_of(dev, FemuCtrl, parent_obj);
-    NvmeCQueue *cq;
 
-    for (uint32_t qid = 1; qid <= n->nr_io_queues; qid++) {
-        cq = n->cq[qid];
-        if (!cq || !cq->irq_enabled || cq->virq <= 0) {
-            continue;
-        }
-
-        /* every queue on the vector, as unmask adds them all back */
-        if (cq->vector == vector) {
-            nvme_irqfd_detach(cq);
-        }
-    }
+    nvme_irqfd_sync_vector(n, vector);
 }
 
 static void nvme_vector_poll(PCIDevice *dev, unsigned int vector_start, unsigned
@@ -327,14 +373,20 @@ void nvme_isr_notify_io(void *opaque)
     }
 
     /*
-     * The queue's own KVM route, while its irqfd is attached and MSI-X is on.
-     * Disabling MSI-X sends no release, so check the mode too. Otherwise the
-     * PCI core notifies, and holds the vector pending while it is masked.
+     * The queue's own KVM route, while nvme_irqfd_sync() allows it. The
+     * user count lets nvme_irqfd_stop() wait for a signal in flight.
+     * Otherwise the PCI core notifies, and holds the vector pending while
+     * it is masked.
      */
-    if (cq->virq > 0 && qatomic_read(&cq->irqfd_on) &&
-        msix_enabled(&cq->ctrl->parent_obj)) {
-        event_notifier_set(&cq->guest_notifier);
-        return;
+    if (cq->virq > 0) {
+        qatomic_inc(&cq->irqfd_users);
+        smp_mb__after_rmw();
+        if (qatomic_read(&cq->irqfd_on)) {
+            event_notifier_set(&cq->guest_notifier);
+            qatomic_dec(&cq->irqfd_users);
+            return;
+        }
+        qatomic_dec(&cq->irqfd_users);
     }
 
     /*
@@ -387,21 +439,12 @@ int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq)
     }
 
     /*
-     * The notifiers attach an irqfd only when a vector is unmasked. A host
-     * that unmasks its vectors before it creates the queues (FreeBSD does)
-     * sends no unmask for this queue, so attach the irqfd here.
+     * The notifiers act only when a vector changes. A host that unmasks its
+     * vectors before it creates the queues (FreeBSD does) sends no unmask
+     * for this queue, so sync it here.
      */
-    if (cq->cqid && cq->irq_enabled && cq->virq > 0 &&
-        !msix_is_masked(&n->parent_obj, cq->vector)) {
-        cq->msg = msix_get_message(&n->parent_obj, cq->vector);
-        ret = nvme_irqfd_attach(cq);
-        if (ret < 0) {
-            /* with no irqfd, notify through the PCI core instead */
-            femu_err("MSI add irqfd gsi vector %u failed, ret %d",
-                     cq->vector, ret);
-            nvme_remove_kvm_msi_virq(cq);
-            return ret;
-        }
+    if (cq->cqid) {
+        nvme_irqfd_sync(n, cq);
     }
 
     return 0;

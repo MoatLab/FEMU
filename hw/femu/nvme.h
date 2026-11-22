@@ -2235,7 +2235,9 @@ typedef struct NvmeCQueue {
     QTAILQ_HEAD(sq_list, NvmeSQueue) sq_list;
     QTAILQ_HEAD(cq_req_list, NvmeRequest) req_list;
     int32_t     virq;
-    bool        irqfd_on;       /* guest_notifier is attached to virq */
+    bool        irqfd_on;       /* pollers may signal guest_notifier */
+    bool        irqfd_attached; /* guest_notifier is attached to virq (BQL) */
+    uint32_t    irqfd_users;    /* pollers that may signal guest_notifier */
     MSIMessage  msg;
     uint64_t    db_addr;
     uint64_t    db_addr_hva;
@@ -4154,6 +4156,7 @@ void nvme_cq_irq_init(NvmeCQueue *cq);
 void nvme_cq_irq_cleanup(NvmeCQueue *cq);
 int nvme_setup_virq(FemuCtrl *n, NvmeCQueue *cq);
 void nvme_remove_kvm_msi_virq(NvmeCQueue *cq);
+void nvme_irqfd_config_written(FemuCtrl *n, uint32_t addr, int len);
 int nvme_clear_virq(FemuCtrl *n);
 
 /* Controller DMA reaches memory only; see femu_dma_rw(). */

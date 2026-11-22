@@ -7852,6 +7852,7 @@ static void femu_pci_write_config(PCIDevice *dev, uint32_t addr,
     FemuCtrl *n = FEMU(dev);
 
     pci_default_write_config(dev, addr, val, len);
+    nvme_irqfd_config_written(FEMU(dev), addr, len);
     /* AER keeps its first-error pointer and header log with the status */
     if (pcie_find_capability(dev, PCI_EXT_CAP_ID_ERR)) {
         pcie_aer_write_config(dev, addr, val, len);
