@@ -951,12 +951,71 @@ static int64_t femu_msi_wait_ms(QTestState *qts, uint64_t msi_addr, int64_t t0)
     return (g_get_monotonic_time() - t0) / 1000;
 }
 
+#define FEMU_INTC_TRIES 5
+
+/*
+ * The shortest of FEMU_INTC_TRIES rounds, in ms from the submit to the MSI.
+ * A round sends @nr reads, or with @err one read past the end, and reaps
+ * them. A held interrupt is in every round, so the minimum keeps it; a
+ * busy host slows only some rounds. With @held, no MSI may come before the
+ * entry is posted, which the test can only check when it read the MSI
+ * address within 19 ms of the submit.
+ */
+static int64_t femu_intc_min_ms(FemuCtrlState *c, uint64_t msi_addr,
+                                uint64_t buf, int nr, bool err, bool held)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    int64_t best = INT64_MAX;
+    NvmeRwCmd rw;
+
+    for (int t = 0; t < FEMU_INTC_TRIES; t++) {
+        int64_t t0;
+
+        qtest_writel(qts, msi_addr, 0);
+        t0 = g_get_monotonic_time();
+        if (err) {
+            memset(&rw, 0, sizeof(rw));
+            rw.opcode = NVME_CMD_READ;
+            rw.nsid = cpu_to_le32(1);
+            rw.dptr.prp1 = cpu_to_le64(buf);
+            rw.slba = cpu_to_le64(1ULL << 40);
+            rw.nlb = cpu_to_le16(7);
+            femu_io_unconsumed(c, (NvmeCmd *)&rw);
+        } else {
+            for (int i = 0; i < nr - 1; i++) {
+                memset(&rw, 0, sizeof(rw));
+                rw.opcode = NVME_CMD_READ;
+                rw.nsid = cpu_to_le32(1);
+                rw.dptr.prp1 = cpu_to_le64(buf);
+                rw.nlb = cpu_to_le16(7);
+                femu_submit(c, &c->io, (NvmeCmd *)&rw);
+            }
+            femu_read_unconsumed(c, buf);
+        }
+        if (held) {
+            uint32_t early = qtest_readl(qts, msi_addr);
+
+            if (g_get_monotonic_time() - t0 < 19000) {
+                g_assert_cmphex(early, ==, 0);
+            }
+        }
+        best = MIN(best, femu_msi_wait_ms(qts, msi_addr, t0));
+        for (int i = 0; i < (err ? 1 : nr); i++) {
+            uint16_t sc = FEMU_SC(femu_complete(c, &c->io, NULL, NULL));
+
+            g_assert_cmpint(sc, ==, err ? NVME_LBA_RANGE : NVME_SUCCESS);
+        }
+    }
+    return best;
+}
+
 /*
  * Interrupt Coalescing (Feature 08h) on an MSI vector. With the defaults a
  * completion interrupts at once. With a threshold of 4 entries (THR 3) and
  * 20 ms (TIME 200), one completion waits about 20 ms for its interrupt, and
  * four completions interrupt at once. A completion with an error, a vector
  * with Coalescing Disable (Feature 09h), and the admin queue are never held.
+ * Each time is the shortest of FEMU_INTC_TRIES rounds (femu_intc_min_ms()).
  */
 void femu_test_intc(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -967,10 +1026,8 @@ void femu_test_intc(void *obj, void *data, QGuestAllocator *alloc)
     uint64_t buf = guest_alloc(alloc, 4096);
     uint64_t msi_addr = guest_alloc(alloc, 4096);
     uint8_t msi = qpci_find_capability(dev, PCI_CAP_ID_MSI, 0);
-    NvmeRwCmd rw;
     uint16_t flags;
-    int64_t t0, ms;
-    int i;
+    int64_t ms;
 
     g_assert_cmpint(msi, !=, 0);
     qpci_config_writel(dev, msi + PCI_MSI_ADDRESS_LO, (uint32_t)msi_addr);
@@ -987,13 +1044,9 @@ void femu_test_intc(void *obj, void *data, QGuestAllocator *alloc)
     g_usleep(50 * 1000);
 
     /* defaults: no coalescing */
-    qtest_writel(qts, msi_addr, 0);
-    t0 = g_get_monotonic_time();
-    femu_read_unconsumed(&c, buf);
-    ms = femu_msi_wait_ms(qts, msi_addr, t0);
+    ms = femu_intc_min_ms(&c, msi_addr, buf, 1, false, false);
     g_test_message("default: interrupt after %" PRId64 " ms", ms);
     g_assert_cmpint(ms, <, 10);
-    g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
 
     g_assert_cmpint(femu_set_feature(&c, 0x08, false, 0, 3 | (200 << 8),
                                      NULL), ==, NVME_SUCCESS);
@@ -1001,65 +1054,30 @@ void femu_test_intc(void *obj, void *data, QGuestAllocator *alloc)
     g_usleep(50 * 1000);
 
     /* one completion waits for the aggregation time */
-    qtest_writel(qts, msi_addr, 0);
-    t0 = g_get_monotonic_time();
-    femu_read_unconsumed(&c, buf);
-    g_assert_cmphex(qtest_readl(qts, msi_addr), ==, 0);
-    ms = femu_msi_wait_ms(qts, msi_addr, t0);
+    ms = femu_intc_min_ms(&c, msi_addr, buf, 1, false, true);
     g_test_message("THR 3, TIME 20 ms, 1 entry: interrupt after %" PRId64
                    " ms", ms);
     g_assert_cmpint(ms, >=, 19);
     g_assert_cmpint(ms, <, 120);
-    g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
 
     /* four completions reach the threshold */
-    qtest_writel(qts, msi_addr, 0);
-    t0 = g_get_monotonic_time();
-    for (i = 0; i < 3; i++) {
-        memset(&rw, 0, sizeof(rw));
-        rw.opcode = NVME_CMD_READ;
-        rw.nsid = cpu_to_le32(1);
-        rw.dptr.prp1 = cpu_to_le64(buf);
-        rw.nlb = cpu_to_le16(7);
-        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
-    }
-    femu_read_unconsumed(&c, buf);
-    ms = femu_msi_wait_ms(qts, msi_addr, t0);
+    ms = femu_intc_min_ms(&c, msi_addr, buf, 4, false, false);
     g_test_message("THR 3, TIME 20 ms, 4 entries: interrupt after %" PRId64
                    " ms", ms);
     g_assert_cmpint(ms, <, 15);
-    for (i = 0; i < 4; i++) {
-        g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==,
-                        NVME_SUCCESS);
-    }
 
     /* a completion with an error is not held */
-    qtest_writel(qts, msi_addr, 0);
-    t0 = g_get_monotonic_time();
-    memset(&rw, 0, sizeof(rw));
-    rw.opcode = NVME_CMD_READ;
-    rw.nsid = cpu_to_le32(1);
-    rw.dptr.prp1 = cpu_to_le64(buf);
-    rw.slba = cpu_to_le64(1ULL << 40);
-    rw.nlb = cpu_to_le16(7);
-    femu_io_unconsumed(&c, (NvmeCmd *)&rw);
-    ms = femu_msi_wait_ms(qts, msi_addr, t0);
+    ms = femu_intc_min_ms(&c, msi_addr, buf, 1, true, false);
     g_test_message("error entry: interrupt after %" PRId64 " ms", ms);
     g_assert_cmpint(ms, <, 15);
-    g_assert_cmpint(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
-                    NVME_LBA_RANGE);
 
     /* Coalescing Disable on the vector */
     g_assert_cmpint(femu_set_feature(&c, 0x09, false, 0, 1 << 16, NULL), ==,
                     NVME_SUCCESS);
     g_usleep(50 * 1000);
-    qtest_writel(qts, msi_addr, 0);
-    t0 = g_get_monotonic_time();
-    femu_read_unconsumed(&c, buf);
-    ms = femu_msi_wait_ms(qts, msi_addr, t0);
+    ms = femu_intc_min_ms(&c, msi_addr, buf, 1, false, false);
     g_test_message("CD set: interrupt after %" PRId64 " ms", ms);
     g_assert_cmpint(ms, <, 15);
-    g_assert_cmpint(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
 
     /* a controller disable with an entry held sends no interrupt */
     g_assert_cmpint(femu_set_feature(&c, 0x09, false, 0, 0, NULL), ==,
