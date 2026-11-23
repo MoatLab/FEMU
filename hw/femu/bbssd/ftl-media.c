@@ -631,6 +631,9 @@ void ssd_wait_note(FemuWaitParts *p, const NandOpCause *w)
             c = FEMU_WAIT_ERASE;
         } else if (NAND_BY_ORIGIN(w->by) == NAND_ORIGIN_GC) {
             c = FEMU_WAIT_GC;
+        } else if (NAND_BY_ORIGIN(w->by) == NAND_ORIGIN_TP ||
+                   NAND_BY_ORIGIN(w->by) == NAND_ORIGIN_MAP) {
+            c = FEMU_WAIT_MAP;
         } else if (NAND_BY_ORIGIN(w->by) == NAND_ORIGIN_HOST) {
             c = NAND_BY_OP(w->by) == NAND_MEDIA_PROGRAM ?
                 FEMU_WAIT_HOST_PROG : FEMU_WAIT_HOST_READ;

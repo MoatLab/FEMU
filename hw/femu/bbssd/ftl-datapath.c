@@ -702,25 +702,61 @@ static uint64_t ssd_mp_flush(struct ssd *ssd, int cmd)
  * the CMT reads and writes them where they are, otherwise (FDP) it charges
  * placeholder pages.
  */
+/*
+ * io_causes: the parts of a translation that took @T beyond the DRAM
+ * lookup. The waits of the TP read it booked keep their owners; the rest
+ * (the TP read itself, the wait for its earlier read or program, a TP read
+ * in flight) is the map part.
+ */
+static void ssd_map_parts(struct ssd *ssd, uint64_t T)
+{
+    uint64_t w = 0;
+
+    memset(&ssd->wc_map, 0, sizeof(ssd->wc_map));
+    if (ssd->wc_tp_set) {
+        ssd->wc_map = ssd->wc_tp;
+        for (int c = 0; c < FEMU_WAIT_NCAT; c++) {
+            w += ssd->wc_tp.ns[c];
+        }
+    }
+    ssd->wc_map.ns[FEMU_WAIT_MAP] += T > w ? T - w : 0;
+}
+
+/*
+ * The same, and with io_causes the parts in wc_map (none for a DRAM-only
+ * lookup).
+ */
 static uint64_t ssd_map_lat(struct ssd *ssd, uint64_t lpn, uint64_t stime,
                             bool is_write)
 {
     /* the controller DRAM access of the lookup itself (l2p_dram_ns) */
     uint64_t dram = ssd->sp.l2p_dram_ns;
     uint64_t t;
+    uint64_t T;
 
+    if (ssd->wc_on) {
+        memset(&ssd->wc_map, 0, sizeof(ssd->wc_map));
+    }
     if (!ssd->cmt.capacity) {
         return dram;
     }
     /* the whole table in the host's memory (HMB): one PCIe round trip */
     if (ssd->n && qatomic_read(&ssd->n->hmb_active)) {
+        if (ssd->wc_on) {
+            ssd->wc_map.ns[FEMU_WAIT_MAP] = ssd->n->hmb_ns;
+        }
         return dram + ssd->n->hmb_ns;
     }
     if (!ssd->tp_on) {
         return dram + cmt_touch(ssd, lpn, stime, is_write);
     }
     t = stime ? stime : ssd_now(ssd);
-    return dram + cmt_access(ssd, lpn, t, is_write) - t;
+    ssd->wc_tp_set = false;
+    T = cmt_access(ssd, lpn, t, is_write) - t;
+    if (ssd->wc_on) {
+        ssd_map_parts(ssd, T);
+    }
+    return dram + T;
 }
 
 /*
@@ -805,17 +841,27 @@ static uint64_t ssd_map_and_program(struct ssd *ssd, uint64_t lpn,
 {
     uint64_t map = ssd_map_lat(ssd, lpn, stime, true);
     uint64_t t = stime ? stime : ssd_now(ssd);
+    /* the program helpers overwrite wc_map with their own lookups */
+    FemuWaitParts mp = ssd->wc_map;
 
     /* a translation program is not the data page: @placed is the program's */
     if (ssd->tp_on && ssd->sp.hot_cold_sep && map) {
-        return ssd_program_lpn(ssd, lpn, t + map, t, stream, placed);
+        uint64_t p = ssd_program_lpn(ssd, lpn, t + map, t, stream, placed);
+
+        /* serial: the program waits for the translation */
+        if (ssd->wc_on) {
+            for (int c = 0; c < FEMU_WAIT_NCAT; c++) {
+                ssd->wc_last.ns[c] += mp.ns[c];
+            }
+        }
+        return p;
     }
     {
         uint64_t p = ssd_program_lpn(ssd, lpn, stime, stime, stream, placed);
 
-        /* the lookup wins a tie: it has no media wait */
+        /* parallel: the later one ends the page; the lookup wins a tie */
         if (ssd->wc_on && p <= map) {
-            memset(&ssd->wc_last, 0, sizeof(ssd->wc_last));
+            ssd->wc_last = mp;
         }
         return MAX(map, p);
     }
@@ -1298,7 +1344,8 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
          * placeholder cost runs in parallel, as it always has.
          */
         map = ssd_map_lat(ssd, lpn, base, false);
-        wc_max(ssd, &maxlat, &best, map, NULL);
+        /* a translation alone can end the page: unmapped, or a cache hit */
+        wc_max(ssd, &maxlat, &best, map, &ssd->wc_map);
         /* the media read follows the DRAM lookup (l2p_dram_ns, default 0) */
         dstart = base + (ssd->tp_on ? map : ssd->sp.l2p_dram_ns);
         wait = ssd->tp_on ? map : ssd->sp.l2p_dram_ns;
@@ -1350,6 +1397,12 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         failed = ssd->rber_failed;
         ssd->rber_failed = false;
         sublat = ssd_advance_status(ssd, &ppa, &srd) + wait;
+        /* with TPs on flash the data read follows the translation */
+        if (ssd->wc_on && ssd->tp_on) {
+            for (int c = 0; c < FEMU_WAIT_NCAT; c++) {
+                ssd->wc_last.ns[c] += ssd->wc_map.ns[c];
+            }
+        }
         wc_max(ssd, &maxlat, &best, sublat, &ssd->wc_last);
         /* a page that did not decode is not in the read cache either */
         if (unlikely(ssd->rber_failed)) {

@@ -6716,6 +6716,37 @@ static void femu_register_nodes(void)
     });
     qos_add_test("io-causes-refused", "femu", femu_test_io_causes_refused,
                  NULL);
+    qos_add_test("io-causes-map", "femu", femu_test_io_causes_map,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=64,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_rd_lat=50000000,pg_wr_lat=20000000,mapping=dftl,"
+            "x-cmt-slots=1,io_stages=on,io_causes=on",
+    });
+    {
+        static const char *hmbs[] = { "5000", "1000", "1001", "serial",
+                                      "buffer" };
+        static const char *extra[] = { "", "", "", ",hot_cold_sep=on",
+            ",hot_cold_sep=on,vwc=1,buffer_size=2,buffer_thres_pcent=50" };
+
+        for (int i = 0; i < ARRAY_SIZE(hmbs); i++) {
+            g_autofree char *name = g_strdup_printf("io-causes-hmb-%s",
+                                                    hmbs[i]);
+            g_autofree char *hopts = g_strdup_printf(
+                "devsz_mb=16,femu_mode=1,secsz=512,secs_per_pg=8,"
+                "pgs_per_blk=64,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+                "nchs=1,pg_wr_lat=20000000,mapping=dftl,x-cmt-slots=1,"
+                "hmb_mb=1,hmb_ns=%s,io_stages=on,io_causes=on%s",
+                g_ascii_isdigit(hmbs[i][0]) ? hmbs[i] : "5000", extra[i]);
+
+            qos_add_test(name, "femu", femu_test_io_causes_hmb,
+                         &(QOSGraphTestOptions) {
+                .edge.extra_device_opts = hopts,
+                .arg = (void *)hmbs[i],
+            });
+        }
+    }
     qos_add_test("io-stages-ns-refused", "femu",
                  femu_test_io_stages_ns_refused, &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,devsz_mb=16,io_stages=on",

@@ -1579,13 +1579,17 @@
 # @buffer: a write-back of the write buffer that set the latency; its
 #     own waits are not counted again
 #
+# @map: a translation with mapping=dftl: the read of a translation
+#     page, a wait behind translation page reads and programs (also
+#     those garbage collection moves), or the HMB access
+#
 # @none: no part above 1000 ns
 #
 # Since: 10.1
 ##
 { 'enum': 'FemuIoCause',
   'data': [ 'erase', 'gc', 'host-program', 'host-read', 'other', 'ecc',
-            'buffer', 'none' ] }
+            'buffer', 'map', 'none' ] }
 
 ##
 # @FemuIoCauseCount:

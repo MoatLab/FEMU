@@ -1706,10 +1706,12 @@ def selftest_synthetic(t: SelfTest) -> None:
         return {"bucket": b, "uncovered": unc,
                 "causes": [{"cause": k.replace("_", "-"), "count": v[0],
                             "sum-ns": v[1]} for k, v in cs.items()]}
-    c0 = dict(st, causes={"read": [cband(17, 1, gc=(2, 300000))],
+    c0 = dict(st, causes={"read": [cband(17, 1, gc=(2, 300000),
+                                         map=(1, 50000000))],
                           "write": []})
     c1 = dict(st, causes={"read": [cband(17, 1, gc=(5, 700000),
-                                         ecc=(0, 9000)),
+                                         ecc=(0, 9000),
+                                         map=(2, 100000000)),
                                    cband(3, 2, none=(4, 0))],
                           "write": [cband(20, 0, buffer=(1, 2000000))]})
 
@@ -1719,10 +1721,12 @@ def selftest_synthetic(t: SelfTest) -> None:
         r = {x["bucket"]: x for x in cr["read"]}
         return (cr["write"][0]["causes"] == {"buffer": {"count": 1,
                                                         "sum-ns": 2000000}}
-                and set(r) == {3, 17} and r[17]["count"] == 3
+                and set(r) == {3, 17} and r[17]["count"] == 4
                 and r[17]["uncovered"] == 0
                 and r[17]["causes"] == {"gc": {"count": 3, "sum-ns": 400000},
-                                        "ecc": {"count": 0, "sum-ns": 9000}}
+                                        "ecc": {"count": 0, "sum-ns": 9000},
+                                        "map": {"count": 1,
+                                                "sum-ns": 50000000}}
                 and r[3]["count"] == 6 and r[3]["uncovered"] == 2)
     t.check("cause tables: interval sums, a wait with no win stays",
             causes_ok())

@@ -226,6 +226,11 @@ uint64_t tp_read(struct ssd *ssd, uint64_t tp, uint64_t stime, bool timed)
     t = MAX(t, ssd->tp_done[tp]);
     r.stime = t;
     t += ssd_advance_status(ssd, &ppa, &r);
+    /* the translation of a host access takes these waits (ssd_map_lat) */
+    if (ssd->wc_on) {
+        ssd->wc_tp = ssd->wc_last;
+        ssd->wc_tp_set = true;
+    }
     /* a TP read stresses its block as a data read does, whoever issues it */
     ssd_read_check_wear(ssd, &ppa, r.stime);
     return t;

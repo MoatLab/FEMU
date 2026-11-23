@@ -23999,7 +23999,7 @@ static void femu_cause_sum(QDict *ret, const char *cls, const char *cause,
 static uint64_t femu_cause_total(QDict *ret, const char *cls)
 {
     const char *all[] = { "erase", "gc", "host-program", "host-read",
-                          "other", "ecc", "buffer", "none" };
+                          "other", "ecc", "buffer", "map", "none" };
     uint64_t total = 0;
     uint64_t w;
     uint64_t ns;
@@ -24117,6 +24117,243 @@ void femu_test_io_causes(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
+/* the read causes after @n more reads than @before were counted */
+static QDict *femu_map_wait(QTestState *qts, uint64_t before, uint64_t n,
+                            QDict **rsp)
+{
+    QDict *ret;
+
+    for (int waited = 0; ; waited++) {
+        *rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+        ret = qdict_get_qdict(*rsp, "return");
+        if (femu_cause_total(ret, "read") >= before + n) {
+            return ret;
+        }
+        qobject_unref(*rsp);
+        g_assert_cmpint(waited, <, 10 * FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+}
+
+/* the TP reads of the namespace so far (query-femu counters) */
+static uint64_t femu_map_reads(QTestState *qts)
+{
+    QDict *rsp;
+    QDict *ns = femu_query_ns(qts, "", &rsp);
+    uint64_t v = qdict_get_int(qdict_get_qdict(ns, "counters"),
+                               "map-read-pages");
+
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * io_causes with mapping=dftl on one LUN, a CMT of one translation page
+ * (TP), 50 ms reads and 20 ms programs. LPNs 0 and 512 are in TP 0 and
+ * TP 1. Each step resets the tables and checks the read causes:
+ *  1. Read LPN 0: the dirty TP 1 goes to flash (20 ms), then TP 0 reads
+ *     (50 ms) behind it. The translation is 70 ms of map, none other.
+ *  2. Read LPNs 514 and 515 at once, never written: the first reads TP 1,
+ *     the second waits for that read in flight. One TP read, two map
+ *     wins, up to 100 ms of map. With no data read, no other part wins.
+ *  3. Read LPN 2, never written: only its TP 0 is read. The map wins.
+ */
+void femu_test_io_causes_map(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    const uint64_t rd = 50000000;
+    const uint64_t wr = 20000000;
+    NvmeRwCmd rw = { 0 };
+    uint64_t nsze;
+    uint32_t lba_size;
+    uint32_t lpp;
+    uint64_t w, ns, u, ow, ons;
+    uint64_t mr;
+    QDict *rsp;
+    QDict *ret;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_identify_ns(&c, &nsze, &lba_size);
+    lpp = 4096 / lba_size;
+    qtest_memset(qts, buf, 0x5a, 8192);
+    /* TP 0 dirty, then TP 1 evicts it to flash and stays dirty */
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_WRITE, 512 * lpp, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_WRITE, 513 * lpp, buf), ==,
+                    NVME_SUCCESS);
+
+    /* 1: a translation behind a TP program, then the TP read */
+    qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                            "'arguments':{'reset':true}}"));
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    ret = femu_map_wait(qts, 0, 1, &rsp);
+    femu_cause_sum(ret, "read", "map", &w, &ns, &u);
+    femu_cause_sum(ret, "read", "other", &ow, &ons, &u);
+    g_test_message("1: map %" PRIu64 " / %" PRIu64 " ns, other %" PRIu64
+                   " ns", w, ns, ons);
+    g_assert_cmpuint(w, ==, 1);
+    g_assert_cmpuint(ns, >=, rd + wr);
+    g_assert_cmpuint(ns, <=, rd + wr + 1000000);
+    g_assert_cmpuint(ons, ==, 0);
+    qobject_unref(rsp);
+
+    /* 2: two reads of TP 1, the second while its read is in flight */
+    qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                            "'arguments':{'reset':true}}"));
+    mr = femu_map_reads(qts);
+    rw.opcode = NVME_CMD_READ;
+    rw.nsid = cpu_to_le32(1);
+    rw.nlb = cpu_to_le16(lpp - 1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(514 * lpp);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    rw.dptr.prp1 = cpu_to_le64(buf + 4096);
+    rw.slba = cpu_to_le64(515 * lpp);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmphex(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
+    ret = femu_map_wait(qts, 0, 2, &rsp);
+    femu_cause_sum(ret, "read", "map", &w, &ns, &u);
+    g_test_message("2: map %" PRIu64 " / %" PRIu64 " ns, TP reads +%"
+                   PRIu64, w, ns, femu_map_reads(qts) - mr);
+    g_assert_cmpuint(femu_map_reads(qts) - mr, ==, 1);
+    /*
+     * The second read starts a host delay after the first, so its part
+     * is rd minus that delay. Without the in-flight part it has no cause.
+     */
+    g_assert_cmpuint(w, ==, 2);
+    g_assert_cmpuint(ns, >, rd + 1000);
+    qobject_unref(rsp);
+
+    /* 3: an LPN with no data: the translation alone ends the read */
+    qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                            "'arguments':{'reset':true}}"));
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 2 * lpp, buf), ==,
+                    NVME_SUCCESS);
+    ret = femu_map_wait(qts, 0, 1, &rsp);
+    femu_cause_sum(ret, "read", "map", &w, &ns, &u);
+    g_test_message("3: map %" PRIu64 " / %" PRIu64 " ns", w, ns);
+    g_assert_cmpuint(w, ==, 1);
+    g_assert_cmpuint(ns, >=, rd);
+    qobject_unref(rsp);
+    femu_disable(&c);
+}
+
+/* the write and read map parts of one class since the last reset */
+static void femu_hmb_cause(QTestState *qts, const char *cls, uint64_t n,
+                           uint64_t *w, uint64_t *ns, uint64_t *none)
+{
+    QDict *rsp;
+    QDict *ret = NULL;
+    uint64_t u;
+    uint64_t ns0;
+
+    for (int waited = 0; ; waited++) {
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+        ret = qdict_get_qdict(rsp, "return");
+        if (femu_cause_total(ret, cls) >= n) {
+            break;
+        }
+        qobject_unref(rsp);
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+    femu_cause_sum(ret, cls, "map", w, ns, &u);
+    femu_cause_sum(ret, cls, "none", none, &ns0, &u);
+    qobject_unref(rsp);
+}
+
+/*
+ * io_causes with the HMB on (mapping=dftl, 20 ms programs): each
+ * translation is the HMB access, hmb_ns (@data: "5000", "1000", "1001",
+ * "serial": 5000 with hot_cold_sep, "buffer": "serial" with a write
+ * buffer of 2 pages that writes back at 1).
+ *  - A write runs its translation beside the program. The program ends
+ *    the page, so the write has no map part. With hot_cold_sep the
+ *    program follows the translation: the map part is hmb_ns.
+ *  - A read follows its translation: the map part is hmb_ns. It wins
+ *    above 1000 ns; at 1000 ns the read has no cause.
+ *  - With the buffer, the second write waits for the write-back of the
+ *    first page. That wait is all buffer: the map part of the program
+ *    inside it does not count again.
+ */
+void femu_test_io_causes_hmb(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool buffer = g_str_equal(data, "buffer");
+    bool serial = buffer || g_str_equal(data, "serial");
+    uint64_t hmb = serial ? 5000 : g_ascii_strtoull(data, NULL, 10);
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mem = guest_alloc(alloc, 2u << 20);
+    uint64_t w, ns, none;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, list, 0, 16);
+    qtest_writeq(qts, list, QEMU_ALIGN_UP(mem, 4096));
+    qtest_writel(qts, list + 8, 256);
+    g_assert_cmphex(femu_hmb_set(&c, true, 256, list, 1), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0x2e, 4096);
+
+    if (buffer) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                        NVME_SUCCESS);
+        qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                                "'arguments':{'reset':true}}"));
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 8, buf)), ==,
+                        NVME_SUCCESS);
+        femu_hmb_cause(qts, "write", 1, &w, &ns, &none);
+        g_test_message("buffer write: map %" PRIu64 " / %" PRIu64 " ns", w,
+                       ns);
+        g_assert_cmpuint(ns, ==, 0);
+        {
+            QDict *rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+            uint64_t bw, bns, u;
+
+            femu_cause_sum(qdict_get_qdict(rsp, "return"), "write", "buffer",
+                           &bw, &bns, &u);
+            g_test_message("buffer write: buffer %" PRIu64 " / %" PRIu64
+                           " ns", bw, bns);
+            g_assert_cmpuint(bw, ==, 1);
+            g_assert_cmpuint(bns, >=, 20000000 + hmb);
+            qobject_unref(rsp);
+        }
+        g_assert_cmphex(femu_hmb_set(&c, false, 0, 0, 0), ==, NVME_SUCCESS);
+        femu_disable(&c);
+        return;
+    }
+
+    qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                            "'arguments':{'reset':true}}"));
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_hmb_cause(qts, "write", 1, &w, &ns, &none);
+    g_test_message("write: map %" PRIu64 " / %" PRIu64 " ns", w, ns);
+    g_assert_cmpuint(ns, ==, serial ? hmb : 0);
+    g_assert_cmpuint(w, ==, serial ? 1 : 0);
+
+    qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                            "'arguments':{'reset':true}}"));
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_hmb_cause(qts, "read", 1, &w, &ns, &none);
+    g_test_message("read: map %" PRIu64 " / %" PRIu64 " ns, none %" PRIu64,
+                   w, ns, none);
+    g_assert_cmpuint(ns, ==, hmb);
+    g_assert_cmpuint(w, ==, hmb > 1000 ? 1 : 0);
+    g_assert_cmpuint(none, ==, hmb > 1000 ? 0 : 1);
+    g_assert_cmphex(femu_hmb_set(&c, false, 0, 0, 0), ==, NVME_SUCCESS);
+    femu_disable(&c);
+}
+
 /* io_causes outside the scope of the cause rules fails at realize */
 void femu_test_io_causes_refused(void *obj, void *data,
                                  QGuestAllocator *alloc)
@@ -24127,8 +24364,10 @@ void femu_test_io_causes_refused(void *obj, void *data,
         { "'femu_mode':2,'io_stages':true", "femu_mode=1" },
         { "'femu_mode':1,'io_stages':true,'namespace_modes':'bbssd,bbssd'",
           "namespace_modes" },
-        { "'femu_mode':1,'io_stages':true,'mapping':'dftl'",
-          "a mapping other than page" },
+        { "'femu_mode':1,'io_stages':true,'mapping':'hybrid'",
+          "a mapping other than page or dftl" },
+        { "'femu_mode':1,'io_stages':true,'mapping':'fast'",
+          "a mapping other than page or dftl" },
         { "'femu_mode':1,'io_stages':true,'ch_xfer_lat':1000",
           "channel bus phases" },
         { "'femu_mode':1,'io_stages':true,'pe_suspend':1",

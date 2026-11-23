@@ -941,6 +941,13 @@ struct ssd {
      */
     bool wc_on;
     FemuWaitParts wc_last;
+    /*
+     * io_causes with dftl: the parts of the last translation, and the
+     * waits of the TP read it booked (wc_tp_set says one was booked)
+     */
+    FemuWaitParts wc_map;
+    FemuWaitParts wc_tp;
+    bool wc_tp_set;
     struct ssd_ns_ctr *ns_ctr;
     /* query-stats: see struct ssd_stats_pub and ssd_stats_publish() */
     QemuSeqLock stats_seq;

@@ -663,7 +663,27 @@ cause of the last booking.
 | `other` | any other booking, such as parity or a second program pass |
 | `ecc` | the ECC time of a read, from its wear and age tiers |
 | `buffer` | a write-back of the write buffer that set the latency |
+| `map` | `mapping=dftl`: a translation page read, a wait behind translation page work, or the HMB access |
 | `none` | no part above 1000 ns |
+
+With `mapping=dftl`, a read on a CMT miss reads its translation page
+(TP) before the data. The waits of that TP read keep their owners. The rest of the
+translation time, the TP read itself included, is `map`:
+
+```
+ LUN:  [ TP 1 program ][ TP 0 read ][ data read ]
+ read:  ^ arrives
+        |<- map: wait->|<- map: TP->|  (data read: no wait)
+```
+
+- A read of a TP that is still in flight counts the wait for it as `map`.
+- With the HMB, the map part is the access time (`hmb_ns`) of each
+  translation.
+- A write runs its translation beside the program. The map part counts
+  only when it ends the page, or with `hot_cold_sep` (program after it).
+- Garbage collection moves TPs as TP work, so a wait behind a moved TP
+  is `map`, not `gc`.
+- The data read time is in no part, as for the page mapping.
 
 - A command takes the waits of the page or step that sets its latency.
   On a tie, the first one in command order wins.
@@ -677,7 +697,8 @@ cause of the last booking.
 - With `nsid`, the `read` and `write` classes of the namespace also have
   `causes`. `reset` clears the causes with the stages.
 
-`io_causes` needs a bbssd device (`femu_mode=1`) with the page mapping.
+`io_causes` needs a bbssd device (`femu_mode=1`) with the page or dftl
+mapping.
 Realize fails for the options whose timing the rules do not follow:
 
 - `namespace_modes`, a `femu-subsys` (FDP), a CXL link, `shared_ftl`;
