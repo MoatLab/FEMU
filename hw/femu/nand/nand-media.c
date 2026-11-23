@@ -222,6 +222,8 @@ void nand_media_destroy(NandMedia *m)
     m->ca_res = NULL;
     free(m->susp);
     m->susp = NULL;
+    free(m->owner);
+    m->owner = NULL;
 }
 
 /* empty every window list of @l, keeping its memory */
@@ -252,6 +254,9 @@ void nand_media_idle(NandMedia *m)
     }
     if (m->die_stat) {
         memset(m->die_stat, 0, luns * sizeof(*m->die_stat));
+    }
+    if (m->owner) {
+        memset(m->owner, 0, luns * (1 + cfg->planes_per_lun));
     }
 }
 
@@ -307,6 +312,10 @@ uint64_t nand_media_bytes(const NandMedia *m)
     if (m->susp) {
         bytes += (uint64_t)m->cfg.nchs * m->cfg.luns_per_ch *
                  m->cfg.planes_per_lun * sizeof(*m->susp);
+    }
+    if (m->owner) {
+        bytes += (uint64_t)m->cfg.nchs * m->cfg.luns_per_ch *
+                 (1 + m->cfg.planes_per_lun);
     }
     return bytes;
 }
@@ -757,6 +766,123 @@ static void array_commit_op(NandMedia *m, const NandLoc *loc, uint64_t done,
         return;
     }
     array_commit(m, loc, done);
+}
+
+/* the owner slots of @loc's LUN: [0] the LUN word, [1 + p] plane p */
+static uint8_t *own_of(const NandMedia *m, const NandLoc *loc)
+{
+    size_t lun = (size_t)loc->ch * m->cfg.luns_per_ch + loc->lun;
+
+    return m->owner + lun * (1 + m->cfg.planes_per_lun);
+}
+
+/* a word that ends strictly later than the start so far sets the start */
+static inline void own_pick(uint64_t v, uint8_t o, uint64_t *s, uint8_t *by)
+{
+    if (v > *s) {
+        *s = v;
+        *by = o;
+    }
+}
+
+/*
+ * The start array_contend_op() gives @op at @loc from @t, and in @by the
+ * owner of the word that set it. The words go in a fixed order: LUN, then
+ * the plane of @loc, or every plane for a program or erase under plane
+ * reads; an equal end keeps the earlier word. @by stays as it was when no
+ * word ends after @t, so a group of locations can share one call chain.
+ */
+static uint64_t own_start(NandMedia *m, const NandLoc *loc, uint64_t t,
+                          bool pe, uint8_t *by)
+{
+    void *op = m->cfg.timeline_opaque;
+    const uint8_t *o = own_of(m, loc);
+    uint64_t s = t;
+
+    switch (m->cfg.policy.array_contend) {
+    case NAND_CONTEND_LUN_ONLY:
+        own_pick(*m->cfg.timeline->lun_avail(op, loc), o[0], &s, by);
+        break;
+    case NAND_CONTEND_LUN_AND_PLANE:
+        own_pick(*m->cfg.timeline->lun_avail(op, loc), o[0], &s, by);
+        own_pick(*plane_of(m, loc, loc->pl), o[1 + loc->pl], &s, by);
+        break;
+    case NAND_CONTEND_PLANE_ONLY:
+        own_pick(*plane_of(m, loc, loc->pl), o[1 + loc->pl], &s, by);
+        break;
+    case NAND_CONTEND_LUN_PE_PLANE_READ:
+        own_pick(*m->cfg.timeline->lun_avail(op, loc), o[0], &s, by);
+        if (!pe) {
+            own_pick(*plane_of(m, loc, loc->pl), o[1 + loc->pl], &s, by);
+            break;
+        }
+        for (uint32_t p = 0; p < m->cfg.planes_per_lun; p++) {
+            own_pick(*plane_of(m, loc, p), o[1 + p], &s, by);
+        }
+        break;
+    }
+    return s;
+}
+
+static inline void own_set(uint64_t *w, uint8_t *o, uint64_t done, uint8_t by)
+{
+    if (done > *w) {
+        *o = by;
+    }
+}
+
+/*
+ * Before a commit of @done: @by owns each word the commit moves forward.
+ * The words are those array_commit_op() writes (@pe for a program or
+ * erase); a word that stays where it is keeps its owner.
+ */
+static void own_commit(NandMedia *m, const NandLoc *loc, bool pe,
+                       uint64_t done, uint8_t by)
+{
+    void *op = m->cfg.timeline_opaque;
+    uint8_t *o = own_of(m, loc);
+
+    switch (m->cfg.policy.array_contend) {
+    case NAND_CONTEND_LUN_ONLY:
+        own_set(m->cfg.timeline->lun_avail(op, loc), &o[0], done, by);
+        break;
+    case NAND_CONTEND_LUN_AND_PLANE:
+        own_set(m->cfg.timeline->lun_avail(op, loc), &o[0], done, by);
+        own_set(plane_of(m, loc, loc->pl), &o[1 + loc->pl], done, by);
+        break;
+    case NAND_CONTEND_PLANE_ONLY:
+        own_set(plane_of(m, loc, loc->pl), &o[1 + loc->pl], done, by);
+        break;
+    case NAND_CONTEND_LUN_PE_PLANE_READ:
+        if (!pe) {
+            own_set(plane_of(m, loc, loc->pl), &o[1 + loc->pl], done, by);
+            break;
+        }
+        own_set(m->cfg.timeline->lun_avail(op, loc), &o[0], done, by);
+        for (uint32_t p = 0; p < m->cfg.planes_per_lun; p++) {
+            own_set(plane_of(m, loc, p), &o[1 + p], done, by);
+        }
+        break;
+    }
+}
+
+int nand_media_track(NandMedia *m)
+{
+    size_t luns = (size_t)m->cfg.nchs * m->cfg.luns_per_ch;
+
+    if (m->owner) {
+        return 0;
+    }
+    m->owner = media_calloc(luns * (1 + m->cfg.planes_per_lun), 1);
+    return m->owner ? 0 : -1;
+}
+
+uint8_t nand_media_owner(const NandMedia *m, const NandLoc *loc, int plane)
+{
+    if (!m->owner) {
+        return 0;
+    }
+    return own_of(m, loc)[plane < 0 ? 0 : 1 + plane];
 }
 
 /*
@@ -1508,7 +1634,8 @@ uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint32_t pg,
 
     /* the same single-word rule as nand_media_op()'s lock-free path */
     if (m->cfg.policy.channel_mode != NAND_CH_STAGED &&
-        m->cfg.policy.array_contend == NAND_CONTEND_LUN_ONLY && !m->susp) {
+        m->cfg.policy.array_contend == NAND_CONTEND_LUN_ONLY && !m->susp &&
+        !m->owner) {
         uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
         uint64_t old = __atomic_load_n(lun, __ATOMIC_RELAXED);
 
@@ -1526,6 +1653,11 @@ uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint32_t pg,
     s = array_contend_op(m, loc, stime, NAND_MEDIA_PROGRAM);
     done = s + alat;
     die_acct(m, loc, stime, s, alat);
+    if (m->owner) {
+        /* a second pass of a wordline the host already programmed */
+        own_commit(m, loc, true, done,
+                   NAND_BY(NAND_ORIGIN_OTHER, NAND_MEDIA_PROGRAM));
+    }
     array_commit_op(m, loc, done, NAND_MEDIA_PROGRAM);
     suspend_note(m, loc, NAND_MEDIA_PROGRAM, done);
     /* no read of the wordline goes ahead of its pass */
@@ -1539,9 +1671,20 @@ uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint32_t pg,
 NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                                NandMediaOp op, uint64_t stime)
 {
+    return nand_media_op_cause(m, loc, op, stime, NULL);
+}
+
+NandOpCompletion nand_media_op_cause(NandMedia *m, const NandLoc *loc,
+                                     NandMediaOp op, uint64_t stime,
+                                     NandOpCause *cause)
+{
     NandOpCompletion c;
     uint64_t t = stime;
     uint64_t alat = array_lat(m, loc, op);
+
+    if (cause) {
+        memset(cause, 0, sizeof(*cause));
+    }
 
     if (m->cfg.policy.channel_mode != NAND_CH_STAGED) {
         /*
@@ -1564,7 +1707,8 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
          * Suspend keeps state beside the timeline that one CAS cannot update
          * with it, so a device with suspend on takes the general path below.
          */
-        if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_ONLY && !m->susp) {
+        if (m->cfg.policy.array_contend == NAND_CONTEND_LUN_ONLY && !m->susp &&
+            !m->owner) {
             uint64_t *lun = m->cfg.timeline->lun_avail(m->cfg.timeline_opaque, loc);
             uint64_t old = __atomic_load_n(lun, __ATOMIC_RELAXED);
             for (;;) {
@@ -1616,6 +1760,19 @@ NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
             } else {
                 done = s + alat;
                 die_acct(m, loc, t, s, alat);
+                if (m->owner) {
+                    uint8_t by = 0;
+
+                    own_start(m, loc, t, op != NAND_MEDIA_READ, &by);
+                    if (cause) {
+                        cause->wait_ns = s - t;
+                        cause->by = s > t ? by : 0;
+                        cause->ecc_ns = op == NAND_MEDIA_READ ?
+                                        ecc_extra_ns(m, loc) : 0;
+                    }
+                    own_commit(m, loc, op != NAND_MEDIA_READ, done,
+                               NAND_BY(loc->origin, op));
+                }
                 array_commit_op(m, loc, done, op);
                 suspend_note(m, loc, op, done);
                 if (op != NAND_MEDIA_READ) {
@@ -1812,14 +1969,26 @@ static NandOpCompletion onfi_multiplane(NandMedia *m, const NandLoc *locs,
 NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nlocs,
                                        NandMediaOp op, uint64_t stime)
 {
+    return nand_media_multiplane_cause(m, locs, nlocs, op, stime, NULL);
+}
+
+NandOpCompletion nand_media_multiplane_cause(NandMedia *m, const NandLoc *locs,
+                                             int nlocs, NandMediaOp op,
+                                             uint64_t stime,
+                                             NandOpCause *cause)
+{
     NandOpCompletion c;
     uint64_t t = stime;
     uint32_t ch = locs[0].ch;
+    uint64_t worst = 0;
     int plbusy = (op == NAND_MEDIA_PROGRAM) ? m->cfg.timing.tplpbsy_ns :
                  (op == NAND_MEDIA_ERASE)   ? m->cfg.timing.tplebsy_ns :
                                               m->cfg.timing.tplrbsy_ns;
     int i;
 
+    if (cause) {
+        memset(cause, 0, sizeof(*cause));
+    }
     if (m->ca_res) {
         return sca_multiplane(m, locs, nlocs, op, stime);
     }
@@ -1855,7 +2024,6 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
                m->cfg.timing.rd_ns :
                m->cfg.timing.rd_table_ns[locs[0].flash_type][locs[0].page_type]);
         /* the plane needing the most correction paces the whole operation */
-        uint64_t worst = 0;
         for (i = 0; i < nlocs; i++) {
             uint64_t extra = ecc_extra_ns(m, &locs[i]);
             if (extra > worst) worst = extra;
@@ -1867,6 +2035,24 @@ NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nl
     uint64_t done = start + alat;
     /* one booking for the group, whatever the plane count */
     die_acct(m, &locs[0], t, start, alat);
+    if (m->owner) {
+        uint64_t s = t;
+        uint8_t by = 0;
+
+        /* the locations in order, each with its own word order */
+        for (i = 0; i < nlocs; i++) {
+            s = own_start(m, &locs[i], s, op != NAND_MEDIA_READ, &by);
+        }
+        if (cause) {
+            cause->wait_ns = start - t;
+            cause->by = start > t ? by : 0;
+            cause->ecc_ns = worst;
+        }
+        for (i = 0; i < nlocs; i++) {
+            own_commit(m, &locs[i], op != NAND_MEDIA_READ, done,
+                       NAND_BY(locs[i].origin, op));
+        }
+    }
     for (i = 0; i < nlocs; i++) {
         array_commit_op(m, &locs[i], done, op);
         suspend_note(m, &locs[i], op, done);
@@ -1974,6 +2160,9 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
         die_acct(m, src, t, rs, rlat);
         s = rs + rlat;
     }
+    if (m->owner) {
+        own_commit(m, src, true, s, NAND_BY(NAND_ORIGIN_GC, NAND_MEDIA_READ));
+    }
     array_commit(m, src, s);
     /* the on-chip read is part of the program, so it is suspended with it */
     suspend_note(m, src, NAND_MEDIA_PROGRAM, s);
@@ -1990,6 +2179,10 @@ NandOpCompletion nand_media_copyback(NandMedia *m, const NandLoc *src,
         /* the program follows its read: that order is not a wait */
         die_acct(m, dst, s, ps, plat);
         s = ps + plat;
+    }
+    if (m->owner) {
+        own_commit(m, dst, true, s,
+                   NAND_BY(NAND_ORIGIN_GC, NAND_MEDIA_PROGRAM));
     }
     array_commit(m, dst, s);
     suspend_note(m, dst, NAND_MEDIA_PROGRAM, s);

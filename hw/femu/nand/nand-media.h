@@ -63,6 +63,16 @@ typedef enum NandChannelMode {
  * page_type (bbssd: pg % cell_pages; OC12: from the page; ZNS/OC20: 0),
  * pe_cycles (bbssd blk->erase_cnt for ECC wear; else 0).
  */
+/* the work a booking belongs to; OTHER when the caller does not say */
+enum {
+    NAND_ORIGIN_OTHER = 0,
+    NAND_ORIGIN_HOST,
+    NAND_ORIGIN_GC,
+    NAND_ORIGIN_TP,
+    NAND_ORIGIN_MAP,
+    NAND_ORIGIN_PARITY,
+};
+
 typedef struct NandLoc {
     uint32_t ch;
     uint32_t lun;
@@ -71,6 +81,8 @@ typedef struct NandLoc {
     uint32_t pg;
     uint8_t  flash_type;
     uint8_t  page_type;
+    /* NAND_ORIGIN_*: who books the op, for wait causes (io_causes) */
+    uint8_t  origin;
     uint32_t pe_cycles;
     uint32_t age_sec;   /* seconds since the data was programmed; 0 = untracked */
     /*
@@ -352,6 +364,11 @@ typedef struct NandMedia {
     NandDieStat *die_stat;
     /* reads that a seal made start after their request time */
     uint64_t seal_waits;
+    /*
+     * Wait causes: per LUN, the owner of the LUN word, then of each plane
+     * word (NAND_BY()); 0 is no owner. NULL unless nand_media_track().
+     */
+    uint8_t *owner;
 } NandMedia;
 
 uint64_t nand_media_last_end(const NandMedia *m);
@@ -360,6 +377,25 @@ typedef struct NandOpCompletion {
     uint64_t done_ns;
     uint64_t latency_ns;
 } NandOpCompletion;
+
+/*
+ * The owner of a timeline word: the origin and the op of the booking that
+ * last moved it forward.
+ */
+#define NAND_BY(origin, op)  ((uint8_t)(((origin) << 2) | ((op) + 1)))
+#define NAND_BY_ORIGIN(by)   ((by) >> 2)
+#define NAND_BY_OP(by)       (((by) & 3) - 1)
+
+/*
+ * What one booking waited for: @wait_ns from the time the op could start
+ * to its array start, @by the owner of the word that set that start (0
+ * without a wait), and @ecc_ns the ECC tier time of a read.
+ */
+typedef struct NandOpCause {
+    uint64_t wait_ns;
+    uint64_t ecc_ns;
+    uint8_t  by;
+} NandOpCause;
 
 void nand_media_init(NandMedia *m, const NandMediaConfig *cfg);
 int nand_media_try_init(NandMedia *m, const NandMediaConfig *cfg);
@@ -370,6 +406,16 @@ uint32_t nand_media_cap_row(NandMediaTiming *t, int fast, int slow,
 void nand_media_test_fail(uint32_t at);
 void nand_media_destroy(NandMedia *m);
 void nand_media_idle(NandMedia *m);
+
+/*
+ * Keep the owner of each timeline word from now on. Each booking then takes
+ * the locked path; the times it books do not change. Only the plain array
+ * rules record owners: no staged channel, ONFI, SCA, suspend or read
+ * priority. Returns -1 when out of memory.
+ */
+int nand_media_track(NandMedia *m);
+/* the owner of the LUN word of @loc (@plane < 0) or of plane @plane */
+uint8_t nand_media_owner(const NandMedia *m, const NandLoc *loc, int plane);
 /* the bytes the media holds now: bus window lists and suspend state */
 uint64_t nand_media_bytes(const NandMedia *m);
 uint64_t nand_media_cfg_bytes(const NandMediaConfig *cfg);
@@ -386,6 +432,10 @@ uint64_t nand_media_hold(NandMedia *m, const NandLoc *loc, uint32_t pg,
 
 NandOpCompletion nand_media_op(NandMedia *m, const NandLoc *loc,
                                NandMediaOp op, uint64_t stime);
+/* nand_media_op(), and with tracking on, what it waited for in @cause */
+NandOpCompletion nand_media_op_cause(NandMedia *m, const NandLoc *loc,
+                                     NandMediaOp op, uint64_t stime,
+                                     NandOpCause *cause);
 
 /*
  * pe_suspend: keep the work booked on the array position of @loc where it
@@ -418,6 +468,11 @@ uint64_t nand_media_pe_end(const NandMedia *m);
  */
 NandOpCompletion nand_media_multiplane(NandMedia *m, const NandLoc *locs, int nlocs,
                                        NandMediaOp op, uint64_t stime);
+/* nand_media_multiplane(), and the cause of the group as one booking */
+NandOpCompletion nand_media_multiplane_cause(NandMedia *m, const NandLoc *locs,
+                                             int nlocs, NandMediaOp op,
+                                             uint64_t stime,
+                                             NandOpCause *cause);
 
 /*
  * On-chip copyback: src read + dst program on one die, with no data phase on

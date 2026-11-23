@@ -2127,6 +2127,237 @@ static void test_cap_row(void)
     check("cap: SLC device", nand_media_cap_row(&t, T_SLC, T_SLC, 1), 0);
 }
 
+/*
+ * Wait causes. Tracking must not move any booked time: the same op
+ * sequence with and without it gives the same ends and the same timeline
+ * words, under the three array rules that tracking covers.
+ */
+#define WC_OPS 12
+
+static NandLoc wc_loc(uint32_t lun, uint32_t pl, uint8_t origin)
+{
+    NandLoc l = pr_loc(lun, pl);
+
+    l.origin = origin;
+    return l;
+}
+
+static void wc_run(NandArrayContend rule, bool track, uint64_t *done,
+                   uint64_t *lun, uint64_t *pl)
+{
+    static const uint32_t slow = 150;
+    static uint32_t lun_pct[64];
+    NandMediaConfig cfg;
+    NandMedia m;
+    const uint64_t t0 = 1000000;
+    NandLoc a = wc_loc(0, 0, NAND_ORIGIN_HOST);
+    NandLoc b = wc_loc(0, 1, NAND_ORIGIN_GC);
+    NandLoc c = wc_loc(1, 2, NAND_ORIGIN_HOST);
+    NandLoc g[2] = { wc_loc(0, 2, NAND_ORIGIN_HOST),
+                     wc_loc(0, 3, NAND_ORIGIN_HOST) };
+    int i = 0;
+
+    bb_config(&cfg);
+    memset(pr_pl, 0, sizeof(pr_pl));
+    cfg.planes_per_lun = 4;
+    cfg.timing.ecc_step_ns = 5000;
+    cfg.policy.array_contend = rule;
+    cfg.timeline = &plane_read_timeline;
+    nand_media_init(&m, &cfg);
+    for (int k = 0; k < 64; k++) {
+        lun_pct[k] = k == 1 ? 200 : 100;
+    }
+    m.throttle_pct = &slow;
+    m.lun_pct = lun_pct;
+    if (track) {
+        check("causes: tracking allocates", nand_media_track(&m), 0);
+    }
+    b.pe_cycles = 1500;
+    g[1].pe_cycles = 2250;
+    done[i++] = nand_media_op(&m, &a, NAND_MEDIA_PROGRAM, t0).done_ns;
+    done[i++] = nand_media_op(&m, &b, NAND_MEDIA_READ, t0).done_ns;
+    done[i++] = nand_media_hold(&m, &a, 0, 1, t0, 30000);
+    done[i++] = nand_media_op(&m, &c, NAND_MEDIA_READ, t0).done_ns;
+    done[i++] = nand_media_op(&m, &a, NAND_MEDIA_READ, t0 + 5000).done_ns;
+    done[i++] = nand_media_multiplane(&m, g, 2, NAND_MEDIA_READ,
+                                      t0).done_ns;
+    done[i++] = nand_media_copyback(&m, &a, &b, t0).done_ns;
+    done[i++] = nand_media_op(&m, &c, NAND_MEDIA_ERASE, t0).done_ns;
+    done[i++] = nand_media_op(&m, &c, NAND_MEDIA_PROGRAM, t0).done_ns;
+    done[i++] = nand_media_multiplane(&m, g, 2, NAND_MEDIA_ERASE,
+                                      t0).done_ns;
+    done[i++] = nand_media_op(&m, &b, NAND_MEDIA_READ, t0).done_ns;
+    /* a probe after all of them */
+    done[i++] = nand_media_op(&m, &a, NAND_MEDIA_READ, t0).done_ns;
+    check("causes: op count", i, WC_OPS);
+    memcpy(lun, lun_avail, sizeof(lun_avail));
+    memcpy(pl, pr_pl, sizeof(pr_pl));
+    nand_media_destroy(&m);
+}
+
+static void test_wait_causes_same_time(void)
+{
+    static const NandArrayContend rules[] = {
+        NAND_CONTEND_LUN_ONLY, NAND_CONTEND_LUN_AND_PLANE,
+        NAND_CONTEND_LUN_PE_PLANE_READ,
+    };
+    uint64_t d0[WC_OPS], d1[WC_OPS];
+    uint64_t l0[NAND_TEST_LUNS], l1[NAND_TEST_LUNS];
+    uint64_t p0[NAND_TEST_LUNS * 4], p1[NAND_TEST_LUNS * 4];
+
+    printf("# wait causes: tracking keeps every booked time\n");
+    for (size_t r = 0; r < sizeof(rules) / sizeof(rules[0]); r++) {
+        int same = 1;
+
+        reset_timelines();
+        wc_run(rules[r], false, d0, l0, p0);
+        reset_timelines();
+        wc_run(rules[r], true, d1, l1, p1);
+        for (int i = 0; i < WC_OPS; i++) {
+            if (d0[i] != d1[i]) {
+                printf("# rule %zu op %d: %llu vs %llu\n", r, i,
+                       (unsigned long long)d0[i], (unsigned long long)d1[i]);
+                same = 0;
+            }
+        }
+        check("causes: same ends", same, 1);
+        check("causes: same LUN words", !memcmp(l0, l1, sizeof(l0)), 1);
+        check("causes: same plane words", !memcmp(p0, p1, sizeof(p0)), 1);
+    }
+}
+
+/* LUN rule: who owns the word, and what each booking waited for */
+static void test_wait_causes_owner(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandOpCause w;
+    const uint64_t t0 = 1000000;
+    NandLoc h = wc_loc(0, 0, NAND_ORIGIN_HOST);
+    NandLoc gc = wc_loc(0, 0, NAND_ORIGIN_GC);
+    NandLoc e = wc_loc(2, 0, NAND_ORIGIN_GC);
+    NandLoc r2 = wc_loc(2, 0, NAND_ORIGIN_HOST);
+    NandLoc idle = wc_loc(1, 0, NAND_ORIGIN_HOST);
+    uint64_t before;
+
+    printf("# wait causes: owners under the LUN rule\n");
+    bb_config(&cfg);
+    cfg.timing.ecc_step_ns = 5000;
+    cfg.timeline = &lun_only_timeline;
+    nand_media_init(&m, &cfg);
+    before = nand_media_bytes(&m);
+    check("causes: track", nand_media_track(&m), 0);
+    check("causes: bytes count the owners", nand_media_bytes(&m) - before,
+          8 * 8 * 2);
+
+    nand_media_op_cause(&m, &h, NAND_MEDIA_PROGRAM, t0, &w);
+    check("causes: free LUN, no wait", w.wait_ns, 0);
+    check("causes: free LUN, no owner", w.by, 0);
+    check("causes: the program owns the LUN", nand_media_owner(&m, &h, -1),
+          NAND_BY(NAND_ORIGIN_HOST, NAND_MEDIA_PROGRAM));
+    nand_media_op_cause(&m, &gc, NAND_MEDIA_PROGRAM, t0, &w);
+    check("causes: GC waits for the host program", w.wait_ns, 40000);
+    check("causes: GC names the host program", w.by,
+          NAND_BY(NAND_ORIGIN_HOST, NAND_MEDIA_PROGRAM));
+    h.pe_cycles = 1500;
+    nand_media_op_cause(&m, &h, NAND_MEDIA_READ, t0 + 1000, &w);
+    check("causes: read waits for the GC program", w.wait_ns, 79000);
+    check("causes: read names the GC program", w.by,
+          NAND_BY(NAND_ORIGIN_GC, NAND_MEDIA_PROGRAM));
+    check("causes: read ECC tiers", w.ecc_ns, 10000);
+
+    nand_media_op_cause(&m, &idle, NAND_MEDIA_READ, t0, &w);
+    check("causes: another LUN, no wait", w.wait_ns + w.by, 0);
+    /* the LUN is idle again: its owner stays, but nothing waits on it */
+    nand_media_op_cause(&m, &h, NAND_MEDIA_READ, t0 + 10000000, &w);
+    check("causes: stale owner, no wait", w.wait_ns, 0);
+    check("causes: stale owner, no name", w.by, 0);
+
+    nand_media_op(&m, &e, NAND_MEDIA_ERASE, t0);
+    nand_media_op_cause(&m, &r2, NAND_MEDIA_READ, t0, &w);
+    check("causes: read waits for the erase", w.wait_ns, 2000000);
+    check("causes: the erase is named as an erase", NAND_BY_OP(w.by),
+          NAND_MEDIA_ERASE);
+    check("causes: the erase keeps its origin", NAND_BY_ORIGIN(w.by),
+          NAND_ORIGIN_GC);
+
+    nand_media_hold(&m, &idle, 0, 1, t0 + 20000000, 30000);
+    check("causes: a hold owns the LUN as a program of no origin",
+          nand_media_owner(&m, &idle, -1),
+          NAND_BY(NAND_ORIGIN_OTHER, NAND_MEDIA_PROGRAM));
+    nand_media_copyback(&m, &h, &e, t0 + 30000000);
+    check("causes: copyback owns its target as a GC program",
+          nand_media_owner(&m, &e, -1),
+          NAND_BY(NAND_ORIGIN_GC, NAND_MEDIA_PROGRAM));
+
+    nand_media_idle(&m);
+    check("causes: idle clears the owners",
+          nand_media_owner(&m, &h, -1) + nand_media_owner(&m, &e, -1), 0);
+    nand_media_destroy(&m);
+
+    check("causes: NandLoc size", sizeof(NandLoc), 40);
+    check("causes: origin in the padding", offsetof(NandLoc, origin), 22);
+    check("causes: pe_cycles stays", offsetof(NandLoc, pe_cycles), 24);
+}
+
+/* plane reads: word order, ties and multi-plane groups */
+static void test_wait_causes_planes(void)
+{
+    NandMediaConfig cfg;
+    NandMedia m;
+    NandOpCause w;
+    const uint64_t t0 = 1000000;
+    const uint64_t host = NAND_BY(NAND_ORIGIN_HOST, NAND_MEDIA_PROGRAM);
+    const uint64_t gcr = NAND_BY(NAND_ORIGIN_GC, NAND_MEDIA_READ);
+    NandLoc p0 = wc_loc(0, 0, NAND_ORIGIN_HOST);
+    NandLoc p1 = wc_loc(0, 1, NAND_ORIGIN_GC);
+    NandLoc p2 = wc_loc(0, 2, NAND_ORIGIN_HOST);
+    uint64_t *lun = &lun_avail[0];
+    uint64_t *pl = pr_pl[0];
+
+    printf("# wait causes: plane reads\n");
+    for (int order = 0; order < 3; order++) {
+        bb_config(&cfg);
+        memset(pr_pl, 0, sizeof(pr_pl));
+        cfg.planes_per_lun = 4;
+        cfg.timing.ecc_step_ns = 5000;
+        cfg.policy.array_contend = NAND_CONTEND_LUN_PE_PLANE_READ;
+        cfg.timeline = &plane_read_timeline;
+        nand_media_init(&m, &cfg);
+        nand_media_track(&m);
+        /* LUN and planes: host program; then plane 1: GC read */
+        nand_media_op(&m, &p0, NAND_MEDIA_PROGRAM, t0);
+        nand_media_op(&m, &p1, NAND_MEDIA_READ, t0);
+        check("causes: plane read owns its plane only",
+              nand_media_owner(&m, &p1, 1), gcr);
+        check("causes: the LUN keeps the program",
+              nand_media_owner(&m, &p1, -1), host);
+        if (order == 0) {
+            /* equal ends: the LUN word comes first and keeps the name */
+            *lun = pl[1];
+            nand_media_op_cause(&m, &p1, NAND_MEDIA_READ, t0, &w);
+            check("causes: tie keeps the earlier word", w.by, host);
+        } else {
+            /* planes 1 and 2 end together, after the LUN */
+            NandLoc ga[2] = { p1, p2 };
+            NandLoc gb[2] = { p2, p1 };
+
+            pl[2] = pl[1];
+            ga[1].pe_cycles = 750;
+            ga[0].pe_cycles = 2250;
+            gb[0].pe_cycles = 750;
+            gb[1].pe_cycles = 2250;
+            nand_media_multiplane_cause(&m, order == 1 ? ga : gb, 2,
+                                        NAND_MEDIA_READ, t0, &w);
+            check("causes: group tie goes to the first location", w.by,
+                  order == 1 ? gcr : host);
+            check("causes: group wait", w.wait_ns, 40000 + 10000);
+            check("causes: group takes the largest ECC", w.ecc_ns, 15000);
+        }
+        nand_media_destroy(&m);
+    }
+}
+
 int main(void)
 {
     /*
@@ -2159,6 +2390,9 @@ int main(void)
     test_media_bytes();
     test_media_fail();
     test_cap_row();
+    test_wait_causes_same_time();
+    test_wait_causes_owner();
+    test_wait_causes_planes();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }
