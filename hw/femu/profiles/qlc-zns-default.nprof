@@ -4,9 +4,16 @@
 femu_nand_profile = 1
 name = qlc-zns-default
 nand_type = qlc
+source.nand_type = FEMU default: the ZNS QLC cell type
 read_ns = 85000
+source.read_ns = FEMU default: QLC_READ_LATENCY_NS in hw/femu/zns/zns.h
 program_ns = 3049000
+source.program_ns = FEMU default: QLC_PROGRAM_LATENCY_NS in hw/femu/zns/zns.h, divided by the 4 pages of a QLC wordline; see the ISSCC 2024 reference there
 erase_ns = 3000000
+source.erase_ns = FEMU default: QLC_BLOCK_ERASE_LATENCY_NS in hw/femu/nand/nand.h
 cmd_addr_ns = 0
+source.cmd_addr_ns = FEMU default: zns_cmd_addr_lat in hw/femu/femu.c (no bus phases)
 xfer_ns = 0
+source.xfer_ns = FEMU default: zns_pg_xfer_lat in hw/femu/femu.c (no bus phases)
 status_ns = 0
+source.status_ns = FEMU default: zns_status_lat in hw/femu/femu.c (no bus phases)

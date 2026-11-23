@@ -3,9 +3,16 @@
 femu_nand_profile = 1
 name = bbssd-flat-default
 nand_type = none
+source.nand_type = FEMU default: no cell type, so no rated P/E cycles
 read_ns = 40000
+source.read_ns = FEMU default: pg_rd_lat in hw/femu/femu.c
 program_ns = 200000
+source.program_ns = FEMU default: pg_wr_lat in hw/femu/femu.c
 erase_ns = 2000000
+source.erase_ns = FEMU default: blk_er_lat in hw/femu/femu.c
 cmd_addr_ns = 0
+source.cmd_addr_ns = FEMU default: cmd_addr_lat in hw/femu/femu.c (no bus phases)
 xfer_ns = 0
+source.xfer_ns = FEMU default: pg_xfer_lat in hw/femu/femu.c (no bus phases)
 status_ns = 0
+source.status_ns = FEMU default: status_lat in hw/femu/femu.c (no bus phases)

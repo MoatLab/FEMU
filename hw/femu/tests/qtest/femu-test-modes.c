@@ -4726,6 +4726,43 @@ static void femu_np_add(QTestState *qts, const char *id, int addr,
 }
 
 /*
+ * The value list of a profile: seven entries in line order. A shipped
+ * file gives a source for each value; the test files give none. The
+ * custom file reads back its raw times, also on ZNS.
+ */
+static void femu_np_values(QDict *md, const char *name, const char *file)
+{
+    QList *vals = qdict_get_qlist(md, "nand-profile-values");
+    bool shipped = strstr(file, "profiles/") != NULL;
+    int64_t last = 0;
+    int n = 0;
+
+    g_assert_nonnull(vals);
+    for (QListEntry *e = qlist_first(vals); e; e = qlist_next(e)) {
+        QDict *v = qobject_to(QDict, qlist_entry_obj(e));
+        const char *key = qdict_get_str(v, "key");
+        const char *val = qdict_get_str(v, "value");
+
+        g_assert_cmpint(qdict_get_int(v, "line"), >, last);
+        last = qdict_get_int(v, "line");
+        g_assert_cmpint(qdict_haskey(v, "source"), ==, shipped);
+        g_assert_cmpint(qdict_haskey(v, "source-line"), ==, shipped);
+        if (shipped) {
+            g_assert_cmpstr(qdict_get_str(v, "source"), !=, "");
+            g_assert_cmpint(qdict_get_int(v, "source-line"), ==, last + 1);
+        }
+        if (g_str_equal(name, "custom") && g_str_equal(key, "program_ns")) {
+            g_assert_cmpstr(val, ==, "210000");
+        }
+        if (g_str_equal(name, "custom") && g_str_equal(key, "nand_type")) {
+            g_assert_cmpstr(val, ==, "tlc");
+        }
+        n++;
+    }
+    g_assert_cmpint(n, ==, 7);
+}
+
+/*
  * The media member of device @id at @slot: base times, timing and profile.
  * query-femu needs an enabled controller, so this enables it around the
  * query.
@@ -4754,9 +4791,11 @@ static void femu_np_check(QFemu *femu, QGuestAllocator *alloc, const char *id,
     if (name) {
         g_assert_cmpstr(qdict_get_str(md, "nand-profile"), ==, name);
         g_assert_cmpstr(qdict_get_str(md, "nand-profile-file"), ==, file);
+        femu_np_values(md, name, file);
     } else {
         g_assert_false(qdict_haskey(md, "nand-profile"));
         g_assert_false(qdict_haskey(md, "nand-profile-file"));
+        g_assert_false(qdict_haskey(md, "nand-profile-values"));
     }
     if (g_str_equal(id, "np2") || g_str_equal(id, "np3")) {
         /* all three bus keys of the custom profile reach bbssd and ZNS */
@@ -4846,6 +4885,8 @@ void femu_test_nand_profile(void *obj, void *data,
             qpci_unplug_acpi_device_test(qts, id, a);
         }
     }
+    /* realize keeps its copy: a change to the file does not reach query */
+    g_assert_true(g_file_set_contents(cus, FEMU_NP_DEFAULT, -1, NULL));
     /* a profile with the old defaults gives exactly the old times */
     femu_np_check(femu, alloc, "np0", 5, 40000, 200000, 2000000, "flat",
                   NULL, NULL);
@@ -4891,6 +4932,11 @@ void femu_test_nand_profile_refused(void *obj, void *data,
         { FEMU_NP_DEFAULT, "'pg_rd_lat':41000", "pg_rd_lat must keep" },
         { FEMU_NP_DEFAULT, "'pgtype_lat':1", "pgtype_lat must keep" },
         { FEMU_NP_DEFAULT, "'ch_xfer_lat':5", "ch_xfer_lat must keep" },
+        { FEMU_NP_DEFAULT "source.read_ns =\n", NULL, "1 to 255 bytes" },
+        { FEMU_NP_DEFAULT "source.name = x\n", NULL, "not a value key" },
+        { FEMU_NP_DEFAULT "source.xfer_ns = a\nsource.xfer_ns = a\n", NULL,
+          "given twice" },
+        { "source.read_ns = x\n" FEMU_NP_DEFAULT, NULL, "first key" },
     };
     static const char *const modes[] = { "'femu_mode':2", "'femu_mode':0" };
     g_autofree char *good = femu_np_file(FEMU_NP_DEFAULT);
@@ -4909,6 +4955,25 @@ void femu_test_nand_profile_refused(void *obj, void *data,
         desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
         g_test_message("case %d: %s", i, desc);
         g_assert_nonnull(strstr(desc, tc[i].msg));
+        qobject_unref(rsp);
+        unlink(f);
+    }
+    /* a NUL byte would hide the rest of the file from the parser */
+    {
+        static const char nul[] = FEMU_NP_DEFAULT "\0read_ns = 1\n";
+        g_autofree char *f = femu_np_file("");
+        g_autofree char *cmd = NULL;
+        QDict *rsp;
+
+        g_assert_true(g_file_set_contents(f, nul, sizeof(nul) - 1, NULL));
+        cmd = g_strdup_printf("{'execute':'device_add','arguments':{"
+                              "'driver':'femu','id':'npr','addr':'5',"
+                              "'femu_mode':1,%s,'nand_profile':'%s'}}",
+                              FEMU_NP_BB, f);
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"), "holds a NUL byte"));
         qobject_unref(rsp);
         unlink(f);
     }

@@ -20,6 +20,7 @@
 #include "qapi/qapi-commands-femu.h"
 #include "qom/object.h"
 #include "nvme.h"
+#include "nand/nand-profile.h"
 #include "bbssd/ftl.h"
 #include "kvssd/kvssd.h"
 #include "femu-query.h"
@@ -138,6 +139,7 @@ typedef struct FemuQuerySel {
     /* the controller's NAND profile, or NULL; copies, as for slow_luns */
     char *profile_name;
     char *profile_file;
+    NandProfile *profile;       /* a copy of the parsed profile, or NULL */
     /* die_slow: the slow LUNs, copied while the controller is held */
     FemuSlowLunList *slow_luns;
     bool has_lsm;               /* a kvssd namespace with kv_index=lsm */
@@ -214,6 +216,10 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
         nand_media_phases(media, &sel->media);
         sel->profile_name = g_strdup(n->nand_profile_name);
         sel->profile_file = g_strdup(n->nand_profile);
+        if (n->nand_profile_data) {
+            sel->profile = g_memdup2(n->nand_profile_data,
+                                     sizeof(*n->nand_profile_data));
+        }
         femu_query_slow_luns(media, sel);
     }
 
@@ -576,6 +582,40 @@ static FemuDieInfo *femu_query_die(const FemuQueryNs *q, uint32_t idx,
     return di;
 }
 
+/* the values of a profile, in the order of their lines in the file */
+static FemuNandProfileValueList *
+femu_query_profile_values(const NandProfile *p)
+{
+    FemuNandProfileValueList *list = NULL;
+    FemuNandProfileValueList **tail = &list;
+    int order[NAND_PROFILE_VALUES];
+
+    for (int i = 0; i < NAND_PROFILE_VALUES; i++) {
+        int j = i;
+
+        while (j > 0 && p->val[order[j - 1]].line > p->val[i].line) {
+            order[j] = order[j - 1];
+            j--;
+        }
+        order[j] = i;
+    }
+    for (int i = 0; i < NAND_PROFILE_VALUES; i++) {
+        const NandProfileValue *v = &p->val[order[i]];
+        FemuNandProfileValue *e = g_new0(FemuNandProfileValue, 1);
+
+        e->key = g_strdup(nand_profile_value_key(order[i]));
+        e->value = nand_profile_value_text(p, order[i]);
+        e->line = v->line;
+        if (v->source_line) {
+            e->has_source_line = true;
+            e->source_line = v->source_line;
+            e->source = g_strdup(v->source);
+        }
+        QAPI_LIST_APPEND(tail, e);
+    }
+    return list;
+}
+
 static FemuMediaTiming *femu_query_media_info(FemuQuerySel *sel)
 {
     FemuMediaTiming *mt = g_new0(FemuMediaTiming, 1);
@@ -591,6 +631,10 @@ static FemuMediaTiming *femu_query_media_info(FemuQuerySel *sel)
     if (sel->profile_name) {
         mt->nand_profile = g_strdup(sel->profile_name);
         mt->nand_profile_file = g_strdup(sel->profile_file);
+    }
+    if (sel->profile) {
+        mt->has_nand_profile_values = true;
+        mt->nand_profile_values = femu_query_profile_values(sel->profile);
     }
     /* the reply takes the list; this QAPI keeps has_ for optional lists */
     mt->slow_luns = g_steal_pointer(&sel->slow_luns);
@@ -1142,6 +1186,7 @@ out:
         qapi_free_FemuSlowLunList(sel[i].slow_luns);
         g_free(sel[i].profile_name);
         g_free(sel[i].profile_file);
+        g_free(sel[i].profile);
     }
     g_free(sel);
     femu_query_zoned_free(zoned, cap);

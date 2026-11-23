@@ -665,6 +665,29 @@
   'data': { 'channel': 'uint32', 'lun': 'uint32', 'percent': 'uint32' } }
 
 ##
+# @FemuNandProfileValue:
+#
+# One value of a NAND profile file, and where the file says it comes
+# from.
+#
+# @key: the profile key, such as read_ns or nand_type
+#
+# @value: the value realize used: whole nanoseconds in decimal, or the
+#     NAND type (none, slc, mlc, tlc or qlc)
+#
+# @line: the line of the value in the file, from 1
+#
+# @source-line: the line of its source.KEY line.  Absent without one.
+#
+# @source: the text of its source.KEY line.  Absent without one.
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuNandProfileValue',
+  'data': { 'key': 'str', 'value': 'str', 'line': 'uint32',
+            '*source-line': 'uint32', '*source': 'str' } }
+
+##
 # @FemuMediaTiming:
 #
 # The NAND bus timing a namespace charges.  The values are the ones
@@ -781,6 +804,10 @@
 # @nand-profile-file: the profile file as given.  Absent without a
 #     profile.
 #
+# @nand-profile-values: the seven values of the profile that realize
+#     used, in the order of their lines in the file.  Absent without a
+#     profile.
+#
 # @slow-luns: the LUNs that die-slow made slow, with their factors.
 #     Absent when no LUN is slow, and without die_slow.
 #
@@ -808,6 +835,7 @@
             'array-timing': 'FemuArrayTiming', 'read-ns': 'uint64',
             'program-ns': 'uint64', 'erase-ns': 'uint64',
             '*nand-profile': 'str', '*nand-profile-file': 'str',
+            '*nand-profile-values': ['FemuNandProfileValue'],
             '*slow-luns': ['FemuSlowLun'] } }
 
 ##

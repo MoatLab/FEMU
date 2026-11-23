@@ -3265,6 +3265,8 @@ typedef struct FemuCtrl {
     uint32_t        pe_cycles_rated;
     char            *nand_profile;      /* profile file; NULL = none */
     char            *nand_profile_name; /* its name, once loaded */
+    /* the parsed profile realize used, for query-femu; NULL = none */
+    struct NandProfile *nand_profile_data;
     uint32_t        nand_bad_blocks; /* bbssd factory bad blocks reported via SMART; 0 = none */
     uint32_t        blk_pe_limit;   /* mean erases a block survives; 0 = off */
     uint32_t        blk_pe_spread;  /* spread of blk_pe_limit, percent */

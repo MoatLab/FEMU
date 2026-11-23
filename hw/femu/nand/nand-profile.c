@@ -37,16 +37,92 @@ static bool nand_profile_num(const char *v, int64_t lo, int64_t hi,
     return true;
 }
 
+static const char *const nand_profile_types[] = {
+    "none", "slc", "mlc", "tlc", "qlc",
+};
+
 static int nand_profile_type(const char *v)
 {
-    static const char *const names[] = { "none", "slc", "mlc", "tlc", "qlc" };
-
-    for (int i = 0; i < ARRAY_SIZE(names); i++) {
-        if (!strcmp(v, names[i])) {
+    for (int i = 0; i < ARRAY_SIZE(nand_profile_types); i++) {
+        if (!strcmp(v, nand_profile_types[i])) {
             return i;
         }
     }
     return -1;
+}
+
+const char *nand_profile_value_key(int i)
+{
+    return nand_profile_keys[K_TYPE + i];
+}
+
+char *nand_profile_value_text(const NandProfile *p, int i)
+{
+    const int64_t ns[NAND_PROFILE_VALUES] = {
+        0, p->read_ns, p->program_ns, p->erase_ns, p->cmd_addr_ns,
+        p->xfer_ns, p->status_ns,
+    };
+
+    if (i == 0) {
+        return g_strdup(nand_profile_types[p->nand_type]);
+    }
+    return g_strdup_printf("%" PRId64, ns[i]);
+}
+
+/*
+ * A source line: "source.KEY = TEXT". It is read before comment removal,
+ * so TEXT keeps any ';' and '#'. Returns false and sets @err on an error.
+ */
+static bool nand_profile_source(const char *path, int ln, char *line,
+                                NandProfile *p, bool *seen, char **err)
+{
+    char *eq = strchr(line, '=');
+    char *key;
+    char *text;
+    int k;
+
+    if (!eq) {
+        *err = g_strdup_printf("%s:%d: expected source.KEY = TEXT", path, ln);
+        return false;
+    }
+    *eq = '\0';
+    key = g_strstrip(line + strlen("source."));
+    text = g_strstrip(eq + 1);
+    for (k = 0; k < NAND_PROFILE_VALUES &&
+         strcmp(key, nand_profile_value_key(k)); k++) {
+    }
+    if (k == NAND_PROFILE_VALUES) {
+        *err = g_strdup_printf("%s:%d: source for '%s', which is not a "
+                               "value key", path, ln, key);
+        return false;
+    }
+    if (seen[k]) {
+        *err = g_strdup_printf("%s:%d: source for '%s' given twice", path, ln,
+                               key);
+        return false;
+    }
+    seen[k] = true;
+    if (!*text || strlen(text) >= NAND_PROFILE_SOURCE_MAX) {
+        *err = g_strdup_printf("%s:%d: the source of '%s' must have 1 to %d "
+                               "bytes", path, ln, key,
+                               NAND_PROFILE_SOURCE_MAX - 1);
+        return false;
+    }
+    if (!g_utf8_validate(text, -1, NULL)) {
+        *err = g_strdup_printf("%s:%d: the source of '%s' is not UTF-8", path,
+                               ln, key);
+        return false;
+    }
+    for (const char *c = text; *c; c++) {
+        if ((unsigned char)*c < 0x20 && *c != '\t') {
+            *err = g_strdup_printf("%s:%d: the source of '%s' holds a "
+                                   "control byte", path, ln, key);
+            return false;
+        }
+    }
+    p->val[k].source_line = ln;
+    g_strlcpy(p->val[k].source, text, sizeof(p->val[k].source));
+    return true;
 }
 
 bool nand_profile_parse(const char *path, const char *buf, NandProfile *p,
@@ -54,6 +130,7 @@ bool nand_profile_parse(const char *path, const char *buf, NandProfile *p,
 {
     g_auto(GStrv) lines = g_strsplit(buf, "\n", -1);
     bool seen[K_NR] = { false };
+    bool seen_src[NAND_PROFILE_VALUES] = { false };
     bool first = true;
 
     memset(p, 0, sizeof(*p));
@@ -63,6 +140,18 @@ bool nand_profile_parse(const char *path, const char *buf, NandProfile *p,
         int64_t num;
         int k;
 
+        line = g_strchug(line);
+        if (g_str_has_prefix(line, "source.")) {
+            if (first) {
+                *err = g_strdup_printf("%s:%d: the first key must be "
+                                       "femu_nand_profile", path, ln + 1);
+                return false;
+            }
+            if (!nand_profile_source(path, ln + 1, line, p, seen_src, err)) {
+                return false;
+            }
+            continue;
+        }
         line[strcspn(line, ";#")] = '\0';
         g_strstrip(line);
         if (!*line) {
@@ -96,6 +185,9 @@ bool nand_profile_parse(const char *path, const char *buf, NandProfile *p,
             return false;
         }
         seen[k] = true;
+        if (k >= K_TYPE) {
+            p->val[k - K_TYPE].line = ln + 1;
+        }
 
         switch (k) {
         case K_VERSION:

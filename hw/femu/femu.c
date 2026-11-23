@@ -5014,6 +5014,8 @@ static bool femu_apply_nand_profile(FemuCtrl *n, Error **errp)
     n->pe_cycles_rated = p.nand_type ? get_rated_pe_cycles(p.nand_type) : 0;
     g_free(n->nand_profile_name);
     n->nand_profile_name = g_strdup(p.name);
+    g_free(n->nand_profile_data);
+    n->nand_profile_data = g_memdup2(&p, sizeof(p));
     return true;
 }
 
@@ -5947,6 +5949,7 @@ static void nvme_destroy_poller(FemuCtrl *n)
     g_clear_pointer(&n->stage_cleared, g_free);
     g_free(n->nand_profile_name);
     n->nand_profile_name = NULL;
+    g_clear_pointer(&n->nand_profile_data, g_free);
 }
 
 /*
@@ -7734,6 +7737,7 @@ static void femu_instance_finalize(Object *obj)
 
     g_free(n->nand_profile_name);
     n->nand_profile_name = NULL;
+    g_clear_pointer(&n->nand_profile_data, g_free);
     g_clear_pointer(&n->fuzz_control_buf, g_free);
     if (n->fuzz_touched) {
         g_array_free(n->fuzz_touched, true);
