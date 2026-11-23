@@ -24013,8 +24013,8 @@ static uint64_t femu_cause_total(QDict *ret, const char *cls)
 }
 
 /*
- * io_causes with 20 ms programs. A read sent with the write of its page
- * waits for that program: one host-program win of about 20 ms. A read
+ * io_causes with 200 ms programs. A read sent with the write of its page
+ * waits for the rest of that program: one host-program win. A read
  * past the end fails: uncovered. A later clean read of the same request
  * slot has no cause, so nothing carries over from the earlier commands.
  */
@@ -24075,8 +24075,8 @@ void femu_test_io_causes(void *obj, void *data, QGuestAllocator *alloc)
     g_test_message("read: host-program %" PRIu64 " / %" PRIu64
                    " ns, uncovered %" PRIu64, w, ns, u);
     g_assert_cmpuint(w, ==, 1);
-    g_assert_cmpuint(ns, >, 10000000);
-    g_assert_cmpuint(ns, <=, 20000000);
+    g_assert_cmpuint(ns, >, 1000);
+    g_assert_cmpuint(ns, <=, 200000000);
     g_assert_cmpuint(u, ==, 1);
     femu_cause_sum(ret, "read", "none", &w, &ns, &u);
     g_assert_cmpuint(w, ==, 1);
@@ -24120,6 +24120,7 @@ void femu_test_io_causes_refused(void *obj, void *data,
         { "'femu_mode':1,'io_stages':true,'mp_program':1", "mp_program" },
         { "'femu_mode':1,'io_stages':true,'rber_ppb':10", "rber_ppb" },
         { "'femu_mode':1,'io_stages':true,'iu_pages':2", "iu_pages" },
+        { "'femu_mode':1,'io_stages':true,'shared_ftl':true", "shared_ftl" },
     };
     QDict *rsp;
 

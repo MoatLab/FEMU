@@ -690,7 +690,6 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
         if (ssd->sp.rain_fidx[ppa->g.lun * ssd->sp.nchs + ppa->g.ch] <
             ssd->sp.rain_nfail ||
             ppa->g.ch * ssd->sp.luns_per_ch + ppa->g.lun == off) {
-            ssd->wc_lost = true;
             return ssd_rain_read(ssd, ppa, stime) - stime;
         }
     } else if (unlikely(ssd->sp.die_parity) && op == NAND_MEDIA_READ &&
@@ -699,7 +698,6 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
 
         if (failed >= 0 &&
             ppa->g.ch * ssd->sp.luns_per_ch + ppa->g.lun == failed) {
-            ssd->wc_lost = true;
             return ssd_parity_read(ssd, ppa, failed, stime) - stime;
         }
     }

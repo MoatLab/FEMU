@@ -1377,6 +1377,7 @@ static FemuIoStageClass *femu_query_stage_class(FemuCtrl *n,
     femu_query_stage_lists(sum, &c->stages, &c->returned_after_due,
                            &c->bands);
     if (n->io_causes) {
+        c->has_causes = true;
         c->causes = femu_query_cause_bands(&sum->causes[cls]);
     }
     return c;

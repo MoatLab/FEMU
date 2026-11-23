@@ -127,6 +127,7 @@ static int media_init(NandMedia *m, const NandMediaConfig *cfg, bool strict)
     m->throttle_pct = NULL;
     m->lun_pct = NULL;
     m->die_stat = NULL;
+    m->owner = NULL;
     m->seal_waits = 0;
     if (cfg->policy.channel_mode == NAND_CH_STAGED && cfg->nchs &&
         cfg->policy.ca_separate) {

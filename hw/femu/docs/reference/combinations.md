@@ -419,6 +419,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 - FEMU: the host has no memory for the io_causes owner table
 - io_causes is not supported with %s
+- io_causes is not supported with a femu-subsys (FDP), a CXL link or shared_ftl
 - io_causes needs femu_mode=1 and no namespace_modes
 - io_causes needs io_stages=on
 
@@ -1183,6 +1184,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `shared_ftl`
 
+- io_causes is not supported with a femu-subsys (FDP), a CXL link or shared_ftl
 - shared_ftl is not supported with %s
 - shared_ftl is not supported with a femu-subsys (FDP shares its FTL already)
 - shared_ftl needs every namespace in bbssd mode; namespace %d is not
@@ -1225,6 +1227,7 @@ own description allows. A message keeps its format directives (`%s`,
 - femu-subsys with fdp=on takes a single controller
 - femu-subsys: memory limit: the FDP reclaim units and handles need %
 - fw_slots above 1%s does not work with a femu-subsys or a CXL device yet
+- io_causes is not supported with a femu-subsys (FDP), a CXL link or shared_ftl
 - lockdown does not work with a femu-subsys yet
 - ns_mgmt=on does not support subsys; use a standalone controller
 - ocp is not supported with a femu-subsys

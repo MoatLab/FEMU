@@ -168,7 +168,8 @@ static void nvme_cause_add(FemuCauseTab *tab, const NvmeRequest *req,
     int win = FEMU_WAIT_NCAT;
     uint64_t top = FEMU_WAIT_FLOOR_NS;
 
-    if (!req->wait_covered) {
+    /* a cancel can still turn the status after the FTL */
+    if (!req->wait_covered || req->status != NVME_SUCCESS) {
         qatomic_set(&tab->uncovered[b], tab->uncovered[b] + 1);
         return;
     }
@@ -634,6 +635,9 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
         req->xfer_bytes = 0;
         /* io_causes: no wait carries over from the last use of the slot */
         req->wait_covered = false;
+        if (unlikely(n->io_causes)) {
+            memset(&req->wait, 0, sizeof(req->wait));
+        }
         req->wz_deac = false;
         req->cancel = false;
         req->dsm_ranges = NULL;

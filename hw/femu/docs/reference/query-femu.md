@@ -672,8 +672,7 @@ cause of the last booking.
 - `causes.read` and `causes.write` have one entry per total-time bucket.
   Each entry has `uncovered` and a list of causes with `count` (the
   commands that cause won) and `sum-ns` (all its waits in the bucket).
-- Errors, Write Zeroes, Copy and reads rebuilt from parity are
-  `uncovered`. Their media work still counts as an owner for later
+- Errors (also a cancel), Write Zeroes and Copy are `uncovered`. Their media work still counts as an owner for later
   commands.
 - With `nsid`, the `read` and `write` classes of the namespace also have
   `causes`. `reset` clears the causes with the stages.
@@ -681,7 +680,8 @@ cause of the last booking.
 `io_causes` needs a bbssd device (`femu_mode=1`) with the page mapping.
 Realize fails for the options whose timing the rules do not follow:
 
-- `namespace_modes`, FDP, a shared or CXL namespace;
+- `namespace_modes`, a `femu-subsys` (FDP), a CXL link, `shared_ftl`;
+- `rain_parity` and `die_parity`;
 - bus phases (bus latencies, ONFI, SCA) and the `tpl*bsy` times;
 - `pe_suspend`, `read_prio`, `mp_program`, `mp_read`, `onfi_cache_read`;
 - `rber_ppb`, `durable_at_done`, `tier_mode`, and `iu_pages` above 1.

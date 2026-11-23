@@ -937,11 +937,9 @@ struct ssd {
     int64_t last_prog_done;
     /*
      * io_causes: the media tracks owners, and wc_last holds the waits of
-     * the latency the last helper returned. wc_lost: a read of this
-     * request was rebuilt from parity, which has no cause.
+     * the latency the last helper returned.
      */
     bool wc_on;
-    bool wc_lost;
     FemuWaitParts wc_last;
     struct ssd_ns_ctr *ns_ctr;
     /* query-stats: see struct ssd_stats_pub and ssd_stats_publish() */

@@ -474,6 +474,9 @@ static const char *ssd_wait_unsupported(struct ssd *ssd, FemuCtrl *n,
     if (spp->rber_ppb) {
         return "rber_ppb";
     }
+    if (spp->rain_parity || spp->die_parity) {
+        return "rain_parity or die_parity";
+    }
     if (ssd_durable_on(ssd)) {
         return "durable_at_done";
     }
@@ -1560,7 +1563,7 @@ void ssd_wear_health(struct ssd *ssd, FemuWearHealth *h)
  */
 static void ssd_wait_take(struct ssd *ssd, NvmeRequest *req)
 {
-    if (ssd->wc_on && !ssd->wc_lost) {
+    if (ssd->wc_on) {
         req->wait = ssd->wc_last;
         req->wait_covered = true;
     }
@@ -1589,8 +1592,6 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     }
     status0 = req->status;
     ssd->pace_gen++;
-    /* io_causes: a parity rebuild marks only the request it runs in */
-    ssd->wc_lost = false;
 
     if (n->streams) {
         qemu_mutex_lock(&n->streams_lock);

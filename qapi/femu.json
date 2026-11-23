@@ -1611,8 +1611,8 @@
 #
 # @bucket: the total-time bucket, numbered as in @FemuIoStageInfo
 #
-# @uncovered: commands with no causes: an error, a Write Zeroes or
-#     Copy, or a read rebuilt from parity
+# @uncovered: commands with no causes: an error (also a cancel), a
+#     Write Zeroes or a Copy
 #
 # @causes: the causes with a count or a wait, in @FemuIoCause order
 #

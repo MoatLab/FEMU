@@ -2787,6 +2787,12 @@ static bool femu_shared_ftl_check(FemuCtrl *n, Error **errp)
         error_setg(errp, "io_causes needs femu_mode=1 and no namespace_modes");
         return false;
     }
+    /* the media of a subsystem, CXL or shared FTL may track no owners */
+    if (n->io_causes && (n->subsys || n->cxl_dev || n->shared_ftl)) {
+        error_setg(errp, "io_causes is not supported with a femu-subsys "
+                   "(FDP), a CXL link or shared_ftl");
+        return false;
+    }
     if (n->stage_ns && n->ns_mgmt) {
         error_setg(errp, "stage_ns is not supported with ns_mgmt");
         return false;
