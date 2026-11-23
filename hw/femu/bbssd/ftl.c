@@ -476,9 +476,6 @@ static const char *ssd_wait_unsupported(struct ssd *ssd, FemuCtrl *n,
     if (spp->mp_program || spp->mp_read || spp->onfi_cache_read) {
         return "mp_program, mp_read or onfi_cache_read";
     }
-    if (spp->rber_ppb) {
-        return "rber_ppb";
-    }
     if (spp->rain_parity || spp->die_parity) {
         return "rain_parity or die_parity";
     }

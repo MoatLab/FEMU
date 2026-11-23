@@ -1583,13 +1583,16 @@
 #     page, a wait behind translation page reads and programs (also
 #     those garbage collection moves), or the HMB access
 #
+# @retry: decode retries and soft decode of a read (rber_ppb), from
+#     the end of its first read to the end of its recovery
+#
 # @none: no part above 1000 ns
 #
 # Since: 10.1
 ##
 { 'enum': 'FemuIoCause',
   'data': [ 'erase', 'gc', 'host-program', 'host-read', 'other', 'ecc',
-            'buffer', 'map', 'none' ] }
+            'buffer', 'map', 'retry', 'none' ] }
 
 ##
 # @FemuIoCauseCount:

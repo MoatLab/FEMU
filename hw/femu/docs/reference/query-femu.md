@@ -664,6 +664,7 @@ cause of the last booking.
 | `ecc` | the ECC time of a read, from its wear and age tiers |
 | `buffer` | a write-back of the write buffer that set the latency |
 | `map` | `mapping=dftl`: a translation page read, a wait behind translation page work, or the HMB access |
+| `retry` | `rber_ppb`: the decode retries and soft decode of a read, after its first read |
 | `none` | no part above 1000 ns |
 
 With `mapping=dftl`, a read on a CMT miss reads its translation page
@@ -684,6 +685,19 @@ translation time, the TP read itself included, is `map`:
 - Garbage collection moves TPs as TP work, so a wait behind a moved TP
   is `map`, not `gc`.
 - The data read time is in no part, as for the page mapping.
+
+With `rber_ppb`, a read whose codewords fail to decode reads the page
+again, and may run a soft decode. All of that time is `retry`:
+
+```
+ read:  [ wait ][ first read ][ retry pass ][ soft senses ][ soft decode ]
+                              |<------------------ retry ---------------->|
+```
+
+- A read that fails (Unrecovered Read Error) is uncovered. A strict
+  read recovery level (`rrl`) fails a read also with `rber_timing_only`.
+- In a read of several pages, the page that ends last sets the cause, as
+  for other parts.
 
 - A command takes the waits of the page or step that sets its latency.
   On a tie, the first one in command order wins.
@@ -719,7 +733,7 @@ Realize fails for the options whose timing the rules do not follow:
 - `rain_parity` and `die_parity`;
 - bus phases (bus latencies, ONFI, SCA) and the `tpl*bsy` times;
 - `pe_suspend`, `read_prio`, `mp_program`, `mp_read`, `onfi_cache_read`;
-- `rber_ppb`, `durable_at_done`, `tier_mode`, and `iu_pages` above 1.
+- `durable_at_done`, `tier_mode`, and `iu_pages` above 1.
 - `nsid` must be 1 to 8 and name an attached namespace. `stage_ns` is
   refused with `ns_mgmt`, so an NSID names one namespace for the life of
   the controller.

@@ -23999,7 +23999,8 @@ static void femu_cause_sum(QDict *ret, const char *cls, const char *cause,
 static uint64_t femu_cause_total(QDict *ret, const char *cls)
 {
     const char *all[] = { "erase", "gc", "host-program", "host-read",
-                          "other", "ecc", "buffer", "map", "none" };
+                          "other", "ecc", "buffer", "map", "retry",
+                          "none" };
     uint64_t total = 0;
     uint64_t w;
     uint64_t ns;
@@ -24361,7 +24362,7 @@ void femu_test_io_causes_hmb(void *obj, void *data, QGuestAllocator *alloc)
 static uint64_t femu_flush_buffer(QTestState *qts, bool want_buffer)
 {
     const char *all[] = { "erase", "gc", "host-program", "host-read",
-                          "other", "ecc", "map" };
+                          "other", "ecc", "map", "retry" };
     QDict *rsp = NULL;
     QDict *ret = NULL;
     uint64_t w, ns, u;
@@ -24528,7 +24529,7 @@ void femu_test_io_causes_merge(void *obj, void *data, QGuestAllocator *alloc)
     bool sw = g_str_equal(mode, "switch");
     int warm = g_str_equal(mode, "fast") ? 63 : 3;
     const char *other[] = { "erase", "host-program", "host-read", "other",
-                            "ecc", "buffer", "map" };
+                            "ecc", "buffer", "map", "retry" };
     QFemu *femu = obj;
     QTestState *qts = femu->dev.bus->qts;
     FemuCtrlState c = { 0 };
@@ -24579,6 +24580,84 @@ void femu_test_io_causes_merge(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
+/*
+ * io_causes with scripted decode (rber-test: one LUN, 100 ms reads, 4
+ * codewords, rr_steps=2, 3 soft senses, 10 ms soft decode). Each case
+ * resets the tables and reads LPN 0 once:
+ *   clean: none
+ *   retry: codeword 2 fails twice, 2 more reads: retry 200 ms
+ *   soft:  3 hard fails, soft decode passes: 5 reads + 10 ms = 510 ms
+ *   limit: soft decode fails too: the read fails, uncovered
+ */
+void femu_test_io_causes_retry(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const struct {
+        const char *u;
+        uint16_t status;
+        uint64_t retry_ns;
+    } cases[] = {
+        { "0 0 0 0", NVME_SUCCESS, 0 },
+        { "0 0 1 1 0 0", NVME_SUCCESS, 200000000 },
+        { "1 1 1 0 0 0 0", NVME_SUCCESS, 510000000 },
+        { "1 1 1 1 0 0 0", NVME_UNRECOVERED_READ, 0 },
+    };
+    const char *other[] = { "erase", "gc", "host-program", "host-read",
+                            "other", "ecc", "buffer", "map" };
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t w, ns, u, nw, nns;
+    QDict *rsp = NULL;
+    QDict *ret = NULL;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    for (size_t k = 0; k < G_N_ELEMENTS(cases); k++) {
+        qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                                "'arguments':{'reset':true}}"));
+        femu_rber_script(qts, cases[k].u);
+        femu_rber_read_st(&c, buf, 0, cases[k].status);
+        for (int waited = 0; ; waited++) {
+            qobject_unref(rsp);
+            rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+            ret = qdict_get_qdict(rsp, "return");
+            if (femu_cause_total(ret, "read") >= 1) {
+                break;
+            }
+            g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+            g_usleep(1000);
+        }
+        femu_cause_sum(ret, "read", "retry", &w, &ns, &u);
+        femu_cause_sum(ret, "read", "none", &nw, &nns, &u);
+        g_test_message("%s: retry %" PRIu64 " / %" PRIu64 " ns, none %"
+                       PRIu64 ", uncovered %" PRIu64, cases[k].u, w, ns, nw,
+                       u);
+        g_assert_cmpuint(femu_cause_total(ret, "read"), ==, 1);
+        g_assert_cmpuint(ns, ==, cases[k].retry_ns);
+        if (cases[k].status != NVME_SUCCESS) {
+            g_assert_cmpuint(u, ==, 1);
+        } else {
+            g_assert_cmpuint(u, ==, 0);
+            g_assert_cmpuint(w, ==, !!cases[k].retry_ns);
+            g_assert_cmpuint(nw, ==, !cases[k].retry_ns);
+        }
+        for (int i = 0; i < ARRAY_SIZE(other); i++) {
+            femu_cause_sum(ret, "read", other[i], &w, &ns, &u);
+            g_assert_cmpuint(w, ==, 0);
+            g_assert_cmpuint(ns, ==, 0);
+        }
+    }
+    qobject_unref(rsp);
+    femu_rber_script(qts, "off");
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* io_causes outside the scope of the cause rules fails at realize */
 void femu_test_io_causes_refused(void *obj, void *data,
                                  QGuestAllocator *alloc)
@@ -24596,7 +24675,6 @@ void femu_test_io_causes_refused(void *obj, void *data,
         { "'femu_mode':1,'io_stages':true,'tplpbsy':1000", "tplpbsy" },
         { "'femu_mode':1,'io_stages':true,'pls_per_lun':2,'mp_program':1",
           "mp_program" },
-        { "'femu_mode':1,'io_stages':true,'rber_ppb':10", "rber_ppb" },
         { "'femu_mode':1,'io_stages':true,'iu_pages':2", "iu_pages" },
         { "'femu_mode':1,'io_stages':true,'shared_ftl':true", "shared_ftl" },
     };

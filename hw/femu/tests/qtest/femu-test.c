@@ -6748,6 +6748,14 @@ static void femu_register_nodes(void)
             });
         }
     }
+    qos_add_test("io-causes-retry", "femu", femu_test_io_causes_retry,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=rber-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,rber_ppb=1,rr_steps=2,rr_soft_ns=10000000,"
+            "pg_rd_lat=100000000,io_stages=on,io_causes=on",
+    });
     qos_add_test("io-causes-map", "femu", femu_test_io_causes_map,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

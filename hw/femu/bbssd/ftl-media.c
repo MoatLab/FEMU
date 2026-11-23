@@ -757,7 +757,13 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     /* retries and soft decode of a host read (rber_ppb) */
     if (unlikely(ssd->sp.rber_ppb) && op == NAND_MEDIA_READ &&
         ncmd->type == USER_IO) {
-        return ssd_rber_read(ssd, ppa, &loc, c.done_ns, reads) - stime;
+        uint64_t done = ssd_rber_read(ssd, ppa, &loc, c.done_ns, reads);
+
+        /* io_causes: the passes start at our own end, so all is retry */
+        if (ssd->wc_on) {
+            ssd->wc_last.ns[FEMU_WAIT_RETRY] += done - c.done_ns;
+        }
+        return done - stime;
     }
     return c.latency_ns;
 }
