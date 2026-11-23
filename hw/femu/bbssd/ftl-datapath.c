@@ -1003,7 +1003,12 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
         more = ssd_mp_flush(ssd, NAND_WRITE);
         wc_max(ssd, &lat, &mine, more, NULL);
         more = ssd_map_reclaim(ssd);
-        wc_max(ssd, &lat, &mine, more, NULL);
+        /* io_causes: the command does this collection itself, all gc */
+        {
+            FemuWaitParts gc = { .ns[FEMU_WAIT_GC] = more };
+
+            wc_max(ssd, &lat, &mine, more, &gc);
+        }
     }
     /* paced collection copies its share after the host page has its slot */
     if (ssd->sp.gc_pace) {
@@ -1748,8 +1753,13 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     if (!ssd->mapping->reclaim_per_page &&
         ssd->mapping->needs_reclaim && ssd->mapping->reclaim &&
         ssd->mapping->needs_reclaim(ssd)) {
+        FemuWaitParts gc;
+
         curlat = ssd_map_reclaim(ssd);
-        wc_max(ssd, &maxlat, &best, curlat, NULL);
+        /* io_causes: as in ssd_program_lpn(), a merge is all gc */
+        memset(&gc, 0, sizeof(gc));
+        gc.ns[FEMU_WAIT_GC] = curlat;
+        wc_max(ssd, &maxlat, &best, curlat, &gc);
     }
 
     if (ssd->wc_on) {

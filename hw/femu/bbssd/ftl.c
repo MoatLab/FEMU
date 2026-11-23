@@ -455,9 +455,13 @@ static const char *ssd_wait_unsupported(struct ssd *ssd, FemuCtrl *n,
     if (ssd->fdp_enabled) {
         return "fdp";
     }
-    /* tp_on is set later; dftl qualifies when its TPs live on flash */
-    if (map && *map && strcmp(map, "page") && !bb_tp_physical(n)) {
-        return "a mapping other than page or dftl";
+    /*
+     * tp_on is set later; dftl qualifies when its TPs live on flash. The
+     * log schemes charge a merge to the command that runs it.
+     */
+    if (map && *map && strcmp(map, "page") && strcmp(map, "hybrid") &&
+        strcmp(map, "fast") && !bb_tp_physical(n)) {
+        return "a mapping other than page, dftl, hybrid or fast";
     }
     if (m->cfg.policy.channel_mode == NAND_CH_STAGED || m->ca_res) {
         return "channel bus phases (bus, ONFI or SCA timing)";

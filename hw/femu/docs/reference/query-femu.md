@@ -701,8 +701,18 @@ translation time, the TP read itself included, is `map`:
 - With `nsid`, the `read` and `write` classes of the namespace also have
   `causes`. A namespace has no flush class. `reset` clears the causes with the stages.
 
-`io_causes` needs a bbssd device (`femu_mode=1`) with the page or dftl
-mapping.
+`io_causes` needs a bbssd device (`femu_mode=1`) with the page, dftl,
+hybrid or fast mapping.
+
+With `mapping=hybrid` or `fast`, a write can merge log blocks before it
+completes. The whole merge time of that write is `gc`, also the erase of
+a switch merge. A later command that waits behind a merge op sees its
+owner as for line GC: `erase` for an erase, else `gc`.
+
+```
+ write N:   [ program ][ merge: copy, copy, erase ]   --> gc (whole merge)
+ read N+1:          waits behind the erase ...        --> erase
+```
 Realize fails for the options whose timing the rules do not follow:
 
 - `namespace_modes`, a `femu-subsys` (FDP), a CXL link, `shared_ftl`;

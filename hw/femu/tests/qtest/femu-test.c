@@ -6724,6 +6724,30 @@ static void femu_register_nodes(void)
             "pg_wr_lat=1000000000,vwc=1,buffer_size=8,buffer_thres_pcent=100,"
             "namespaces=2,ns_wp=on,io_stages=on,stage_ns=on,io_causes=on",
     });
+    {
+        static const char *merges[][2] = {
+            { "hybrid", "hybrid,blk_er_lat=2000000" },
+            { "fast", "fast,blk_er_lat=2000000" },
+            { "switch", "hybrid,blk_er_lat=100000000" },
+        };
+
+        for (int i = 0; i < ARRAY_SIZE(merges); i++) {
+            g_autofree char *name = g_strdup_printf("io-causes-merge-%s",
+                                                    merges[i][0]);
+            g_autofree char *mopts = g_strdup_printf(
+                "devsz_mb=1,femu_mode=1,mapping=%s,secsz=512,"
+                "secs_per_pg=8,pgs_per_blk=4,blks_per_pl=128,pls_per_lun=1,"
+                "luns_per_ch=1,nchs=1,buffer_size=0,pg_rd_lat=40000,"
+                "pg_wr_lat=20000000,io_stages=on,io_causes=on",
+                merges[i][1]);
+
+            qos_add_test(name, "femu", femu_test_io_causes_merge,
+                         &(QOSGraphTestOptions) {
+                .edge.extra_device_opts = mopts,
+                .arg = (void *)merges[i][0],
+            });
+        }
+    }
     qos_add_test("io-causes-map", "femu", femu_test_io_causes_map,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

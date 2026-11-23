@@ -239,7 +239,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "with io_stages: name what each Read or Write waited for on the "
       "media (erase, GC, host program or read, ECC, write buffer, "
       "translation); query-femu-stages returns it as causes; bbssd with "
-      "the page or dftl mapping only; off (default)" },
+      "the page, dftl, hybrid or fast mapping only; off (default)" },
     { "intc",
       "Initial Coalescing Disable bit (0 or 1) of the Interrupt Vector "
       "Configuration feature for every vector" },

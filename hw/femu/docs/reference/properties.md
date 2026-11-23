@@ -63,7 +63,7 @@ Devices:
 | `hiops_inline` | `bool` | `on` | NoSSD only: performance option, on by default; set off only when debugging |
 | `io_stages` | `bool` | `off` | Time each I/O command in five stages (submit, ftl, hold, post-delay, total) for the QMP command query-femu-stages; off by default |
 | `stage_ns` | `bool` | `off` | with io_stages: also time the Read and the write commands of each NVM or zoned namespace, NSID 1 to 8, apart, in ns; query-femu-stages returns them with nsid; not with ns_mgmt; off (default) |
-| `io_causes` | `bool` | `off` | with io_stages: name what each Read or Write waited for on the media (erase, GC, host program or read, ECC, write buffer, translation); query-femu-stages returns it as causes; bbssd with the page or dftl mapping only; off (default) |
+| `io_causes` | `bool` | `off` | with io_stages: name what each Read or Write waited for on the media (erase, GC, host program or read, ECC, write buffer, translation); query-femu-stages returns it as causes; bbssd with the page, dftl, hybrid or fast mapping only; off (default) |
 | `wrr` | `bool` | `off` | weighted round robin with an urgent class: CAP.AMS offers it and the host may set CC.AMS 001b; needs one poller (multipoller_enabled=0, or poller_ratio of at least queues); off (default) is round robin only |
 | `aerl` | `uint8` | `3` | Asynchronous Event Request Limit (Identify AERL, 0's based): the controller holds up to aerl + 1 outstanding requests |
 | `elpe` | `uint8` | `3` | Error Log Page Entries (Identify ELPE, 0's based): the Error Information log keeps the newest elpe + 1 entries |

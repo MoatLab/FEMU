@@ -1195,6 +1195,7 @@ void femu_test_io_causes(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_io_causes_map(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_io_causes_hmb(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_io_causes_flush(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_io_causes_merge(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_io_causes_refused(void *obj, void *data,
                                  QGuestAllocator *alloc);
 void femu_test_io_stages_ns_refused(void *obj, void *data,

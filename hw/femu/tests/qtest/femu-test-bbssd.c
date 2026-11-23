@@ -24482,6 +24482,103 @@ void femu_test_io_causes_flush(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
+/* host, NAND and GC write pages of namespace 1 so far */
+static void femu_merge_ctr(QTestState *qts, uint64_t v[3])
+{
+    QDict *rsp;
+    QDict *ctr = qdict_get_qdict(femu_query_ns(qts, "", &rsp), "counters");
+
+    v[0] = qdict_get_int(ctr, "host-write-pages");
+    v[1] = qdict_get_int(ctr, "nand-write-pages");
+    v[2] = qdict_get_int(ctr, "gc-write-pages");
+    qobject_unref(rsp);
+}
+
+/* the write causes once @n writes are counted */
+static QDict *femu_merge_wait(QTestState *qts, uint64_t n, QDict **rsp)
+{
+    QDict *ret;
+
+    for (int waited = 0; ; waited++) {
+        *rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+        ret = qdict_get_qdict(*rsp, "return");
+        if (femu_cause_total(ret, "write") >= n) {
+            return ret;
+        }
+        qobject_unref(*rsp);
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+}
+
+/*
+ * io_causes with a log-block mapping (one LUN, 4-page blocks, 20 ms
+ * programs). Warm-up writes fill the logs; then one write runs a merge,
+ * and its whole merge time is gc. @data names the case:
+ *  - "hybrid": 3 writes of LPN 1, then a 4th: a full merge copies the
+ *    one live page.
+ *  - "fast": 63 writes of LPN 1 fill the 64 random-log slots; the 64th
+ *    write merges and copies one page.
+ *  - "switch": hybrid, LPNs 0 to 2 then 3 fill one block in order. The
+ *    switch merge copies nothing and books a 100 ms erase.
+ */
+void femu_test_io_causes_merge(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const char *mode = data;
+    bool sw = g_str_equal(mode, "switch");
+    int warm = g_str_equal(mode, "fast") ? 63 : 3;
+    const char *other[] = { "erase", "host-program", "host-read", "other",
+                            "ecc", "buffer", "map" };
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t v0[3];
+    uint64_t v1[3];
+    uint64_t w, ns, u;
+    QDict *rsp;
+    QDict *ret;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x51, 4096);
+    for (int i = 0; i < warm; i++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (sw ? i : 1) * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_merge_wait(qts, warm, &rsp);
+    qobject_unref(rsp);
+    qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                            "'arguments':{'reset':true}}"));
+    femu_merge_ctr(qts, v0);
+
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, (sw ? 3 : 1) * 8,
+                                    buf)), ==, NVME_SUCCESS);
+    ret = femu_merge_wait(qts, 1, &rsp);
+    femu_merge_ctr(qts, v1);
+    femu_cause_sum(ret, "write", "gc", &w, &ns, &u);
+    g_test_message("%s: gc %" PRIu64 " / %" PRIu64 " ns; pages host +%"
+                   PRIu64 " nand +%" PRIu64 " gc +%" PRIu64, mode, w, ns,
+                   v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]);
+    g_assert_cmpuint(v1[0] - v0[0], ==, 1);
+    g_assert_cmpuint(v1[1] - v0[1], ==, 1);
+    g_assert_cmpuint(v1[2] - v0[2], ==, sw ? 0 : 1);
+    g_assert_cmpuint(femu_cause_total(ret, "write"), ==, 1);
+    g_assert_cmpuint(u, ==, 0);
+    g_assert_cmpuint(w, ==, 1);
+    g_assert_cmpuint(ns, >=, sw ? 100000000 : 20000000);
+    for (int i = 0; i < ARRAY_SIZE(other); i++) {
+        femu_cause_sum(ret, "write", other[i], &w, &ns, &u);
+        g_assert_cmpuint(w, ==, 0);
+        g_assert_cmpuint(ns, ==, 0);
+    }
+    qobject_unref(rsp);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* io_causes outside the scope of the cause rules fails at realize */
 void femu_test_io_causes_refused(void *obj, void *data,
                                  QGuestAllocator *alloc)
@@ -24492,10 +24589,6 @@ void femu_test_io_causes_refused(void *obj, void *data,
         { "'femu_mode':2,'io_stages':true", "femu_mode=1" },
         { "'femu_mode':1,'io_stages':true,'namespace_modes':'bbssd,bbssd'",
           "namespace_modes" },
-        { "'femu_mode':1,'io_stages':true,'mapping':'hybrid'",
-          "a mapping other than page or dftl" },
-        { "'femu_mode':1,'io_stages':true,'mapping':'fast'",
-          "a mapping other than page or dftl" },
         { "'femu_mode':1,'io_stages':true,'ch_xfer_lat':1000",
           "channel bus phases" },
         { "'femu_mode':1,'io_stages':true,'pe_suspend':1",
