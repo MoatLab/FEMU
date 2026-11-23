@@ -71,6 +71,20 @@ stat = _load("femu_stat", "femu-stat.py")
 FAULT = ""
 
 MODES = {0: "ocssd", 1: "bbssd", 2: "nossd", 3: "znssd", 4: "csd", 5: "kvssd"}
+
+# the value keys of a NAND profile, and the properties realize writes from
+# each (femu_apply_nand_profile); nand_type other than none sets the rating
+PROFILE_VALUE_KEYS = ("nand_type", "read_ns", "program_ns", "erase_ns",
+                      "cmd_addr_ns", "xfer_ns", "status_ns")
+PROFILE_PROPS = {
+    "read_ns": ("pg_rd_lat", "zns_pg_rd_lat"),
+    "program_ns": ("pg_wr_lat", "zns_pg_wr_lat"),
+    "erase_ns": ("blk_er_lat", "zns_blk_er_lat"),
+    "cmd_addr_ns": ("cmd_addr_lat", "zns_cmd_addr_lat"),
+    "xfer_ns": ("pg_xfer_lat", "zns_pg_xfer_lat"),
+    "status_ns": ("status_lat", "zns_status_lat"),
+    "nand_type": ("pe_cycles_rated",),
+}
 CSI_NAMES = {0: "NVM", 1: "key-value", 2: "zoned"}
 # FEMU's informational lines, and the notice of an unpinned memory backend
 INFO_LINE = re.compile(r"^\[FEMU\] (Log|FDP-Log): ")
@@ -447,9 +461,15 @@ def inspect(q, report: Dict[str, Any],
             namespaces.append(entry)
         shared_op(namespaces)
         dev["namespaces"] = namespaces
+        prof = profile_record([ns.get("media") for ns in by_nsid.values()])
+        if prof is None:
+            prof = profile_from_property(qmp, path)
+        if prof is not None:
+            dev["nand-profile"] = prof
         devices.append(dev)
         if given is not None:
             property_records(qmp, path, given.get(path), dev)
+            link_profile(dev)
     report["not-reached"] = missed
     return report
 
@@ -589,6 +609,79 @@ def property_records(qmp, path: str, given: Optional[Dict[str, str]],
             rec["source"] = "default"
         else:
             rec["source"] = "derived"
+
+
+def profile_value(v: Dict[str, Any]) -> Dict[str, Any]:
+    """One entry of nand-profile-values for the manifest: times as
+    integers, the NAND type as a string, the source as cite."""
+    key = v.get("key")
+    val = v.get("value")
+    rec: Dict[str, Any] = {"key": key, "line": v.get("line"),
+                           "value": val if key == "nand_type" else int(val)}
+    if "source" in v:
+        rec["source-line"] = v.get("source-line")
+        rec["cite"] = v["source"]
+    return rec
+
+
+def profile_record(medias: List[Optional[Dict[str, Any]]]
+                   ) -> Optional[Dict[str, Any]]:
+    """The NAND profile of a controller, from the raw query-femu media
+    of its namespaces. All of them read the same profile. An older QEMU
+    has no value list: then "values" is None."""
+    for media in medias:
+        if media and "nand-profile-file" in media:
+            vals = media.get("nand-profile-values")
+            return {"name": media.get("nand-profile"),
+                    "file": media["nand-profile-file"],
+                    "values": None if vals is None else
+                    [profile_value(v) for v in vals]}
+    return None
+
+
+def profile_from_property(qmp, path: str) -> Optional[Dict[str, Any]]:
+    """The profile file when no namespace reports one."""
+    try:
+        f = qmp.execute("qom-get", {"path": path, "property": "nand_profile"})
+    except (stat.QmpError, stat.ToolError):
+        return None
+    return {"file": f, "values": None} if f else None
+
+
+def link_profile(dev: Dict[str, Any]) -> None:
+    """Give each property that realize wrote from the profile the key
+    it came from. Without a value list nothing is linked."""
+    vals = (dev.get("nand-profile") or {}).get("values")
+    if not vals or FAULT == "no-profile-key":
+        return
+    links: Dict[str, str] = {}
+    for v in vals:
+        if v["key"] == "nand_type" and v["value"] == "none":
+            continue
+        for name in PROFILE_PROPS.get(v["key"], ()):
+            links[name] = v["key"]
+    for rec in dev.get("properties", []):
+        if rec["name"] in links:
+            rec["profile-key"] = links[rec["name"]]
+
+
+def profile_missing_sources(path: str) -> List[str]:
+    """The value keys of profile file PATH with no source line. This
+    reads the file apart from QEMU's parser, which accepts a file with no
+    sources."""
+    have = set()
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s.startswith("source.") and "=" in s:
+                have.add(s[len("source."):].split("=", 1)[0].strip())
+    return [k for k in PROFILE_VALUE_KEYS if k not in have]
+
+
+def shipped_profiles() -> List[str]:
+    return sorted(os.path.join(HERE, "..", "profiles", n) for n in
+                  os.listdir(os.path.join(HERE, "..", "profiles"))
+                  if n.endswith(".nprof"))
 
 
 def _read(path: str) -> str:
@@ -821,6 +914,97 @@ def parser_checks(t) -> None:
                      {"nchs": "2"}], str(opts))
 
 
+PROFILE_TEXT = """femu_nand_profile = 1
+name = cited
+nand_type = {nt}
+read_ns = 00060000
+source.read_ns = Table 12; p. 34 #a=b
+program_ns = 200000
+erase_ns = 2000000
+cmd_addr_ns = 0
+xfer_ns = 0
+status_ns = 0
+"""
+
+
+def profile_checks(t, qemu: str) -> None:
+    """The manifest record of a NAND profile, and the shipped files."""
+    tmp = tempfile.mkdtemp(prefix="femu-config-check-np-")
+    try:
+        _profile_checks(t, qemu, tmp)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _profile_checks(t, qemu: str, tmp: str) -> None:
+    def run(nt: str, extra: str = "") -> Dict[str, Any]:
+        f = os.path.join(tmp, f"{nt}.nprof")
+        with open(f, "w") as fh:
+            fh.write(PROFILE_TEXT.format(nt=nt))
+        code, r = check(qemu, ["-device", f"femu,{SMALL_BB},nand_profile={f}"
+                               f"{extra}"], records=True)
+        dev = (r.get("devices") or [{}])[0]
+        dev["exit"] = code
+        dev["file"] = f
+        return dev
+
+    def links(dev: Dict[str, Any]) -> Dict[str, str]:
+        return {p["name"]: p["profile-key"] for p in dev.get("properties", [])
+                if "profile-key" in p}
+
+    def tlc_ok() -> bool:
+        dev = run("tlc", ",pg_wr_lat=200000")
+        prof = dev.get("nand-profile") or {}
+        vals = {v["key"]: v for v in prof.get("values") or []}
+        props = {p["name"]: p for p in dev.get("properties", [])}
+        want = {n: k for k, ns in PROFILE_PROPS.items() for n in ns}
+        rd = vals.get("read_ns", {})
+        return (dev["exit"] == 0 and prof.get("name") == "cited"
+                and prof.get("file") == dev["file"] and len(vals) == 7
+                and [v["line"] for v in prof["values"]] == [3, 4, 6, 7, 8, 9,
+                                                           10]
+                and rd.get("value") == 60000 and rd.get("source-line") == 5
+                and rd.get("cite") == "Table 12; p. 34 #a=b"
+                and vals["nand_type"].get("value") == "tlc"
+                and "cite" not in vals["program_ns"]
+                and "source-line" not in vals["program_ns"]
+                and links(dev) == want
+                and props["pg_rd_lat"].get("source") == "derived"
+                and props["blk_er_lat"].get("source") == "default"
+                and props["pg_wr_lat"].get("source") == "given"
+                and props["pe_cycles_rated"].get("source") == "derived")
+    t.check("nand profile: values, cite, 13 profile-key links, sources",
+            tlc_ok(), "")
+    t.control("profile-key", "no-profile-key", tlc_ok)
+
+    dev = run("none")
+    ln = links(dev)
+    t.check("nand profile none: 12 links, pe_cycles_rated not linked",
+            dev["exit"] == 0 and len(ln) == 12
+            and "pe_cycles_rated" not in ln, str(ln))
+    old = profile_record([{"nand-profile": "x", "nand-profile-file": "f"}])
+    dev = {"nand-profile": old, "properties": [{"name": "pg_rd_lat"}]}
+    link_profile(dev)
+    t.check("nand profile from an older QEMU: values null, no links",
+            old == {"name": "x", "file": "f", "values": None}
+            and "profile-key" not in dev["properties"][0], str(old))
+
+    files = shipped_profiles()
+    t.check("shipped profiles: found, a source for every value",
+            files and all(not profile_missing_sources(f) for f in files),
+            str({f: profile_missing_sources(f) for f in files}))
+    # the control: one source removed; QEMU still accepts the file
+    cut = os.path.join(tmp, "cut.nprof")
+    src = next(f for f in files if "qlc-zns" in f)
+    with open(src) as fh, open(cut, "w") as out:
+        out.writelines(x for x in fh if not x.startswith("source.read_ns"))
+    code, _ = check(qemu, ["-device", f"femu,femu_mode=3,devsz_mb=64,"
+                           f"nand_profile={cut}"])
+    t.check("control shipped profiles: one source removed is caught",
+            code == 0 and profile_missing_sources(cut) == ["read_ns"],
+            f"exit {code}")
+
+
 def self_test(qemu: str) -> int:
     t = ConfigSelfTest(qemu)
     start = time.monotonic()
@@ -860,6 +1044,7 @@ def self_test(qemu: str) -> int:
                 records_ok(opts), "")
     t.control("property sources", "records-no-given",
               lambda: records_ok(SMALL_BB))
+    profile_checks(t, qemu)
 
     code, r = check(qemu, ["-device", "femu,femu_mode=1,nchs=2,luns_per_ch=2,"
                            "blks_per_pl=64,pgs_per_blk=64,op_pcent=25"])

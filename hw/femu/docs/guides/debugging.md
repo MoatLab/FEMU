@@ -274,7 +274,8 @@ results, so a reader can find the exact device behind each number.
             tool-commit, tool-dirty: the checkout of this script, which
             need not be the source of the QEMU binary
     report: the --json report; each femu device also lists
-            properties: name, type, value, default, source
+            properties: name, type, value, default, source, profile-key
+            nand-profile: name, file, values (with nand_profile only)
 ```
 
 The source of each property value comes from the live device:
@@ -295,6 +296,23 @@ How the check matches devices and options:
   sources are `unknown` and the report notes why.
 - Options follow the QEMU rules: `,,` is a comma, a bare `flag` is on and
   `noflag` is off. Property names stay as given.
+
+With `nand_profile`, the device gets a `nand-profile` member. It lists
+the seven profile values and the line of each.
+
+A value with a source line also gets a `cite`. Each property that
+realize wrote from the profile gets the `profile-key` it came from. See [NAND profiles](../features/nand-profiles.md).
+
+| Member | Example |
+| --- | --- |
+| `nand-profile` | `{"name": "cited", "file": "x.nprof", "values": [...]}` |
+| one of `values` | `{"key": "read_ns", "value": 60000, "line": 4, "source-line": 5, "cite": "Table 12"}` |
+| a property | `{"name": "pg_rd_lat", "value": 60000, "source": "derived", "profile-key": "read_ns"}` |
+
+- Times are integers, and `nand_type` is a string.
+- With `nand_type` none, `pe_cycles_rated` gets no `profile-key`.
+- An older QEMU gives no value list. Then `values` is null and no
+  property gets `profile-key`.
 
 The manifest leaves out `x-` test properties, child and link properties,
 and the properties of `femu-subsys` and CXL devices. A failed property
