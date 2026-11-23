@@ -1589,6 +1589,8 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     }
     status0 = req->status;
     ssd->pace_gen++;
+    /* io_causes: a parity rebuild marks only the request it runs in */
+    ssd->wc_lost = false;
 
     if (n->streams) {
         qemu_mutex_lock(&n->streams_lock);

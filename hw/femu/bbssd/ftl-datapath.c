@@ -1252,8 +1252,6 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     bool failed;
     FemuWaitParts best = { 0 };
 
-    ssd->wc_lost = false;
-
     /* the Read Recovery Level bounds host Read commands only */
     ssd->rber_failed = false;
     ssd->rrl_read = req->cmd.opcode == NVME_CMD_READ;
