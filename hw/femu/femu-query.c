@@ -1167,7 +1167,7 @@ static void femu_query_stage_load(FemuStageSet *set, FemuStageSet *out)
         out->bands[b].total_ns = qatomic_read(&bd->total_ns);
         out->bands[b].past_due_ns = qatomic_read(&bd->past_due_ns);
     }
-    for (int cls = 0; cls < FEMU_STAGE_CLASSES; cls++) {
+    for (int cls = 0; cls < FEMU_CAUSE_CLASSES; cls++) {
         const FemuCauseTab *t = &set->causes[cls];
         FemuCauseTab *o = &out->causes[cls];
 
@@ -1235,7 +1235,7 @@ static void femu_query_stage_add(FemuStageSet *to, const FemuStageSet *from)
         to->bands[b].total_ns += from->bands[b].total_ns;
         to->bands[b].past_due_ns += from->bands[b].past_due_ns;
     }
-    for (int cls = 0; cls < FEMU_STAGE_CLASSES; cls++) {
+    for (int cls = 0; cls < FEMU_CAUSE_CLASSES; cls++) {
         FemuCauseTab *t = &to->causes[cls];
         const FemuCauseTab *f = &from->causes[cls];
 
@@ -1468,6 +1468,8 @@ FemuIoStages *qmp_query_femu_stages(const char *path, bool has_nsid,
             femu_query_cause_bands(&sum->causes[FEMU_STAGE_READ]);
         info->causes->write =
             femu_query_cause_bands(&sum->causes[FEMU_STAGE_WRITE]);
+        info->causes->flush =
+            femu_query_cause_bands(&sum->causes[FEMU_CAUSE_FLUSH]);
     }
     if (has_nsid) {
         info->has_nsid = true;

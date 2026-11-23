@@ -317,7 +317,7 @@ def band_report(cur: List[Dict[str, Any]],
     return out
 
 
-CAUSE_CLASSES = ("read", "write")
+CAUSE_CLASSES = ("read", "write", "flush")
 
 
 def cause_flat(bands: List[Dict[str, Any]]) -> Dict[Tuple, int]:
@@ -1731,6 +1731,23 @@ def selftest_synthetic(t: SelfTest) -> None:
     t.check("cause tables: interval sums, a wait with no win stays",
             causes_ok())
     t.control("causes", "cause-raw", causes_ok)
+
+    # flush: 4 commands and 160 ms of buffer, then 5 and 200 ms
+    f0 = dict(st, causes={"read": [], "write": [],
+                          "flush": [cband(30, 0, buffer=(4, 160000000))]})
+    f1 = dict(st, causes={"read": [], "write": [],
+                          "flush": [cband(30, 0, buffer=(5, 200000000))]})
+
+    def flush_ok() -> bool:
+        cr = build_report(dev(ns0, f1, 1.0),
+                          dev(ns0, f0))["devices"][0]["stages"]["causes"]
+        return cr.get("flush") == [{"bucket": 30, "count": 1,
+                                    "uncovered": 0,
+                                    "causes": {"buffer": {
+                                        "count": 1, "sum-ns": 40000000}}}]
+    t.check("cause tables: the flush class sums over the interval",
+            flush_ok())
+    t.control("flush causes", "cause-raw", flush_ok)
     text = report_text(build_report(dev(ns0, c1, 1.0), dev(ns0, c0)),
                        "synthetic")
     t.check("cause tables: shown as text",

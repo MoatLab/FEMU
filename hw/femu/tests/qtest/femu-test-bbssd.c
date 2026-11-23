@@ -24354,6 +24354,134 @@ void femu_test_io_causes_hmb(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
 }
 
+/*
+ * The flush causes after a reset and one Flush: wait for the Flush,
+ * check it is the only command, and that buffer is its only part.
+ */
+static uint64_t femu_flush_buffer(QTestState *qts, bool want_buffer)
+{
+    const char *all[] = { "erase", "gc", "host-program", "host-read",
+                          "other", "ecc", "map" };
+    QDict *rsp = NULL;
+    QDict *ret = NULL;
+    uint64_t w, ns, u;
+    uint64_t bns;
+
+    for (int waited = 0; ; waited++) {
+        qobject_unref(rsp);
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+        ret = qdict_get_qdict(rsp, "return");
+        if (femu_cause_total(ret, "flush") >= 1) {
+            break;
+        }
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(femu_cause_total(ret, "flush"), ==, 1);
+    g_assert_cmpuint(femu_cause_total(ret, "read"), ==, 0);
+    g_assert_cmpuint(femu_cause_total(ret, "write"), ==, 0);
+    for (int i = 0; i < ARRAY_SIZE(all); i++) {
+        femu_cause_sum(ret, "flush", all[i], &w, &ns, &u);
+        g_assert_cmpuint(w, ==, 0);
+        g_assert_cmpuint(ns, ==, 0);
+    }
+    g_assert_cmpuint(u, ==, 0);
+    femu_cause_sum(ret, "flush", "buffer", &w, &bns, &u);
+    g_assert_cmpuint(w, ==, want_buffer ? 1 : 0);
+    if (!want_buffer) {
+        g_assert_cmpuint(bns, ==, 0);
+    }
+    femu_cause_sum(ret, "flush", "none", &w, &ns, &u);
+    g_assert_cmpuint(w, ==, want_buffer ? 0 : 1);
+    qobject_unref(rsp);
+    return bns;
+}
+
+/* reset the controller tables and those of both namespaces */
+static void femu_flush_reset(QTestState *qts)
+{
+    QDict *rsp;
+
+    qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                            "'arguments':{'reset':true}}"));
+    for (uint32_t id = 1; id <= 2; id++) {
+        femu_stages_ns(qts, id, true, &rsp);
+        qobject_unref(rsp);
+    }
+}
+
+/*
+ * io_causes for Flush (one LUN, 1 s programs, a write buffer of 8 pages
+ * that writes back only on Flush, two namespaces with stage_ns).
+ * Each step resets the tables and sends one Flush to namespace 1:
+ *  1. Empty buffer: no cause.
+ *  2. Two buffered pages: buffer, at least 2 programs (2 s).
+ *  3. A cache disable wrote a page back: the Flush waits for that program
+ *     (the fence), and the wait is buffer. The test has 1 s to send it.
+ *  4. Namespace 1 write protected: the Flush returns at once, no cause.
+ * A Flush is in no namespace class, so the stage sets of both namespaces
+ * stay empty.
+ */
+void femu_test_io_causes_flush(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t ns;
+    QDict *rsp;
+    QDict *ret;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3f, 4096);
+
+    femu_flush_reset(qts);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    femu_flush_buffer(qts, false);
+
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 8, buf)), ==,
+                    NVME_SUCCESS);
+    femu_flush_reset(qts);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    ns = femu_flush_buffer(qts, true);
+    g_test_message("2: buffer %" PRIu64 " ns", ns);
+    g_assert_cmpuint(ns, >=, 2000000000);
+    for (uint32_t id = 1; id <= 2; id++) {
+        ret = femu_stages_ns(qts, id, false, &rsp);
+        g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "read")), ==,
+                        0);
+        g_assert_cmpint(femu_stage_count(qdict_get_qdict(ret, "write")), ==,
+                        0);
+        qobject_unref(rsp);
+    }
+
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 16, buf)), ==,
+                    NVME_SUCCESS);
+    /* Volatile Write Cache off: the buffer drains, no command waits */
+    g_assert_cmphex(femu_set_feature(&c, 0x06, false, 0, 0, NULL), ==,
+                    NVME_SUCCESS);
+    femu_flush_reset(qts);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    ns = femu_flush_buffer(qts, true);
+    g_test_message("3: buffer %" PRIu64 " ns", ns);
+    g_assert_cmpuint(ns, <=, 1000000000);
+    g_assert_cmphex(femu_set_feature(&c, 0x06, false, 0, 1, NULL), ==,
+                    NVME_SUCCESS);
+
+    g_assert_cmphex(femu_wp_set(&c, 1, 1), ==, NVME_SUCCESS);
+    femu_flush_reset(qts);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    femu_flush_buffer(qts, false);
+    g_assert_cmphex(femu_wp_set(&c, 1, 0), ==, NVME_SUCCESS);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
 /* io_causes outside the scope of the cause rules fails at realize */
 void femu_test_io_causes_refused(void *obj, void *data,
                                  QGuestAllocator *alloc)

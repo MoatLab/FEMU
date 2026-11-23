@@ -254,6 +254,18 @@ static int nvme_stage_class(NvmeRequest *req)
     }
 }
 
+/* the cause class of @req: its stage class, or the Flush class */
+static int nvme_cause_class(NvmeRequest *req, int cls)
+{
+    NvmeNamespace *ns = req->ns;
+
+    if (cls < 0 && req->cmd_opcode == NVME_CMD_FLUSH && ns &&
+        (NS_BBSSD(ns) || NS_NOSSD(ns) || NS_ZNSSD(ns))) {
+        return FEMU_CAUSE_FLUSH;
+    }
+    return cls;
+}
+
 static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
                              int64_t post)
 {
@@ -265,7 +277,7 @@ static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
     /* io_causes needs the class also without stage_ns */
     cls = n->io_causes || n->stage_ns_sets ? nvme_stage_class(req) : -1;
     nvme_stages_note_set(n, &n->stage_sets[index_poller], req, post, true,
-                         cls);
+                         n->io_causes ? nvme_cause_class(req, cls) : cls);
     if (unlikely(n->stage_ns_sets) && req->ns &&
         req->ns->id <= FEMU_STAGE_NS && cls >= 0) {
         nvme_stages_note_set(n, nvme_stage_ns_set(n, index_poller,

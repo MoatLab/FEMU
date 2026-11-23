@@ -1634,11 +1634,15 @@
 # @write: the Write, Write Zeroes, Zone Append and Copy commands, by
 #     total-time bucket
 #
+# @flush: the Flush commands, by total-time bucket.  The whole wait of
+#     a Flush is buffer.
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuIoCauses',
   'data': { 'read': [ 'FemuIoCauseBand' ],
-            'write': [ 'FemuIoCauseBand' ] } }
+            'write': [ 'FemuIoCauseBand' ],
+            'flush': [ 'FemuIoCauseBand' ] } }
 
 ##
 # @FemuIoStageClass:

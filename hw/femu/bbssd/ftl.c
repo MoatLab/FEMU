@@ -1810,6 +1810,17 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     }
 
     /*
+     * io_causes: a Flush waits only for buffer work (its write-back or the
+     * fence of earlier ones), so all of it is buffer. Set here, from the
+     * final latency, so the early exits of the Flush case count too.
+     */
+    if (ssd->wc_on && req->cmd.opcode == NVME_CMD_FLUSH) {
+        memset(&req->wait, 0, sizeof(req->wait));
+        req->wait.ns[FEMU_WAIT_BUFFER] = lat;
+        req->wait_covered = true;
+    }
+
+    /*
      * A media error that this request ends with: count it and log it once,
      * by the final status. A Compare or Verify that failed its check keeps
      * that status, and its read error does not count as returned.

@@ -689,13 +689,17 @@ translation time, the TP read itself included, is `map`:
   On a tie, the first one in command order wins.
 - The cause with the largest part wins the command. On a tie, the first
   cause in the table wins. A part of 1000 ns or less is not a cause.
-- `causes.read` and `causes.write` have one entry per total-time bucket.
+- `causes.read`, `causes.write` and `causes.flush` have one entry per
+  total-time bucket.
   Each entry has `uncovered` and a list of causes with `count` (the
   commands that cause won) and `sum-ns` (all its waits in the bucket).
 - Errors (also a cancel), Write Zeroes and Copy are `uncovered`. Their media work still counts as an owner for later
   commands.
+- A Flush waits only for the write buffer: its own write-back, or the
+  fence of earlier write-backs. While that fence is due, the Flush waits
+  for the end of all booked media work. All of that wait is `buffer`. A Flush with nothing to wait for has no cause.
 - With `nsid`, the `read` and `write` classes of the namespace also have
-  `causes`. `reset` clears the causes with the stages.
+  `causes`. A namespace has no flush class. `reset` clears the causes with the stages.
 
 `io_causes` needs a bbssd device (`femu_mode=1`) with the page or dftl
 mapping.

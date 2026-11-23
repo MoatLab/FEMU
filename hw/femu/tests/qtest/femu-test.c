@@ -6716,6 +6716,14 @@ static void femu_register_nodes(void)
     });
     qos_add_test("io-causes-refused", "femu", femu_test_io_causes_refused,
                  NULL);
+    qos_add_test("io-causes-flush", "femu", femu_test_io_causes_flush,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "devsz_mb=16,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=64,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,"
+            "pg_wr_lat=1000000000,vwc=1,buffer_size=8,buffer_thres_pcent=100,"
+            "namespaces=2,ns_wp=on,io_stages=on,stage_ns=on,io_causes=on",
+    });
     qos_add_test("io-causes-map", "femu", femu_test_io_causes_map,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

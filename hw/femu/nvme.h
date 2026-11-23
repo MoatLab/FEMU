@@ -1970,6 +1970,9 @@ typedef struct FemuWaitParts {
 } FemuWaitParts;
 
 enum { FEMU_STAGE_READ, FEMU_STAGE_WRITE, FEMU_STAGE_CLASSES };
+/* io_causes also has a Flush class; the stage_ns sets do not */
+#define FEMU_CAUSE_FLUSH    FEMU_STAGE_CLASSES
+#define FEMU_CAUSE_CLASSES  (FEMU_STAGE_CLASSES + 1)
 
 /*
  * io_causes: the Read or Write commands of a set by total-time bucket.
@@ -1989,7 +1992,7 @@ typedef struct FemuStageSet {
     uint64_t returned_after_due;    /* back from the FTL after its due time */
     QemuSeqLock seq;                /* odd while the poller adds a command */
     FemuStageBand bands[FEMU_STAGE_BUCKETS];
-    FemuCauseTab causes[FEMU_STAGE_CLASSES];    /* io_causes, by class */
+    FemuCauseTab causes[FEMU_CAUSE_CLASSES];    /* io_causes, by class */
 } FemuStageSet;
 
 /* a firmware image FEMU holds in a slot (nvme-fw.c) */
