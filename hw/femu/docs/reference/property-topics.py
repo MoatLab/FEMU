@@ -71,7 +71,7 @@ DEVICES = [
                 "props": [
                     "queues", "entries", "max_sqes", "max_cqes", "stride",
                     "multipoller_enabled", "poller_ratio", "hiops_inline", "io_stages",
-                    "stage_ns",
+                    "stage_ns", "io_causes",
                     "wrr",
                     "aerl", "elpe", "mdts", "intc", "intc_thresh", "intc_time",
                 ],

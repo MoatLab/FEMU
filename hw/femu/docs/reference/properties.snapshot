@@ -496,6 +496,11 @@
     "kind": "static",
     "type": "uint8"
    },
+   "io_causes": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
    "io_stages": {
     "default": false,
     "kind": "static",

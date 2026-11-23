@@ -1256,7 +1256,7 @@ static void femu_query_stage_add(FemuStageSet *to, const FemuStageSet *from)
  * A cause is listed when it won a command or has a wait in the bucket.
  */
 /* the QAPI cause order is the FEMU_WAIT_* order, with none last */
-QEMU_BUILD_BUG_ON(FEMU_IO_CAUSE_NONE != FEMU_WAIT_NCAT);
+QEMU_BUILD_BUG_ON((int)FEMU_IO_CAUSE_NONE != (int)FEMU_WAIT_NCAT);
 
 static FemuIoCauseBandList *femu_query_cause_bands(const FemuCauseTab *t)
 {
