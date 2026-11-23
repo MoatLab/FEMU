@@ -638,6 +638,53 @@ each with its stages, bands and `returned-after-due`.
   the classes need not add up to them.
 - `reset` with `nsid` clears only that namespace's two classes; without
   `nsid` it clears only the controller's stages.
+
+### Wait causes: io_causes
+
+With `io_causes=on` (and `io_stages=on`), the reply also has `causes`.
+It tells what the slow Read and Write commands waited for on the media.
+Each LUN and plane of the media remembers which operation booked it
+last. A command that must wait for a LUN or plane adds that wait to the
+cause of the last booking.
+
+```
+ LUN 3:  [ GC program ............ ]
+ read:              ^ arrives        [ read ]
+                    |<-- wait gc -->|
+ the read command: gc = wait, on the path that sets its latency
+```
+
+| Cause | The wait came from |
+| --- | --- |
+| `erase` | an erase, of any origin |
+| `gc` | a read or program of garbage collection |
+| `host-program` | a program of host data |
+| `host-read` | a read of host data |
+| `other` | any other booking, such as parity or a second program pass |
+| `ecc` | the ECC time of a read, from its wear and age tiers |
+| `buffer` | a write-back of the write buffer that set the latency |
+| `none` | no part above 1000 ns |
+
+- A command takes the waits of the page or step that sets its latency.
+  On a tie, the first one in command order wins.
+- The cause with the largest part wins the command. On a tie, the first
+  cause in the table wins. A part of 1000 ns or less is not a cause.
+- `causes.read` and `causes.write` have one entry per total-time bucket.
+  Each entry has `uncovered` and a list of causes with `count` (the
+  commands that cause won) and `sum-ns` (all its waits in the bucket).
+- Errors, Write Zeroes, Copy and reads rebuilt from parity are
+  `uncovered`. Their media work still counts as an owner for later
+  commands.
+- With `nsid`, the `read` and `write` classes of the namespace also have
+  `causes`. `reset` clears the causes with the stages.
+
+`io_causes` needs a bbssd device (`femu_mode=1`) with the page mapping.
+Realize fails for the options whose timing the rules do not follow:
+
+- `namespace_modes`, FDP, a shared or CXL namespace;
+- bus phases (bus latencies, ONFI, SCA) and the `tpl*bsy` times;
+- `pe_suspend`, `read_prio`, `mp_program`, `mp_read`, `onfi_cache_read`;
+- `rber_ppb`, `durable_at_done`, `tier_mode`, and `iu_pages` above 1.
 - `nsid` must be 1 to 8 and name an attached namespace. `stage_ns` is
   refused with `ns_mgmt`, so an NSID names one namespace for the life of
   the controller.

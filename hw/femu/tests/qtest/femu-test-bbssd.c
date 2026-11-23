@@ -23965,3 +23965,177 @@ void femu_test_g1_ring_full(void *obj, void *data,
     femu_disable(&c);
     qos_invalidate_command_line();
 }
+
+/*
+ * io_causes: the commands of one class of a query-femu-stages reply, as
+ * the wins and waits of @cause, and the uncovered ones.
+ */
+static void femu_cause_sum(QDict *ret, const char *cls, const char *cause,
+                           uint64_t *wins, uint64_t *ns, uint64_t *uncovered)
+{
+    QListEntry *e;
+    QListEntry *f;
+
+    *wins = 0;
+    *ns = 0;
+    *uncovered = 0;
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(qdict_get_qdict(ret, "causes"), cls),
+                        e) {
+        QDict *bd = qobject_to(QDict, qlist_entry_obj(e));
+
+        *uncovered += qdict_get_int(bd, "uncovered");
+        QLIST_FOREACH_ENTRY(qdict_get_qlist(bd, "causes"), f) {
+            QDict *cc = qobject_to(QDict, qlist_entry_obj(f));
+
+            if (!strcmp(qdict_get_str(cc, "cause"), cause)) {
+                *wins += qdict_get_int(cc, "count");
+                *ns += qdict_get_int(cc, "sum-ns");
+            }
+        }
+    }
+}
+
+/* all commands of a class, so a test can wait for the poller to count them */
+static uint64_t femu_cause_total(QDict *ret, const char *cls)
+{
+    const char *all[] = { "erase", "gc", "host-program", "host-read",
+                          "other", "ecc", "buffer", "none" };
+    uint64_t total = 0;
+    uint64_t w;
+    uint64_t ns;
+    uint64_t u;
+
+    for (int i = 0; i < ARRAY_SIZE(all); i++) {
+        femu_cause_sum(ret, cls, all[i], &w, &ns, &u);
+        total += w;
+    }
+    return total + u;
+}
+
+/*
+ * io_causes with 20 ms programs. A read sent with the write of its page
+ * waits for that program: one host-program win of about 20 ms. A read
+ * past the end fails: uncovered. A later clean read of the same request
+ * slot has no cause, so nothing carries over from the earlier commands.
+ */
+void femu_test_io_causes(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 8192);
+    NvmeRwCmd rw = { 0 };
+    uint64_t nsze;
+    uint32_t lba_size;
+    uint64_t w;
+    uint64_t ns;
+    uint64_t u;
+    QDict *rsp = NULL;
+    QDict *ret = NULL;
+    int waited;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_identify_ns(&c, &nsze, &lba_size);
+    qtest_memset(qts, buf, 0x6b, 8192);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_WRITE, 0, buf), ==, NVME_SUCCESS);
+    qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                            "'arguments':{'reset':true}}"));
+
+    /* the write of page 1 and its read, both in flight */
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(4096 / lba_size);
+    rw.nlb = cpu_to_le16(4096 / lba_size - 1);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    rw.opcode = NVME_CMD_READ;
+    rw.dptr.prp1 = cpu_to_le64(buf + 4096);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmphex(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
+
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, nsze, buf), !=, NVME_SUCCESS);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+
+    for (waited = 0; ; waited++) {
+        qobject_unref(rsp);
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+        ret = qdict_get_qdict(rsp, "return");
+        g_assert_true(qdict_haskey(ret, "causes"));
+        if (femu_cause_total(ret, "read") >= 3 &&
+            femu_cause_total(ret, "write") >= 1) {
+            break;
+        }
+        g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+
+    femu_cause_sum(ret, "read", "host-program", &w, &ns, &u);
+    g_test_message("read: host-program %" PRIu64 " / %" PRIu64
+                   " ns, uncovered %" PRIu64, w, ns, u);
+    g_assert_cmpuint(w, ==, 1);
+    g_assert_cmpuint(ns, >, 10000000);
+    g_assert_cmpuint(ns, <=, 20000000);
+    g_assert_cmpuint(u, ==, 1);
+    femu_cause_sum(ret, "read", "none", &w, &ns, &u);
+    g_assert_cmpuint(w, ==, 1);
+    g_assert_cmpuint(femu_cause_total(ret, "read"), ==, 3);
+    femu_cause_sum(ret, "write", "none", &w, &ns, &u);
+    g_assert_cmpuint(w, ==, 1);
+    g_assert_cmpuint(femu_cause_total(ret, "write"), ==, 1);
+    qobject_unref(rsp);
+
+    /* a reset clears the cause tables with the stages */
+    qobject_unref(qtest_qmp(qts, "{'execute':'query-femu-stages',"
+                            "'arguments':{'reset':true}}"));
+    rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
+    ret = qdict_get_qdict(rsp, "return");
+    g_assert_cmpuint(femu_cause_total(ret, "read"), ==, 0);
+    g_assert_cmpuint(femu_cause_total(ret, "write"), ==, 0);
+    qobject_unref(rsp);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* io_causes outside the scope of the cause rules fails at realize */
+void femu_test_io_causes_refused(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QTestState *qts = ((QFemu *)obj)->dev.bus->qts;
+    const char *cases[][2] = {
+        { "'femu_mode':1", "io_causes needs io_stages=on" },
+        { "'femu_mode':2,'io_stages':true", "femu_mode=1" },
+        { "'femu_mode':1,'io_stages':true,'namespace_modes':'bbssd,bbssd'",
+          "namespace_modes" },
+        { "'femu_mode':1,'io_stages':true,'mapping':'dftl'",
+          "a mapping other than page" },
+        { "'femu_mode':1,'io_stages':true,'ch_xfer_lat':1000",
+          "channel bus phases" },
+        { "'femu_mode':1,'io_stages':true,'pe_suspend':1",
+          "pe_suspend or read_prio" },
+        { "'femu_mode':1,'io_stages':true,'tplpbsy':1000", "tplpbsy" },
+        { "'femu_mode':1,'io_stages':true,'mp_program':1", "mp_program" },
+        { "'femu_mode':1,'io_stages':true,'rber_ppb':10", "rber_ppb" },
+        { "'femu_mode':1,'io_stages':true,'iu_pages':2", "iu_pages" },
+    };
+    QDict *rsp;
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{"
+            "'driver':'femu','id':'wcr','addr':'5','devsz_mb':16,"
+            "'io_causes':true,%s}}", cases[i][0]);
+        const char *desc;
+
+        rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", cases[i][0], desc);
+        g_assert_nonnull(strstr(desc, cases[i][1]));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}

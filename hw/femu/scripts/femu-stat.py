@@ -317,6 +317,60 @@ def band_report(cur: List[Dict[str, Any]],
     return out
 
 
+CAUSE_CLASSES = ("read", "write")
+
+
+def cause_flat(bands: List[Dict[str, Any]]) -> Dict[Tuple, int]:
+    """The raw cause sums of one class, keyed by bucket and field."""
+    out: Dict[Tuple, int] = {}
+    for b in bands:
+        out[(b["bucket"], "uncovered")] = b["uncovered"]
+        for c in b["causes"]:
+            out[(b["bucket"], c["cause"], "count")] = c["count"]
+            out[(b["bucket"], c["cause"], "sum-ns")] = c["sum-ns"]
+    return out
+
+
+def causes_report(cur: Dict[str, Any], prev: Optional[Dict[str, Any]]
+                  ) -> Dict[str, List[Dict[str, Any]]]:
+    """Per class and bucket: the commands each cause won, the waits of
+    each cause and the uncovered commands, over the window. A cause with
+    no win and some wait stays in the output."""
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for cls in CAUSE_CLASSES:
+        now = cause_flat(cur.get(cls, []))
+        old = cause_flat(prev.get(cls, [])) if prev is not None else {}
+        if FAULT == "cause-raw":
+            old = {}
+        rows: Dict[int, Dict[str, Any]] = {}
+        for key, v in now.items():
+            d = v - old.get(key, 0)
+            if d == 0:
+                continue
+            row = rows.setdefault(key[0], {"bucket": key[0], "count": 0,
+                                           "uncovered": 0, "causes": {}})
+            if key[1] == "uncovered":
+                row["uncovered"] = d
+                row["count"] += d
+                continue
+            c = row["causes"].setdefault(key[1], {"count": 0, "sum-ns": 0})
+            c[key[2]] = d
+            if key[2] == "count":
+                row["count"] += d
+        out[cls] = [rows[b] for b in sorted(rows)]
+    return out
+
+
+def causes_went_back(cur: Dict[str, Any], prev: Dict[str, Any]) -> bool:
+    """True when a cause sum fell or vanished: a reset in between."""
+    for cls in CAUSE_CLASSES:
+        now = cause_flat(cur.get(cls, []))
+        for key, v in cause_flat(prev.get(cls, [])).items():
+            if now.get(key, 0) < v:
+                return True
+    return False
+
+
 def stage_report(cur: Dict[str, Any],
                  prev: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Per stage figures over the interval, or since the last reset when
@@ -338,11 +392,17 @@ def stage_report(cur: Dict[str, Any],
     if any(k not in {b["bucket"] for b in cur.get("bands", [])}
            for k in pbands):
         use_prev = False
+    if "causes" in cur and prev is not None and "causes" in prev and \
+            causes_went_back(cur["causes"], prev["causes"]):
+        use_prev = False
     if not use_prev:
         out["window"] = "since-reset"
     if "bands" in cur:
         out["bands"] = band_report(cur["bands"],
                                    pbands if use_prev else {})
+    if "causes" in cur:
+        out["causes"] = causes_report(
+            cur["causes"], prev.get("causes") if use_prev and prev else None)
     for s in cur.get("stages", []):
         p = prev_by.get(s["stage"]) if use_prev else None
         buckets = list(s["buckets"])
@@ -761,6 +821,19 @@ def stages_text(st: Dict[str, Any]) -> List[str]:
                          f"{100 * b['past-due-share']:>7.1f}%")
         lines.append("    due+: mean past-due time of the band; not a "
                      "cause")
+    for cls in CAUSE_CLASSES:
+        rows = st.get("causes", {}).get(cls)
+        if not rows:
+            continue
+        lines.append(f"    {cls} causes (bucket: commands; cause "
+                     "wins/wait):")
+        for r in rows:
+            parts = [f"{c} {v['count']}/{fmt_ns(v['sum-ns'])}"
+                     for c, v in r["causes"].items()]
+            if r["uncovered"]:
+                parts.append(f"uncovered {r['uncovered']}")
+            lines.append(f"      {r['bucket']:>3}: {r['count']:>7}  "
+                         + ", ".join(parts))
     return lines
 
 
@@ -1627,6 +1700,43 @@ def selftest_synthetic(t: SelfTest) -> None:
     bd = build_report(dev(ns0, b2, 1.0), dev(ns0, b1))["devices"][0]["stages"]
     t.check("a band count that goes down is a reset",
             bd["window"] == "since-reset" and bd["bands"][0]["count"] == 2)
+
+    # causes: bucket 17 gains 3 GC wins and ECC wait with no win
+    def cband(b: int, unc: int, **cs: Tuple[int, int]) -> Dict[str, Any]:
+        return {"bucket": b, "uncovered": unc,
+                "causes": [{"cause": k.replace("_", "-"), "count": v[0],
+                            "sum-ns": v[1]} for k, v in cs.items()]}
+    c0 = dict(st, causes={"read": [cband(17, 1, gc=(2, 300000))],
+                          "write": []})
+    c1 = dict(st, causes={"read": [cband(17, 1, gc=(5, 700000),
+                                         ecc=(0, 9000)),
+                                   cband(3, 2, none=(4, 0))],
+                          "write": [cband(20, 0, buffer=(1, 2000000))]})
+
+    def causes_ok() -> bool:
+        cr = build_report(dev(ns0, c1, 1.0),
+                          dev(ns0, c0))["devices"][0]["stages"]["causes"]
+        r = {x["bucket"]: x for x in cr["read"]}
+        return (cr["write"][0]["causes"] == {"buffer": {"count": 1,
+                                                        "sum-ns": 2000000}}
+                and set(r) == {3, 17} and r[17]["count"] == 3
+                and r[17]["uncovered"] == 0
+                and r[17]["causes"] == {"gc": {"count": 3, "sum-ns": 400000},
+                                        "ecc": {"count": 0, "sum-ns": 9000}}
+                and r[3]["count"] == 6 and r[3]["uncovered"] == 2)
+    t.check("cause tables: interval sums, a wait with no win stays",
+            causes_ok())
+    t.control("causes", "cause-raw", causes_ok)
+    text = report_text(build_report(dev(ns0, c1, 1.0), dev(ns0, c0)),
+                       "synthetic")
+    t.check("cause tables: shown as text",
+            "read causes" in text and "ecc 0/9.0us" in text, text)
+    c2 = dict(st, causes={"read": [cband(17, 0, gc=(1, 50000))],
+                          "write": []})
+    cr = build_report(dev(ns0, c2, 1.0), dev(ns0, c1))["devices"][0]["stages"]
+    t.check("a cause sum that goes down is a reset",
+            cr["window"] == "since-reset"
+            and cr["causes"]["read"][0]["causes"]["gc"]["count"] == 1)
 
 
 def self_test(qemu: str) -> int:

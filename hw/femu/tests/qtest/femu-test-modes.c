@@ -1259,6 +1259,8 @@ void femu_test_io_stages(void *obj, void *data, QGuestAllocator *alloc)
     femu_stages_check_sum(ret);
     g_assert_cmpuint(qdict_get_int(femu_stage(ret, "past-due"), "sum-ns"), >,
                      0);
+    /* io_causes is off: no cause tables */
+    g_assert_false(qdict_haskey(ret, "causes"));
     femu_stages_check_bands(ret);
     if (!zero) {
         /* with a 3 ms read, past-due time is far below total time */

@@ -235,6 +235,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "NVM or zoned namespace, NSID 1 to 8, apart, in ns; "
       "query-femu-stages returns them with nsid; not with ns_mgmt; off "
       "(default)" },
+    { "io_causes",
+      "with io_stages: name what each Read or Write waited for on the "
+      "media (erase, GC, host program or read, ECC, write buffer); "
+      "query-femu-stages returns it as causes; bbssd with the page "
+      "mapping only; off (default)" },
     { "intc",
       "Initial Coalescing Disable bit (0 or 1) of the Interrupt Vector "
       "Configuration feature for every vector" },

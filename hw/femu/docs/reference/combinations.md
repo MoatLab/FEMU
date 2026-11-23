@@ -300,6 +300,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 - csd_slm_size and csd_cp need femu_mode=4
 - femu_mode must be 0 (OpenChannel), 1 (black-box), 2 (no-SSD), 3 (zoned), 4 (computational storage) or 5 (key-value)
+- io_causes needs femu_mode=1 and no namespace_modes
 - kv_index=lsm and the kv_lsm_* knobs need a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_max_keys needs a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_pack=off needs a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
@@ -413,6 +414,13 @@ own description allows. A message keeps its format directives (`%s`,
 ## `intc`
 
 - vwc, intc, cqr and extended are single bits
+
+## `io_causes`
+
+- FEMU: the host has no memory for the io_causes owner table
+- io_causes is not supported with %s
+- io_causes needs femu_mode=1 and no namespace_modes
+- io_causes needs io_stages=on
 
 ## `io_stages`
 
@@ -636,6 +644,7 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU bbssd: die_parity and rain_parity need two dies at least and mapping=page, and does not work with mp_program, mp_read, onfi_cache_read, gc_copyback, rber_ppb, KV, namespace_modes or FDP; parity_xor_ns (0 or more) and failed_die (-1 to dies - 1) need die_parity
 - die_slow requires bbssd or CSD with one namespace, and no ns_mgmt, namespace_modes, subsystem or cxl_ssd
 - die_stats requires bbssd, with no namespace_modes, subsystem or cxl_ssd
+- io_causes needs femu_mode=1 and no namespace_modes
 - kv_index=lsm and the kv_lsm_* knobs need a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_max_keys needs a key-value namespace (femu_mode=5 or kvssd in namespace_modes)
 - kv_pack=off needs a key-value namespace (femu_mode=5 or kvssd in namespace_modes)

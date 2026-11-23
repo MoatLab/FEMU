@@ -156,6 +156,37 @@ static void nvme_stage_band_add(FemuStageSet *set, int64_t total,
 }
 
 /*
+ * io_causes: a part of 1000 ns or less is not a cause. The largest part
+ * wins; on a tie the first cause in FEMU_WAIT_* order does.
+ */
+#define FEMU_WAIT_FLOOR_NS 1000
+
+static void nvme_cause_add(FemuCauseTab *tab, const NvmeRequest *req,
+                           int64_t total)
+{
+    int b = nvme_stage_bucket(total > 0 ? total : 0);
+    int win = FEMU_WAIT_NCAT;
+    uint64_t top = FEMU_WAIT_FLOOR_NS;
+
+    if (!req->wait_covered) {
+        qatomic_set(&tab->uncovered[b], tab->uncovered[b] + 1);
+        return;
+    }
+    for (int c = 0; c < FEMU_WAIT_NCAT; c++) {
+        uint64_t v = req->wait.ns[c];
+
+        if (v > top) {
+            top = v;
+            win = c;
+        }
+        if (v) {
+            qatomic_set(&tab->ns[c][b], tab->ns[c][b] + v);
+        }
+    }
+    qatomic_set(&tab->win[win][b], tab->win[win][b] + 1);
+}
+
+/*
  * io_stages: add one posted command to this poller's histograms. The stages
  * meet at "ready", the later of the due time and the return from the FTL,
  * so submit, ftl, hold and post-delay add up to total. past-due, from the
@@ -165,7 +196,8 @@ static void nvme_stage_band_add(FemuStageSet *set, int64_t total,
  * namespace retired has no due time, and is not counted.
  */
 static void nvme_stages_note_set(FemuCtrl *n, FemuStageSet *set,
-                                 NvmeRequest *req, int64_t post, bool hold)
+                                 NvmeRequest *req, int64_t post, bool hold,
+                                 int cls)
 {
     int64_t ready = req->expire_time;
 
@@ -191,6 +223,9 @@ static void nvme_stages_note_set(FemuCtrl *n, FemuStageSet *set,
         g_usleep(qatomic_read(&n->test_stage_hold_ms) * 1000ULL);
     }
     nvme_stage_band_add(set, post - req->t_submit, post - req->expire_time);
+    if (n->io_causes && cls >= 0) {
+        nvme_cause_add(&set->causes[cls], req, post - req->t_submit);
+    }
     seqlock_write_end(&set->seq);
 }
 
@@ -226,15 +261,15 @@ static void nvme_stages_note(FemuCtrl *n, int index_poller, NvmeRequest *req,
     if (req->expire_time < req->t_submit) {
         return;
     }
-    nvme_stages_note_set(n, &n->stage_sets[index_poller], req, post, true);
+    /* io_causes needs the class also without stage_ns */
+    cls = n->io_causes || n->stage_ns_sets ? nvme_stage_class(req) : -1;
+    nvme_stages_note_set(n, &n->stage_sets[index_poller], req, post, true,
+                         cls);
     if (unlikely(n->stage_ns_sets) && req->ns &&
-        req->ns->id <= FEMU_STAGE_NS) {
-        cls = nvme_stage_class(req);
-        if (cls >= 0) {
-            nvme_stages_note_set(n, nvme_stage_ns_set(n, index_poller,
-                                                      req->ns->id, cls),
-                                 req, post, false);
-        }
+        req->ns->id <= FEMU_STAGE_NS && cls >= 0) {
+        nvme_stages_note_set(n, nvme_stage_ns_set(n, index_poller,
+                                                  req->ns->id, cls),
+                             req, post, false, cls);
     }
 }
 

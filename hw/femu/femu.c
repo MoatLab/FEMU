@@ -2781,6 +2781,12 @@ static bool femu_shared_ftl_check(FemuCtrl *n, Error **errp)
         error_setg(errp, "io_causes needs io_stages=on");
         return false;
     }
+    /* the FTL that follows the causes is bbssd's; ZNS and NoSSD have none */
+    if (n->io_causes &&
+        (n->femu_mode != FEMU_BBSSD_MODE || n->namespace_modes)) {
+        error_setg(errp, "io_causes needs femu_mode=1 and no namespace_modes");
+        return false;
+    }
     if (n->stage_ns && n->ns_mgmt) {
         error_setg(errp, "stage_ns is not supported with ns_mgmt");
         return false;

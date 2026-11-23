@@ -1558,6 +1558,85 @@
             'past-due-sum-ns': 'uint64' } }
 
 ##
+# @FemuIoCause:
+#
+# What a Read or Write command waited for on the media (io_causes=on).
+# A wait names the booking that ended last before the command could
+# start on its LUN or plane.
+#
+# @erase: an erase
+#
+# @gc: a read or program of garbage collection
+#
+# @host-program: a program of host data
+#
+# @host-read: a read of host data
+#
+# @other: any other booking, such as parity or a second program pass
+#
+# @ecc: the ECC time of a read, from its wear and age tiers
+#
+# @buffer: a write-back of the write buffer that set the latency; its
+#     own waits are not counted again
+#
+# @none: no part above 1000 ns
+#
+# Since: 10.1
+##
+{ 'enum': 'FemuIoCause',
+  'data': [ 'erase', 'gc', 'host-program', 'host-read', 'other', 'ecc',
+            'buffer', 'none' ] }
+
+##
+# @FemuIoCauseCount:
+#
+# @cause: the cause
+#
+# @count: commands whose largest part is this cause
+#
+# @sum-ns: the waits of this cause, summed over all the commands of
+#     the bucket, also those another cause won
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuIoCauseCount',
+  'data': { 'cause': 'FemuIoCause', 'count': 'uint64', 'sum-ns': 'uint64' } }
+
+##
+# @FemuIoCauseBand:
+#
+# The causes of the commands of one class whose total time fell in
+# one bucket.  The counts of all causes plus @uncovered give the
+# commands of the class in the bucket.
+#
+# @bucket: the total-time bucket, numbered as in @FemuIoStageInfo
+#
+# @uncovered: commands with no causes: an error, a Write Zeroes or
+#     Copy, or a read rebuilt from parity
+#
+# @causes: the causes with a count or a wait, in @FemuIoCause order
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuIoCauseBand',
+  'data': { 'bucket': 'uint8', 'uncovered': 'uint64',
+            'causes': [ 'FemuIoCauseCount' ] } }
+
+##
+# @FemuIoCauses:
+#
+# @read: the Read commands, by total-time bucket
+#
+# @write: the Write, Write Zeroes, Zone Append and Copy commands, by
+#     total-time bucket
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuIoCauses',
+  'data': { 'read': [ 'FemuIoCauseBand' ],
+            'write': [ 'FemuIoCauseBand' ] } }
+
+##
 # @FemuIoStageClass:
 #
 # Stage times of one class of I/O commands of one namespace
@@ -1570,12 +1649,15 @@
 #
 # @bands: one entry per non-empty total-time bucket, in bucket order
 #
+# @causes: what the commands of the class waited for (io_causes=on)
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuIoStageClass',
   'data': { 'stages': [ 'FemuIoStageInfo' ],
             'returned-after-due': 'uint64',
-            'bands': [ 'FemuIoStageBand' ] } }
+            'bands': [ 'FemuIoStageBand' ],
+            '*causes': [ 'FemuIoCauseBand' ] } }
 
 ##
 # @FemuIoStages:
@@ -1601,13 +1683,17 @@
 # @write: the Write, Write Zeroes, Zone Append and Copy commands of
 #     namespace @nsid (a Copy counts for its destination)
 #
+# @causes: what the Read and Write commands of the controller waited
+#     for (io_causes=on)
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuIoStages',
   'data': { 'path': 'str', 'stages': [ 'FemuIoStageInfo' ],
             'returned-after-due': 'uint64',
             'bands': [ 'FemuIoStageBand' ], '*nsid': 'uint32',
-            '*read': 'FemuIoStageClass', '*write': 'FemuIoStageClass' } }
+            '*read': 'FemuIoStageClass', '*write': 'FemuIoStageClass',
+            '*causes': 'FemuIoCauses' } }
 
 ##
 # @query-femu-stages:

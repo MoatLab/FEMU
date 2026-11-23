@@ -6709,6 +6709,13 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "id=stns,femu_mode=1,devsz_mb=16,"
             "namespaces=2,io_stages=on,stage_ns=on,pg_rd_lat=3000000",
     });
+    qos_add_test("io-causes", "femu", femu_test_io_causes,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,devsz_mb=16,io_stages=on,"
+            "io_causes=on,pg_wr_lat=20000000",
+    });
+    qos_add_test("io-causes-refused", "femu", femu_test_io_causes_refused,
+                 NULL);
     qos_add_test("io-stages-ns-refused", "femu",
                  femu_test_io_stages_ns_refused, &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,devsz_mb=16,io_stages=on",

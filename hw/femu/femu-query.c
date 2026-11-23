@@ -1167,6 +1167,20 @@ static void femu_query_stage_load(FemuStageSet *set, FemuStageSet *out)
         out->bands[b].total_ns = qatomic_read(&bd->total_ns);
         out->bands[b].past_due_ns = qatomic_read(&bd->past_due_ns);
     }
+    for (int cls = 0; cls < FEMU_STAGE_CLASSES; cls++) {
+        const FemuCauseTab *t = &set->causes[cls];
+        FemuCauseTab *o = &out->causes[cls];
+
+        for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+            for (int c = 0; c <= FEMU_WAIT_NCAT; c++) {
+                o->win[c][b] = qatomic_read(&t->win[c][b]);
+            }
+            for (int c = 0; c < FEMU_WAIT_NCAT; c++) {
+                o->ns[c][b] = qatomic_read(&t->ns[c][b]);
+            }
+            o->uncovered[b] = qatomic_read(&t->uncovered[b]);
+        }
+    }
 }
 
 /*
@@ -1221,6 +1235,65 @@ static void femu_query_stage_add(FemuStageSet *to, const FemuStageSet *from)
         to->bands[b].total_ns += from->bands[b].total_ns;
         to->bands[b].past_due_ns += from->bands[b].past_due_ns;
     }
+    for (int cls = 0; cls < FEMU_STAGE_CLASSES; cls++) {
+        FemuCauseTab *t = &to->causes[cls];
+        const FemuCauseTab *f = &from->causes[cls];
+
+        for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+            for (int c = 0; c <= FEMU_WAIT_NCAT; c++) {
+                t->win[c][b] += f->win[c][b];
+            }
+            for (int c = 0; c < FEMU_WAIT_NCAT; c++) {
+                t->ns[c][b] += f->ns[c][b];
+            }
+            t->uncovered[b] += f->uncovered[b];
+        }
+    }
+}
+
+/*
+ * io_causes: one entry per bucket that has a command, in bucket order.
+ * A cause is listed when it won a command or has a wait in the bucket.
+ */
+/* the QAPI cause order is the FEMU_WAIT_* order, with none last */
+QEMU_BUILD_BUG_ON(FEMU_IO_CAUSE_NONE != FEMU_WAIT_NCAT);
+
+static FemuIoCauseBandList *femu_query_cause_bands(const FemuCauseTab *t)
+{
+    FemuIoCauseBandList *list = NULL;
+    FemuIoCauseBandList **tail = &list;
+
+    for (int b = 0; b < FEMU_STAGE_BUCKETS; b++) {
+        FemuIoCauseCountList **ctail;
+        FemuIoCauseBand *bd;
+        bool any = t->uncovered[b] != 0;
+
+        for (int c = 0; c <= FEMU_WAIT_NCAT; c++) {
+            any |= t->win[c][b] || (c < FEMU_WAIT_NCAT && t->ns[c][b]);
+        }
+        if (!any) {
+            continue;
+        }
+        bd = g_new0(FemuIoCauseBand, 1);
+        bd->bucket = b;
+        bd->uncovered = t->uncovered[b];
+        ctail = &bd->causes;
+        for (int c = 0; c <= FEMU_WAIT_NCAT; c++) {
+            uint64_t ns = c < FEMU_WAIT_NCAT ? t->ns[c][b] : 0;
+            FemuIoCauseCount *cc;
+
+            if (!t->win[c][b] && !ns) {
+                continue;
+            }
+            cc = g_new0(FemuIoCauseCount, 1);
+            cc->cause = c;
+            cc->count = t->win[c][b];
+            cc->sum_ns = ns;
+            QAPI_LIST_APPEND(ctail, cc);
+        }
+        QAPI_LIST_APPEND(tail, bd);
+    }
+    return list;
 }
 
 typedef FemuStageSet *(*FemuStageSetFn)(FemuCtrl *n, int p, void *opaque);
@@ -1295,12 +1368,17 @@ static void femu_query_stage_lists(const FemuStageSet *sum,
     }
 }
 
-static FemuIoStageClass *femu_query_stage_class(const FemuStageSet *sum)
+static FemuIoStageClass *femu_query_stage_class(FemuCtrl *n,
+                                                const FemuStageSet *sum,
+                                                int cls)
 {
     FemuIoStageClass *c = g_new0(FemuIoStageClass, 1);
 
     femu_query_stage_lists(sum, &c->stages, &c->returned_after_due,
                            &c->bands);
+    if (n->io_causes) {
+        c->causes = femu_query_cause_bands(&sum->causes[cls]);
+    }
     return c;
 }
 
@@ -1383,6 +1461,13 @@ FemuIoStages *qmp_query_femu_stages(const char *path, bool has_nsid,
     info->path = object_get_canonical_path(OBJECT(n));
     femu_query_stage_lists(sum, &info->stages, &info->returned_after_due,
                            &info->bands);
+    if (n->io_causes) {
+        info->causes = g_new0(FemuIoCauses, 1);
+        info->causes->read =
+            femu_query_cause_bands(&sum->causes[FEMU_STAGE_READ]);
+        info->causes->write =
+            femu_query_cause_bands(&sum->causes[FEMU_STAGE_WRITE]);
+    }
     if (has_nsid) {
         info->has_nsid = true;
         info->nsid = nsid;
@@ -1391,9 +1476,9 @@ FemuIoStages *qmp_query_femu_stages(const char *path, bool has_nsid,
             femu_query_stage_sum(n, femu_query_stage_ns,
                                  (void *)(uintptr_t)(nsid << 1 | cls), ns_sum);
             if (cls == FEMU_STAGE_READ) {
-                info->read = femu_query_stage_class(ns_sum);
+                info->read = femu_query_stage_class(n, ns_sum, cls);
             } else {
-                info->write = femu_query_stage_class(ns_sum);
+                info->write = femu_query_stage_class(n, ns_sum, cls);
             }
             g_clear_pointer(&ns_sum, g_free);
         }

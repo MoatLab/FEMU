@@ -1949,12 +1949,46 @@ typedef struct FemuStageBand {
     uint64_t past_due_ns;               /* sum of their past-due times */
 } FemuStageBand;
 
+/*
+ * io_causes: what a command waited for on the media, in ns per cause. The
+ * order is the tie order: an earlier cause wins an equal sum.
+ */
+enum {
+    FEMU_WAIT_ERASE = 0,
+    FEMU_WAIT_GC,
+    FEMU_WAIT_HOST_PROG,
+    FEMU_WAIT_HOST_READ,
+    FEMU_WAIT_OTHER,
+    FEMU_WAIT_ECC,
+    FEMU_WAIT_BUFFER,
+    FEMU_WAIT_NCAT,
+};
+
+typedef struct FemuWaitParts {
+    uint64_t ns[FEMU_WAIT_NCAT];
+} FemuWaitParts;
+
+enum { FEMU_STAGE_READ, FEMU_STAGE_WRITE, FEMU_STAGE_CLASSES };
+
+/*
+ * io_causes: the Read or Write commands of a set by total-time bucket.
+ * win counts each covered command once, under its largest cause, or
+ * under FEMU_WAIT_NCAT (none); ns sums every cause of every covered
+ * command. uncovered counts the commands the FTL gave no causes.
+ */
+typedef struct FemuCauseTab {
+    uint64_t win[FEMU_WAIT_NCAT + 1][FEMU_STAGE_BUCKETS];
+    uint64_t ns[FEMU_WAIT_NCAT][FEMU_STAGE_BUCKETS];
+    uint64_t uncovered[FEMU_STAGE_BUCKETS];
+} FemuCauseTab;
+
 /* one per poller, written only by that poller */
 typedef struct FemuStageSet {
     FemuStageHist st[FEMU_STAGE_NR];
     uint64_t returned_after_due;    /* back from the FTL after its due time */
     QemuSeqLock seq;                /* odd while the poller adds a command */
     FemuStageBand bands[FEMU_STAGE_BUCKETS];
+    FemuCauseTab causes[FEMU_STAGE_CLASSES];    /* io_causes, by class */
 } FemuStageSet;
 
 /* a firmware image FEMU holds in a slot (nvme-fw.c) */
@@ -2025,25 +2059,6 @@ typedef struct FemuOcpLat {
     QemuSeqLock seq;
     FemuOcpLatState s;
 } FemuOcpLat;
-
-/*
- * io_causes: what a command waited for on the media, in ns per cause. The
- * order is the tie order: an earlier cause wins an equal sum.
- */
-enum {
-    FEMU_WAIT_ERASE = 0,
-    FEMU_WAIT_GC,
-    FEMU_WAIT_HOST_PROG,
-    FEMU_WAIT_HOST_READ,
-    FEMU_WAIT_OTHER,
-    FEMU_WAIT_ECC,
-    FEMU_WAIT_BUFFER,
-    FEMU_WAIT_NCAT,
-};
-
-typedef struct FemuWaitParts {
-    uint64_t ns[FEMU_WAIT_NCAT];
-} FemuWaitParts;
 
 typedef struct NvmeRequest {
     struct NvmeSQueue       *sq;
@@ -3709,7 +3724,6 @@ static inline NvmeNamespace *nvme_ns(FemuCtrl *n, uint32_t nsid)
 
 /* stage_ns: namespaces with their own stage sets, and the classes */
 #define FEMU_STAGE_NS           8
-enum { FEMU_STAGE_READ, FEMU_STAGE_WRITE, FEMU_STAGE_CLASSES };
 
 /* the stage set of poller @p for namespace @nsid (1-based) and @cls */
 static inline FemuStageSet *nvme_stage_ns_set(FemuCtrl *n, int p,

@@ -1191,6 +1191,9 @@ void femu_test_shared_ftl_buffer(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_shared_ftl_refused(void *obj, void *data,
                                   QGuestAllocator *alloc);
 void femu_test_io_stages_ns(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_io_causes(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_io_causes_refused(void *obj, void *data,
+                                 QGuestAllocator *alloc);
 void femu_test_io_stages_ns_refused(void *obj, void *data,
                                     QGuestAllocator *alloc);
 void femu_test_durable_at_done(void *obj, void *data, QGuestAllocator *alloc);
