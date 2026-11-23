@@ -24015,8 +24015,8 @@ static uint64_t femu_cause_total(QDict *ret, const char *cls)
 /*
  * io_causes with 200 ms programs. A read sent with the write of its page
  * waits for the rest of that program: one host-program win. A read
- * past the end fails: uncovered. A later clean read of the same request
- * slot has no cause, so nothing carries over from the earlier commands.
+ * past the end fails: uncovered. Later clean reads have no cause, and a
+ * Write Zeroes in the slot of the caused read is uncovered.
  */
 void femu_test_io_causes(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -24056,15 +24056,29 @@ void femu_test_io_causes(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmphex(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
 
     g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, nsze, buf), !=, NVME_SUCCESS);
-    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    for (int i = 0; i < FEMU_QSIZE - 2; i++) {
+        g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    }
+    /*
+     * The SQ has FEMU_QSIZE request slots, taken in turn, so this Write
+     * Zeroes takes the slot of the caused read. It must not count that
+     * read's waits.
+     */
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = NVME_CMD_WRITE_ZEROES;
+    rw.nsid = cpu_to_le32(1);
+    rw.slba = cpu_to_le64(2 * 4096 / lba_size);
+    rw.nlb = cpu_to_le16(4096 / lba_size - 1);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_assert_cmphex(femu_complete(&c, &c.io, NULL, NULL), ==, NVME_SUCCESS);
 
     for (waited = 0; ; waited++) {
         qobject_unref(rsp);
         rsp = qtest_qmp(qts, "{'execute':'query-femu-stages'}");
         ret = qdict_get_qdict(rsp, "return");
         g_assert_true(qdict_haskey(ret, "causes"));
-        if (femu_cause_total(ret, "read") >= 3 &&
-            femu_cause_total(ret, "write") >= 1) {
+        if (femu_cause_total(ret, "read") >= FEMU_QSIZE &&
+            femu_cause_total(ret, "write") >= 2) {
             break;
         }
         g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
@@ -24079,11 +24093,14 @@ void femu_test_io_causes(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(ns, <=, 200000000);
     g_assert_cmpuint(u, ==, 1);
     femu_cause_sum(ret, "read", "none", &w, &ns, &u);
-    g_assert_cmpuint(w, ==, 1);
-    g_assert_cmpuint(femu_cause_total(ret, "read"), ==, 3);
+    g_assert_cmpuint(w, ==, FEMU_QSIZE - 2);
+    g_assert_cmpuint(femu_cause_total(ret, "read"), ==, FEMU_QSIZE);
     femu_cause_sum(ret, "write", "none", &w, &ns, &u);
     g_assert_cmpuint(w, ==, 1);
-    g_assert_cmpuint(femu_cause_total(ret, "write"), ==, 1);
+    g_assert_cmpuint(u, ==, 1);
+    femu_cause_sum(ret, "write", "host-program", &w, &ns, &u);
+    g_assert_cmpuint(w, ==, 0);
+    g_assert_cmpuint(femu_cause_total(ret, "write"), ==, 2);
     qobject_unref(rsp);
 
     /* a reset clears the cause tables with the stages */

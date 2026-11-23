@@ -6712,7 +6712,7 @@ static void femu_register_nodes(void)
     qos_add_test("io-causes", "femu", femu_test_io_causes,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "femu_mode=1,devsz_mb=16,io_stages=on,"
-            "io_causes=on,pg_wr_lat=200000000",
+            "io_causes=on,pg_wr_lat=200000000,oncs=12",
     });
     qos_add_test("io-causes-refused", "femu", femu_test_io_causes_refused,
                  NULL);
