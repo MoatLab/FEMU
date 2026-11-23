@@ -1429,6 +1429,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     uint8_t **txn_state = NULL;
     FemuWaitParts best = { 0 };
     FemuWaitParts buf = { 0 };
+    FemuWaitParts stall = { 0 };
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
     /*
@@ -1577,7 +1578,9 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
          * after the last line is gone has nowhere to move pages to.
          */
         curlat = ssd_gc_until_clear(ssd);
-        wc_max(ssd, &maxlat, &best, curlat, NULL);
+        /* a foreground collection that sets the latency is the one cause */
+        stall.ns[FEMU_WAIT_GC] = curlat;
+        wc_max(ssd, &maxlat, &best, curlat, &stall);
 
         /*
          * Garbage collection could not free a line, so there is nowhere to
