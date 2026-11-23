@@ -4705,6 +4705,11 @@ static char *femu_np_file(const char *text)
     "femu_nand_profile = 1\nname = custom\nnand_type = tlc\n" \
     "read_ns = 51000\nprogram_ns = 210000\nerase_ns = 2100000\n" \
     "cmd_addr_ns = 11\nxfer_ns = 22\nstatus_ns = 33\n"
+/* no NAND type, and a ZNS QLC program time above INT32_MAX: 4 pages */
+#define FEMU_NP_BIG \
+    "femu_nand_profile = 1\nname = big\nnand_type = none\n" \
+    "read_ns = 51000\nprogram_ns = 600000000\nerase_ns = 2100000\n" \
+    "cmd_addr_ns = 0\nxfer_ns = 0\nstatus_ns = 0\n"
 #define FEMU_NP_BB "'secsz':512,'secs_per_pg':8,'pgs_per_blk':32," \
     "'blks_per_pl':12,'pls_per_lun':1,'luns_per_ch':1,'nchs':1,'devsz_mb':1"
 
@@ -4757,6 +4762,12 @@ static void femu_np_values(QDict *md, const char *name, const char *file)
         if (g_str_equal(name, "custom") && g_str_equal(key, "nand_type")) {
             g_assert_cmpstr(val, ==, "tlc");
         }
+        if (g_str_equal(name, "big") && g_str_equal(key, "program_ns")) {
+            g_assert_cmpstr(val, ==, "600000000");
+        }
+        if (g_str_equal(name, "big") && g_str_equal(key, "nand_type")) {
+            g_assert_cmpstr(val, ==, "none");
+        }
         n++;
     }
     g_assert_cmpint(n, ==, 7);
@@ -4807,6 +4818,20 @@ static void femu_np_check(QFemu *femu, QGuestAllocator *alloc, const char *id,
     qobject_unref(rsp);
     femu_disable(&c);
     g_free(pdev);
+}
+
+/* integer property @prop of device @id */
+static int64_t femu_np_qom(QTestState *qts, const char *id, const char *prop)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':%s}}", path, prop);
+    int64_t v;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    return v;
 }
 
 /*
@@ -4884,6 +4909,35 @@ void femu_test_nand_profile(void *obj, void *data,
 
             qpci_unplug_acpi_device_test(qts, id, a);
         }
+    }
+    /*
+     * ZNS takes its wordline from zns_flash_type, not from nand_type: SLC
+     * programs one page. With nand_type none the rating stays 0, and the
+     * QLC product 4 x 600000000 does not fit in 32 bits.
+     */
+    {
+        g_autofree char *big = femu_np_file(FEMU_NP_BIG);
+        g_autofree char *o9 = g_strdup_printf("'femu_mode':3,'devsz_mb':64,"
+                                              "'nand_profile':'%s'", big);
+        g_autofree char *o10 = g_strdup_printf("'femu_mode':3,'devsz_mb':64,"
+                                               "'zns_flash_type':1,"
+                                               "'nand_profile':'%s'", cus);
+
+        femu_np_add(qts, "np9", 14, o9);
+        femu_np_add(qts, "np10", 15, o10);
+        g_assert_cmpint(femu_np_qom(qts, "np9", "zns_pg_wr_lat"), ==,
+                        2400000000LL);
+        g_assert_cmpint(femu_np_qom(qts, "np9", "pe_cycles_rated"), ==, 0);
+        g_assert_cmpint(femu_np_qom(qts, "np10", "zns_pg_wr_lat"), ==,
+                        210000);
+        g_assert_cmpint(femu_np_qom(qts, "np10", "pe_cycles_rated"), >, 0);
+        femu_np_check(femu, alloc, "np9", 14, 51000, 2400000000ULL, 2100000,
+                      "table", "big", big);
+        femu_np_check(femu, alloc, "np10", 15, 51000, 210000, 2100000,
+                      "table", "custom", cus);
+        qpci_unplug_acpi_device_test(qts, "np9", 14);
+        qpci_unplug_acpi_device_test(qts, "np10", 15);
+        unlink(big);
     }
     /* realize keeps its copy: a change to the file does not reach query */
     g_assert_true(g_file_set_contents(cus, FEMU_NP_DEFAULT, -1, NULL));
