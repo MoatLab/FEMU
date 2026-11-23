@@ -617,6 +617,31 @@ static uint64_t ssd_parity_read(struct ssd *ssd, struct ppa *ppa,
     return done + spp->parity_xor_ns;
 }
 
+/*
+ * io_causes: add the waits of one booking to @p. The wait goes to the
+ * cause of the booking in front: an erase first, then GC, then the host
+ * op; ECC tier time is its own cause.
+ */
+void ssd_wait_note(FemuWaitParts *p, const NandOpCause *w)
+{
+    int c;
+
+    if (w->wait_ns) {
+        if (NAND_BY_OP(w->by) == NAND_MEDIA_ERASE) {
+            c = FEMU_WAIT_ERASE;
+        } else if (NAND_BY_ORIGIN(w->by) == NAND_ORIGIN_GC) {
+            c = FEMU_WAIT_GC;
+        } else if (NAND_BY_ORIGIN(w->by) == NAND_ORIGIN_HOST) {
+            c = NAND_BY_OP(w->by) == NAND_MEDIA_PROGRAM ?
+                FEMU_WAIT_HOST_PROG : FEMU_WAIT_HOST_READ;
+        } else {
+            c = FEMU_WAIT_OTHER;
+        }
+        p->ns[c] += w->wait_ns;
+    }
+    p->ns[FEMU_WAIT_ECC] += w->ecc_ns;
+}
+
 uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
                             struct nand_cmd *ncmd)
 {
@@ -628,6 +653,9 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     NandMediaOp op;
 
     ncmd->at = stime;
+    if (ssd->wc_on) {
+        memset(&ssd->wc_last, 0, sizeof(ssd->wc_last));
+    }
     switch (ncmd->cmd) {
     case NAND_READ:  op = NAND_MEDIA_READ;    break;
     case NAND_WRITE: op = NAND_MEDIA_PROGRAM; break;
@@ -662,6 +690,7 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
         if (ssd->sp.rain_fidx[ppa->g.lun * ssd->sp.nchs + ppa->g.ch] <
             ssd->sp.rain_nfail ||
             ppa->g.ch * ssd->sp.luns_per_ch + ppa->g.lun == off) {
+            ssd->wc_lost = true;
             return ssd_rain_read(ssd, ppa, stime) - stime;
         }
     } else if (unlikely(ssd->sp.die_parity) && op == NAND_MEDIA_READ &&
@@ -670,6 +699,7 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
 
         if (failed >= 0 &&
             ppa->g.ch * ssd->sp.luns_per_ch + ppa->g.lun == failed) {
+            ssd->wc_lost = true;
             return ssd_parity_read(ssd, ppa, failed, stime) - stime;
         }
     }
@@ -682,7 +712,18 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     qatomic_set(&ssd->media_plane_ops[op],
                 qatomic_read(&ssd->media_plane_ops[op]) + 1);
     loc = bb_decode_loc(ssd, ppa, stime, !bb_io_meta(ncmd->type));
-    c = nand_media_op(&ssd->media, &loc, op, stime);
+    loc.origin = ncmd->type == USER_IO ? NAND_ORIGIN_HOST :
+                 ncmd->type == GC_IO   ? NAND_ORIGIN_GC :
+                 ncmd->type == TP_IO   ? NAND_ORIGIN_TP :
+                 ncmd->type == MAP_IO  ? NAND_ORIGIN_MAP : NAND_ORIGIN_OTHER;
+    if (ssd->wc_on) {
+        NandOpCause w;
+
+        c = nand_media_op_cause(&ssd->media, &loc, op, stime, &w);
+        ssd_wait_note(&ssd->wc_last, &w);
+    } else {
+        c = nand_media_op(&ssd->media, &loc, op, stime);
+    }
     /*
      * durable_at_done: the end of the host program just booked. A merge
      * or collection program after it (GC_IO) must not take its place.

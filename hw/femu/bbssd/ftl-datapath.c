@@ -810,7 +810,15 @@ static uint64_t ssd_map_and_program(struct ssd *ssd, uint64_t lpn,
     if (ssd->tp_on && ssd->sp.hot_cold_sep && map) {
         return ssd_program_lpn(ssd, lpn, t + map, t, stream, placed);
     }
-    return MAX(map, ssd_program_lpn(ssd, lpn, stime, stime, stream, placed));
+    {
+        uint64_t p = ssd_program_lpn(ssd, lpn, stime, stime, stream, placed);
+
+        /* the lookup wins a tie: it has no media wait */
+        if (ssd->wc_on && p <= map) {
+            memset(&ssd->wc_last, 0, sizeof(ssd->wc_last));
+        }
+        return MAX(map, p);
+    }
 }
 
 /*
@@ -827,7 +835,14 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
     struct nand_cmd swr;
     struct ppa ppa;
     uint64_t lat;
+    uint64_t more;
     bool pslc = false;
+    FemuWaitParts mine;
+
+    /* io_causes: a page that finds no place has no media wait */
+    if (ssd->wc_on) {
+        memset(&ssd->wc_last, 0, sizeof(ssd->wc_last));
+    }
 
     /* log the overwrite before commit_write invalidates the old mapping */
     if (exp_lpn_watched(lpn)) {
@@ -923,29 +938,33 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
 
     if (ssd->sp.mp_program) {
         lat = ssd_mp_add(ssd, &ppa, stime, base, NAND_WRITE);
+        memset(&mine, 0, sizeof(mine));
     } else {
         swr.type = USER_IO;
         swr.cmd = NAND_WRITE;
         swr.stime = stime;
         lat = ssd_advance_status(ssd, &ppa, &swr) + (stime - base);
+        mine = ssd->wc_last;
     }
     /* held programs a fold for this page charged belong to this request */
     if (unlikely(ssd->tier)) {
-        lat = MAX(lat, ftl_tier_take_drain(ssd));
+        wc_max(ssd, &lat, &mine, ftl_tier_take_drain(ssd), NULL);
     }
     /* A full logical log cannot accept another program in this command. */
     if (ssd->mapping->reclaim_per_page &&
         ssd->mapping->needs_reclaim(ssd)) {
-        uint64_t merge_lat;
-
         /* the merge reads pages this command may still hold */
-        lat = MAX(lat, ssd_mp_flush(ssd, NAND_WRITE));
-        merge_lat = ssd_map_reclaim(ssd);
-        lat = MAX(lat, merge_lat);
+        more = ssd_mp_flush(ssd, NAND_WRITE);
+        wc_max(ssd, &lat, &mine, more, NULL);
+        more = ssd_map_reclaim(ssd);
+        wc_max(ssd, &lat, &mine, more, NULL);
     }
     /* paced collection copies its share after the host page has its slot */
     if (ssd->sp.gc_pace) {
         ssd_pace_program(ssd);
+    }
+    if (ssd->wc_on) {
+        ssd->wc_last = mine;
     }
     return lat;
 }
@@ -1231,6 +1250,9 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
     int lost_die = ssd_parity_on(spp) ? -1 : ssd_offline_die(ssd);
     bool lost = false;
     bool failed;
+    FemuWaitParts best = { 0 };
+
+    ssd->wc_lost = false;
 
     /* the Read Recovery Level bounds host Read commands only */
     ssd->rber_failed = false;
@@ -1263,7 +1285,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
          */
         if (ssd->write_buffer_cnt && ssd_buffer_hit(ssd, lpn)) {
             sublat = ssd_buffer_hit_lat(ssd);
-            maxlat = (sublat > maxlat) ? sublat : maxlat;
+            wc_max(ssd, &maxlat, &best, sublat, NULL);
             ssd->sp.read_hit_cnt++;
             continue;
         }
@@ -1278,7 +1300,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
          * placeholder cost runs in parallel, as it always has.
          */
         map = ssd_map_lat(ssd, lpn, base, false);
-        maxlat = (map > maxlat) ? map : maxlat;
+        wc_max(ssd, &maxlat, &best, map, NULL);
         /* the media read follows the DRAM lookup (l2p_dram_ns, default 0) */
         dstart = base + (ssd->tp_on ? map : ssd->sp.l2p_dram_ns);
         wait = ssd->tp_on ? map : ssd->sp.l2p_dram_ns;
@@ -1295,7 +1317,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
          */
         sublat = rcache_touch(ssd, lpn);
         if (sublat) {
-            maxlat = (sublat > maxlat) ? sublat : maxlat;
+            wc_max(ssd, &maxlat, &best, sublat, NULL);
             continue;
         }
         /*
@@ -1312,7 +1334,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 
         if (ssd_mp_reads(ssd)) {
             sublat = ssd_mp_add(ssd, &ppa, dstart, base, NAND_READ);
-            maxlat = (sublat > maxlat) ? sublat : maxlat;
+            wc_max(ssd, &maxlat, &best, sublat, NULL);
             continue;
         }
         /* the media times the pages of each LUN after the loop */
@@ -1330,7 +1352,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         failed = ssd->rber_failed;
         ssd->rber_failed = false;
         sublat = ssd_advance_status(ssd, &ppa, &srd) + wait;
-        maxlat = (sublat > maxlat) ? sublat : maxlat;
+        wc_max(ssd, &maxlat, &best, sublat, &ssd->wc_last);
         /* a page that did not decode is not in the read cache either */
         if (unlikely(ssd->rber_failed)) {
             rcache_invalidate(ssd, lpn);
@@ -1339,10 +1361,13 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
         ssd_read_check_wear(ssd, &ppa, req->stime);
     }
     sublat = ssd_mp_flush(ssd, NAND_READ);
-    maxlat = (sublat > maxlat) ? sublat : maxlat;
+    wc_max(ssd, &maxlat, &best, sublat, NULL);
     if (npend) {
         sublat = ssd_read_seq_charge(ssd, pend, npend, seq_stime);
-        maxlat = (sublat > maxlat) ? sublat : maxlat;
+        wc_max(ssd, &maxlat, &best, sublat, NULL);
+    }
+    if (ssd->wc_on) {
+        ssd->wc_last = best;
     }
     /*
      * The media was read and its pages did not decode.
@@ -1404,6 +1429,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     bool snap_all;
     uint8_t **txn_undo = NULL;
     uint8_t **txn_state = NULL;
+    FemuWaitParts best = { 0 };
+    FemuWaitParts buf = { 0 };
 
     ssd_lpn_range(ssd, req, req->slba, req->nlb, &start_lpn, &end_lpn);
     /*
@@ -1480,7 +1507,9 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
                 buffer_full = true;
                 curlat = ssd_buffer_destage(ssd, batch, req->stime);
-                maxlat = (curlat > maxlat) ? curlat : maxlat;
+                /* a write-back that sets the latency is the one cause */
+                buf.ns[FEMU_WAIT_BUFFER] = curlat;
+                wc_max(ssd, &maxlat, &best, curlat, &buf);
                 /*
                  * The write-back could not free anything, so the buffer is at
                  * its limit and no page found a place. Accepting more here
@@ -1507,10 +1536,13 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
 
         /* accepting into DRAM is not free, even though it is not a program */
         curlat = ssd_buffer_hit_lat(ssd);
-        maxlat = (curlat > maxlat) ? curlat : maxlat;
+        wc_max(ssd, &maxlat, &best, curlat, NULL);
 
         ssd->buffer_full_destages += buffer_full;
         ssd_note_gc_stall(ssd, passes);
+        if (ssd->wc_on) {
+            ssd->wc_last = best;
+        }
         return maxlat;
     }
 
@@ -1527,7 +1559,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     /* a partial indirection unit: read and rewrite the rest of it */
     if (unlikely(spp->iu_pages > 1)) {
         curlat = ssd_iu_rmw(ssd, start_lpn, end_lpn, req->stime, stream);
-        maxlat = (curlat > maxlat) ? curlat : maxlat;
+        wc_max(ssd, &maxlat, &best, curlat, NULL);
     }
 
     if (snap_all) {
@@ -1547,7 +1579,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
          * after the last line is gone has nowhere to move pages to.
          */
         curlat = ssd_gc_until_clear(ssd);
-        maxlat = (curlat > maxlat) ? curlat : maxlat;
+        wc_max(ssd, &maxlat, &best, curlat, NULL);
 
         /*
          * Garbage collection could not free a line, so there is nowhere to
@@ -1588,7 +1620,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         buffer_write_data(ssd, req, lpn, false);
         /* with dftl, the translation goes with the program */
         curlat = wait + ssd_map_and_program(ssd, lpn, book, stream, &placed);
-        maxlat = (curlat > maxlat) ? curlat : maxlat;
+        wc_max(ssd, &maxlat, &best, curlat, &ssd->wc_last);
         if (!placed) {
             req->status = NVME_CAP_EXCEEDED | NVME_DNR;
             ssd_host_pages_back(ssd, lpn, end_lpn - lpn + 1);
@@ -1643,11 +1675,12 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         g_free(txn_state);
     }
     curlat = ssd_mp_flush(ssd, NAND_WRITE);
-    maxlat = (curlat > maxlat) ? curlat : maxlat;
+    wc_max(ssd, &maxlat, &best, curlat, NULL);
     /* a disabled write cache must not keep pages back at all */
     if (drain && ssd->write_buffer_cnt) {
         curlat = ssd_buffer_destage(ssd, 0, req->stime);
-        maxlat = (curlat > maxlat) ? curlat : maxlat;
+        buf.ns[FEMU_WAIT_BUFFER] = curlat;
+        wc_max(ssd, &maxlat, &best, curlat, &buf);
     }
     /* the write waited for collection to make room */
     ssd_note_gc_stall(ssd, passes);
@@ -1662,9 +1695,12 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         ssd->mapping->needs_reclaim && ssd->mapping->reclaim &&
         ssd->mapping->needs_reclaim(ssd)) {
         curlat = ssd_map_reclaim(ssd);
-        maxlat = (curlat > maxlat) ? curlat : maxlat;
+        wc_max(ssd, &maxlat, &best, curlat, NULL);
     }
 
+    if (ssd->wc_on) {
+        ssd->wc_last = best;
+    }
     return maxlat;
 }
 

@@ -597,6 +597,8 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
         req->cqe.res64 = 0;
         req->ns = NULL;
         req->xfer_bytes = 0;
+        /* io_causes: no wait carries over from the last use of the slot */
+        req->wait_covered = false;
         req->wz_deac = false;
         req->cancel = false;
         req->dsm_ranges = NULL;

@@ -2026,6 +2026,25 @@ typedef struct FemuOcpLat {
     FemuOcpLatState s;
 } FemuOcpLat;
 
+/*
+ * io_causes: what a command waited for on the media, in ns per cause. The
+ * order is the tie order: an earlier cause wins an equal sum.
+ */
+enum {
+    FEMU_WAIT_ERASE = 0,
+    FEMU_WAIT_GC,
+    FEMU_WAIT_HOST_PROG,
+    FEMU_WAIT_HOST_READ,
+    FEMU_WAIT_OTHER,
+    FEMU_WAIT_ECC,
+    FEMU_WAIT_BUFFER,
+    FEMU_WAIT_NCAT,
+};
+
+typedef struct FemuWaitParts {
+    uint64_t ns[FEMU_WAIT_NCAT];
+} FemuWaitParts;
+
 typedef struct NvmeRequest {
     struct NvmeSQueue       *sq;
     struct NvmeCQueue       *cq;
@@ -2069,6 +2088,12 @@ typedef struct NvmeRequest {
     /* io_stages: when the poller handed it to the FTL ring, and got it back */
     int64_t                 t_handoff;
     int64_t                 t_return;
+    /*
+     * io_causes: the waits on the path that set the latency, and whether
+     * the FTL filled them for this command
+     */
+    FemuWaitParts           wait;
+    bool                    wait_covered;
     int64_t                 reqlat;
     int64_t                 gcrt;
     int64_t                 expire_time;
@@ -3424,6 +3449,7 @@ typedef struct FemuCtrl {
     FemuPollerCtr   *poller_ctr;   /* per-poller I/O accounting (1-based) */
     bool            cq_teardown;   /* a reset frees every CQ: no interrupts */
     bool            io_stages;     /* time each I/O command by stage */
+    bool            io_causes;     /* name what slow commands waited for */
     FemuStageSet    *stage_sets;   /* per-poller stage times (1-based) */
     /*
      * stage_ns=on: for each poller, a set per namespace (NSID 1 to

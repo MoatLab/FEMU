@@ -435,6 +435,76 @@ static bool ssd_init_fail(struct ssd *ssd, Error **errp)
 }
 
 /*
+ * io_causes: the scope of wait causes (design T3.2 step B). Each option
+ * here adds a dependency or a duration that the cause rules do not
+ * follow. Returns the first one set, or NULL.
+ */
+static const char *ssd_wait_unsupported(struct ssd *ssd, FemuCtrl *n,
+                                        NvmeNamespace *ns)
+{
+    const struct ssdparams *spp = &ssd->sp;
+    const NandMedia *m = &ssd->media;
+    const char *map = n->bb_params.mapping_scheme;
+
+    if (!ns || !NS_BBSSD(ns)) {
+        return "a namespace mode other than bbssd";
+    }
+    if (nvme_ns_shared(n) || n->cxl_dev) {
+        return "a shared or CXL-linked namespace";
+    }
+    if (ssd->fdp_enabled) {
+        return "fdp";
+    }
+    if (map && *map && strcmp(map, "page")) {
+        return "a mapping other than page";
+    }
+    if (m->cfg.policy.channel_mode == NAND_CH_STAGED || m->ca_res) {
+        return "channel bus phases (bus, ONFI or SCA timing)";
+    }
+    if (m->susp) {
+        return "pe_suspend or read_prio";
+    }
+    if (m->cfg.timing.tplpbsy_ns || m->cfg.timing.tplrbsy_ns ||
+        m->cfg.timing.tplebsy_ns) {
+        return "tplpbsy, tplrbsy or tplebsy";
+    }
+    if (spp->mp_program || spp->mp_read || spp->onfi_cache_read) {
+        return "mp_program, mp_read or onfi_cache_read";
+    }
+    if (spp->rber_ppb) {
+        return "rber_ppb";
+    }
+    if (ssd_durable_on(ssd)) {
+        return "durable_at_done";
+    }
+    if (ssd->tier) {
+        return "tier_mode";
+    }
+    if (spp->iu_pages > 1) {
+        return "iu_pages";
+    }
+    return NULL;
+}
+
+static bool ssd_wait_init(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns,
+                          Error **errp)
+{
+    const char *why = ssd_wait_unsupported(ssd, n, ns);
+
+    if (why) {
+        error_setg(errp, "io_causes is not supported with %s", why);
+        return false;
+    }
+    if (nand_media_track(&ssd->media)) {
+        error_setg(errp, "FEMU: the host has no memory for the io_causes "
+                   "owner table");
+        return false;
+    }
+    ssd->wc_on = true;
+    return true;
+}
+
+/*
  * ssd_init - build the FTL of @ns into the zeroed ns->ssd
  *
  * Returns false, with @errp set, when an allocation fails. Then the FTL
@@ -588,6 +658,10 @@ bool ssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     /* configure the NAND media-layer timing (reads spp, points at ssd->ch) */
     if (!bb_nand_media_init(ssd)) {
         return ssd_init_fail(ssd, errp);
+    }
+    if (n->io_causes && !ssd_wait_init(ssd, n, ns, errp)) {
+        ssd_free(ssd);
+        return false;
     }
 
     /*
@@ -1479,6 +1553,19 @@ void ssd_wear_health(struct ssd *ssd, FemuWearHealth *h)
  * charge it. The controller's FTL thread calls this once it has picked out the
  * namespace, so one controller can serve namespaces of different modes.
  */
+/*
+ * io_causes: a Read or Write takes the waits its latency came from. The
+ * request counts as covered only if it also ends without an error, which
+ * bb_ftl_process_req() decides at its end.
+ */
+static void ssd_wait_take(struct ssd *ssd, NvmeRequest *req)
+{
+    if (ssd->wc_on && !ssd->wc_lost) {
+        req->wait = ssd->wc_last;
+        req->wait_covered = true;
+    }
+}
+
 uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
 {
     struct ssd *ssd = ns->ssd;
@@ -1603,6 +1690,7 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
             lat = nvme_do_write_fdp(n, req, req->slba, req->nlb);
         } else {
             lat = ssd_write(ssd, req);
+            ssd_wait_take(ssd, req);
         }
         /* optional write fault on every Nth write, on the same principle */
         if (ssd->err_write_fail_period &&
@@ -1636,6 +1724,7 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     }
     case NVME_CMD_READ:
         lat = ssd_read(ssd, req);
+        ssd_wait_take(ssd, req);
         /*
          * Optional media error on every Nth read. The counter makes a run
          * reproducible, unlike a random draw.
@@ -1732,6 +1821,11 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         nvme_set_error_page(n, req->sq->sqid, req->cmd.cid, NVME_WRITE_FAULT,
                             offsetof(NvmeRwCmd, slba), req->slba, ns->id,
                             req->cmd.opcode, ns->csi);
+    }
+
+    /* io_causes: an error has no cause, whatever the media did */
+    if (req->status != NVME_SUCCESS) {
+        req->wait_covered = false;
     }
 
     if (n->streams) {

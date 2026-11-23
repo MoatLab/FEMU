@@ -2777,6 +2777,10 @@ static bool femu_shared_ftl_check(FemuCtrl *n, Error **errp)
         error_setg(errp, "stage_ns needs io_stages=on");
         return false;
     }
+    if (n->io_causes && !n->io_stages) {
+        error_setg(errp, "io_causes needs io_stages=on");
+        return false;
+    }
     if (n->stage_ns && n->ns_mgmt) {
         error_setg(errp, "stage_ns is not supported with ns_mgmt");
         return false;
@@ -6109,6 +6113,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("wrr", FemuCtrl, wrr, false),
     DEFINE_PROP_BOOL("hiops_inline", FemuCtrl, hiops_inline, true),
     DEFINE_PROP_BOOL("io_stages", FemuCtrl, io_stages, false),
+    DEFINE_PROP_BOOL("io_causes", FemuCtrl, io_causes, false),
     DEFINE_PROP_UINT8("max_cqes", FemuCtrl, max_cqes, 0x4),
     DEFINE_PROP_UINT8("max_sqes", FemuCtrl, max_sqes, 0x6),
     DEFINE_PROP_UINT8("stride", FemuCtrl, db_stride, 0),

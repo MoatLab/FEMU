@@ -935,6 +935,14 @@ struct ssd {
     int64_t gen_first;
     uint64_t durable_waits;
     int64_t last_prog_done;
+    /*
+     * io_causes: the media tracks owners, and wc_last holds the waits of
+     * the latency the last helper returned. wc_lost: a read of this
+     * request was rebuilt from parity, which has no cause.
+     */
+    bool wc_on;
+    bool wc_lost;
+    FemuWaitParts wc_last;
     struct ssd_ns_ctr *ns_ctr;
     /* query-stats: see struct ssd_stats_pub and ssd_stats_publish() */
     QemuSeqLock stats_seq;
@@ -1198,6 +1206,29 @@ static inline uint64_t ssd_age_now(struct ssd *ssd)
 /* NAND media-layer bridge (hw/femu/bbssd/ftl-media.c) */
 bool bb_nand_media_init(struct ssd *ssd);
 void bb_nand_media_refresh_timing(struct ssd *ssd);
+void ssd_wait_note(FemuWaitParts *p, const NandOpCause *w);
+
+/*
+ * io_causes: @lat becomes the new maximum when it is strictly larger, as
+ * in "max = lat > max ? lat : max"; then @best takes the waits of its
+ * branch (@parts, or none for a NULL branch without a media wait).
+ */
+static inline void wc_max(struct ssd *ssd, uint64_t *maxlat,
+                          FemuWaitParts *best, uint64_t lat,
+                          const FemuWaitParts *parts)
+{
+    if (lat > *maxlat) {
+        *maxlat = lat;
+        if (ssd->wc_on) {
+            if (parts) {
+                *best = *parts;
+            } else {
+                memset(best, 0, sizeof(*best));
+            }
+        }
+    }
+}
+
 uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
                             struct nand_cmd *ncmd);
 uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,

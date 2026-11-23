@@ -416,6 +416,7 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `io_stages`
 
+- io_causes needs io_stages=on
 - stage_ns needs io_stages=on
 - the femu device does not time I/O stages; set io_stages=on
 
