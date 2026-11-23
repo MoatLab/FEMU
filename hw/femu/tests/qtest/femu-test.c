@@ -4508,6 +4508,25 @@ static void femu_register_nodes(void)
             "id=qu,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2"
     });
+    {
+        /* the shipped profile, from a build directory or the source root */
+        const char *np = "../hw/femu/profiles/bbssd-flat-default.nprof";
+        char *opts;
+
+        if (!g_file_test(np, G_FILE_TEST_EXISTS)) {
+            np = "hw/femu/profiles/bbssd-flat-default.nprof";
+        }
+        /* the test graph keeps the string for the life of the process */
+        opts = g_strdup_printf("id=qu,devsz_mb=1,femu_mode=1,secsz=512,"
+                               "secs_per_pg=8,pgs_per_blk=4,blks_per_pl=19,"
+                               "pls_per_lun=1,luns_per_ch=2,nchs=2,"
+                               "nand_profile=%s", np);
+        qos_add_test("query-unplug-profile", "femu", femu_test_query_unplug,
+                     &(QOSGraphTestOptions) {
+            .arg = (void *)"profile",
+            .edge.extra_device_opts = opts,
+        });
+    }
     qos_add_test("query-zns-busy", "femu", femu_test_query_zns_busy,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

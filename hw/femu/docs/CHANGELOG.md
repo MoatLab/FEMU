@@ -444,6 +444,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 ### Fixes
 
+- `query-femu` copies the NAND profile name and file while it holds the device. Before, a device unplugged during the query could leave the reply to read freed strings.
 #### Crashes, memory safety and teardown
 
 - Write Uncorrectable, Write Zeroes, deallocate, Copy and Write now change the allocated and uncorrectable bits in the range lock that covers their bytes. A Write Uncorrectable that overlapped a running Write could finish first and then lose its mark. See [data copies and write atomicity](design/nvme-frontend.md#data-copies-and-write-atomicity).

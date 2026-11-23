@@ -135,8 +135,9 @@ typedef struct FemuQuerySel {
     int onfi_col;               /* address cycles of the profile */
     int onfi_row;
     NandMediaPhases media;
-    const char *profile_name;   /* the controller's NAND profile, or NULL */
-    const char *profile_file;
+    /* the controller's NAND profile, or NULL; copies, as for slow_luns */
+    char *profile_name;
+    char *profile_file;
     /* die_slow: the slow LUNs, copied while the controller is held */
     FemuSlowLunList *slow_luns;
     bool has_lsm;               /* a kvssd namespace with kv_index=lsm */
@@ -211,8 +212,8 @@ static bool femu_query_prepare(FemuCtrl *n, NvmeNamespace *ns,
     sel->nsid = ns->id;
     if (media) {
         nand_media_phases(media, &sel->media);
-        sel->profile_name = n->nand_profile_name;
-        sel->profile_file = n->nand_profile;
+        sel->profile_name = g_strdup(n->nand_profile_name);
+        sel->profile_file = g_strdup(n->nand_profile);
         femu_query_slow_luns(media, sel);
     }
 
@@ -1139,6 +1140,8 @@ FemuInfo *coroutine_fn qmp_query_femu(const char *path, bool has_nsid,
 out:
     for (i = 0; sel && i < cap; i++) {
         qapi_free_FemuSlowLunList(sel[i].slow_luns);
+        g_free(sel[i].profile_name);
+        g_free(sel[i].profile_file);
     }
     g_free(sel);
     femu_query_zoned_free(zoned, cap);

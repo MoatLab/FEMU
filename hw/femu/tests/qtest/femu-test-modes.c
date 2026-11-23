@@ -89,7 +89,21 @@ void femu_test_query_unplug(void *obj, void *data,
     g_assert_nonnull(ret);
     g_assert_cmpstr(qdict_get_str(ret, "path"), ==,
                     "/machine/peripheral/qu");
-    g_assert_cmpstr(qdict_get_str(ret, "mode"), ==, data ? data : "bbssd");
+    if (data && !strcmp(data, "profile")) {
+        /* the profile strings of the reply are copies, not the device's */
+        QDict *ns = qobject_to(QDict, qlist_peek(qdict_get_qlist(ret,
+                                                             "namespaces")));
+        QDict *media = qdict_get_qdict(ns, "media");
+
+        g_assert_cmpstr(qdict_get_str(media, "nand-profile"), ==,
+                        "bbssd-flat-default");
+        g_assert_true(g_str_has_suffix(qdict_get_str(media,
+                                                     "nand-profile-file"),
+                                       "/bbssd-flat-default.nprof"));
+    } else {
+        g_assert_cmpstr(qdict_get_str(ret, "mode"), ==,
+                        data ? data : "bbssd");
+    }
     qobject_unref(rsp);
     qtest_qmp_eventwait(qts, "DEVICE_DELETED");
     femu_query_fails(qts, "", "no femu device");
