@@ -660,6 +660,8 @@ def link_profile(dev: Dict[str, Any]) -> None:
             continue
         for name in PROFILE_PROPS.get(v["key"], ()):
             links[name] = v["key"]
+    if FAULT == "swap-zns-link":
+        links["zns_pg_rd_lat"] = "program_ns"
     for rec in dev.get("properties", []):
         if rec["name"] in links:
             rec["profile-key"] = links[rec["name"]]
@@ -957,7 +959,15 @@ def _profile_checks(t, qemu: str, tmp: str) -> None:
         prof = dev.get("nand-profile") or {}
         vals = {v["key"]: v for v in prof.get("values") or []}
         props = {p["name"]: p for p in dev.get("properties", [])}
-        want = {n: k for k, ns in PROFILE_PROPS.items() for n in ns}
+        # written out apart from PROFILE_PROPS, from femu_apply_nand_profile
+        want = {"pg_rd_lat": "read_ns", "zns_pg_rd_lat": "read_ns",
+                "pg_wr_lat": "program_ns", "zns_pg_wr_lat": "program_ns",
+                "blk_er_lat": "erase_ns", "zns_blk_er_lat": "erase_ns",
+                "cmd_addr_lat": "cmd_addr_ns",
+                "zns_cmd_addr_lat": "cmd_addr_ns",
+                "pg_xfer_lat": "xfer_ns", "zns_pg_xfer_lat": "xfer_ns",
+                "status_lat": "status_ns", "zns_status_lat": "status_ns",
+                "pe_cycles_rated": "nand_type"}
         rd = vals.get("read_ns", {})
         return (dev["exit"] == 0 and prof.get("name") == "cited"
                 and prof.get("file") == dev["file"] and len(vals) == 7
@@ -972,10 +982,12 @@ def _profile_checks(t, qemu: str, tmp: str) -> None:
                 and props["pg_rd_lat"].get("source") == "derived"
                 and props["blk_er_lat"].get("source") == "default"
                 and props["pg_wr_lat"].get("source") == "given"
-                and props["pe_cycles_rated"].get("source") == "derived")
+                and props["pe_cycles_rated"].get("source") == "derived"
+                and props["pe_cycles_rated"].get("value") == 1000)
     t.check("nand profile: values, cite, 13 profile-key links, sources",
             tlc_ok(), "")
     t.control("profile-key", "no-profile-key", tlc_ok)
+    t.control("profile-key target", "swap-zns-link", tlc_ok)
 
     dev = run("none")
     ln = links(dev)

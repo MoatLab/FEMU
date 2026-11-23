@@ -69,14 +69,14 @@ static void test_old_file(void)
 static void test_source_lines(void)
 {
     g_autofree char *f = np_file("source.read_ns = Table 12; p. 34 #a=b\n",
-                                 "  source.status_ns\t=\t#123 \r\n");
+                                 "  source.status_ns\t=\t#123\tx \r\n");
     NandProfile p;
 
     g_assert_null(np_parse(f, &p));
     g_assert_cmpstr(p.val[1].source, ==, "Table 12; p. 34 #a=b");
     g_assert_cmpint(p.val[1].source_line, ==, 2);
     g_assert_cmpint(p.val[1].line, ==, 5);
-    g_assert_cmpstr(p.val[6].source, ==, "#123");
+    g_assert_cmpstr(p.val[6].source, ==, "#123\tx");
     g_assert_cmpint(p.val[6].source_line, ==, 11);
     g_assert_cmpint(p.val[0].source_line, ==, 0);
 }
@@ -122,6 +122,10 @@ static void test_source_refused(void)
         { "source.read_ns x\n", "expected source.KEY = TEXT" },
         { "source.read_ns = \xff\xfe\n", "not UTF-8" },
         { "source.read_ns = a\x01" "b\n", "control byte" },
+        { "source.read_ns = a\x7f" "b\n", "control byte" },
+        { "source.read_ns = a\rb\n", "control byte" },
+        { "source. read_ns = x\n", "not a value key" },
+        { "source.\tread_ns = x\n", "not a value key" },
     };
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -138,6 +142,14 @@ static void test_source_refused(void)
         g_assert_nonnull(strstr(err, "t.nprof:2:"));
         g_assert_nonnull(strstr(err, "'foo'"));
     }
+    {
+        g_autofree char *f = np_file("source.read_ns x\n", "");
+        NandProfile p;
+        g_autofree char *err = np_parse(f, &p);
+
+        g_assert_nonnull(strstr(err, "t.nprof:2:"));
+        g_assert_nonnull(strstr(err, "'source.read_ns x'"));
+    }
 }
 
 /* the header comes first, also before a source line */
@@ -148,7 +160,8 @@ static void test_header_rules(void)
                                              NULL);
     g_autofree char *bom = g_strconcat("\xef\xbb\xbf", body, NULL);
 
-    np_refused(src_first, "the first key must be femu_nand_profile");
+    np_refused(src_first, "the first key must be femu_nand_profile, not "
+               "'source.read_ns'");
     np_refused(bom, "unknown key");
     {
         g_autofree char *f = g_strconcat("femu_nand_profile = 01\n",
@@ -188,6 +201,40 @@ static void test_value_text(void)
     }
     g_assert_cmpint(p.val[6].line, ==, 3);
     g_assert_cmpint(p.val[1].line, ==, 4);
+}
+
+/* @key = @val in a valid file: true when the parser takes it */
+static bool np_takes(const char *key, const char *val)
+{
+    g_autofree char *f = np_file("", "");
+    g_autofree char *want = g_strdup_printf("\n%s = ", key);
+    char *at = strstr(f, want);
+    char *eol = strchr(at + 1, '\n');
+    g_autofree char *nf = NULL;
+    NandProfile p;
+    g_autofree char *err = NULL;
+
+    *at = '\0';
+    nf = g_strdup_printf("%s\n%s = %s%s", f, key, val, eol);
+    err = np_parse(nf, &p);
+    return !err;
+}
+
+/* each time key: array times from 1 ns, bus phases from 0 ns */
+static void test_each_bound(void)
+{
+    static const char *const keys[] = {
+        "read_ns", "program_ns", "erase_ns", "cmd_addr_ns", "xfer_ns",
+        "status_ns",
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(keys); i++) {
+        g_assert_cmpint(np_takes(keys[i], "0"), ==, i >= 3);
+        g_assert_true(np_takes(keys[i], "1"));
+        g_assert_true(np_takes(keys[i], "2147483647"));
+        g_assert_false(np_takes(keys[i], "2147483648"));
+        g_assert_false(np_takes(keys[i], "-1"));
+    }
 }
 
 /* the number bounds of the base keys */
@@ -237,5 +284,6 @@ int main(int argc, char **argv)
     g_test_add_func("/femu/nand-profile/header", test_header_rules);
     g_test_add_func("/femu/nand-profile/value-text", test_value_text);
     g_test_add_func("/femu/nand-profile/value-bounds", test_value_bounds);
+    g_test_add_func("/femu/nand-profile/each-bound", test_each_bound);
     return g_test_run();
 }

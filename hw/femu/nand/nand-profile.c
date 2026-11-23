@@ -82,11 +82,13 @@ static bool nand_profile_source(const char *path, int ln, char *line,
     int k;
 
     if (!eq) {
-        *err = g_strdup_printf("%s:%d: expected source.KEY = TEXT", path, ln);
+        *err = g_strdup_printf("%s:%d: expected source.KEY = TEXT, not '%s'",
+                               path, ln, g_strstrip(line));
         return false;
     }
     *eq = '\0';
-    key = g_strstrip(line + strlen("source."));
+    /* white space may end the key, but not follow "source." */
+    key = g_strchomp(line + strlen("source."));
     text = g_strstrip(eq + 1);
     for (k = 0; k < NAND_PROFILE_VALUES &&
          strcmp(key, nand_profile_value_key(k)); k++) {
@@ -114,7 +116,7 @@ static bool nand_profile_source(const char *path, int ln, char *line,
         return false;
     }
     for (const char *c = text; *c; c++) {
-        if ((unsigned char)*c < 0x20 && *c != '\t') {
+        if (((unsigned char)*c < 0x20 && *c != '\t') || *c == 0x7f) {
             *err = g_strdup_printf("%s:%d: the source of '%s' holds a "
                                    "control byte", path, ln, key);
             return false;
@@ -143,8 +145,10 @@ bool nand_profile_parse(const char *path, const char *buf, NandProfile *p,
         line = g_strchug(line);
         if (g_str_has_prefix(line, "source.")) {
             if (first) {
+                line[strcspn(line, "= \t")] = '\0';
                 *err = g_strdup_printf("%s:%d: the first key must be "
-                                       "femu_nand_profile", path, ln + 1);
+                                       "femu_nand_profile, not '%s'", path,
+                                       ln + 1, line);
                 return false;
             }
             if (!nand_profile_source(path, ln + 1, line, p, seen_src, err)) {

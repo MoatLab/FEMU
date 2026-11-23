@@ -4700,11 +4700,13 @@ static char *femu_np_file(const char *text)
     "femu_nand_profile = 1\nname = bbssd-flat-default\nnand_type = none\n" \
     "read_ns = 40000\nprogram_ns = 200000\nerase_ns = 2000000\n" \
     "cmd_addr_ns = 0\nxfer_ns = 0\nstatus_ns = 0\n"
+/* values away from the defaults, out of key order, two with a source */
 #define FEMU_NP_CUSTOM \
     "; a chip with every value away from the defaults\n" \
-    "femu_nand_profile = 1\nname = custom\nnand_type = tlc\n" \
-    "read_ns = 51000\nprogram_ns = 210000\nerase_ns = 2100000\n" \
-    "cmd_addr_ns = 11\nxfer_ns = 22\nstatus_ns = 33\n"
+    "femu_nand_profile = 1\nname = custom\nstatus_ns = 33\n" \
+    "source.status_ns = bus; #9\nread_ns = 051000\nnand_type = tlc\n" \
+    "source.read_ns = Table 1\nprogram_ns = 210000\nerase_ns = 2100000\n" \
+    "cmd_addr_ns = 11\nxfer_ns = 22\n"
 /* no NAND type, and a ZNS QLC program time above INT32_MAX: 4 pages */
 #define FEMU_NP_BIG \
     "femu_nand_profile = 1\nname = big\nnand_type = none\n" \
@@ -4730,6 +4732,11 @@ static void femu_np_add(QTestState *qts, const char *id, int addr,
     qobject_unref(rsp);
 }
 
+static const char *const femu_np_keys[] = {
+    "nand_type", "read_ns", "program_ns", "erase_ns", "cmd_addr_ns",
+    "xfer_ns", "status_ns",
+};
+
 /*
  * The value list of a profile: seven entries in line order. A shipped
  * file gives a source for each value; the test files give none. The
@@ -4737,17 +4744,54 @@ static void femu_np_add(QTestState *qts, const char *id, int addr,
  */
 static void femu_np_values(QDict *md, const char *name, const char *file)
 {
+    /* FEMU_NP_CUSTOM in the order of its lines: key, value, line, source */
+    static const struct {
+        const char *key;
+        const char *val;
+        int line;
+        int src_line;
+        const char *src;
+    } custom[] = {
+        { "status_ns", "33", 4, 5, "bus; #9" },
+        { "read_ns", "51000", 6, 8, "Table 1" },
+        { "nand_type", "tlc", 7, 0, NULL },
+        { "program_ns", "210000", 9, 0, NULL },
+        { "erase_ns", "2100000", 10, 0, NULL },
+        { "cmd_addr_ns", "11", 11, 0, NULL },
+        { "xfer_ns", "22", 12, 0, NULL },
+    };
     QList *vals = qdict_get_qlist(md, "nand-profile-values");
     bool shipped = strstr(file, "profiles/") != NULL;
+    bool is_custom = g_str_equal(name, "custom");
     int64_t last = 0;
     int n = 0;
 
     g_assert_nonnull(vals);
-    for (QListEntry *e = qlist_first(vals); e; e = qlist_next(e)) {
+    for (const QListEntry *e = qlist_first(vals); e; e = qlist_next(e)) {
         QDict *v = qobject_to(QDict, qlist_entry_obj(e));
         const char *key = qdict_get_str(v, "key");
         const char *val = qdict_get_str(v, "value");
 
+        if (is_custom) {
+            g_assert_cmpint(n, <, ARRAY_SIZE(custom));
+            g_assert_cmpstr(key, ==, custom[n].key);
+            g_assert_cmpstr(val, ==, custom[n].val);
+            g_assert_cmpint(qdict_get_int(v, "line"), ==, custom[n].line);
+            g_assert_cmpint(qdict_haskey(v, "source"), ==, !!custom[n].src);
+            g_assert_cmpint(qdict_haskey(v, "source-line"), ==,
+                            !!custom[n].src);
+            if (custom[n].src) {
+                g_assert_cmpstr(qdict_get_str(v, "source"), ==,
+                                custom[n].src);
+                g_assert_cmpint(qdict_get_int(v, "source-line"), ==,
+                                custom[n].src_line);
+            }
+            n++;
+            continue;
+        }
+        /* the shipped files and FEMU_NP_BIG list the keys in key order */
+        g_assert_cmpint(n, <, ARRAY_SIZE(femu_np_keys));
+        g_assert_cmpstr(key, ==, femu_np_keys[n]);
         g_assert_cmpint(qdict_get_int(v, "line"), >, last);
         last = qdict_get_int(v, "line");
         g_assert_cmpint(qdict_haskey(v, "source"), ==, shipped);
@@ -4755,12 +4799,6 @@ static void femu_np_values(QDict *md, const char *name, const char *file)
         if (shipped) {
             g_assert_cmpstr(qdict_get_str(v, "source"), !=, "");
             g_assert_cmpint(qdict_get_int(v, "source-line"), ==, last + 1);
-        }
-        if (g_str_equal(name, "custom") && g_str_equal(key, "program_ns")) {
-            g_assert_cmpstr(val, ==, "210000");
-        }
-        if (g_str_equal(name, "custom") && g_str_equal(key, "nand_type")) {
-            g_assert_cmpstr(val, ==, "tlc");
         }
         if (g_str_equal(name, "big") && g_str_equal(key, "program_ns")) {
             g_assert_cmpstr(val, ==, "600000000");
@@ -4930,7 +4968,9 @@ void femu_test_nand_profile(void *obj, void *data,
         g_assert_cmpint(femu_np_qom(qts, "np9", "pe_cycles_rated"), ==, 0);
         g_assert_cmpint(femu_np_qom(qts, "np10", "zns_pg_wr_lat"), ==,
                         210000);
-        g_assert_cmpint(femu_np_qom(qts, "np10", "pe_cycles_rated"), >, 0);
+        /* TLC_RATED_PE_CYCLES */
+        g_assert_cmpint(femu_np_qom(qts, "np10", "pe_cycles_rated"), ==,
+                        1000);
         femu_np_check(femu, alloc, "np9", 14, 51000, 2400000000ULL, 2100000,
                       "table", "big", big);
         femu_np_check(femu, alloc, "np10", 15, 51000, 210000, 2100000,
