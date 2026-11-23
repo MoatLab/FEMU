@@ -1732,6 +1732,8 @@ void femu_test_pd_refused(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_onfi_refused(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_onfi_page(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_dftl_tp(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_dftl_tp_charge(void *obj, void *data,
+                              QGuestAllocator *alloc);
 void femu_test_pe_suspend(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ns_retire(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_intc(void *obj, void *data, QGuestAllocator *alloc);

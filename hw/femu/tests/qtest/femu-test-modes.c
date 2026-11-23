@@ -716,6 +716,83 @@ void femu_test_dftl_tp(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * The media charge of the TPs of mapping=dftl. dftl-tp checks the TP
+ * counters; this test checks that each TP read and program is also a
+ * media read or program (fields 6 and 7 of x-ftl-trace), so a refactor
+ * cannot keep the counters and lose the time.
+ *
+ *   "slot": one CMT slot, 4 TPs of 512 mappings
+ *     fill 2048 pages       READ 0  PROGRAM 2048 + 3 evicted TPs
+ *     read page 0           READ 2  (TP 0, then the data page)
+ *                           PROGRAM + 1 (TP 3 evicted)
+ *   "cached": the default cache holds all 4 TPs (the control)
+ *     fill 2048 pages       READ 0  PROGRAM 2048
+ *     read page 0           READ 1  PROGRAM 2048
+ *
+ * "slot" then overwrites random pages until collection moves TPs, and
+ * checks that every program is a data, collection or TP program.
+ */
+void femu_test_dftl_tp_charge(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    bool slot = g_str_equal(data, "slot");
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *id = "/machine/peripheral/tp";
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 2048;
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t v[7];
+    uint32_t seed = 5;
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+
+    for (i = 0; i < pages / 64; i++) {
+        qtest_memset(qts, buf, 0x10 + i, 64 * 4096);
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i * 64, 64, buf, list)),
+                        ==, NVME_SUCCESS);
+    }
+    g_assert_cmpuint(femu_ftl_trace_id(qts, "tp", 3), ==, pages);
+    g_assert_cmpuint(femu_ftl_trace_id(qts, "tp", 6), ==, 0);
+    g_assert_cmpuint(femu_ftl_trace_id(qts, "tp", 7), ==,
+                     pages + (slot ? 3 : 0));
+
+    g_assert_cmphex(femu_read_pages(&c, 0, 1, buf, list), ==, NVME_SUCCESS);
+    g_assert_cmphex(qtest_readb(qts, buf), ==, 0x10);
+    g_assert_cmpuint(femu_ftl_trace_id(qts, "tp", 6), ==, slot ? 2 : 1);
+    g_assert_cmpuint(femu_ftl_trace_id(qts, "tp", 7), ==,
+                     pages + (slot ? 4 : 0));
+
+    if (slot) {
+        for (i = 0; i < 6000; i++) {
+            seed = seed * 1103515245 + 12345;
+            qtest_memset(qts, buf, 0x80 + (i & 0x3f), 4096);
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (seed >> 8) % pages,
+                                                     1, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+        femu_tp_check(qts, id, v);
+        g_assert_cmpuint(v[5], >, 0);
+        /* each program is a host page, a moved page or a TP (C0h 280) */
+        g_assert_cmpuint(femu_ftl_trace_id(qts, "tp", 7), ==,
+                         femu_ftl_trace_id(qts, "tp", 3) +
+                         femu_ftl_trace_id(qts, "tp", 4) +
+                         femu_c0h_field(&c, log, 280));
+    }
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
  * Program/erase suspend, end to end. On one LUN, a write that programs NAND
  * and a read of a page written before go in one doorbell ring, so the read
  * reaches the media while the program is in flight. Off, the read waits out

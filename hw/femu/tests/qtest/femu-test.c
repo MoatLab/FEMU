@@ -5225,6 +5225,24 @@ static void femu_register_nodes(void)
             });
         }
     }
+    /* the media charge of each TP read and program (T3.0) */
+    qos_add_test("dftl-tp-charge", "femu", femu_test_dftl_tp_charge,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"slot",
+        .edge.extra_device_opts =
+            "id=tp,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "mapping=dftl,x-cmt-slots=1,femu_mode=1",
+    });
+    /* the control: the default cache holds all 4 TPs */
+    qos_add_test("dftl-tp-charge-cached", "femu", femu_test_dftl_tp_charge,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"cached",
+        .edge.extra_device_opts =
+            "id=tp,devsz_mb=8,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "mapping=dftl,femu_mode=1",
+    });
     qos_add_test("dftl-tp-gc-fw", "femu", femu_test_dftl_tp,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"fw",
