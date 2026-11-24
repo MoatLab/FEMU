@@ -516,6 +516,17 @@ static void nvme_handoff_failed(FemuCtrl *n, NvmeRequest *req,
 
     femu_err("to_ftl[%d] is full: command %u ends with an error\n",
              index_poller, (unsigned)le16_to_cpu(req->cqe.cid));
+    /* a fused pair: its Write ends with it, as a request of its own */
+    if (unlikely(req->fused)) {
+        NvmeRequest *w = femu_fused_drop(n, req);
+
+        w->reqlat = 0;
+        w->expire_time = MIN(w->expire_time, now);
+        if (w->status == NVME_SUCCESS) {
+            w->status = NVME_CMD_ABORT_FAILED_FUSE;
+        }
+        QTAILQ_INSERT_TAIL(&n->cpl_backlog[index_poller], w, entry);
+    }
     nvme_req_release_ranges(req);
     nvme_eol_release(req);
     g_clear_pointer(&req->write_data, g_free);
@@ -532,6 +543,370 @@ static void nvme_handoff_failed(FemuCtrl *n, NvmeRequest *req,
         n->persist_torn = true;
     }
     QTAILQ_INSERT_TAIL(&n->cpl_backlog[index_poller], req, entry);
+}
+
+/*
+ * Set up @req for command @cmd, fetched from @sq at @fetched. @eol and
+ * @eol_pages are what nvme_eol_peek() gave, or -1 and 0.
+ */
+static inline void nvme_req_start(FemuCtrl *n, NvmeRequest *req,
+                                  NvmeCmd *cmd, int64_t fetched, int eol,
+                                  uint32_t eol_pages)
+{
+    /*
+     * Only res64 (the result+rsvd union) is left unset per command: cid is
+     * assigned below, and sq_head/sq_id/status are written by nvme_post_cqe
+     * before the CQE is copied to the guest. res64 defaults to 0 (the NVMe
+     * result for ordinary I/O); handlers that produce a result overwrite it.
+     */
+    req->cqe.res64 = 0;
+    req->ns = NULL;
+    req->xfer_bytes = 0;
+    /* io_causes: no wait carries over from the last use of the slot */
+    req->wait_covered = false;
+    if (unlikely(n->io_causes)) {
+        memset(&req->wait, 0, sizeof(req->wait));
+    }
+    req->wz_deac = false;
+    req->cancel = false;
+    req->dsm_ranges = NULL;
+    req->dsm_nr_ranges = 0;
+    req->dsm_attributes = 0;
+    req->zone_resets = NULL;
+    req->zone_reset_gens = NULL;
+    req->nr_zone_resets = 0;
+    req->zone_finishes = NULL;
+    req->zone_finish_gens = NULL;
+    req->nr_zone_finishes = 0;
+    req->fdp_pids = NULL;
+    req->nr_fdp_pids = 0;
+    req->fdp_dtype = 0;
+    req->fdp_dspec = 0;
+    req->cxl_seq = 0;
+    req->defer = NULL;
+    /* every path that frees a request slot released this first */
+    assert(!req->csd_use);
+    assert(!req->eol_held);
+    req->eol_held = eol == FEMU_EOL_ADMITTED;
+    req->eol_pages = req->eol_held ? eol_pages : 0;
+    /* a failed protection in ROM mode refuses writes the same way */
+    req->eol_ro = eol == FEMU_EOL_READ_ONLY ||
+                  (unlikely(qatomic_read(&n->plp_ro)) &&
+                   nvme_media_write_class(cmd));
+    /* Coperd: record req->stime at earliest convenience */
+    req->expire_time = req->stime = req->t_submit = fetched;
+    /* a controller in PS3 wakes first: the command starts EXLAT later */
+    req->wake_ns = 0;
+    if (unlikely(n->power_states)) {
+        req->wake_ns = femu_power_io(n, fetched);
+        req->expire_time = req->stime = fetched + req->wake_ns;
+    }
+    req->link_early = false;
+    req->opal_synth = false;
+    req->t_handoff = 0;
+    req->t_return = 0;
+    req->cqe.cid = cmd->cid;
+    req->cmd_opcode = cmd->opcode;
+    memcpy(&req->cmd, cmd, sizeof(NvmeCmd));
+
+    if (n->print_log) {
+        femu_debug("%s,cid:%d\n", __func__, cmd->cid);
+    }
+
+    req->write_data = NULL;
+    req->fused = NULL;
+}
+
+/*
+ * Pass @req, which nvme_io_cmd() or the fused path has run, on to its
+ * completion: inline on NoSSD, a mode's own route, or the ring to the FTL.
+ * *@did_isr is set when an inline completion was posted.
+ */
+static inline void nvme_req_handoff(FemuCtrl *n, NvmeSQueue *sq,
+                                    NvmeRequest *req, int index_poller,
+                                    bool inline_mode, bool *did_isr)
+{
+    if (req->status != NVME_SUCCESS) {
+        /* Clean up DSM ranges on error */
+        g_free(req->dsm_ranges);
+        req->dsm_ranges = NULL;
+        req->dsm_nr_ranges = 0;
+    }
+
+    /*
+     * The host-link, encryption engine and controller-CPU models are
+     * applied on the ring path, so a request that should pay them
+     * cannot complete inline.
+     */
+    if (inline_mode && !n->pcie_enabled && !n->fw_enabled &&
+        !n->crypto_mbps && req->ns && NS_NOSSD(req->ns)) {
+        /*
+         * Inline completion: NoSSD has zero latency, so the request is
+         * ready now. Post the CQE directly here instead of bouncing it
+         * through the to_ftl ring + per-poller pqueue in
+         * nvme_process_cq_cpl, then return it to the SQ free list (mirrors
+         * the cq_cpl path). The interrupt is fired once at sweep end.
+         * Failed requests carry their error status in the same CQE, so the
+         * leak hazard that the FTL-ring path guards against does not arise.
+         */
+        NvmeCQueue *cq = n->cq[sq->cqid];
+
+        nvme_req_release_ranges(req);
+        /*
+         * The check at the top of the loop is taken without the queue
+         * lock, so another poller sharing the queue may have filled it
+         * since: hold the completion for the next sweep then.
+         */
+        if (cq && cq->is_active && !nvme_try_post_cqe(n, cq, req)) {
+            n->poller_ctr[index_poller].nr_cq_full++;
+            QTAILQ_INSERT_TAIL(&n->cpl_backlog[index_poller], req, entry);
+        } else {
+            if (cq && cq->is_active) {
+                *did_isr = true;
+                n->poller_ctr[index_poller].nr_tt_ios++;
+                n->poller_ctr[index_poller].nr_model_ns += req->reqlat;
+                if (n->stage_sets) {
+                    nvme_stages_note(n, index_poller, req, req->t_cqe);
+                }
+            }
+            QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
+        }
+    } else if (req->defer) {
+        req->defer(n, req, index_poller);
+    } else {
+        /*
+         * Always enqueue to FTL ring for completion. Failed requests
+         * will hit the FTL default case (lat=0) and get completed
+         * immediately with the error status. Without this, failed
+         * requests would leak from the request list and never be
+         * completed back to the guest, eventually causing the NVMe
+         * driver to timeout and crash.
+         */
+        int rc;
+
+        if (n->stage_sets) {
+            req->t_handoff = femu_io_now(n);
+        }
+        rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
+        if (unlikely(rc != 1)) {
+            nvme_handoff_failed(n, req, index_poller);
+        }
+    }
+}
+
+/*
+ * The host write totals of a fused Write that ran, on the poller that owns
+ * its queue, as for a Write alone (query-stats reads them).
+ */
+static void nvme_count_write(FemuCtrl *n, int index_poller, NvmeRequest *w)
+{
+    FemuPollerCtr *ctr = &n->poller_ctr[index_poller];
+
+    if (w->status != NVME_SUCCESS || !w->ns) {
+        return;
+    }
+    qatomic_set(&ctr->nr_host_wr_cmds, ctr->nr_host_wr_cmds + 1);
+    qatomic_set(&ctr->nr_host_wr_bytes,
+                ctr->nr_host_wr_bytes +
+                ((uint64_t)w->nlb << w->ns->lbaf.lbads));
+}
+
+/* the command in slot @slot of @sq, as the fetch reads it */
+static void nvme_sq_slot(FemuCtrl *n, NvmeSQueue *sq, uint32_t slot,
+                         NvmeCmd *cmd)
+{
+    if (sq->phys_contig) {
+        nvme_copy_cmd(cmd, (void *)&(((NvmeCmd *)sq->dma_addr_hva)[slot]));
+    } else {
+        nvme_addr_read(n, nvme_discontig(sq->prp_list, slot, n->page_size,
+                                         n->sqe_size),
+                       (void *)cmd, sizeof(*cmd));
+    }
+}
+
+/* the status an Abort or Sanitize Namespace mark at @slot gives @cid */
+static uint16_t nvme_mark_status(NvmeSQueue *sq, uint32_t slot, uint16_t cid)
+{
+    uint32_t mark = sq->nr_aborts ? sq->abort_cid[slot] : 0;
+
+    if (!mark || (mark & 0xffff) != cid) {
+        return 0;
+    }
+    return (mark & ~0xffffu) == NVME_SANNS_MARKED ?
+           NVME_SANITIZE_NS_IN_PROGRESS : NVME_CMD_ABORT_REQ;
+}
+
+static void nvme_drop_mark(NvmeSQueue *sq, uint32_t slot)
+{
+    if (sq->nr_aborts && sq->abort_cid[slot]) {
+        sq->abort_cid[slot] = 0;
+        sq->nr_aborts--;
+    }
+}
+
+/*
+ * The end-of-life admission of a pair's Write, as nvme_eol_peek() gives
+ * it for a Write alone. Returns -1 when the namespace takes no credits.
+ */
+static int nvme_fused_eol(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
+                          uint32_t *pages)
+{
+    uint64_t nlb = (le32_to_cpu(cmd->cdw12) & 0xffff) + 1;
+
+    *pages = 0;
+    if (!n->eol_admit || !ns->ssd || !NS_BBSSD(ns)) {
+        return -1;
+    }
+    *pages = ssd_eol_cost(ns->ssd, nlb << ns->lbaf.lbads);
+    return ssd_eol_admit(ns->ssd, *pages);
+}
+
+/*
+ * Fused Compare and Write: @first, at the head of @sq, has FUSE 01b.
+ * Returns the SQEs it took (1 or 2), or 0 to leave both in the queue for
+ * a later sweep. Nothing changes before the pair is taken whole:
+ *
+ *   1 slots      next SQE missing or not FUSE 10b --> first: 0Ah alone
+ *   2 structure  opcodes, NSID, SLBA, NLB         --> both 02h
+ *   3 ACWU                                         --> 0014h, Write 09h
+ *   4 marks, then the access checks of each command
+ *   5 Compare fails --> Write 09h; Write fails --> Compare runs alone
+ *   6 EOL of the Write: WAIT --> take nothing; read-only --> Write 82h
+ *   7 two free requests and a staging slot, else take nothing
+ */
+static uint32_t nvme_fused_take(FemuCtrl *n, NvmeSQueue *sq, NvmeCmd *first,
+                                int index_poller, int64_t fetched,
+                                bool inline_mode, bool *did_isr)
+{
+    uint32_t next = sq->head + 1 == sq->size ? 0 : sq->head + 1;
+    NvmeRwCmd *r1 = (NvmeRwCmd *)first;
+    NvmeRwCmd *r2;
+    NvmeCmd second;
+    NvmeNamespace *ns = NULL;
+    NvmeNamespace *ns2 = NULL;
+    NvmeRequest *c;
+    NvmeRequest *w;
+    uint16_t sc = 0;
+    uint16_t sw = 0;
+    uint32_t pages = 0;
+    int eol = -1;
+
+    if (next == sq->tail) {
+        goto alone;
+    }
+    nvme_sq_slot(n, sq, next, &second);
+    if (second.fuse != FEMU_FUSE_SECOND) {
+        goto alone;
+    }
+    /* the pair needs two requests; one alone is not enough */
+    c = QTAILQ_FIRST(&sq->req_list);
+    if (!c || !QTAILQ_NEXT(c, entry)) {
+        return 0;
+    }
+    r2 = (NvmeRwCmd *)&second;
+    if (first->opcode != NVME_CMD_COMPARE || second.opcode != NVME_CMD_WRITE ||
+        first->nsid != second.nsid || r1->slba != r2->slba ||
+        r1->nlb != r2->nlb) {
+        sc = sw = NVME_INVALID_FIELD | NVME_DNR;
+    } else if (le16_to_cpu(r1->nlb) > n->fused_acwu) {
+        sc = NVME_ATOMIC_WRITE_UNIT_EXCEEDED | NVME_DNR;
+        sw = NVME_CMD_ABORT_FAILED_FUSE;
+    } else {
+        sc = nvme_mark_status(sq, sq->head, first->cid);
+        if (!sc) {
+            sc = femu_fused_check_cmd(n, first, &ns);
+        }
+        if (sc) {
+            /* a Compare that does not run fails its Write (2.1.3.1) */
+            sw = NVME_CMD_ABORT_FAILED_FUSE;
+        } else {
+            sw = nvme_mark_status(sq, next, second.cid);
+            if (!sw) {
+                sw = femu_fused_check_cmd(n, &second, &ns2);
+            }
+            if (!sw) {
+                eol = nvme_fused_eol(n, ns, &second, &pages);
+                if (eol == FEMU_EOL_WAIT) {
+                    return 0;
+                }
+                if (eol == FEMU_EOL_READ_ONLY) {
+                    sw = NVME_WRITE_TO_RO | NVME_DNR;
+                }
+            }
+            /* the Compare stages its data: it takes a slot */
+            if (qatomic_fetch_inc(&n->fused_inflight) >= FEMU_FUSED_MAX) {
+                qatomic_dec(&n->fused_inflight);
+                if (eol == FEMU_EOL_ADMITTED) {
+                    ssd_eol_release(ns->ssd, pages);
+                }
+                return 0;
+            }
+        }
+    }
+
+    /* take both */
+    nvme_drop_mark(sq, sq->head);
+    nvme_drop_mark(sq, next);
+    nvme_inc_sq_head(sq);
+    nvme_inc_sq_head(sq);
+    c = QTAILQ_FIRST(&sq->req_list);
+    QTAILQ_REMOVE(&sq->req_list, c, entry);
+    w = QTAILQ_FIRST(&sq->req_list);
+    QTAILQ_REMOVE(&sq->req_list, w, entry);
+    nvme_req_start(n, c, first, fetched, -1, 0);
+    nvme_req_start(n, w, &second, fetched, eol, pages);
+    c->ns = nvme_ns(n, le32_to_cpu(first->nsid));
+    w->ns = nvme_ns(n, le32_to_cpu(second.nsid));
+    w->status = sw;
+
+    if (!sc) {
+        /*
+         * The Compare runs. A Write that failed its checks keeps its
+         * status only if the Compare then succeeds (femu_fused_run()).
+         */
+        c->status = NVME_SUCCESS;
+        sc = femu_fused_stage(n, c, w);
+        if (!sc) {
+            femu_fused_log(n, w);
+            c->fused = w;
+            if (NS_NOSSD(c->ns)) {
+                femu_fused_run(n, c, false);
+                nvme_count_write(n, index_poller, w);
+                nvme_req_handoff(n, sq, c, index_poller, inline_mode,
+                                 did_isr);
+                nvme_req_handoff(n, sq, w, index_poller, inline_mode,
+                                 did_isr);
+            } else {
+                /* the Write rides on the Compare to the FTL thread */
+                nvme_req_handoff(n, sq, c, index_poller, inline_mode,
+                                 did_isr);
+            }
+            return 2;
+        }
+        nvme_eol_release(w);
+        qatomic_dec(&n->fused_inflight);
+        w->status = NVME_CMD_ABORT_FAILED_FUSE;
+    }
+    c->status = sc;
+    femu_fused_log(n, c);
+    femu_fused_log(n, w);
+    nvme_req_handoff(n, sq, c, index_poller, inline_mode, did_isr);
+    nvme_req_handoff(n, sq, w, index_poller, inline_mode, did_isr);
+    return 2;
+
+alone:
+    /* FIRST with no SECOND after it fails alone (NVM 1.2, 2.1.3.1) */
+    sc = nvme_mark_status(sq, sq->head, first->cid);
+    nvme_drop_mark(sq, sq->head);
+    nvme_inc_sq_head(sq);
+    c = QTAILQ_FIRST(&sq->req_list);
+    QTAILQ_REMOVE(&sq->req_list, c, entry);
+    nvme_req_start(n, c, first, fetched, -1, 0);
+    c->ns = nvme_ns(n, le32_to_cpu(first->nsid));
+    c->fused = NULL;
+    c->status = sc ? sc : NVME_CMD_ABORT_MISSING_FUSE | NVME_DNR;
+    nvme_req_handoff(n, sq, c, index_poller, inline_mode, did_isr);
+    return 1;
 }
 
 /* Take at most @burst commands of one queue; returns how many it took. */
@@ -616,6 +991,18 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
         }
         /* the SQ fetch: the start of the latency a host sees */
         fetched = femu_io_now(n);
+        if (unlikely(n->fused_cw) && cmd.fuse == FEMU_FUSE_FIRST) {
+            uint32_t got = nvme_fused_take(n, sq, &cmd, index_poller,
+                                           fetched, inline_mode, &did_isr);
+
+            if (!got) {
+                break;
+            }
+            /* a pair is one unit of the Arbitration Burst */
+            taken++;
+            processed += got;
+            continue;
+        }
         /*
          * A write that finds no room in the end-of-life reserve stays in the
          * queue, untouched, until the FTL gives credits back.
@@ -633,71 +1020,8 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
 
         req = QTAILQ_FIRST(&sq->req_list);
         QTAILQ_REMOVE(&sq->req_list, req, entry);
-        /*
-         * Only res64 (the result+rsvd union) is left unset per command: cid is
-         * assigned just below, and sq_head/sq_id/status are written by
-         * nvme_post_cqe before the CQE is copied to the guest. Zeroing just the
-         * 8-byte res64 instead of memset-ing the whole 16-byte CQE saves a
-         * per-command store on the hot path. res64 defaults to 0 (the NVMe
-         * result for ordinary I/O); handlers that produce a result (e.g. zone
-         * append, feature get) overwrite it explicitly.
-         */
-        req->cqe.res64 = 0;
-        req->ns = NULL;
-        req->xfer_bytes = 0;
-        /* io_causes: no wait carries over from the last use of the slot */
-        req->wait_covered = false;
-        if (unlikely(n->io_causes)) {
-            memset(&req->wait, 0, sizeof(req->wait));
-        }
-        req->wz_deac = false;
-        req->cancel = false;
-        req->dsm_ranges = NULL;
-        req->dsm_nr_ranges = 0;
-        req->dsm_attributes = 0;
-        req->zone_resets = NULL;
-        req->zone_reset_gens = NULL;
-        req->nr_zone_resets = 0;
-        req->zone_finishes = NULL;
-        req->zone_finish_gens = NULL;
-        req->nr_zone_finishes = 0;
-        req->fdp_pids = NULL;
-        req->nr_fdp_pids = 0;
-        req->fdp_dtype = 0;
-        req->fdp_dspec = 0;
-        req->cxl_seq = 0;
-        req->defer = NULL;
-        /* every path that frees a request slot released this first */
-        assert(!req->csd_use);
-        assert(!req->eol_held);
-        req->eol_held = eol == FEMU_EOL_ADMITTED;
-        req->eol_pages = req->eol_held ? eol_pages : 0;
-        /* a failed protection in ROM mode refuses writes the same way */
-        req->eol_ro = eol == FEMU_EOL_READ_ONLY ||
-                      (unlikely(qatomic_read(&n->plp_ro)) &&
-                       nvme_media_write_class(&cmd));
+        nvme_req_start(n, req, &cmd, fetched, eol, eol_pages);
         eol = -1;
-        /* Coperd: record req->stime at earliest convenience */
-        req->expire_time = req->stime = req->t_submit = fetched;
-        /* a controller in PS3 wakes first: the command starts EXLAT later */
-        req->wake_ns = 0;
-        if (unlikely(n->power_states)) {
-            req->wake_ns = femu_power_io(n, fetched);
-            req->expire_time = req->stime = fetched + req->wake_ns;
-        }
-        req->link_early = false;
-        req->opal_synth = false;
-        req->t_handoff = 0;
-        req->t_return = 0;
-        req->cqe.cid = cmd.cid;
-        req->cmd_opcode = cmd.opcode;
-        memcpy(&req->cmd, &cmd, sizeof(NvmeCmd));
-
-        if (n->print_log) {
-            femu_debug("%s,cid:%d\n", __func__, cmd.cid);
-        }
-
-        req->write_data = NULL;
         if (n->power_loss && !aborted) {
             req->ns = nvme_ns(n, le32_to_cpu(cmd.nsid));
         }
@@ -794,75 +1118,7 @@ static uint32_t nvme_process_sq_io(void *opaque, int index_poller,
             req->link_early = true;
         }
 
-        if (status != NVME_SUCCESS) {
-            /* Clean up DSM ranges on error */
-            if (req->dsm_ranges) {
-                g_free(req->dsm_ranges);
-                req->dsm_ranges = NULL;
-                req->dsm_nr_ranges = 0;
-            }
-        }
-
-        /*
-         * The host-link, encryption engine and controller-CPU models are
-         * applied on the ring path, so a request that should pay them
-         * cannot complete inline.
-         */
-        if (inline_mode && !n->pcie_enabled && !n->fw_enabled &&
-            !n->crypto_mbps && req->ns && NS_NOSSD(req->ns)) {
-            /*
-             * Inline completion: NoSSD has zero latency, so the request is
-             * ready now. Post the CQE directly here instead of bouncing it
-             * through the to_ftl ring + per-poller pqueue in
-             * nvme_process_cq_cpl, then return it to the SQ free list (mirrors
-             * the cq_cpl path). The interrupt is fired once at sweep end.
-             * Failed requests carry their error status in the same CQE, so the
-             * leak hazard that the FTL-ring path guards against does not arise.
-             */
-            NvmeCQueue *cq = n->cq[sq->cqid];
-
-            nvme_req_release_ranges(req);
-            /*
-             * The check at the top of the loop is taken without the queue
-             * lock, so another poller sharing the queue may have filled it
-             * since: hold the completion for the next sweep then.
-             */
-            if (cq && cq->is_active && !nvme_try_post_cqe(n, cq, req)) {
-                n->poller_ctr[index_poller].nr_cq_full++;
-                QTAILQ_INSERT_TAIL(&n->cpl_backlog[index_poller], req, entry);
-            } else {
-                if (cq && cq->is_active) {
-                    did_isr = true;
-                    n->poller_ctr[index_poller].nr_tt_ios++;
-                    n->poller_ctr[index_poller].nr_model_ns += req->reqlat;
-                    if (n->stage_sets) {
-                        nvme_stages_note(n, index_poller, req, req->t_cqe);
-                    }
-                }
-                QTAILQ_INSERT_TAIL(&sq->req_list, req, entry);
-            }
-        } else if (req->defer) {
-            req->defer(n, req, index_poller);
-        } else {
-            /*
-             * Always enqueue to FTL ring for completion. Failed requests
-             * will hit the FTL default case (lat=0) and get completed
-             * immediately with the error status. Without this, failed
-             * requests would leak from the request list and never be
-             * completed back to the guest, eventually causing the NVMe
-             * driver to timeout and crash.
-             */
-            int rc;
-
-            if (n->stage_sets) {
-                req->t_handoff = femu_io_now(n);
-            }
-            rc = femu_ring_enqueue(n->to_ftl[index_poller], (void *)&req, 1);
-            if (unlikely(rc != 1)) {
-                nvme_handoff_failed(n, req, index_poller);
-            }
-        }
-
+        nvme_req_handoff(n, sq, req, index_poller, inline_mode, &did_isr);
         processed++;
     }
 
@@ -1106,6 +1362,11 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         assert(req);
         if (n->stage_sets) {
             req->t_return = femu_io_now(n);
+        }
+        /* a bbssd fused Write ran on the FTL thread: count it here */
+        if (unlikely(n->fused_cw) && n->use_ftl_thread &&
+            req->cmd.fuse == FEMU_FUSE_SECOND) {
+            nvme_count_write(n, index_poller, req);
         }
 
         /*
@@ -3435,6 +3696,10 @@ static uint16_t nvme_io_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
      * Write pair run as two commands would write after a miscompare.
      */
     if (unlikely(cmd->fuse)) {
+        /* a SECOND that no FIRST took (fused_cw); 11b is reserved */
+        if (n->fused_cw && cmd->fuse == FEMU_FUSE_SECOND) {
+            return NVME_CMD_ABORT_MISSING_FUSE | NVME_DNR;
+        }
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 

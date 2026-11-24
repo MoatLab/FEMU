@@ -1043,6 +1043,48 @@ Event Configuration, Host Behavior Support and each namespace's Error
 Recovery; the Software Progress Marker, LBA Range Type data, Key Value
 Configuration and FDP event filters keep their values.
 
+### Fused Compare and Write
+
+With `fused_cw=on`, a Compare with FUSE 01b and the Write after it with
+FUSE 10b run as one atomic unit (NVM 1.2, 2.1.3.1). FUSES bit 0 is set.
+The Write runs only when the Compare matches, and no other command on
+the blocks sees a state between the two.
+
+```text
+ fetch: both SQEs, checks, both payloads staged.
+ run:   lock range; DULBE, uncorrectable, memcmp.
+        match:    book the Write (bbssd); copy; mark; unlock.
+        no match: Compare 0285h; Write 09h; nothing booked.
+```
+
+- A NoSSD pair runs at fetch on the poller. A bbssd pair runs on the FTL
+  thread, and the Write starts where the Compare read ends.
+- The pair takes two SQEs, two requests and one unit of the Arbitration
+  Burst. At most 16 pairs are staged at a time.
+- ACWU is the blocks of the largest LBA format that fit in MDTS and in
+  1 MiB, minus one. With the defaults it is 127.
+
+| Case | Compare | Write |
+| --- | --- | --- |
+| FIRST with no SECOND after it, or SECOND alone | 0Ah | 0Ah |
+| opcode, NSID, SLBA or NLB differ | 02h | 02h |
+| NLB above ACWU | 14h | 09h |
+| Compare with FUA | 02h | 09h |
+| Compare fails a check or the compare | its status | 09h |
+| Write fails a check, Compare passes | Compare's result | its status |
+
+- A Write that fails its checks keeps its status only when its Compare
+  succeeds. A Compare that fails gives its Write 09h, also a Write that an
+  Abort marked.
+- Not with metadata, `x-opal`, `cancel`, `reservations`, `power_loss`,
+  `cxl_ssd`, `streams`, `namespace_modes`, a femu-subsys, the host link
+  model or `oncs` without Compare. Each of these keeps a second copy of
+  block data, ends commands by another path, or times the Write data
+  before the media.
+- The tests `fused-cw-nossd`, `fused-cw-bbssd` and `fused-cw-refused`
+  cover the cases above. `fused-cw-lock` holds a pair in its range lock
+  (`x-copy-hold`) and checks that a Write on another poller waits.
+
 ### Asynchronous events
 
 The controller holds up to `aerl` + 1 Asynchronous Event Requests; one more

@@ -1126,6 +1126,7 @@ enum NvmeStatusCodes {
     NVME_DATA_SGL_LEN_INVALID   = 0x000f,
     NVME_SGL_DESCR_TYPE_INVALID = 0x0011,
     NVME_INVALID_PRP_OFFSET     = 0x0013,
+    NVME_ATOMIC_WRITE_UNIT_EXCEEDED = 0x0014,
     NVME_CMD_PROHIBITED         = 0x0023,   /* by Lockdown */
     NVME_FDP_DISABLED           = 0x0029,
     NVME_INVALID_PHID_LIST      = 0x002a,
@@ -2071,6 +2072,13 @@ typedef struct NvmeRequest {
     struct NvmeCQueue       *cq;
     struct NvmeNamespace    *ns;
     uint8_t                 *write_data; /* power-loss model, FTL owned */
+    /*
+     * fused_cw: a Compare carries the Write of its pair here until the pair
+     * runs, with the staged bytes of each (nvme-fused.c)
+     */
+    struct NvmeRequest      *fused;
+    uint8_t                 *fused_cmp;
+    uint8_t                 *fused_wr;
     uint16_t                status;
     uint64_t                slba;
     uint16_t                is_write;
@@ -3212,6 +3220,10 @@ typedef struct FemuCtrl {
      * cancel=on: the pollers append each Cancel that passed its checks
      * under cancel_lock; cancel_bh runs them with the dataplane paused.
      */
+    /* Fused Compare and Write: ACWU, and the pairs staged now */
+    bool            fused_cw;
+    uint16_t        fused_acwu;
+    uint32_t        fused_inflight;
     bool            cancel;
     QemuMutex       cancel_lock;
     QTAILQ_HEAD(, NvmeRequest) cancel_list;
@@ -4083,6 +4095,15 @@ bool femu_sanns_check(FemuCtrl *n, Error **errp);
 bool femu_sanns_busy(FemuCtrl *n);
 uint16_t femu_sanns_cmd(FemuCtrl *n, NvmeCmd *cmd);
 bool femu_cancel_check(FemuCtrl *n, Error **errp);
+#define FEMU_FUSE_FIRST     1
+#define FEMU_FUSE_SECOND    2
+#define FEMU_FUSED_MAX      16
+bool femu_fused_check(FemuCtrl *n, Error **errp);
+uint16_t femu_fused_check_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeNamespace **nsp);
+uint16_t femu_fused_stage(FemuCtrl *n, NvmeRequest *c, NvmeRequest *w);
+int64_t femu_fused_run(FemuCtrl *n, NvmeRequest *c, bool ftl);
+NvmeRequest *femu_fused_drop(FemuCtrl *n, NvmeRequest *c);
+void femu_fused_log(FemuCtrl *n, NvmeRequest *req);
 void femu_cancel_init(FemuCtrl *n);
 void femu_cancel_exit(FemuCtrl *n);
 uint16_t femu_cancel_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest *req);
@@ -4282,6 +4303,8 @@ uint16_t dma_read_prp(FemuCtrl *n, uint8_t *ptr, uint32_t len, uint64_t
 uint16_t femu_map_dptr(FemuCtrl *n, NvmeCmd *cmd, QEMUSGList *qsg,
                        QEMUIOVector *iov, uint32_t len);
 uint16_t dma_write_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len);
+uint16_t dma_write_cmd_exact(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr,
+                             uint32_t len);
 uint16_t dma_read_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len);
 uint16_t dma_read_cmd_buf(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr,
                           uint32_t len, uint64_t buf_len);

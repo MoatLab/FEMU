@@ -22,7 +22,7 @@ Devices:
 
 ## `femu`: NVMe controller
 
-`-device femu` has 324 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
+`-device femu` has 325 properties of its own and 4 QOM properties listed in [runtime-properties.md](runtime-properties.md).
 
 ### Mode, capacity and namespaces
 
@@ -102,6 +102,7 @@ Devices:
 | `ns_wp` | `bool` | `off` | bbssd, NoSSD: Namespace Write Protection (feature 84h, Base 2.3 8.1.17), the No Write Protect and Write Protect states; writes to a protected namespace fail with Namespace Is Write Protected; not with FDP, ns_mgmt, shared namespaces, cxl_ssd or persist_file; off (default) |
 | `sanitize_ns` | `bool` | `off` | bbssd, NoSSD with sanitize_ops: Sanitize Namespace (8Ch, Base 2.3 5.2.23), a crypto erase of one namespace while other namespaces keep their data, one at a time; log 81h by NSID; not with a femu-subsys, ns_mgmt, cxl_ssd or persist_file; off (default) |
 | `cancel` | `bool` | `off` | bbssd, NoSSD: Cancel (I/O 18h, Base 2.3 7.1) aborts commands of its own submission queue, one by CID or all of a namespace; commands past the FTL step abort at once (CMDA), the others when the step ends (CEDA); needs mapping=page; not with buffer_size, cxl_ssd, ocp, power_loss or a femu-subsys; off (default) |
+| `fused_cw` | `bool` | `off` | bbssd, NoSSD: Fused Compare and Write (FUSES bit 0, NVM 1.2 2.1.3.1); the Write runs only on a match, atomic against other commands; ACWU from MDTS, at most 1 MiB; not with metadata, x-opal, cancel, reservations, power_loss, cxl_ssd, streams, namespace_modes, a femu-subsys, pcie_bandwidth_mbps, pcie_prop_delay_ns or oncs without Compare; off (default) |
 | `shared_ftl` | `bool` | `off` | bbssd: the namespaces share the FTL and NAND array of namespace 1, each in its own slice of the logical pages, so writes and GC of one slow the I/O of another; sizes in whole NAND pages; needs mapping=page; not with a femu-subsys, ns_mgmt, power_loss, persist_ftl, ns_wp, sanitize_ns or telemetry_da4; off (default) |
 | `x-opal` | `bool` | `off` | TCG Opal security, experimental and not yet conformant: Security Send (81h) and Receive (82h), OACS bit 0, Level 0 discovery, ComID 1000h with STACK_RESET, Admin SP sessions with MSID, SID, PSID, Activate, Revert and transactions, Block SID and TPER_RESET; the Locking SP with 8 ranges, GenKey erase, an MBR shadow and the DataStore, a cryptographic erase in Format NVM (FNA bit 2), checked on every I/O command ([TCG Opal](../features/tcg-opal.md)); MSID and PSID are FEMU-MSID- and FEMU-PSID- plus the serial; one NoSSD or page-mapped bbssd namespace without metadata, not with a femu-subsys, CXL, CSD, ns_mgmt, power_loss, sanitize_ns, ns_wp or persist_file; off (default) |
 | `x-opal-mpa` | `bool` | `off` | x-opal: TCG MEK Multiparty Authorization 1.00, experimental: 4 AccessConditions with InitializeAccessCondition, TestAccessKey, ChangeAccessKey, EnableAccess and DisableAccess over HPKE (X25519, HKDF-SHA256, ChaCha20-Poly1305), an ephemeral KEM certificate signed by an Ed25519 identity certificate, Active and Pending lists on each K_AES_256 row (2 per key), Level 0 feature 040Ch; emulation only, not constant time ([TCG Opal](../features/tcg-opal.md)); needs x-opal; off (default) |

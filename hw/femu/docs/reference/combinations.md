@@ -314,6 +314,11 @@ own description allows. A message keeps its format directives (`%s`,
 
 - flash_type must be 1 (SLC), 2 (MLC), 3 (TLC) or 4 (QLC)
 
+## `fused_cw`
+
+- femu: fused_cw is not supported with %s
+- femu: fused_cw needs MDTS to hold one block of the largest LBA format
+
 ## `fw_cores`
 
 - fw_cores must be 1 to 64, got %u

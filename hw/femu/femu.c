@@ -3406,7 +3406,9 @@ static void nvme_init_ctrl(FemuCtrl *n)
     subnqn           = g_strdup_printf("nqn.2019-08.org.qemu:%s", n->serial);
     strpadcpy((char *)id->subnqn, sizeof(id->subnqn), subnqn, '\0');
     g_free(subnqn);
-    id->fuses        = cpu_to_le16(0);
+    /* FUSES bit 0: Compare and Write (fused_cw); ACWU is 0's based */
+    id->fuses        = cpu_to_le16(n->fused_cw ? 1 : 0);
+    id->acwu         = cpu_to_le16(n->fused_acwu);
     /* CRYES: x-opal keys and the crypto_mbps engine model encryption */
     id->fna          = n->opal || n->crypto_mbps ? NVME_FNA_CRYES : 0;
     /*
@@ -3617,7 +3619,7 @@ static void femu_ftl_ring_full(FemuCtrl *n, int i)
  * enqueue below copes with that. A tail that moves means the poller is
  * draining: report no room and count nothing, the next pass tries again.
  */
-static bool femu_ftl_ring_room(FemuCtrl *n, int i)
+static bool femu_ftl_ring_room(FemuCtrl *n, int i, uint32_t need)
 {
     struct rte_ring *r = n->to_poller[i];
     uint32_t cons = r->cons.tail;
@@ -3629,11 +3631,38 @@ static bool femu_ftl_ring_room(FemuCtrl *n, int i)
     if (r->cons.tail != cons) {
         return false;
     }
-    if (prod - cons < r->capacity) {
+    if (prod - cons + need <= r->capacity) {
         return true;
     }
     femu_ftl_ring_full(n, i);
     return false;
+}
+
+/*
+ * Give @req back to poller @i. The ring had room, and a CSD worker may take
+ * a slot since. Each request on the ring is a request object of its
+ * queues, this one too, and the ring holds all of them (nvme_ring_slots()).
+ * So the enqueue cannot fail on a correct device. If it does, wait while
+ * the poller drains the ring; a pause stops the poller, so stop the device
+ * there instead of losing the command or the pause.
+ */
+static void femu_ftl_return(FemuCtrl *n, int i, NvmeRequest *req)
+{
+    int rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
+
+    while (unlikely(rc != 1) && !n->ftl_stopping) {
+        femu_ftl_ring_full(n, i);
+        if (!n->dataplane_started) {
+            error_report("femu: to_poller[%d] refused command %u "
+                         "of queue %u during a pause; the request "
+                         "ring size is wrong", i,
+                         (unsigned)le16_to_cpu(req->cqe.cid),
+                         (unsigned)req->sq->sqid);
+            abort();
+        }
+        usleep(100);
+        rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
+    }
 }
 
 /*
@@ -3646,6 +3675,7 @@ static void *femu_ftl_thread(void *arg)
 {
     FemuCtrl *n = (FemuCtrl *)arg;
     NvmeRequest *req = NULL;
+    NvmeRequest *pair;
     uint64_t lat;
     bool busy;
     bool idle;
@@ -3741,7 +3771,8 @@ static void *femu_ftl_thread(void *arg)
              * is full leaves the request on to_ftl[i], where the queue
              * drain, Cancel and a pause find it.
              */
-            if (unlikely(!femu_ftl_ring_room(n, i))) {
+            /* a fused pair returns two requests (nvme-fused.c) */
+            if (unlikely(!femu_ftl_ring_room(n, i, n->fused_cw ? 2 : 1))) {
                 stalled = true;
                 n->ftl_in_sweep = false;
                 continue;
@@ -3759,7 +3790,13 @@ static void *femu_ftl_thread(void *arg)
                 n->subsys->storage->features.volatile_wc =
                     n->features.volatile_wc;
             }
-            lat = femu_ftl_process_req(n, req);
+            pair = NULL;
+            if (unlikely(req->fused)) {
+                pair = req->fused;
+                lat = femu_fused_run(n, req, true);
+            } else {
+                lat = femu_ftl_process_req(n, req);
+            }
             /* idle collection counts quiet time from here (gc_idle_ms) */
             if (unlikely(n->gc_idle)) {
                 ssd_gc_idle_note(n->ssd, req->stime + lat);
@@ -3796,28 +3833,12 @@ static void *femu_ftl_thread(void *arg)
                 femu_power_busy(n, req->expire_time);
             }
 
-            /*
-             * The ring had room, and a CSD worker may take a slot since.
-             * Each request on the ring is a request object of its
-             * queues, this one too, and the ring holds all of them
-             * (nvme_ring_slots()). So the enqueue cannot fail on a
-             * correct device. If it does, wait while the poller drains
-             * the ring; a pause stops the poller, so stop the device
-             * there instead of losing the command or the pause.
-             */
-            rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
-            while (unlikely(rc != 1) && !n->ftl_stopping) {
-                femu_ftl_ring_full(n, i);
-                if (!n->dataplane_started) {
-                    error_report("femu: to_poller[%d] refused command %u "
-                                 "of queue %u during a pause; the request "
-                                 "ring size is wrong", i,
-                                 (unsigned)le16_to_cpu(req->cqe.cid),
-                                 (unsigned)req->sq->sqid);
-                    abort();
+            femu_ftl_return(n, i, req);
+            if (unlikely(pair)) {
+                if (unlikely(n->power_states)) {
+                    femu_power_busy(n, pair->expire_time);
                 }
-                usleep(100);
-                rc = femu_ring_enqueue(n->to_poller[i], (void *)&req, 1);
+                femu_ftl_return(n, i, pair);
             }
 
             n->ftl_in_sweep = false;
@@ -5455,6 +5476,7 @@ static void femu_realize_steps(PCIDevice *pci_dev, Error **errp)
     if (!femu_thermal_check(n, errp) || !femu_power_check(n, errp) ||
         !femu_pmeas_check(n, errp) || !femu_wp_check(n, errp) ||
         !femu_sanns_check(n, errp) || !femu_cancel_check(n, errp) ||
+        !femu_fused_check(n, errp) ||
         !femu_shared_ftl_check(n, errp) || !femu_durable_check(n, errp)) {
         return;
     }
@@ -6418,6 +6440,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("ns_wp", FemuCtrl, ns_wp, false),
     DEFINE_PROP_BOOL("sanitize_ns", FemuCtrl, sanitize_ns, false),
     DEFINE_PROP_BOOL("cancel", FemuCtrl, cancel, false),
+    DEFINE_PROP_BOOL("fused_cw", FemuCtrl, fused_cw, false),
     DEFINE_PROP_BOOL("shared_ftl", FemuCtrl, shared_ftl, false),
     DEFINE_PROP_BOOL("stage_ns", FemuCtrl, stage_ns, false),
     DEFINE_PROP_BOOL("throttle", FemuCtrl, throttle, false),

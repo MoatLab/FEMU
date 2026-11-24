@@ -351,6 +351,11 @@
     "kind": "static",
     "type": "uint8"
    },
+   "fused_cw": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
    "fw_cores": {
     "default": 1,
     "kind": "static",

@@ -12332,3 +12332,337 @@ void femu_test_g1_dptr_layouts(void *obj, void *data,
     femu_disable(&c);
     qos_invalidate_command_line();
 }
+
+/*
+ * Fused Compare and Write (fused_cw). Statuses are type and code, as
+ * FEMU_SC() gives them.
+ */
+#define FUSED_INVALID   0x002
+#define FUSED_FAILED    0x009
+#define FUSED_MISSING   0x00a
+#define FUSED_AWU       0x014
+#define FUSED_CMP_FAIL  0x285
+#define FUSED_BS        4096
+#define FUSED_FIRST     1
+#define FUSED_SECOND    2
+
+static void femu_fused_cmd(NvmeCmd *cmd, uint8_t opcode, uint8_t fuse,
+                           uint64_t slba, uint64_t buf, uint16_t nlb0,
+                           uint16_t control)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+
+    memset(cmd, 0, sizeof(*cmd));
+    rw->opcode = opcode;
+    rw->flags = fuse;
+    rw->nsid = cpu_to_le32(1);
+    rw->dptr.prp1 = cpu_to_le64(buf);
+    rw->slba = cpu_to_le64(slba);
+    rw->nlb = cpu_to_le16(nlb0);
+    rw->control = cpu_to_le16(control);
+}
+
+/*
+ * Collect @nr completions of @q and give each status by submit order.
+ * Each CID must come back exactly once.
+ */
+static void femu_fused_collect(FemuCtrlState *c, FemuQueue *q, int nr,
+                               uint16_t first_cid, uint16_t *st)
+{
+    bool seen[8] = { false };
+
+    g_assert_cmpint(nr, <=, ARRAY_SIZE(seen));
+    for (int k = 0; k < nr; k++) {
+        uint64_t slot = q->cq_addr + q->cq_head * sizeof(NvmeCqe);
+        NvmeCqe cqe;
+        int waited = 0;
+        uint16_t i;
+
+        for (;;) {
+            qtest_memread(c->pdev->bus->qts, slot, &cqe, sizeof(cqe));
+            if ((le16_to_cpu(cqe.status) & 1) == q->phase) {
+                break;
+            }
+            g_assert_cmpint(waited, <, FEMU_POLL_LIMIT_MS);
+            g_usleep(1000);
+            waited++;
+        }
+        i = le16_to_cpu(cqe.cid) - first_cid;
+        g_assert_cmpuint(i, <, nr);
+        g_assert_false(seen[i]);
+        seen[i] = true;
+        st[i] = FEMU_SC(le16_to_cpu(cqe.status) >> 1);
+        q->cq_head = (q->cq_head + 1) % ZAP_QDEPTH;
+        if (q->cq_head == 0) {
+            q->phase ^= 1;
+        }
+        qpci_io_writel(c->pdev, c->bar, femu_cq_doorbell(c, q->qid),
+                       q->cq_head);
+    }
+}
+
+/* send @nr commands with one doorbell write; give their statuses */
+static void femu_fused_send(FemuCtrlState *c, FemuQueue *q, NvmeCmd *cmds,
+                            int nr, uint16_t *st)
+{
+    uint16_t first = c->cid;
+
+    for (int k = 0; k < nr; k++) {
+        femu_zap_queue(c, q, &cmds[k]);
+    }
+    femu_zap_ring(c, q);
+    femu_fused_collect(c, q, nr, first, st);
+}
+
+/* the pair Compare(@cmp) and Write(@wr) at @slba; @nlb0 is 0's based */
+static void femu_fused_pair(FemuCtrlState *c, FemuQueue *q, uint64_t slba,
+                            uint64_t cmp, uint64_t wr, uint16_t nlb0,
+                            uint16_t control, uint16_t *st)
+{
+    NvmeCmd cmds[2];
+
+    femu_fused_cmd(&cmds[0], NVME_CMD_COMPARE, FUSED_FIRST, slba, cmp,
+                   nlb0, control);
+    femu_fused_cmd(&cmds[1], NVME_CMD_WRITE, FUSED_SECOND, slba, wr,
+                   nlb0, 0);
+    femu_fused_send(c, q, cmds, 2, st);
+}
+
+static void femu_fused_expect(const char *what, uint16_t *st, uint16_t sc,
+                              uint16_t sw)
+{
+    g_test_message("%s: Compare %03x, Write %03x", what, st[0], st[1]);
+    g_assert_cmphex(st[0], ==, sc);
+    g_assert_cmphex(st[1], ==, sw);
+}
+
+/* the 8 blocks at 0 read back @fill in every byte */
+static void femu_pair_reads(FemuCtrlState *c, FemuQueue *q, uint64_t rd,
+                            uint8_t fill)
+{
+    g_autofree uint8_t *got = g_malloc(FUSED_BS);
+    NvmeCmd cmd;
+    uint16_t st;
+
+    femu_fused_cmd(&cmd, NVME_CMD_READ, 0, 0, rd, FUSED_BS / 512 - 1, 0);
+    femu_fused_send(c, q, &cmd, 1, &st);
+    g_assert_cmphex(st, ==, NVME_SUCCESS);
+    qtest_bufread(c->pdev->bus->qts, rd, got, FUSED_BS);
+    for (int k = 0; k < FUSED_BS; k++) {
+        g_assert_cmphex(got[k], ==, fill);
+    }
+}
+
+/*
+ * The Write of a pair runs only when its Compare matches, and a pair that
+ * breaks a rule of NVM 1.2 2.1.3.1 fails with the status that rule names.
+ */
+void femu_test_fused_cw(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    uint16_t nlb0 = FUSED_BS / 512 - 1;
+    uint64_t buf[4];
+    uint64_t id_buf;
+    NvmeIdCtrl id;
+    NvmeCmd cmds[2];
+    NvmeCmd cmd;
+    uint16_t st[2];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q, 1);
+    for (i = 0; i < 4; i++) {
+        buf[i] = guest_alloc(alloc, FUSED_BS);
+        qtest_memset(qts, buf[i], 0xa0 + i, FUSED_BS);
+    }
+
+    /* FUSES bit 0, and ACWU: 1 MiB of the largest format (8 KiB) */
+    id_buf = guest_alloc(alloc, 4096);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_IDENTIFY;
+    cmd.dptr.prp1 = cpu_to_le64(id_buf);
+    cmd.cdw10 = cpu_to_le32(NVME_ID_CNS_CTRL);
+    g_assert_cmpint(FEMU_SC(femu_admin(&c, &cmd)), ==, NVME_SUCCESS);
+    qtest_memread(qts, id_buf, &id, sizeof(id));
+    g_assert_cmphex(le16_to_cpu(id.fuses), ==, 1);
+    g_assert_cmpuint(le16_to_cpu(id.acwu), ==, 127);
+
+    /* blocks 0 to 7 hold A */
+    femu_fused_cmd(&cmd, NVME_CMD_WRITE, 0, 0, buf[0], nlb0, 0);
+    femu_fused_send(&c, &q, &cmd, 1, st);
+    g_assert_cmphex(st[0], ==, NVME_SUCCESS);
+
+    /* a match writes B; a miscompare then leaves B */
+    femu_fused_pair(&c, &q, 0, buf[0], buf[1], nlb0, 0, st);
+    femu_fused_expect("match", st, NVME_SUCCESS, NVME_SUCCESS);
+    femu_pair_reads(&c, &q, buf[3], 0xa1);
+    femu_fused_pair(&c, &q, 0, buf[0], buf[2], nlb0, 0, st);
+    femu_fused_expect("miscompare", st, FUSED_CMP_FAIL, FUSED_FAILED);
+    femu_pair_reads(&c, &q, buf[3], 0xa1);
+
+    /* the two commands name other blocks */
+    femu_fused_cmd(&cmds[0], NVME_CMD_COMPARE, FUSED_FIRST, 0, buf[1],
+                   nlb0, 0);
+    femu_fused_cmd(&cmds[1], NVME_CMD_WRITE, FUSED_SECOND, 8, buf[2],
+                   nlb0, 0);
+    femu_fused_send(&c, &q, cmds, 2, st);
+    femu_fused_expect("mismatch", st, FUSED_INVALID, FUSED_INVALID);
+
+    /* a FIRST with no SECOND after it, then a SECOND alone */
+    femu_fused_cmd(&cmds[0], NVME_CMD_COMPARE, FUSED_FIRST, 0, buf[1],
+                   nlb0, 0);
+    femu_fused_cmd(&cmds[1], NVME_CMD_READ, 0, 0, buf[3], nlb0, 0);
+    femu_fused_send(&c, &q, cmds, 2, st);
+    femu_fused_expect("first alone", st, FUSED_MISSING, NVME_SUCCESS);
+    femu_fused_cmd(&cmd, NVME_CMD_WRITE, FUSED_SECOND, 0, buf[2],
+                   nlb0, 0);
+    femu_fused_send(&c, &q, &cmd, 1, st);
+    g_assert_cmphex(st[0], ==, FUSED_MISSING);
+    femu_pair_reads(&c, &q, buf[3], 0xa1);
+
+    /* one block past ACWU, and a Compare with FUA */
+    femu_fused_pair(&c, &q, 0, buf[1], buf[2], 128, 0, st);
+    femu_fused_expect("acwu", st, FUSED_AWU, FUSED_FAILED);
+    femu_fused_pair(&c, &q, 0, buf[1], buf[2], nlb0, NVME_RW_FUA, st);
+    femu_fused_expect("fua", st, FUSED_INVALID, FUSED_FAILED);
+    femu_pair_reads(&c, &q, buf[3], 0xa1);
+
+    guest_free(alloc, id_buf);
+    for (i = 0; i < 4; i++) {
+        guest_free(alloc, buf[i]);
+    }
+    femu_queue_free(&c, &q);
+    femu_disable(&c);
+}
+
+/* fused_cw is refused where a pair cannot stay atomic */
+void femu_test_fused_cw_refused(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':3", "mode" },
+        { "'cancel':true", "cancel" },
+        { "'reservations':true", "reservations" },
+        { "'femu_mode':1,'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,"
+          "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':1,'nchs':1,"
+          "'buffer_size':16,'vwc':1,'power_loss':true", "power_loss" },
+        { "'meta':8,'mc':3", "metadata" },
+        { "'oncs':412", "Compare" },
+        { "'mdts':1,'nlbaf':6", "MDTS" },
+        { "'pcie_bandwidth_mbps':1000", "host link" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        for (int on = 1; on >= 0; on--) {
+            g_autofree char *cmd = NULL;
+            QDict *rsp;
+
+            cmd = g_strdup_printf("{'execute':'device_add','arguments':{"
+                                  "'driver':'femu','id':'fcw','addr':'5',"
+                                  "'devsz_mb':4,'fused_cw':%s,%s}}",
+                                  on ? "true" : "false", cases[i].opts);
+            rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+            if (on) {
+                const char *desc;
+
+                g_assert_true(qdict_haskey(rsp, "error"));
+                desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+                g_test_message("%s: %s", cases[i].opts, desc);
+                g_assert_nonnull(strstr(desc, "fused_cw"));
+                g_assert_nonnull(strstr(desc, cases[i].msg));
+            } else {
+                if (!qdict_haskey(rsp, "return")) {
+                    g_test_message("control %s refused: %s", cases[i].opts,
+                                   qdict_get_str(qdict_get_qdict(rsp,
+                                                 "error"), "desc"));
+                    g_assert_not_reached();
+                }
+                qpci_unplug_acpi_device_test(qts, "fcw", 5);
+            }
+            qobject_unref(rsp);
+        }
+    }
+}
+
+/*
+ * A pair is atomic against a Write on another poller. x-copy-hold stops
+ * the pair after its compare, inside its range lock. The Write must wait
+ * for the lock (x-range-waits), and once the pair goes on, the blocks
+ * hold the Write's data: pair, then Write. Without the lock the Write
+ * completes during the hold.
+ */
+void femu_test_fused_lock(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q1;
+    FemuQueue q2;
+    uint16_t nlb0 = FUSED_BS / 512 - 1;
+    uint64_t buf[4];
+    NvmeCmd cmds[2];
+    NvmeCmd cmd;
+    uint16_t first;
+    uint16_t st[2];
+    bool early = false;
+    uint64_t waits;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q1, 1);
+    femu_zap_create_queue(&c, &q2, 2);
+    for (i = 0; i < 4; i++) {
+        buf[i] = guest_alloc(alloc, FUSED_BS);
+        qtest_memset(qts, buf[i], 0xa0 + i, FUSED_BS);
+    }
+    femu_fused_cmd(&cmd, NVME_CMD_WRITE, 0, 0, buf[0], nlb0, 0);
+    femu_fused_send(&c, &q1, &cmd, 1, st);
+    g_assert_cmphex(st[0], ==, NVME_SUCCESS);
+
+    femu_rwa_hold(qts, 1);
+    first = c.cid;
+    femu_fused_cmd(&cmds[0], NVME_CMD_COMPARE, FUSED_FIRST, 0, buf[0],
+                   nlb0, 0);
+    femu_fused_cmd(&cmds[1], NVME_CMD_WRITE, FUSED_SECOND, 0, buf[1],
+                   nlb0, 0);
+    femu_zap_queue(&c, &q1, &cmds[0]);
+    femu_zap_queue(&c, &q1, &cmds[1]);
+    femu_zap_ring(&c, &q1);
+    for (i = 0; i < FEMU_POLL_LIMIT_MS && !femu_rwa_get(qts, "x-copy-held");
+         i++) {
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(femu_rwa_get(qts, "x-copy-held"), ==, 1);
+
+    waits = femu_rwa_get(qts, "x-range-waits");
+    femu_fused_cmd(&cmd, NVME_CMD_WRITE, 0, 0, buf[2], nlb0, 0);
+    femu_zap_queue(&c, &q2, &cmd);
+    femu_zap_ring(&c, &q2);
+    for (i = 0; i < FEMU_POLL_LIMIT_MS && !early &&
+         femu_rwa_get(qts, "x-range-waits") == waits; i++) {
+        g_usleep(1000);
+        early = femu_rwa_cq_ready(&c, &q2);
+    }
+    g_assert_cmpuint(femu_rwa_get(qts, "x-copy-held"), ==, 1);
+    femu_rwa_hold(qts, 0);
+    femu_fused_collect(&c, &q1, 2, first, st);
+    femu_fused_expect("held pair", st, NVME_SUCCESS, NVME_SUCCESS);
+    g_assert_cmpint(femu_zap_complete(&c, &q2, NULL), ==, NVME_SUCCESS);
+    g_assert_false(early);
+    femu_pair_reads(&c, &q1, buf[3], 0xa2);
+
+    for (i = 0; i < 4; i++) {
+        guest_free(alloc, buf[i]);
+    }
+    femu_queue_free(&c, &q2);
+    femu_queue_free(&c, &q1);
+    femu_disable(&c);
+}

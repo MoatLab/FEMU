@@ -86,6 +86,7 @@ listed one by one.
 
 #### NVMe commands, features and log pages
 
+- With `fused_cw=on`, a fused Compare and Write runs as one atomic unit: the Write runs only on a match (FUSES bit 0, ACWU). bbssd and NoSSD. See [fused Compare and Write](design/nvme-frontend.md#fused-compare-and-write).
 - With `csd_slm_size`, CSD mode adds an NVMe Subsystem Local Memory 1.2 namespace. It takes Memory Read, Write, Fill and Copy. With `csd_cp=on`, CSD mode also adds an NVMe Computational Programs 1.2 namespace. It takes Load Program, Program Activation Management, Memory Range Set Management and Execute Program. Two device-defined programs (copy and a 64-bit FNV-1a hash) and the CEMU shared-library and eBPF programs run on it.
 - The memory and compute namespaces of `csd_slm_size` and `csd_cp` work in a `femu-subsys`, so FDP and these namespaces can run together. The controller must be alone in its subsystem, because Reachability Reporting on one controller needs it on all of them.
 - A Copy with descriptor format 4h moves memory namespace bytes to a block namespace. The CEMU commands stay on ([guide](features/cp-slm.md)).

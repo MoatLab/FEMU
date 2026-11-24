@@ -807,6 +807,31 @@ uint16_t dma_write_cmd(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr, uint32_t len)
     return dma_copy(n, &qsg, &iov, ptr, len, false);
 }
 
+/*
+ * As dma_write_cmd(), but an SGL must describe exactly @len bytes, as a
+ * Read or Write takes it (Data SGL Length Invalid otherwise).
+ */
+uint16_t dma_write_cmd_exact(FemuCtrl *n, NvmeCmd *cmd, uint8_t *ptr,
+                             uint32_t len)
+{
+    QEMUSGList qsg;
+    QEMUIOVector iov;
+    uint16_t status;
+
+    if (cmd->psdt == NVME_PSDT_PRP) {
+        return dma_write_cmd(n, cmd, ptr, len);
+    }
+    if (!n->sgl || cmd->psdt > NVME_PSDT_SGL_MPTR_SGL) {
+        return NVME_INVALID_FIELD | NVME_DNR;
+    }
+    status = nvme_map_sgl(&qsg, &iov, cmd->dptr.sgl, len, true, n);
+    if (status) {
+        return status;
+    }
+
+    return dma_copy(n, &qsg, &iov, ptr, len, false);
+}
+
 /* as dma_read_cmd(), then zeroes up to @xfer */
 uint16_t dma_read_cmd_fill(FemuCtrl *n, NvmeCmd *cmd, const uint8_t *ptr,
                            uint32_t len, uint32_t xfer)

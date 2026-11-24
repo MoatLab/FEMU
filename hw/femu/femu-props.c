@@ -358,6 +358,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "past the FTL step abort at once (CMDA), the others when the step "
       "ends (CEDA); needs mapping=page; not with buffer_size, cxl_ssd, "
       "ocp, power_loss or a femu-subsys; off (default)" },
+    { "fused_cw",
+      "bbssd, NoSSD: Fused Compare and Write (FUSES bit 0, NVM 1.2 "
+      "2.1.3.1); the Write runs only on a match, atomic against other "
+      "commands; ACWU from MDTS, at most 1 MiB; not with metadata, x-opal, "
+      "cancel, reservations, power_loss, cxl_ssd, streams, namespace_modes, "
+      "a femu-subsys, pcie_bandwidth_mbps, pcie_prop_delay_ns or oncs "
+      "without Compare; off (default)" },
     { "shared_ftl",
       "bbssd: the namespaces share the FTL and NAND array of namespace 1, "
       "each in its own slice of the logical pages, so writes and GC of one "
