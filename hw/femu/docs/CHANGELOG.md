@@ -259,6 +259,7 @@ listed one by one.
 - `fw_gc_page_ns` (bbssd, CSD, 0 by default): the controller firmware time of each page that GC, read reclaim, refresh or wear levelling moves. The moves take turns on one GC firmware line per FTL, and the program of a move starts after its read and its slot. It needs `gc_erase_order`, so the erase of a victim waits for the delayed copies. Log page C0h (offsets 336 and 344) counts the slots and their time; for bbssd, `query-femu` also gives them.
 - CI runs QEMU's checkpatch on each new commit (`check-patches.sh`); `femu-compile.sh --werror` builds with `--enable-werror`.
 - I/O trace export (`io_trace=FILE`, off by default): one CSV line per completed I/O command, with its submit and completion times, range and status, in every mode.
+- `io_trace` gives a Zone Append the LBA where it landed, or its submitted SLBA when it fails. Before, an append line had no range.
 - `mode=NAME` (ocssd, bbssd, nossd, zns, csd, kv) sets the emulated SSD type by name; `femu_mode` keeps taking the number.
 - Read Recovery Levels (`rrl`, off by default, with `rber_ppb`): Feature 12h sets level 4, 9 or 15 (Fast Fail), which bound the retry and soft decode of host reads; a read the level leaves uncorrected fails.
 - `persist_ftl` (off by default): `persist_file` also keeps the bbssd FTL state of a page-mapped drive (mapping, page and block state, lines, write pointer, counters), so a restarted drive continues aged. A load checks every record first; other FTL properties fail realize.

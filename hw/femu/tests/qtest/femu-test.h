@@ -498,6 +498,7 @@ uint16_t femu_rw(FemuCtrlState *c, uint8_t opcode, uint64_t slba,
                  uint64_t data);
 void femu_round_trip(FemuCtrlState *c, uint8_t seed);
 uint64_t femu_alloc_64k(QGuestAllocator *alloc, uint64_t *raw);
+uint64_t femu_last_res64(FemuCtrlState *c, FemuQueue *q);
 uint16_t femu_zone_action(FemuCtrlState *c, uint64_t slba, uint32_t action);
 void femu_zone_report(FemuCtrlState *c, uint64_t buf, uint8_t *report);
 uint16_t femu_get_feature(FemuCtrlState *c, uint8_t fid, uint8_t sel,
@@ -929,6 +930,8 @@ void femu_test_pel_set_feature(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_pel_file(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_pel_file_quit(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_io_trace(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_io_trace_append(void *obj, void *data,
+                               QGuestAllocator *alloc);
 void femu_test_arb_burst(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_wrr(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_wrr_refused(void *obj, void *data, QGuestAllocator *alloc);

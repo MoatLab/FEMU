@@ -2478,6 +2478,7 @@ static void femu_register_nodes(void)
     qos_add_test("events-bad", "femu", femu_test_events_bad, NULL);
     qos_add_test("events-timer", "femu", femu_test_events_timer, NULL);
     qos_add_test("io-trace", "femu", femu_test_io_trace, NULL);
+    qos_add_test("io-trace-append", "femu", femu_test_io_trace_append, NULL);
     qos_add_test("mode-names", "femu", femu_test_mode_names,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = "id=mode-test,mode=bbssd,devsz_mb=16"

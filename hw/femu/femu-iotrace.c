@@ -10,8 +10,10 @@
  * host sees, from the fetch to the CQE write: SQ wait before the fetch and
  * interrupt delivery after the CQE are not in it. slba and nlb (a block
  * count) are the submitted range of a Read, Write, Compare, Write Zeroes
- * or Verify on an NVM or zoned namespace; other commands leave them
- * empty. status is SCT and SC with DNR, without the phase bit.
+ * or Verify on an NVM or zoned namespace. A Zone Append on a zoned
+ * namespace gives the LBA where it landed, or its submitted SLBA if it
+ * failed. Other commands leave them empty. status is SCT and SC with DNR,
+ * without the phase bit.
  *
  * The file is created with O_EXCL: FEMU never writes over a file. One
  * mutex orders the pollers' lines, the final flush at QEMU exit and the
@@ -154,6 +156,21 @@ void femu_iotrace_note(FemuCtrl *n, NvmeRequest *req, int64_t now)
                         req->ns->csi == NVME_CSI_ZONED)) {
             snprintf(range, sizeof(range), "%" PRIu64 ",%u",
                      le64_to_cpu(rw->slba), le16_to_cpu(rw->nlb) + 1u);
+        }
+        break;
+    case NVME_CMD_ZONE_APPEND:
+        /*
+         * A successful append landed where CQE Dword 0 and 1 say, and that
+         * is the address a host or a replay needs. A failed one has no such
+         * result, so the line keeps the submitted SLBA.
+         */
+        if (req->ns && req->ns->csi == NVME_CSI_ZONED) {
+            uint64_t slba = req->status == NVME_SUCCESS ?
+                            le64_to_cpu(req->cqe.res64) :
+                            le64_to_cpu(rw->slba);
+
+            snprintf(range, sizeof(range), "%" PRIu64 ",%u", slba,
+                     le16_to_cpu(rw->nlb) + 1u);
         }
         break;
     default:

@@ -3839,3 +3839,11 @@ void femu_g1_cqe_wait(QTestState *qts, FemuQueue *q, uint32_t slot,
         waited++;
     }
 }
+
+/* Dword 0 and 1 of the completion femu_complete() consumed last on @q. */
+uint64_t femu_last_res64(FemuCtrlState *c, FemuQueue *q)
+{
+    uint16_t head = (q->cq_head + FEMU_QSIZE - 1) % FEMU_QSIZE;
+
+    return qtest_readq(c->pdev->bus->qts, q->cq_addr + head * sizeof(NvmeCqe));
+}

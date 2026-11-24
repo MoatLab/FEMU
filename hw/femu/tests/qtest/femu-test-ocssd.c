@@ -278,14 +278,6 @@ void femu_test_oc20_vector_io(void *obj, void *data,
     femu_disable(&c);
 }
 
-/* Dword 0 and 1 of the completion femu_complete() consumed last on @q. */
-static uint64_t femu_last_res64(FemuCtrlState *c, FemuQueue *q)
-{
-    uint16_t head = (q->cq_head + FEMU_QSIZE - 1) % FEMU_QSIZE;
-
-    return qtest_readq(c->pdev->bus->qts, q->cq_addr + head * sizeof(NvmeCqe));
-}
-
 /*
  * Vector Chunk Reset (OCSSD 2.0, 2.2.1 and 2.2.2) works on each entry of its
  * LBA list. Dword 0 and 1 of the completion hold one bit per entry that failed,

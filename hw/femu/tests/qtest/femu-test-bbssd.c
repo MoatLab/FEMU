@@ -10673,6 +10673,155 @@ static void femu_queue_read(FemuCtrlState *c, FemuQueue *q, uint64_t buf)
     femu_queue_only(c, q, (NvmeCmd *)&rw);
 }
 
+/* a Zone Append of 4 KiB at @slba on namespace 1 */
+static NvmeRwCmd femu_append_cmd(uint64_t slba, uint64_t buf)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = NVME_CMD_ZONE_APPEND;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(slba);
+    rw.nlb = cpu_to_le16(7);
+    return rw;
+}
+
+/*
+ * io_trace gives a Zone Append the LBA where it landed, from CQE Dword 0
+ * and 1, and the submitted SLBA when it failed. Every third write fails
+ * (err_write_fail_ppm=333333), after the append took its place. The
+ * zones are not zone 0, so a zero result cannot pass for a start. An
+ * append that Abort ends before the fetch has no namespace, so its line
+ * keeps an empty range. Each line must carry the queue, command ID and
+ * full status of its command. The landed LBAs fit in 32 bits, so this
+ * test cannot see a lost CQE Dword 1.
+ */
+void femu_test_io_trace_append(void *obj, void *data,
+                               QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-iotrace-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "trace.csv", NULL);
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=zt,addr=5,devsz_mb=32,"
+        "femu_mode=3,secsz=512,zns_num_ch=1,zns_num_lun=1,zns_num_plane=2,"
+        "zns_num_blk=32,err_write_fail_ppm=333333,io_trace=%s", path);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    uint64_t page = guest_alloc(&qs->alloc, 4096);
+    uint8_t report[192];
+    uint64_t zsze, res[2];
+    uint64_t want_slba[5];
+    uint16_t sc[6], st[6], cids[6], cid;
+    NvmeRwCmd rw;
+    NvmeCmd abort = { 0 };
+    int n = 0;
+
+    femu_enable_csi(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    femu_zone_report(&c, page, report);
+    zsze = ldq_le_p(report + 128 + 16);
+    g_assert_cmpuint(zsze, >, 8);
+    g_assert_cmpuint(ldq_le_p(report), >=, 4);     /* zones 1 to 3 exist */
+
+    /* two appends land one after the other, the third fails */
+    for (int i = 0; i < 3; i++) {
+        rw = femu_append_cmd(zsze, buf);
+        cids[i] = c.cid;
+        sc[i] = femu_io(&c, (NvmeCmd *)&rw);
+        st[i] = femu_io_status;
+        if (i < 2) {
+            res[i] = femu_last_res64(&c, &c.io);
+        }
+    }
+    g_assert_cmphex(sc[0], ==, NVME_SUCCESS);
+    g_assert_cmphex(sc[1], ==, NVME_SUCCESS);
+    g_assert_cmphex(st[2], ==, NVME_WRITE_FAULT | NVME_DNR);
+    g_assert_cmpuint(res[0], ==, zsze);
+    g_assert_cmpuint(res[1], ==, zsze + 8);
+
+    /* a full zone, and a submitted SLBA that is not a zone start */
+    g_assert_cmphex(femu_zone_action(&c, 2 * zsze, NVME_ZONE_ACTION_FINISH),
+                    ==, NVME_SUCCESS);
+    rw = femu_append_cmd(2 * zsze, buf);
+    cids[3] = c.cid;
+    sc[3] = femu_io(&c, (NvmeCmd *)&rw);
+    st[3] = femu_io_status;
+    g_assert_cmphex(sc[3], ==, NVME_ZONE_FULL);
+    rw = femu_append_cmd(3 * zsze + 8, buf);
+    cids[4] = c.cid;
+    sc[4] = femu_io(&c, (NvmeCmd *)&rw);
+    st[4] = femu_io_status;
+    g_assert_cmphex(st[4], ==, NVME_INVALID_FIELD | NVME_DNR);
+
+    /* Abort ends a queued append before the fetch */
+    femu_fetch_hold(qts, "zt", 1);
+    rw = femu_append_cmd(3 * zsze, buf);
+    femu_queue_only(&c, &c.io, (NvmeCmd *)&rw);
+    cid = c.cid - 1;
+    qpci_io_writel(c.pdev, c.bar, femu_sq_doorbell(&c, c.io.qid),
+                   c.io.sq_tail);
+    abort.opcode = NVME_ADM_CMD_ABORT;
+    abort.cdw10 = cpu_to_le32(((uint32_t)cid << 16) | c.io.qid);
+    g_assert_cmphex(FEMU_SC(femu_admin(&c, &abort)), ==, NVME_SUCCESS);
+    femu_fetch_hold(qts, "zt", 0);
+    {
+        uint16_t got;
+
+        st[5] = femu_complete(&c, &c.io, &got, NULL);
+        sc[5] = FEMU_SC(st[5]);
+        g_assert_cmpint(got, ==, cid);
+        cids[5] = cid;
+    }
+    g_assert_cmphex(sc[5], ==, FEMU_CMD_ABORT_REQ);
+
+    guest_free(&qs->alloc, page);
+    guest_free(&qs->alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_qmp_send(qts, "{'execute':'quit'}");
+    qtest_set_expected_status(qts, 0);
+    qtest_wait_qemu(qts);
+    qtest_pc_shutdown(qs);
+
+    want_slba[0] = zsze;
+    want_slba[1] = zsze + 8;
+    want_slba[2] = zsze;
+    want_slba[3] = 2 * zsze;
+    want_slba[4] = 3 * zsze + 8;
+    g_assert_true(g_file_get_contents(path, &text, NULL, NULL));
+    lines = g_strsplit(text, "\n", 0);
+    for (int i = 1; lines[i] && lines[i][0]; i++) {
+        g_auto(GStrv) f = g_strsplit(lines[i], ",", 0);
+        g_assert_cmpuint(g_strv_length(f), ==, 9);
+        if (strcmp(f[5], "0x7d")) {
+            continue;
+        }
+        g_test_message("io_trace: %s", lines[i]);
+        g_assert_cmpint(n, <, 6);
+        g_assert_cmpuint(g_ascii_strtoull(f[2], NULL, 10), ==, c.io.qid);
+        g_assert_cmpuint(g_ascii_strtoull(f[3], NULL, 10), ==, cids[n]);
+        g_assert_cmpstr(f[4], ==, "1");
+        g_assert_cmphex(g_ascii_strtoull(f[8], NULL, 16), ==, st[n]);
+        if (n < 5) {
+            g_assert_cmpuint(g_ascii_strtoull(f[6], NULL, 10), ==,
+                             want_slba[n]);
+            g_assert_cmpstr(f[7], ==, "8");
+        } else {
+            g_assert_cmpstr(f[6], ==, "");
+            g_assert_cmpstr(f[7], ==, "");
+        }
+        n++;
+    }
+    g_assert_cmpint(n, ==, 6);
+    unlink(path);
+    rmdir(dir);
+}
+
 /* the command in slot @slot of @q is still the one the host wrote */
 static void femu_check_sqe(FemuCtrlState *c, FemuQueue *q, uint16_t slot,
                            uint8_t opcode, uint16_t cid)

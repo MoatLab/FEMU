@@ -217,7 +217,8 @@ t_submit_ns,t_cqe_ns,sqid,cid,nsid,opcode,slba,nlb,status
 1053200417,1053313090,1,7,1,0x01,0,8,0x0
  |          |          | |  | |    | |  status: SCT and SC, with DNR
  |          |          | |  | |    | +- blocks (Read, Write, Compare,
- |          |          | |  | |    +--- SLBA     Write Zeroes, Verify)
+ |          |          | |  | |    +--- SLBA     Write Zeroes, Verify,
+ |          |          | |  | |                  Zone Append)
  |          |          | |  | +-------- opcode
  |          |          | |  +---------- NSID of the command
  |          |          | +------------- command ID
@@ -230,8 +231,24 @@ t_submit_ns,t_cqe_ns,sqid,cid,nsid,opcode,slba,nlb,status
 write, every model stage included. Time in the SQ before the fetch and
 the interrupt after the CQE are not in it. The trace, `io_stages` and the
 OCP latency monitor (log C3h) take one time right after the CQE write, so
-a command has the same end in all three. Only NVM and zoned namespaces
-get a range. Admin commands are not in the trace.
+a command has the same end in all three.
+
+Only NVM and zoned namespaces get a range. A Zone Append on a zoned namespace gets the LBA where it
+landed (CQE Dword 0 and 1) and its submitted block count. A failed
+append gets its submitted SLBA, as sent. A failed append can fail after
+its data copy, so the SLBA tells only that no landed LBA came back. An
+append with no namespace, as one aborted before its fetch, has no range.
+Admin commands are not in the trace.
+
+```
+ Zone Append line   slba                 nlb
+ success            landed LBA (CQE)     submitted NLB + 1
+ failure            submitted SLBA       submitted NLB + 1
+ no namespace       empty                empty
+```
+
+A `femu-trace2fio.py` older than this change refuses an append line
+with a range.
 
 The file is written through a 1 MiB buffer. QEMU exit flushes it, and
 lines that come after are dropped and counted. Unplug closes it. A
