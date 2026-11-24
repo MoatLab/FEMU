@@ -95,16 +95,30 @@ a fraction such as `1/2`.
  -------------------------------  ---------------------------------
  Read with a range, status 0      read  <byte offset> <byte length>
  Write with a range, status 0     write <byte offset> <byte length>
+ Zone Append with a range,        write <landed byte offset> <length>
+   status 0
  Flush, status 0                  sync 0 0
  Dataset Management (trim)        none: the trace holds no range
  Compare, Write Zeroes, Verify,   none: fio has no such action
-   Copy, zone commands
+   Copy, Zone Management
  each other opcode                none
  a command with a status above 0  none
 ```
 
 The report counts each command that is not replayed, by name. An opcode
 with no name shows as `opcode-0xNN`.
+
+A successful Zone Append replays as a write at the LBA where it landed,
+so the replay target need not be zoned. The replay keeps the landed
+ranges only. It skips zone resets and finishes, so it does not give a
+valid zoned workload. The report counts each append in the write mix.
+Only a successful append counts in the bytes, sizes, sequential share
+and the append count.
+
+A successful append with no range comes from an FEMU older than this
+change. The tool counts it as `zone-append-no-range`. A failed append
+counts as `failed`, with or without a range. A `femu-trace2fio.py` older
+than this change refuses an append line with a range.
 
 A replay of a workload that trims leaves more valid data on the device
 than the live run. Use `--strict` when that matters.

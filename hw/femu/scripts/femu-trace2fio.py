@@ -15,9 +15,11 @@ This tool checks each line, selects one namespace and then:
     "fio --read_iolog=OUT" replays with the time of the capture.
 
 Read, Write and Flush commands with status 0 go to the I/O log as read,
-write and sync. The trace holds no range for Dataset Management, so the
-tool cannot replay a trim. It counts each command that it does not replay
-and prints the counts; --strict turns a non-zero count into a failure.
+write and sync. A Zone Append with status 0 goes as a write at the LBA
+where it landed, and the report counts it as a write. The trace holds
+no range for Dataset Management, so the tool cannot replay a trim. It
+counts each command that it does not replay and prints the counts;
+--strict turns a non-zero count into a failure.
 That covers each opcode the tool does not know: FEMU writes the commands
 of every mode, and a failed command can hold any opcode.
 
@@ -53,9 +55,10 @@ OP_FLUSH = 0x00
 OP_WRITE = 0x01
 OP_READ = 0x02
 OP_DSM = 0x09
+OP_APPEND = 0x7d
 
 # FEMU writes a range only for these opcodes (femu-iotrace.c)
-RANGED = (0x01, 0x02, 0x05, 0x08, 0x0c)
+RANGED = (0x01, 0x02, 0x05, 0x08, 0x0c, 0x7d)
 U64 = (1 << 64) - 1
 U32 = (1 << 32) - 1
 
@@ -200,9 +203,11 @@ def replay_action(r):
         return None, "failed"
     if r.opcode == OP_FLUSH:
         return "sync", None
-    if r.opcode in (OP_READ, OP_WRITE):
+    if r.opcode in (OP_READ, OP_WRITE, OP_APPEND):
         if r.slba is None:
             return None, OPCODES[r.opcode] + "-no-range"
+        if r.opcode == OP_APPEND:
+            return "write", None
         return OPCODES[r.opcode], None
     return None, opname(r.opcode)
 
@@ -217,7 +222,7 @@ def convert(rows, block_size, filename, device_size=None,
     t0 = rows[0].t_submit
     out = ["fio version 3 iolog", "0 %s add" % filename,
            "0 %s open" % filename]
-    done = {"read": 0, "write": 0, "sync": 0}
+    done = {"read": 0, "write": 0, "sync": 0, "append": 0}
     skipped = {}
     usec = 0
     for r in rows:
@@ -246,6 +251,8 @@ def convert(rows, block_size, filename, device_size=None,
         out.append("%d %s %s %d %d" % (usec, filename, action, offset,
                                        length))
         done[action] += 1
+        if r.opcode == OP_APPEND:
+            done["append"] += 1
     out.append("%d %s close" % (usec, filename))
     return out, done, skipped
 
@@ -358,27 +365,32 @@ def report(rows, nsid, block_size, nbuckets, burst_gap):
     ranged = {OP_READ: 0, OP_WRITE: 0}
     seq = {OP_READ: 0, OP_WRITE: 0}
     failed = 0
+    appends = 0
     for r in rows:
-        kind = kinds.get(r.opcode, "other")
-        if r.opcode in nbytes and r.slba is None:
-            # not a Read or Write of the NVM command set
+        # a Zone Append writes, at the LBA where it landed
+        op = OP_WRITE if r.opcode == OP_APPEND else r.opcode
+        kind = kinds.get(op, "other")
+        if op in nbytes and r.slba is None:
+            # not a Read or Write of the NVM or zoned command set
             kind = "other"
         mix[kind] += 1
         queues.setdefault(r.sqid, []).append(r.t_submit)
         if r.status != 0:
             failed += 1
             continue
-        if r.opcode not in nbytes or r.slba is None:
+        if op not in nbytes or r.slba is None:
             continue
+        if r.opcode == OP_APPEND:
+            appends += 1
         length = r.nlb * block_size
-        nbytes[r.opcode] += length
+        nbytes[op] += length
         pair = sizes.setdefault(size_bucket(length), {OP_READ: 0,
                                                       OP_WRITE: 0})
-        pair[r.opcode] += 1
-        ranged[r.opcode] += 1
-        stream = (r.sqid, r.opcode)
+        pair[op] += 1
+        ranged[op] += 1
+        stream = (r.sqid, op)
         if last_end.get(stream) == r.slba:
-            seq[r.opcode] += 1
+            seq[op] += 1
         last_end[stream] = r.slba + r.nlb
 
     out.append("mix (kind, commands, share):")
@@ -386,6 +398,8 @@ def report(rows, nsid, block_size, nbuckets, burst_gap):
         out.append("  %-5s %d %s" % (kind, mix[kind],
                                      percent(mix[kind], len(rows))))
     out.append("  failed %d" % failed)
+    if appends:
+        out.append("  zone appends in write %d" % appends)
     out.append("  bytes read %d written %d" % (nbytes[OP_READ],
                                                nbytes[OP_WRITE]))
 
@@ -437,7 +451,10 @@ def report(rows, nsid, block_size, nbuckets, burst_gap):
 
 def replay_summary(done, skipped):
     out = ["replay: %d commands (read %d, write %d, sync %d)"
-           % (sum(done.values()), done["read"], done["write"], done["sync"])]
+           % (done["read"] + done["write"] + done["sync"], done["read"],
+              done["write"], done["sync"])]
+    if done.get("append"):
+        out.append("  zone appends replayed as write %d" % done["append"])
     if skipped:
         out.append("not replayed: " + ", ".join(
             "%s %d" % (why, skipped[why]) for why in sorted(skipped)))
@@ -785,6 +802,52 @@ def self_test():
         assert "2 commands are not replayed" in e.text, str(e)
     else:
         raise AssertionError("not caught: --strict")
+
+    # 9. Zone Append: a landed range replays as a write and counts in the
+    # write bytes, sizes and sequential share; a failed append and an
+    # append with no range (an old trace) are not replayed
+    zap = trace_lines(["10,20,1,1,1,0x7d,%d,8,0x0" % (1 << 33),
+                       "30,40,1,2,1,0x7d,%d,8,0x0" % ((1 << 33) + 8),
+                       "50,60,1,3,1,0x7d,4096,8,0x4280",
+                       "70,80,1,4,1,0x7d,,,0x7"])
+    big = dict(base, device_size=None)
+    text, iolog = run(zap, ns(**dict(big, iolog="x")))
+    assert [io[1:] for io in parse_iolog(iolog)] == \
+        [("write", (1 << 33) * 512, 4096),
+         ("write", ((1 << 33) + 8) * 512, 4096)], iolog
+    assert "  write 3 75.0%" in text and "  other 1 25.0%" in text, text
+    assert "  bytes read 0 written 8192" in text, text
+    assert "  zone appends in write 2" in text, text
+    assert "  4096 0 2" in text, text
+    assert text[-4].endswith("write 1 of 2 50.0%"), text[-4]
+    assert text[-3] == "replay: 2 commands (read 0, write 2, sync 0)", text
+    assert text[-2] == "  zone appends replayed as write 2", text[-2]
+    assert text[-1] == ("not replayed: failed 2"), text[-1]
+    old = trace_lines(["10,20,1,1,1,0x7d,,,0x0"])
+    text, _ = run(old, ns(**base))
+    assert text[-1] == "not replayed: zone-append-no-range 1", text[-1]
+    try:
+        run(old, ns(**dict(base, strict=True)))
+    except TraceError as e:
+        assert "1 commands are not replayed" in e.text, str(e)
+    else:
+        raise AssertionError("not caught: an append with no range, --strict")
+    # a Write and an append share one sequential stream per queue; a
+    # contiguous command on another queue is not sequential
+    mixed = trace_lines(["10,20,1,1,1,0x01,0,8,0x0",
+                         "30,40,1,2,1,0x7d,8,8,0x0",
+                         "50,60,2,1,1,0x7d,16,8,0x0",
+                         "70,80,1,3,1,0x01,16,8,0x0"])
+    text, _ = run(mixed, ns(**dict(base, strict=True)))
+    assert text[-4].endswith("write 2 of 4 50.0%"), text[-4]
+    assert text[-1] == "not replayed: none", text[-1]
+    # a range on a Zone Management command is still refused
+    try:
+        run(trace_lines(["10,20,1,1,1,0x79,0,8,0x0"]), ns(**base))
+    except TraceError as e:
+        assert "a range on opcode 0x79" in e.text, str(e)
+    else:
+        raise AssertionError("not caught: a range on opcode 0x79")
 
     print("femu-trace2fio: self-test passed (%d planted faults caught)"
           % len(faults))
