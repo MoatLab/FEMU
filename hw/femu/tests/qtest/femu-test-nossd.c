@@ -12652,6 +12652,8 @@ void femu_test_fused_lock(void *obj, void *data, QGuestAllocator *alloc)
         early = femu_rwa_cq_ready(&c, &q2);
     }
     g_assert_cmpuint(femu_rwa_get(qts, "x-copy-held"), ==, 1);
+    g_assert_false(early);
+    g_assert_cmpuint(femu_rwa_get(qts, "x-range-waits"), >, waits);
     femu_rwa_hold(qts, 0);
     femu_fused_collect(&c, &q1, 2, first, st);
     femu_fused_expect("held pair", st, NVME_SUCCESS, NVME_SUCCESS);
@@ -12664,5 +12666,147 @@ void femu_test_fused_lock(void *obj, void *data, QGuestAllocator *alloc)
     }
     femu_queue_free(&c, &q2);
     femu_queue_free(&c, &q1);
+    femu_disable(&c);
+}
+
+static void femu_fused_ftl_hold(QTestState *qts, bool hold)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/fcl',"
+                           "'property':'x-ftl-hold','value':%d}}", hold);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+static uint32_t femu_fused_inflight(QTestState *qts)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/fcl',"
+                           "'property':'x-fused-inflight'}}");
+    uint32_t v;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    return v;
+}
+
+/*
+ * Stage the pair Compare(@cmp) and Write(@wr) at 0 while the FTL is held,
+ * and wait until the fetch took it (x-fused-inflight is 1).
+ */
+static uint16_t femu_fused_stage_held(FemuCtrlState *c, FemuQueue *q,
+                                      uint64_t cmp, uint64_t wr)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    NvmeCmd cmds[2];
+    uint16_t first = c->cid;
+    int i;
+
+    femu_fused_ftl_hold(qts, true);
+    femu_fused_cmd(&cmds[0], NVME_CMD_COMPARE, FUSED_FIRST, 0, cmp,
+                   FUSED_BS / 512 - 1, 0);
+    femu_fused_cmd(&cmds[1], NVME_CMD_WRITE, FUSED_SECOND, 0, wr,
+                   FUSED_BS / 512 - 1, 0);
+    femu_zap_queue(c, q, &cmds[0]);
+    femu_zap_queue(c, q, &cmds[1]);
+    femu_zap_ring(c, q);
+    for (i = 0; i < FEMU_POLL_LIMIT_MS && femu_fused_inflight(qts) != 1;
+         i++) {
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(femu_fused_inflight(qts), ==, 1);
+    return first;
+}
+
+/* Delete queue @q: the SQ, a check that its CQ got no entry, the CQ */
+static void femu_fused_delete_queue(FemuCtrlState *c, FemuQueue *q)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    size_t len = ZAP_QDEPTH * sizeof(NvmeCqe);
+    g_autofree uint8_t *before = g_malloc(len);
+    g_autofree uint8_t *after = g_malloc(len);
+    NvmeCmd cmd;
+
+    qtest_memread(qts, q->cq_addr, before, len);
+    g_assert_cmphex(FEMU_SC(femu_delete_sq(c, q->qid)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_fused_inflight(qts), ==, 0);
+    femu_fused_ftl_hold(qts, false);
+    g_usleep(20 * 1000);
+    qtest_memread(qts, q->cq_addr, after, len);
+    g_assert_cmpint(memcmp(before, after, len), ==, 0);
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_DELETE_CQ;
+    cmd.cdw10 = cpu_to_le32(q->qid);
+    g_assert_cmphex(FEMU_SC(femu_admin(c, &cmd)), ==, NVME_SUCCESS);
+}
+
+/*
+ * A bbssd pair waits for the FTL thread with its Write staged. A Sanitize
+ * or a Format ends it at once: the Compare with the status of the
+ * operation, the Write with 09h. The blocks read as zeros, so a pair that
+ * ran anyway would match and land. A deleted SQ drops its pair with no
+ * completion. 17 drops in a row must give back each of the 16 pair slots,
+ * or the last pair never runs.
+ */
+void femu_test_fused_life(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q;
+    uint64_t buf[3];
+    uint16_t first;
+    uint16_t st[2];
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q, 1);
+    for (i = 0; i < 3; i++) {
+        buf[i] = guest_alloc(alloc, FUSED_BS);
+    }
+    qtest_memset(qts, buf[0], 0, FUSED_BS);
+    qtest_memset(qts, buf[1], 0xb1, FUSED_BS);
+
+    /* Sanitize (Block Erase, in the background): the pair ends at start */
+    first = femu_fused_stage_held(&c, &q, buf[0], buf[1]);
+    g_assert_cmphex(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_fused_inflight(qts), ==, 0);
+    femu_fused_ftl_hold(qts, false);
+    femu_fused_collect(&c, &q, 2, first, st);
+    femu_fused_expect("pair at Sanitize", st, 0x01d,
+                      FUSED_FAILED);
+    /* sanitize_ms runs on the virtual clock, which qtest steps */
+    g_assert_cmphex(femu_sstat(&c, buf[2], NULL) & 0x7, ==, 0x2);
+    qtest_clock_step(qts, 450 * 1000 * 1000LL);
+    g_assert_cmphex(femu_sstat(&c, buf[2], NULL) & 0x7, ==, 0x1);
+    femu_pair_reads(&c, &q, buf[2], 0);
+
+    /* Format */
+    first = femu_fused_stage_held(&c, &q, buf[0], buf[1]);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    g_assert_cmpuint(femu_fused_inflight(qts), ==, 0);
+    femu_fused_ftl_hold(qts, false);
+    femu_fused_collect(&c, &q, 2, first, st);
+    femu_fused_expect("pair at Format", st, 0x084, FUSED_FAILED);
+    femu_pair_reads(&c, &q, buf[2], 0);
+
+    /* Delete I/O SQ: the pair goes with its queue, with no completion */
+    for (i = 0; i <= 16; i++) {
+        femu_fused_stage_held(&c, &q, buf[0], buf[1]);
+        femu_fused_delete_queue(&c, &q);
+        femu_queue_free(&c, &q);
+        femu_zap_create_queue(&c, &q, 1);
+    }
+    femu_pair_reads(&c, &q, buf[2], 0);
+    femu_fused_pair(&c, &q, 0, buf[0], buf[1], FUSED_BS / 512 - 1, 0, st);
+    femu_fused_expect("pair after 17 drops", st, NVME_SUCCESS, NVME_SUCCESS);
+    femu_pair_reads(&c, &q, buf[2], 0xb1);
+
+    for (i = 0; i < 3; i++) {
+        guest_free(alloc, buf[i]);
+    }
+    femu_queue_free(&c, &q);
     femu_disable(&c);
 }

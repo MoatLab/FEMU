@@ -201,6 +201,7 @@ uint16_t femu_sanns_cmd(FemuCtrl *n, NvmeCmd *cmd)
     resume = nvme_pause_pollers(n);
     qatomic_set(&ns->san_busy, true);
     nvme_mark_ns_queued(n, nsid);
+    femu_fused_retire(n, ns, NVME_SANITIZE_NS_IN_PROGRESS);
     nvme_retire_ns_requests_status(n, ns, NVME_SANITIZE_NS_IN_PROGRESS);
     femu_sanns_erase(n, ns);
     ns->san_sstat = 0x2;

@@ -1147,6 +1147,13 @@ static void femu_register_nodes(void)
     });
     qos_add_test("fused-cw-refused", "femu", femu_test_fused_cw_refused,
                  NULL);
+    qos_add_test("fused-cw-life", "femu", femu_test_fused_life,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=fcl,femu_mode=1,devsz_mb=8,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,fused_cw=on,sanitize_ops=on,sanitize_ms=300"
+    });
     qos_add_test("fused-cw-lock", "femu", femu_test_fused_lock,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

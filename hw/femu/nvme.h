@@ -1193,6 +1193,7 @@ enum NvmeStatusCodes {
 
     /* key-value command set */
     NVME_KV_FORMAT_IN_PROGRESS  = 0x0084,
+    NVME_FORMAT_IN_PROGRESS     = 0x0084,
     NVME_KV_INVALID_VALUE_SIZE  = 0x0085,
     NVME_KV_INVALID_KEY_SIZE    = 0x0086,
     NVME_KV_KEY_NOT_EXIST       = 0x0087,
@@ -2079,6 +2080,14 @@ typedef struct NvmeRequest {
     struct NvmeRequest      *fused;
     uint8_t                 *fused_cmp;
     uint8_t                 *fused_wr;
+    /* the pair ran: a later retirement keeps its status */
+    bool                    fused_ran;
+    /* the Write's error entry waits for its final status */
+    bool                    fused_log;
+    /* where a staging fault is in the command, 0 if none */
+    uint16_t                fused_eloc;
+    /* the bytes of the pair, fixed at staging */
+    uint32_t                fused_bytes;
     uint16_t                status;
     uint64_t                slba;
     uint16_t                is_write;
@@ -4103,6 +4112,8 @@ uint16_t femu_fused_check_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeNamespace **nsp);
 uint16_t femu_fused_stage(FemuCtrl *n, NvmeRequest *c, NvmeRequest *w);
 int64_t femu_fused_run(FemuCtrl *n, NvmeRequest *c, bool ftl);
 NvmeRequest *femu_fused_drop(FemuCtrl *n, NvmeRequest *c);
+int femu_fused_retire(FemuCtrl *n, NvmeNamespace *ns, uint16_t status);
+void femu_fused_account(FemuCtrl *n, int index_poller, NvmeRequest *w);
 void femu_fused_log(FemuCtrl *n, NvmeRequest *req);
 void femu_cancel_init(FemuCtrl *n);
 void femu_cancel_exit(FemuCtrl *n);

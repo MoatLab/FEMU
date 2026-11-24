@@ -767,6 +767,11 @@ void nvme_drain_sq(FemuCtrl *n, NvmeSQueue *sq)
                 }
                 if (req->sq != sq) {
                     kept[nkept++] = req;
+                    continue;
+                }
+                /* a pair that did not run: drop its staging and credits */
+                if (req->fused) {
+                    femu_fused_drop(n, req);
                 } else if (r == 0) {
                     /* its data is in the backend; the FTL never saw it */
                     n->persist_torn = true;
@@ -832,6 +837,58 @@ static void nvme_retire_ns_request(NvmeRequest *req, bool completed,
     req->cancel = false;
 }
 
+/**
+ * femu_fused_retire - end the fused pairs that wait for the FTL thread
+ * @n: the controller, with its dataplane paused
+ * @ns: only the pairs on this namespace; NULL for all of them
+ * @status: the status of each Compare
+ *
+ * A pair waits in to_ftl as its Compare, which carries the Write. Neither
+ * ran, so nothing of the pair is in the backend. The Compare completes
+ * with @status and its Write with 09h (NVM 1.2, 2.1.3.1). The staged bytes
+ * and the Write's credits go back. A Format or Sanitize calls this before
+ * it changes blocks, so no staged Write lands after it. Returns the number
+ * of pairs.
+ */
+int femu_fused_retire(FemuCtrl *n, NvmeNamespace *ns, uint16_t status)
+{
+    NvmeRequest *req;
+    NvmeRequest *w;
+    size_t count;
+    size_t i;
+    int nr = 0;
+    int p;
+    int rc;
+
+    assert(!n->dataplane_started);
+    if (!n->fused_cw || !n->to_ftl || !qatomic_read(&n->fused_inflight)) {
+        return 0;
+    }
+    for (p = 1; p <= n->nr_pollers; p++) {
+        if (!n->to_ftl[p]) {
+            continue;
+        }
+        /* one rotation keeps the order of the others */
+        count = femu_ring_count(n->to_ftl[p]);
+        for (i = 0; i < count; i++) {
+            rc = femu_ring_dequeue(n->to_ftl[p], (void **)&req, 1);
+            assert(rc == 1);
+            if (!req->fused || (ns && req->ns != ns)) {
+                rc = femu_ring_enqueue(n->to_ftl[p], (void **)&req, 1);
+                assert(rc == 1);
+                continue;
+            }
+            w = femu_fused_drop(n, req);
+            nvme_retire_ns_request(req, false, status);
+            nvme_retire_ns_request(w, false, NVME_CMD_ABORT_FAILED_FUSE);
+            QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
+            QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], w, entry);
+            nr++;
+        }
+    }
+    return nr;
+}
+
 /*
  * The caller holds the BQL and keeps the dataplane paused until namespace
  * teardown is complete. Retire processing, not CQ delivery: the host may leave
@@ -858,6 +915,7 @@ void nvme_retire_ns_requests_status(FemuCtrl *n, NvmeNamespace *ns,
     assert(!n->dataplane_started);
     assert(ns);
     femu_cancel_retire_ns(n, ns, status);
+    femu_fused_retire(n, ns, status);
     for (p = 1; p <= n->nr_pollers; p++) {
         struct rte_ring *rings[2];
         int r;
@@ -883,11 +941,17 @@ void nvme_retire_ns_requests_status(FemuCtrl *n, NvmeNamespace *ns,
                 assert(rc == 1);
                 if (req->ns == ns) {
                     bool completed = req->status != NVME_SUCCESS ||
+                        req->fused_ran ||
                         ((!n->use_ftl_thread || r == 1) &&
                          !n->pcie_enabled && !n->fw_enabled &&
                          !n->crypto_mbps &&
                          req->expire_time <= femu_dev_now(n));
 
+                    /* a bbssd fused Write that ran: counted on return */
+                    if (r == 1 && req->fused_ran &&
+                        req->cmd.fuse == FEMU_FUSE_SECOND) {
+                        femu_fused_account(n, p, req);
+                    }
                     nvme_retire_ns_request(req, completed, status);
                     QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);
                 } else {
@@ -905,6 +969,7 @@ void nvme_retire_ns_requests_status(FemuCtrl *n, NvmeNamespace *ns,
         while ((req = pqueue_pop(n->pq[p]))) {
             if (req->ns == ns) {
                 nvme_retire_ns_request(req, req->status != NVME_SUCCESS ||
+                                        req->fused_ran ||
                                         req->expire_time <=
                                         femu_dev_now(n), status);
                 QTAILQ_INSERT_TAIL(&n->cpl_backlog[p], req, entry);

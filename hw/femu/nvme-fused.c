@@ -185,6 +185,7 @@ uint16_t femu_fused_stage(FemuCtrl *n, NvmeRequest *c, NvmeRequest *w)
     c->nlb = w->nlb = nlb;
     c->is_write = 0;
     w->is_write = 1;
+    w->fused_bytes = len;
     c->fused_cmp = g_try_malloc(len);
     if (!c->fused_cmp) {
         return NVME_INTERNAL_DEV_ERROR;
@@ -192,6 +193,7 @@ uint16_t femu_fused_stage(FemuCtrl *n, NvmeRequest *c, NvmeRequest *w)
     status = dma_write_cmd_exact(n, &c->cmd, c->fused_cmp, len);
     if (status) {
         g_clear_pointer(&c->fused_cmp, g_free);
+        c->fused_eloc = offsetof(NvmeRwCmd, prp1);
         return status;
     }
     if (w->status != NVME_SUCCESS) {
@@ -206,6 +208,7 @@ uint16_t femu_fused_stage(FemuCtrl *n, NvmeRequest *c, NvmeRequest *w)
     if (status) {
         g_clear_pointer(&w->fused_wr, g_free);
         w->status = status;
+        w->fused_eloc = offsetof(NvmeRwCmd, prp1);
     }
     return NVME_SUCCESS;
 }
@@ -224,22 +227,74 @@ void femu_fused_log(FemuCtrl *n, NvmeRequest *req)
     uint16_t sc = req->status & ~NVME_DNR;
     uint16_t off;
 
-    switch (sc) {
+    switch (req->fused_eloc ? 0xffff : sc) {
+    case 0xffff:
+        /* a fault in the data, found at staging */
+        off = req->fused_eloc;
+        break;
+    case NVME_SUCCESS:
+    case NVME_CMD_ABORT_FAILED_FUSE:
+    case NVME_CMD_ABORT_MISSING_FUSE:
+        /* the peer's entry names the fault */
+        return;
     case NVME_LBA_RANGE:
+    case NVME_ATOMIC_WRITE_UNIT_EXCEEDED:
         off = offsetof(NvmeRwCmd, nlb);
         break;
-    case NVME_INVALID_FIELD:
     case NVME_INVALID_NSID:
-    case NVME_INVALID_OPCODE:
-        off = sc == NVME_INVALID_NSID ? offsetof(NvmeRwCmd, nsid) :
-              offsetof(NvmeRwCmd, opcode);
+        off = offsetof(NvmeRwCmd, nsid);
+        break;
+    case NVME_INVALID_FIELD:
+        /* a Compare with FUA, else the pair's fields disagree */
+        off = req->cmd.opcode == NVME_CMD_COMPARE &&
+              (le16_to_cpu(rw->control) & NVME_RW_FUA) ?
+              offsetof(NvmeRwCmd, control) : offsetof(NvmeRwCmd, opcode);
+        break;
+    case NVME_INVALID_SGL_SEG_DESCR:
+    case NVME_DATA_SGL_LEN_INVALID:
+    case NVME_INVALID_PRP_OFFSET:
+    case NVME_INVALID_NUM_SGL_DESCRS:
+    case NVME_SGL_DESCR_TYPE_INVALID:
+    case NVME_DATA_TRAS_ERROR:
+        off = offsetof(NvmeRwCmd, prp1);
         break;
     default:
-        return;
+        off = offsetof(NvmeRwCmd, opcode);
+        break;
     }
     nvme_set_error_page(n, req->sq->sqid, req->cqe.cid, sc, off,
                         le64_to_cpu(rw->slba), le32_to_cpu(rw->nsid),
                         req->cmd.opcode, req->ns ? req->ns->csi : 0);
+}
+
+/**
+ * femu_fused_account - settle a fused Write that ran
+ * @n: the controller
+ * @index_poller: the poller that owns @w's queue, or a caller that holds
+ *                the pollers paused
+ * @w: the Write
+ *
+ * Writes the Write's error entry, now that its status is final, and adds
+ * a Write that succeeded to the host write totals. Only the owner writes
+ * these counters, as for a Write alone. A bbssd Write is settled when it
+ * comes back from the FTL thread, or when a retirement takes it from
+ * to_poller before that. The bytes are those of staging, as a Format may
+ * change the LBA size meanwhile.
+ */
+void femu_fused_account(FemuCtrl *n, int index_poller, NvmeRequest *w)
+{
+    FemuPollerCtr *ctr = &n->poller_ctr[index_poller];
+
+    if (w->fused_log) {
+        w->fused_log = false;
+        femu_fused_log(n, w);
+    }
+    if (w->status != NVME_SUCCESS) {
+        return;
+    }
+    qatomic_set(&ctr->nr_host_wr_cmds, ctr->nr_host_wr_cmds + 1);
+    qatomic_set(&ctr->nr_host_wr_bytes,
+                ctr->nr_host_wr_bytes + w->fused_bytes);
 }
 
 /**
@@ -330,6 +385,8 @@ int64_t femu_fused_run(FemuCtrl *n, NvmeRequest *c, bool ftl)
         w->expire_time = MAX(w->expire_time, c->stime + lat_c);
     }
     w->reqlat = w->expire_time - w->t_submit;
+    c->fused_ran = true;
+    w->fused_ran = true;
     femu_fused_drop(n, c);
     return lat_c;
 }

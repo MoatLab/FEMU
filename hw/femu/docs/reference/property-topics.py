@@ -42,6 +42,7 @@ DEVICES = [
                       "x-rain-fail",
                       "x-backend-size",
                       "x-query-delay-ms", "x-range-waits",
+                      "x-fused-inflight",
                       "x-rber-u", "x-ring-slots", "x-save-hold", "x-sdc",
                       "x-stage-hold-ms",
                       "x-stream-test", "x-tier-check", "x-tier-fold-stop",

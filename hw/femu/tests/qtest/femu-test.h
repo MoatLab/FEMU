@@ -806,6 +806,7 @@ void femu_test_fused_cw(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_fused_cw_refused(void *obj, void *data,
                                 QGuestAllocator *alloc);
 void femu_test_fused_lock(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fused_life(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_crypto(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_fw_cost(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_shared_cq(void *obj, void *data, QGuestAllocator *alloc);

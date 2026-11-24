@@ -4669,6 +4669,8 @@ static uint16_t nvme_sanitize_finish(FemuCtrl *n)
     }
 
     resume = nvme_pause_pollers(n);
+    /* a staged fused Write must not land after the erase */
+    femu_fused_retire(n, NULL, NVME_SANITIZE_IN_PROGRESS);
     /* buffered writes reach the media first, so they are sanitized too */
     if (n->power_loss) {
         uint16_t status = bbssd_flush_all(n);
@@ -4726,6 +4728,7 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
     bool emvs = dw10 & (1 << 10);
     uint8_t ev[16] = { 0 };
     bool resume = false;
+    bool pause;
 
     if (!nvme_can_sanitize(n)) {
         return NVME_INVALID_OPCODE | NVME_DNR;
@@ -4809,11 +4812,17 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
         }
         return status;
     }
-    /* in the background: SSTAT 010b, I/O and most admin commands refused */
+    /*
+     * In the background: SSTAT 010b, I/O and most admin commands refused.
+     * A fused pair that waits for the FTL ends first (8.1.26.5).
+     */
+    pause = nvme_pause_pollers(n);
+    femu_fused_retire(n, NULL, NVME_SANITIZE_IN_PROGRESS);
     sanitize->start_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     qatomic_set(&sanitize->sstat,
                 (qatomic_read(&sanitize->sstat) & NVME_SSTAT_GDE) | 0x2);
     qatomic_set(&sanitize->active, true);
+    nvme_resume_pollers(n, pause);
     timer_mod(n->san_timer, sanitize->start_ms + n->sanitize_ms);
     if (n->opal_tper) {
         femu_opal_loud(n, resume);
@@ -5726,6 +5735,13 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
     } else {
         resume = nvme_pause_pollers(n);
     }
+
+    /*
+     * A staged fused Write must not land in the new format. NULL names all
+     * namespaces, so a detached one is passed as allocated.
+     */
+    femu_fused_retire(n, nsid == 0xffffffff ? NULL :
+                      &n->namespaces[nsid - 1], NVME_FORMAT_IN_PROGRESS);
 
     /*
      * A write admitted against the end-of-life reserve was costed in the LBA

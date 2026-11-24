@@ -522,9 +522,7 @@ static void nvme_handoff_failed(FemuCtrl *n, NvmeRequest *req,
 
         w->reqlat = 0;
         w->expire_time = MIN(w->expire_time, now);
-        if (w->status == NVME_SUCCESS) {
-            w->status = NVME_CMD_ABORT_FAILED_FUSE;
-        }
+        w->status = NVME_CMD_ABORT_FAILED_FUSE;
         QTAILQ_INSERT_TAIL(&n->cpl_backlog[index_poller], w, entry);
     }
     nvme_req_release_ranges(req);
@@ -615,6 +613,10 @@ static inline void nvme_req_start(FemuCtrl *n, NvmeRequest *req,
 
     req->write_data = NULL;
     req->fused = NULL;
+    req->fused_ran = false;
+    req->fused_log = false;
+    req->fused_eloc = 0;
+    req->fused_bytes = 0;
 }
 
 /*
@@ -692,23 +694,6 @@ static inline void nvme_req_handoff(FemuCtrl *n, NvmeSQueue *sq,
             nvme_handoff_failed(n, req, index_poller);
         }
     }
-}
-
-/*
- * The host write totals of a fused Write that ran, on the poller that owns
- * its queue, as for a Write alone (query-stats reads them).
- */
-static void nvme_count_write(FemuCtrl *n, int index_poller, NvmeRequest *w)
-{
-    FemuPollerCtr *ctr = &n->poller_ctr[index_poller];
-
-    if (w->status != NVME_SUCCESS || !w->ns) {
-        return;
-    }
-    qatomic_set(&ctr->nr_host_wr_cmds, ctr->nr_host_wr_cmds + 1);
-    qatomic_set(&ctr->nr_host_wr_bytes,
-                ctr->nr_host_wr_bytes +
-                ((uint64_t)w->nlb << w->ns->lbaf.lbads));
 }
 
 /* the command in slot @slot of @sq, as the fetch reads it */
@@ -867,11 +852,12 @@ static uint32_t nvme_fused_take(FemuCtrl *n, NvmeSQueue *sq, NvmeCmd *first,
         c->status = NVME_SUCCESS;
         sc = femu_fused_stage(n, c, w);
         if (!sc) {
-            femu_fused_log(n, w);
+            /* logged once its status is final (femu_fused_account()) */
+            w->fused_log = w->status != NVME_SUCCESS;
             c->fused = w;
             if (NS_NOSSD(c->ns)) {
                 femu_fused_run(n, c, false);
-                nvme_count_write(n, index_poller, w);
+                femu_fused_account(n, index_poller, w);
                 nvme_req_handoff(n, sq, c, index_poller, inline_mode,
                                  did_isr);
                 nvme_req_handoff(n, sq, w, index_poller, inline_mode,
@@ -1363,10 +1349,10 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         if (n->stage_sets) {
             req->t_return = femu_io_now(n);
         }
-        /* a bbssd fused Write ran on the FTL thread: count it here */
+        /* a bbssd fused Write ran on the FTL thread: settle it here */
         if (unlikely(n->fused_cw) && n->use_ftl_thread &&
             req->cmd.fuse == FEMU_FUSE_SECOND) {
-            nvme_count_write(n, index_poller, req);
+            femu_fused_account(n, index_poller, req);
         }
 
         /*

@@ -1081,9 +1081,26 @@ the blocks sees a state between the two.
   model or `oncs` without Compare. Each of these keeps a second copy of
   block data, ends commands by another path, or times the Write data
   before the media.
+- A bbssd pair waits in `to_ftl` until the FTL thread runs it. A Format,
+  a Sanitize or a Sanitize Namespace first ends each waiting pair, so no
+  staged Write lands after the change. The Compare gets the status of
+  that operation and the Write gets 09h. A namespace retirement ends it
+  the same way with the retirement status. A deleted SQ drops it with no
+  completion. A pair that ran keeps its status.
+
+```text
+ to_ftl: [C+W] --FTL--> ran: C, W keep their status
+            \--Format-------------> C 84h, W 09h, staging freed
+            \--Sanitize (start)---> C 1Dh, W 09h
+            \--Sanitize Namespace-> C 2Ch, W 09h
+             \--Delete I/O SQ-----> dropped, staging and slot freed
+```
+
 - The tests `fused-cw-nossd`, `fused-cw-bbssd` and `fused-cw-refused`
   cover the cases above. `fused-cw-lock` holds a pair in its range lock
   (`x-copy-hold`) and checks that a Write on another poller waits.
+  `fused-cw-life` holds the FTL thread and checks Sanitize, Format and SQ
+  deletion.
 
 ### Asynchronous events
 

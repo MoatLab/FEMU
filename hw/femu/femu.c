@@ -7611,6 +7611,16 @@ static void femu_test_range_waits_get(Object *obj, Visitor *v,
     visit_type_uint64(v, name, &value, errp);
 }
 
+/* the fused pairs staged and not yet run or dropped */
+static void femu_test_fused_inflight_get(Object *obj, Visitor *v,
+                                         const char *name, void *opaque,
+                                         Error **errp)
+{
+    uint32_t value = qatomic_read(&FEMU(obj)->fused_inflight);
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
 /* the committed key number of the Global range; 0 without x-opal */
 static void femu_test_opal_gkey_get(Object *obj, Visitor *v,
                                     const char *name, void *opaque,
@@ -7886,6 +7896,8 @@ static void femu_instance_init(Object *obj)
                             femu_test_copy_held_get, NULL, NULL, NULL);
         object_property_add(obj, "x-range-waits", "uint64",
                             femu_test_range_waits_get, NULL, NULL, NULL);
+        object_property_add(obj, "x-fused-inflight", "uint32",
+                            femu_test_fused_inflight_get, NULL, NULL, NULL);
         object_property_add(obj, "x-backend-size", "uint64",
                             femu_test_backend_size_get, NULL, NULL, NULL);
         object_property_add(obj, "x-opal-gkey", "uint64",
