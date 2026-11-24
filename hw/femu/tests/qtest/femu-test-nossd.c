@@ -9044,6 +9044,275 @@ void femu_test_checkpoint_reuse_ftl(void *obj, void *data,
     rmdir(dir);
 }
 
+/* femu-save-data of device pd with background=true; an error or NULL */
+static char *femu_save_data_bg(QTestState *qts, const char *file)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'femu-save-data','arguments':"
+                           "{'path':'/machine/peripheral/pd','file':%s,"
+                           "'background':true}}", file);
+    char *err = NULL;
+
+    if (qdict_haskey(rsp, "error")) {
+        err = g_strdup(qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_test_message("femu-save-data background: %s", err);
+    }
+    qobject_unref(rsp);
+    return err;
+}
+
+static void femu_save_hold(QTestState *qts, bool hold)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/pd',"
+                             "'property':'x-save-hold','value':%i}}", hold);
+}
+
+/* the LSI generation, and the log length in @len */
+static uint16_t femu_save_lsi(FemuCtrlState *c, uint64_t buf, uint32_t *len)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmphex(femu_lsi_read(c, buf, 4096, 0, false), ==, NVME_SUCCESS);
+    *len = qtest_readl(qts, buf);
+    return qtest_readw(qts, buf + 14);
+}
+
+static void femu_save_fails(char *err, const char *want)
+{
+    g_assert_nonnull(err);
+    g_assert_nonnull(strstr(err, want));
+    g_free(err);
+}
+
+/*
+ * femu-save-data background=true copies the state with the I/O paused and
+ * writes it in a thread. x-save-hold keeps the writer after the copy, so
+ * the test changes the device in between:
+ *   before:  A at pages 0 and 1, LBA 24 and 32 uncorrectable, LSI read
+ *   held:    B at pages 0 and 3 (LBA 24), page 1 deallocated, LBA 48
+ *            uncorrectable and LSI read; I/O and query-femu still work
+ * The checkpoint must hold the state before: counters (read first), LSI
+ * generation and length, data, allocation (DULBE) and uncorrectable blocks.
+ * Then a held save and an unplug: the unplug lets the writer finish.
+ */
+void femu_test_save_background(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *tmp = g_dir_make_tmp("femu-save-bg-XXXXXX", NULL);
+    /* the event names the resolved file */
+    g_autofree char *dir = realpath(tmp, NULL);
+    g_autofree char *d = g_build_filename(dir, "d", NULL);
+    g_autofree char *k = g_build_filename(dir, "k", NULL);
+    g_autofree char *k2 = g_build_filename(dir, "k2", NULL);
+    g_autofree char *wd = g_strdup_printf(",'persist_file':'%s','oncs':415",
+                                          d);
+    g_autofree char *rk = g_strdup_printf(",'persist_file':'%s',"
+                                          "'persist_load_only':true,"
+                                          "'oncs':415", k);
+    g_autofree char *tk = g_strdup_printf(",'io_trace':'%s'", k);
+    g_autofree char *pk = g_strdup_printf(",'pel_file':'%s'", k);
+    g_autofree char *fk = g_strdup_printf(",'femu_mode':1,'persist_file':"
+                                          "'%s'", k);
+    g_autofree char *ctr0 = NULL;
+    g_autofree char *ctr = NULL;
+    g_autofree uint8_t *lsi0 = NULL;
+    g_autofree uint8_t *lsi = NULL;
+    uint64_t buf = guest_alloc(alloc, 8192);
+    FemuCtrlState c = { 0 };
+    QPCIDevice *pdev;
+    QDict *ev;
+    QDict *evd;
+    uint16_t gen;
+    uint16_t gen0;
+    uint32_t len;
+    uint32_t len0;
+
+    femu_ckpt_add_ftl(qts, wd);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c, pdev, alloc);
+    femu_create_io_queues(&c);
+    femu_ns_page(&c, buf, 1, 0, 0x41, true);
+    femu_ns_page(&c, buf, 1, 1, 0x41, true);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE_UNCOR, 24, buf)), ==,
+                    NVME_SUCCESS);
+    femu_save_lsi(&c, buf, &len);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE_UNCOR, 32, buf)), ==,
+                    NVME_SUCCESS);
+    gen0 = femu_save_lsi(&c, buf, &len0);
+    g_assert_cmpuint(gen0, >, 1);
+    g_assert_cmpuint(len0, <=, 4096);
+    lsi0 = g_malloc(len0);
+    qtest_memread(qts, buf, lsi0, len0);
+    ctr0 = femu_ftl_counters(qts);
+
+    /* admission: the own persist_file is refused, and sends no event */
+    femu_save_fails(femu_save_data_bg(qts, d), "own persist_file");
+    femu_save_hold(qts, true);
+    g_assert_null(femu_save_data_bg(qts, k));
+
+    /* held: the device runs, and k is reserved */
+    femu_ns_page(&c, buf, 1, 0, 0x42, true);
+    g_assert_cmphex(femu_dealloc_pages(&c, 1, 1, buf), ==, NVME_SUCCESS);
+    femu_ns_page(&c, buf, 1, 3, 0x42, true);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE_UNCOR, 48, buf)), ==,
+                    NVME_SUCCESS);
+    gen = femu_save_lsi(&c, buf, &len);
+    g_test_message("LSI generation %u length %u, held %u length %u", gen0,
+                   len0, gen, len);
+    g_assert_true(gen != gen0 || len != len0);
+    ctr = femu_ftl_counters(qts);
+    g_assert_cmpstr(ctr, !=, ctr0);
+    femu_save_fails(femu_save_data(qts, "pd", k2), "in progress");
+    femu_save_fails(femu_save_data_bg(qts, k2), "in progress");
+    femu_save_fails(femu_ckpt_try_add(qts, "t", 6, tk), "of a device");
+    femu_save_fails(femu_ckpt_try_add(qts, "t", 6, pk), "background");
+    femu_save_fails(femu_ckpt_try_add(qts, "t", 6, fk), "in use");
+
+    femu_save_hold(qts, false);
+    ev = qtest_qmp_eventwait_ref(qts, "FEMU_SAVE_DATA_DONE");
+    evd = qdict_get_qdict(ev, "data");
+    g_assert_false(qdict_haskey(evd, "error"));
+    g_assert_cmpstr(qdict_get_str(evd, "file"), ==, k);
+    g_assert_cmpstr(qdict_get_str(evd, "path"), ==, "/machine/peripheral/pd");
+    qobject_unref(ev);
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    qpci_unplug_acpi_device_test(qts, "pd", 5);
+    g_free(pdev);
+
+    /* the checkpoint holds the state at the copy */
+    memset(&c, 0, sizeof(c));
+    femu_ckpt_add_ftl(qts, rk);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c, pdev, alloc);
+    femu_create_io_queues(&c);
+    g_free(ctr);
+    ctr = femu_ftl_counters(qts);
+    g_assert_cmpstr(ctr, ==, ctr0);
+    gen = femu_save_lsi(&c, buf, &len);
+    g_assert_cmpuint(gen, ==, gen0);
+    g_assert_cmpuint(len, ==, len0);
+    /* the same descriptors: LBA 24 to 39, and not 48 */
+    lsi = g_malloc(len);
+    qtest_memread(qts, buf, lsi, len);
+    g_assert_cmpmem(lsi, len, lsi0, len0);
+    g_assert_cmpint(FEMU_SC(femu_set_feature(&c, NVME_ERROR_RECOVERY, false,
+                                             1, 1 << 16, NULL)), ==,
+                    NVME_SUCCESS);
+    femu_ns_page(&c, buf, 1, 0, 0x41, false);
+    femu_ns_page(&c, buf, 1, 1, 0x41, false);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 40, buf)), ==,
+                    NVME_DULB);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 24, buf)), ==,
+                    NVME_UNRECOVERED_READ);
+    femu_disable(&c);
+    femu_queue_free(&c, &c.io);
+    qpci_unplug_acpi_device_test(qts, "pd", 5);
+    g_free(pdev);
+
+    /* an unplug of a device with a held save lets the writer finish */
+    memset(&c, 0, sizeof(c));
+    femu_ckpt_add_ftl(qts, wd);
+    femu_save_hold(qts, true);
+    g_assert_null(femu_save_data_bg(qts, k2));
+    qpci_unplug_acpi_device_test(qts, "pd", 5);
+    g_assert_true(g_file_test(k2, G_FILE_TEST_IS_REGULAR));
+
+    for (int i = 0; i < 3; i++) {
+        const char *f = i == 0 ? d : i == 1 ? k : k2;
+        g_autofree char *lock = g_strconcat(f, ".lock", NULL);
+
+        unlink(f);
+        unlink(lock);
+    }
+    rmdir(dir);
+    guest_free(alloc, buf);
+}
+
+/* the FEMU_SAVE_DATA_DONE event of a QEMU with one device; its error */
+static char *femu_save_done(QTestState *qts)
+{
+    QDict *ev = qtest_qmp_eventwait_ref(qts, "FEMU_SAVE_DATA_DONE");
+    QDict *d = qdict_get_qdict(ev, "data");
+    char *err = qdict_haskey(d, "error") ?
+                g_strdup(qdict_get_str(d, "error")) : NULL;
+
+    qobject_unref(ev);
+    return err;
+}
+
+/*
+ * The ends of a background save in a QEMU of its own (NoSSD, no
+ * persist_file, so no exit save of the device):
+ *   a writer that cannot create its file: the command passes, the event
+ *   has an error, and the next save works;
+ *   a held save, then quit: QEMU's end lets the writer finish the file.
+ */
+void femu_test_save_background_end(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    g_autofree char *tmp = g_dir_make_tmp("femu-save-end-XXXXXX", NULL);
+    g_autofree char *dir = realpath(tmp, NULL);
+    g_autofree char *ro = g_build_filename(dir, "ro", NULL);
+    g_autofree char *f = g_build_filename(ro, "f", NULL);
+    g_autofree char *f_lock = g_strconcat(f, ".lock", NULL);
+    g_autofree char *g = g_build_filename(dir, "g", NULL);
+    g_autofree char *g_lock = g_strconcat(g, ".lock", NULL);
+    g_autofree char *h = g_build_filename(dir, "h", NULL);
+    g_autofree char *h_lock = g_strconcat(h, ".lock", NULL);
+    QTestState *qts = qtest_init("-machine pc -nodefaults -device femu,"
+                                 "addr=5,id=q,femu_mode=2,devsz_mb=16");
+    g_autofree char *err = NULL;
+    struct stat st;
+    off_t gsz;
+    int fd;
+
+    if (geteuid() != 0) {
+        g_assert_cmpint(mkdir(ro, 0755), ==, 0);
+        fd = open(f_lock, O_CREAT | O_RDWR, 0644);
+        g_assert_cmpint(fd, >=, 0);
+        close(fd);
+        g_assert_cmpint(chmod(ro, 0555), ==, 0);
+        qtest_qmp_assert_success(qts, "{'execute':'femu-save-data',"
+                                 "'arguments':{'file':%s,'background':true}}",
+                                 f);
+        err = femu_save_done(qts);
+        g_test_message("writer error: %s", err ? err : "(none)");
+        g_assert_nonnull(err);
+        g_assert_nonnull(strstr(err, "cannot create"));
+        g_assert_false(g_file_test(f, G_FILE_TEST_EXISTS));
+        g_assert_cmpint(chmod(ro, 0755), ==, 0);
+    } else {
+        g_test_message("root: the writer error case is skipped");
+    }
+    qtest_qmp_assert_success(qts, "{'execute':'femu-save-data','arguments':"
+                             "{'file':%s,'background':true}}", g);
+    g_free(err);
+    err = femu_save_done(qts);
+    g_assert_null(err);
+    g_assert_cmpint(stat(g, &st), ==, 0);
+    g_assert_cmpuint(st.st_size, >, 16 * MiB);
+    gsz = st.st_size;
+
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/q',"
+                             "'property':'x-save-hold','value':true}}");
+    qtest_qmp_assert_success(qts, "{'execute':'femu-save-data','arguments':"
+                             "{'file':%s,'background':true}}", h);
+    qtest_quit(qts);
+    g_assert_cmpint(stat(h, &st), ==, 0);
+    g_assert_cmpuint(st.st_size, ==, gsz);
+
+    unlink(f_lock);
+    rmdir(ro);
+    unlink(g);
+    unlink(g_lock);
+    unlink(h);
+    unlink(h_lock);
+    rmdir(dir);
+}
+
 void femu_test_pel_file_invalid(void *obj, void *data,
                                 QGuestAllocator *alloc)
 {

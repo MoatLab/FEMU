@@ -1133,6 +1133,9 @@ void femu_test_persist_ftl(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_persist_retention(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_mode_names(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_checkpoint_reuse(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_save_background(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_save_background_end(void *obj, void *data,
+                                   QGuestAllocator *alloc);
 void femu_test_checkpoint_ro_dir(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_streams_gc(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_streams_subpage(void *obj, void *data, QGuestAllocator *alloc);

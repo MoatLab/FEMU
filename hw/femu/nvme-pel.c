@@ -538,6 +538,16 @@ bool femu_pel_init(FemuCtrl *n, Error **errp)
                    "file", n->pel_file);
         return false;
     }
+    /* a background femu-save-data renames its file over the path */
+    if (n->pel_file) {
+        g_autofree char *res = femu_path_resolve(n->pel_file);
+
+        if (res && femu_save_path_busy(res)) {
+            error_setg(errp, "pel_file '%s' is the file of a background "
+                       "femu-save-data", n->pel_file);
+            return false;
+        }
+    }
     pel = g_new0(FemuPel, 1);
 
     pel->cap = PEL_UNITS(n) * PEL_UNIT - PEL_HDR_SIZE;

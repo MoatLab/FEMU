@@ -391,6 +391,20 @@ A device with `persist_file=FILE` locks `FILE.lock` while it runs. A
 `femu-save-data` to FILE locks it during the save. The file is empty
 and stays after unplug and after QEMU exits.
 
+With `background=true`, `femu-save-data` copies the device state with
+the I/O paused, then replies. A thread writes the copy and holds the
+lock until the event `FEMU_SAVE_DATA_DONE`:
+
+```
+ QMP (I/O paused):  copy data, bitmaps, LSI, FTL --> resume --> reply
+ thread:            write FILE.XXXXXX, fsync, rename --> event
+```
+
+- The copy takes host memory of the size of the device.
+- One save runs per device. A second save fails until the event.
+- An unplug or the end of QEMU waits for the write, and sends no event.
+- The device's own `persist_file` is refused: its exit save owns it.
+
 ```
  device A: open FILE.lock --> flock --> ... unplug: close (file stays)
  device B: open FILE.lock --> flock --> same file, so A and B see each other

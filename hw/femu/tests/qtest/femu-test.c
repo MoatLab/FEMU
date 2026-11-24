@@ -2474,6 +2474,10 @@ static void femu_register_nodes(void)
     });
     qos_add_test("checkpoint-reuse-ftl", "femu",
                  femu_test_checkpoint_reuse_ftl, NULL);
+    qos_add_test("save-data-background", "femu", femu_test_save_background,
+                 NULL);
+    qos_add_test("save-data-background-end", "femu",
+                 femu_test_save_background_end, NULL);
     qos_add_test("persist-nossd", "femu", femu_test_persist,
                  &(QOSGraphTestOptions) { .arg = GINT_TO_POINTER(1) });
     qos_add_test("pel-file-media", "femu", femu_test_pel_file,

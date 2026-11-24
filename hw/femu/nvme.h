@@ -26,6 +26,7 @@
 #include "femu-ext-ops.h"
 
 typedef struct FemuCtrl FemuCtrl;
+typedef struct FemuSaveJob FemuSaveJob;
 typedef struct NvmeNamespace NvmeNamespace;
 
 /* ========== FDP (Flexible Data Placement) Constants ========== */
@@ -3126,6 +3127,8 @@ typedef struct FemuCtrl {
     /* persist_file: the data backend kept across QEMU runs */
     char            *persist_file;
     Notifier        persist_notifier;
+    FemuSaveJob     *save_job;       /* femu-save-data background; BQL */
+    bool            save_hold;       /* x-save-hold */
     bool            persist_active;  /* loaded; saves at unplug or exit */
     bool            persist_ftl;     /* the file holds the bbssd FTL too */
     /* persist_file is a checkpoint: load it under a shared lock, never save */
@@ -3932,6 +3935,9 @@ void femu_persist_quiesce(FemuCtrl *n);
 bool femu_iotrace_init(FemuCtrl *n, Error **errp);
 char *femu_path_resolve(const char *file);
 bool femu_path_in_use(FemuCtrl *self, const char *path, bool traces_only);
+bool femu_save_path_busy(const char *path);
+void femu_save_job_exit(FemuCtrl *n);
+void femu_save_hold_set(FemuCtrl *n, bool hold);
 void femu_iotrace_note(FemuCtrl *n, NvmeRequest *req, int64_t now);
 void femu_iotrace_exit(FemuCtrl *n);
 bool femu_events_init(FemuCtrl *n, Error **errp);
@@ -3943,7 +3949,8 @@ struct FemuEventSched;
 void femu_iotrace_abort(FemuCtrl *n);
 void femu_persist_exit(FemuCtrl *n);
 void femu_persist_abort(FemuCtrl *n);
-bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp);
+bool femu_persist_checkpoint(FemuCtrl *n, const char *file, bool background,
+                             Error **errp);
 void femu_pel_exit(FemuCtrl *n);
 void femu_pel_reset(FemuCtrl *n);
 void femu_pel_power_loss(FemuCtrl *n);

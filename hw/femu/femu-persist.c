@@ -38,6 +38,9 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "system/system.h"
+#include "qemu/main-loop.h"
+#include "qemu/thread.h"
+#include "qapi/qapi-events-femu.h"
 #include "nvme.h"
 
 #define PERSIST_MAGIC     "FEMUDATA"
@@ -324,56 +327,123 @@ static bool persist_drain(FemuCtrl *n, bool *resume, Error **errp)
     }
 }
 
-static bool persist_save_to(FemuCtrl *n, const char *path, Error **errp)
+/* one piece of the file, in file order */
+typedef struct PersistSeg {
+    const void *p;
+    size_t len;
+    void *own;              /* freed with the list */
+    GByteArray *ba;         /* freed with the list */
+} PersistSeg;
+
+static void persist_seg(GArray *segs, const void *p, size_t len, void *own,
+                        GByteArray *ba)
 {
-    g_autofree uint8_t *meta = persist_meta(n, PERSIST_V_FTL,
-                                            PERSIST_F_LSI |
-                                            (n->persist_ftl ? PERSIST_F_FTL :
-                                                              0));
-    g_autoptr(GByteArray) lsi = femu_lsi_save(n);
-    uint8_t lsi_len[8];
-    g_autofree char *tmp = g_strconcat(path, ".XXXXXX", NULL);
-    g_autofree char *dir = g_path_get_dirname(path);
-    int fd;
-    int saved_errno;
-    bool ok;
+    PersistSeg seg = { .p = p, .len = len, .own = own, .ba = ba };
 
-    if (n->persist_ftl && n->persist_torn) {
-        error_setg(errp, "persist_ftl: a fetched request left without "
-                   "reaching the FTL (a queue deleted or a reset under I/O, "
-                   "or a drain that timed out); nothing saved");
-        return false;
-    }
-    fd = g_mkstemp(tmp);
-    if (fd < 0) {
-        error_setg_errno(errp, errno, "persist_file: cannot create '%s'",
-                         tmp);
-        return false;
-    }
-    ok = persist_write(fd, meta, persist_meta_len(n)) &&
-         persist_write(fd, n->mbe->logical_space, n->mbe->size);
-    for (uint32_t i = 0; ok && i < n->num_namespaces; i++) {
-        NvmeNamespace *ns = &n->namespaces[i];
+    g_array_append_val(segs, seg);
+}
 
-        ok = persist_write(fd, ns->util, persist_bitmap_len(ns)) &&
-             persist_write(fd, ns->uncorrectable, persist_bitmap_len(ns));
+static void persist_segs_free(GArray *segs)
+{
+    for (guint i = 0; segs && i < segs->len; i++) {
+        PersistSeg *seg = &g_array_index(segs, PersistSeg, i);
+
+        g_free(seg->own);
+        if (seg->ba) {
+            g_byte_array_unref(seg->ba);
+        }
     }
-    stq_le_p(lsi_len, lsi->len);
-    ok = ok && persist_write(fd, lsi_len, 8) &&
-         persist_write(fd, lsi->data, lsi->len);
-    for (uint32_t i = 0; ok && n->persist_ftl && i < n->num_namespaces; i++) {
+    if (segs) {
+        g_array_free(segs, true);
+    }
+}
+
+/* a little-endian length word, owned by the list */
+static void persist_seg_len(GArray *segs, uint64_t len)
+{
+    uint8_t *w = g_malloc(8);
+
+    stq_le_p(w, len);
+    persist_seg(segs, w, 8, w, NULL);
+}
+
+/*
+ * The file as a list of pieces; the workers are paused. With @copy, the
+ * backend and the bitmaps go to the buffers in @pre (backend, then util
+ * and uncorrectable of each namespace), so the list holds no live state.
+ */
+static GArray *persist_segs(FemuCtrl *n, void **pre)
+{
+    uint8_t *meta = persist_meta(n, PERSIST_V_FTL,
+                                 PERSIST_F_LSI |
+                                 (n->persist_ftl ? PERSIST_F_FTL : 0));
+    GByteArray *lsi = femu_lsi_save(n);
+    GArray *segs = g_array_new(false, false, sizeof(PersistSeg));
+    int k = 0;
+
+    persist_seg(segs, meta, persist_meta_len(n), meta, NULL);
+    if (pre) {
+        memcpy(pre[k], n->mbe->logical_space, n->mbe->size);
+        persist_seg(segs, pre[k], n->mbe->size, pre[k], NULL);
+        k++;
+    } else {
+        persist_seg(segs, n->mbe->logical_space, n->mbe->size, NULL, NULL);
+    }
+    for (uint32_t i = 0; i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
-        g_autoptr(GByteArray) sec = NULL;
+        size_t len = persist_bitmap_len(ns);
+        const void *bm[2] = { ns->util, ns->uncorrectable };
+
+        for (int b = 0; b < 2; b++) {
+            if (pre) {
+                memcpy(pre[k], bm[b], len);
+                persist_seg(segs, pre[k], len, pre[k], NULL);
+                k++;
+            } else {
+                persist_seg(segs, bm[b], len, NULL, NULL);
+            }
+        }
+    }
+    persist_seg_len(segs, lsi->len);
+    persist_seg(segs, lsi->data, lsi->len, NULL, lsi);
+    for (uint32_t i = 0; n->persist_ftl && i < n->num_namespaces; i++) {
+        NvmeNamespace *ns = &n->namespaces[i];
         int schema = n->test_persist_schema == 1 ? 1 : 2;
-        uint8_t len[8];
+        GByteArray *sec;
 
         if (!persist_ftl_ns(ns)) {
             continue;
         }
         sec = ssd_persist_save(ns->ssd, persist_digest(n, schema == 2),
                                schema);
-        stq_le_p(len, sec->len);
-        ok = persist_write(fd, len, 8) && persist_write(fd, sec->data, sec->len);
+        persist_seg_len(segs, sec->len);
+        persist_seg(segs, sec->data, sec->len, NULL, sec);
+    }
+    return segs;
+}
+
+/*
+ * Write @segs to @path through a temporary file and a rename. It reads only
+ * @segs, so a thread without the BQL may run it.
+ */
+static bool persist_write_file(const char *path, GArray *segs, Error **errp)
+{
+    g_autofree char *tmp = g_strconcat(path, ".XXXXXX", NULL);
+    g_autofree char *dir = g_path_get_dirname(path);
+    int fd;
+    int saved_errno;
+    bool ok = true;
+
+    fd = g_mkstemp(tmp);
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "persist_file: cannot create '%s'",
+                         tmp);
+        return false;
+    }
+    for (guint i = 0; ok && i < segs->len; i++) {
+        PersistSeg *seg = &g_array_index(segs, PersistSeg, i);
+
+        ok = persist_write(fd, seg->p, seg->len);
     }
     if (!ok || fsync(fd) < 0) {
         saved_errno = errno;
@@ -401,6 +471,143 @@ static bool persist_save_to(FemuCtrl *n, const char *path, Error **errp)
     }
     close(fd);
     return true;
+}
+
+static bool persist_torn_check(FemuCtrl *n, Error **errp)
+{
+    if (n->persist_ftl && n->persist_torn) {
+        error_setg(errp, "persist_ftl: a fetched request left without "
+                   "reaching the FTL (a queue deleted or a reset under I/O, "
+                   "or a drain that timed out); nothing saved");
+        return false;
+    }
+    return true;
+}
+
+static bool persist_save_to(FemuCtrl *n, const char *path, Error **errp)
+{
+    GArray *segs;
+    bool ok;
+
+    if (!persist_torn_check(n, errp)) {
+        return false;
+    }
+    segs = persist_segs(n, NULL);
+    ok = persist_write_file(path, segs, errp);
+    persist_segs_free(segs);
+    return ok;
+}
+
+/*
+ * femu-save-data background=true. The command copies the file into @segs
+ * with the workers paused; the thread writes it without the BQL. One job
+ * per device, in n->save_job, which only the BQL holder changes.
+ */
+struct FemuSaveJob {
+    FemuCtrl *n;
+    QemuThread thread;
+    QEMUBH *bh;             /* the writer's end, in the main loop */
+    QemuEvent go;           /* x-save-hold: set when the writer may write */
+    Notifier exit;          /* QEMU's end waits for the writer */
+    GArray *segs;
+    char *path;
+    int lock_fd;            /* holds path.lock */
+    Error *err;             /* the writer's result */
+};
+
+static void *persist_job_run(void *opaque)
+{
+    FemuSaveJob *job = opaque;
+
+    qemu_event_wait(&job->go);
+    persist_write_file(job->path, job->segs, &job->err);
+    qemu_bh_schedule(job->bh);
+    return NULL;
+}
+
+/*
+ * End the job of @n, once: the first caller takes it from the device. The
+ * writer may wait on the hold, so it is let go before the join. Only the
+ * end in the main loop (@emit) sends the event: at QEMU's end the monitors
+ * are gone, and at an unplug the device is.
+ */
+static void persist_job_end(FemuCtrl *n, bool emit)
+{
+    FemuSaveJob *job = n->save_job;
+    g_autofree char *dev = NULL;
+
+    if (!job) {
+        return;
+    }
+    n->save_job = NULL;
+    qemu_event_set(&job->go);
+    qemu_thread_join(&job->thread);
+    qemu_bh_delete(job->bh);
+    qemu_event_destroy(&job->go);
+    qemu_remove_exit_notifier(&job->exit);
+    persist_segs_free(job->segs);
+    close(job->lock_fd);
+    if (emit) {
+        dev = object_get_canonical_path(OBJECT(n));
+        qapi_event_send_femu_save_data_done(dev, job->path,
+                                            job->err ?
+                                            error_get_pretty(job->err) :
+                                            NULL);
+    } else if (job->err) {
+        error_report_err(job->err);
+        job->err = NULL;
+    }
+    error_free(job->err);
+    g_free(job->path);
+    g_free(job);
+}
+
+static void persist_job_bh(void *opaque)
+{
+    FemuSaveJob *job = opaque;
+
+    persist_job_end(job->n, true);
+}
+
+static void persist_job_exit(Notifier *notifier, void *data)
+{
+    FemuSaveJob *job = container_of(notifier, FemuSaveJob, exit);
+
+    persist_job_end(job->n, false);
+}
+
+/* unplug: wait for a background save, so it leaves a whole file or none */
+void femu_save_job_exit(FemuCtrl *n)
+{
+    persist_job_end(n, false);
+}
+
+/* x-save-hold: a background save waits after its copy until this is off */
+void femu_save_hold_set(FemuCtrl *n, bool hold)
+{
+    n->save_hold = hold;
+    if (!hold && n->save_job) {
+        qemu_event_set(&n->save_job->go);
+    }
+}
+
+/* whether a background save writes @path (resolved) */
+static bool persist_job_path(FemuCtrl *n, const char *path)
+{
+    return n->save_job && !strcmp(n->save_job->path, path);
+}
+
+static int persist_job_match(Object *obj, void *opaque)
+{
+    FemuCtrl *n = (FemuCtrl *)object_dynamic_cast(obj, TYPE_NVME);
+
+    return n && persist_job_path(n, opaque);
+}
+
+bool femu_save_path_busy(const char *path)
+{
+    return object_child_foreach_recursive(object_get_root(),
+                                          persist_job_match, (void *)path);
 }
 
 static bool persist_save(FemuCtrl *n, Error **errp)
@@ -535,6 +742,10 @@ static int persist_path_match(Object *obj, void *opaque)
 
     if (!n) {
         return 0;
+    }
+    /* a background save renames its file over the path when it ends */
+    if (persist_job_path(n, u->path)) {
+        return 1;
     }
     if (n != u->self && n->iotrace_path && !strcmp(n->iotrace_path, u->path)) {
         return 1;
@@ -1095,6 +1306,67 @@ void femu_persist_exit(FemuCtrl *n)
 }
 
 /*
+ * Copy the file with the workers paused, then write it in a thread. The
+ * copy buffers are taken before the pause, so a host without the memory
+ * fails the command and the guest sees no pause. Takes @lock_fd.
+ */
+static bool persist_job_start(FemuCtrl *n, char *path, int lock_fd,
+                              Error **errp)
+{
+    g_autofree void **pre = g_new0(void *, 1 + 2 * n->num_namespaces);
+    FemuSaveJob *job;
+    bool resume;
+    int k = 0;
+
+    pre[k++] = g_try_malloc(n->mbe->size);
+    for (uint32_t i = 0; i < n->num_namespaces; i++) {
+        pre[k++] = g_try_malloc(persist_bitmap_len(&n->namespaces[i]));
+        pre[k++] = g_try_malloc(persist_bitmap_len(&n->namespaces[i]));
+    }
+    for (int i = 0; i < k; i++) {
+        if (!pre[i]) {
+            error_setg(errp, "femu-save-data: cannot allocate the %" PRIu64
+                       " byte copy of the device", (uint64_t)n->mbe->size);
+            goto fail;
+        }
+    }
+    if (n->persist_ftl) {
+        if (!persist_drain(n, &resume, errp)) {
+            goto fail;
+        }
+    } else {
+        resume = nvme_pause_pollers(n);
+    }
+    if (!persist_torn_check(n, errp)) {
+        nvme_resume_pollers(n, resume);
+        goto fail;
+    }
+    job = g_new0(FemuSaveJob, 1);
+    /* the list owns the buffers now */
+    job->segs = persist_segs(n, pre);
+    nvme_resume_pollers(n, resume);
+    job->n = n;
+    job->path = path;
+    job->lock_fd = lock_fd;
+    job->bh = qemu_bh_new(persist_job_bh, job);
+    qemu_event_init(&job->go, !n->save_hold);
+    job->exit.notify = persist_job_exit;
+    qemu_add_exit_notifier(&job->exit);
+    n->save_job = job;
+    qemu_thread_create(&job->thread, "femu-save", persist_job_run, job,
+                       QEMU_THREAD_JOINABLE);
+    return true;
+
+fail:
+    for (int i = 0; i < k; i++) {
+        g_free(pre[i]);
+    }
+    g_free(path);
+    close(lock_fd);
+    return false;
+}
+
+/*
  * QMP femu-save-data: a checkpoint of the data in the persist_file format,
  * with the workers paused so no copy tears it. A later run loads it with
  * persist_file. The file's lock keeps out a file another device keeps;
@@ -1104,7 +1376,8 @@ void femu_persist_exit(FemuCtrl *n)
  * not only this device. Commands queued but not yet run may or may not be
  * in the file; a completed write is in it.
  */
-bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp)
+bool femu_persist_checkpoint(FemuCtrl *n, const char *file, bool background,
+                             Error **errp)
 {
     g_autofree char *path = NULL;
     g_autofree char *lock = NULL;
@@ -1117,8 +1390,18 @@ bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp)
     if (!persist_check(n, errp)) {
         return false;
     }
+    if (n->save_job) {
+        error_setg(errp, "femu-save-data: a background save to '%s' is in "
+                   "progress", n->save_job->path);
+        return false;
+    }
     path = persist_resolve(file, errp);
     if (!path) {
+        return false;
+    }
+    if (background && n->persist_path && !strcmp(path, n->persist_path)) {
+        error_setg(errp, "femu-save-data: background=true cannot write this "
+                   "device's own persist_file '%s'", path);
         return false;
     }
     if (object_child_foreach_recursive(object_get_root(), persist_pel_match,
@@ -1169,6 +1452,9 @@ bool femu_persist_checkpoint(FemuCtrl *n, const char *file, Error **errp)
             }
             return false;
         }
+    }
+    if (background) {
+        return persist_job_start(n, g_steal_pointer(&path), fd, errp);
     }
     if (n->persist_ftl) {
         ok = persist_drain(n, &resume, errp);

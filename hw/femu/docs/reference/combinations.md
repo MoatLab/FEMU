@@ -888,6 +888,7 @@ own description allows. A message keeps its format directives (`%s`,
 - femu-save-data: '%s' is a device's pel_file
 - io_trace: '%s' is a persist_file, pel_file or io_trace of a device
 - pel_file '%s' ends in .lock, which names a lock file
+- pel_file '%s' is the file of a background femu-save-data
 - persist_file and pel_file name one file
 
 ## `perf_hints`
@@ -897,6 +898,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `persist_file`
 
 - FEMU: rrl is not supported with persist_file
+- femu-save-data: background=true cannot write this device's own persist_file '%s'
 - femu: rain_loss is not supported with persist_file
 - io_trace: '%s' is a persist_file, pel_file or io_trace of a device
 - persist_file '%s' cannot be read in full

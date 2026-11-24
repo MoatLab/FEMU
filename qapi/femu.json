@@ -1998,7 +1998,8 @@
 # Write a checkpoint of a femu device's data in the persist_file
 # format:
 # the data, the namespace layout and LBA format, and the deallocated
-# and uncorrectable blocks.  The device's I/O pauses for the write.  A
+# and uncorrectable blocks.  The device's I/O pauses for the write,
+# or with @background only for a copy of the state.  A
 # later run loads the file with -device femu,persist_file=FILE.  The
 # device must be bbssd or NoSSD, as persist_file needs.
 #
@@ -2007,6 +2008,12 @@
 #
 # @file: host file to write.  It must not be the persist_file of
 #     another device.
+#
+# @background: copy the state with the I/O paused, reply at once, and
+#     write the file in a thread, so QEMU does not wait for the disk.
+#     The copy takes host memory of the size of the device.  The event
+#     FEMU_SAVE_DATA_DONE tells the result.  @file must not be the
+#     device's own persist_file.  (default: false)
 #
 # Since: 10.1
 #
@@ -2017,4 +2024,23 @@
 #     <- { "return": {} }
 ##
 { 'command': 'femu-save-data',
-  'data': { '*path': 'str', 'file': 'str' } }
+  'data': { '*path': 'str', 'file': 'str', '*background': 'bool' } }
+
+##
+# @FEMU_SAVE_DATA_DONE:
+#
+# A femu-save-data with @background true ended.  A device removal or
+# the end of QEMU waits for the write, and sends no event.
+#
+# @path: QOM path of the femu device
+#
+# @file: the file, as resolved
+#
+# @error: why the save failed.  The file can then be the old one, or
+#     the new one without a durable directory entry.  Absent on
+#     success.
+#
+# Since: 10.1
+##
+{ 'event': 'FEMU_SAVE_DATA_DONE',
+  'data': { 'path': 'str', 'file': 'str', '*error': 'str' } }

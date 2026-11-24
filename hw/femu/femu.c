@@ -6017,6 +6017,7 @@ static void femu_exit(PCIDevice *pci_dev)
      * consumer first leaves them enqueueing into a ring nothing drains, which
      * fills and then complains once per request.
      */
+    femu_save_job_exit(n);
     femu_persist_quiesce(n);
     femu_stop_pollers(n);
     femu_stop_ftl_thread(n);
@@ -7712,6 +7713,16 @@ static void femu_instance_finalize(Object *obj)
     qemu_mutex_destroy(&n->ps_lock);
 }
 
+static bool femu_test_save_hold_get(Object *obj, Error **errp)
+{
+    return FEMU(obj)->save_hold;
+}
+
+static void femu_test_save_hold_set(Object *obj, bool v, Error **errp)
+{
+    femu_save_hold_set(FEMU(obj), v);
+}
+
 static void femu_instance_init(Object *obj)
 {
     qemu_mutex_init(&FEMU(obj)->ocp_lat.lock);
@@ -7786,6 +7797,8 @@ static void femu_instance_init(Object *obj)
                             femu_test_gc_idle_latch, NULL, NULL);
         object_property_add_str(obj, "x-gc-idle-order", femu_test_gc_idle_order,
                                 NULL);
+        object_property_add_bool(obj, "x-save-hold", femu_test_save_hold_get,
+                                 femu_test_save_hold_set);
         object_property_add_bool(obj, "x-tp-hold", femu_test_tp_hold_get,
                                  femu_test_tp_hold_set);
         object_property_add_bool(obj, "x-eol-enter", NULL,

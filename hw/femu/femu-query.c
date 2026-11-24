@@ -1199,12 +1199,13 @@ static void femu_query_stage_copy(FemuStageSet *set, FemuStageSet *out)
     } while (seqlock_read_retry(&set->seq, seq));
 }
 
-void qmp_femu_save_data(const char *path, const char *file, Error **errp)
+void qmp_femu_save_data(const char *path, const char *file,
+                        bool has_background, bool background, Error **errp)
 {
     FemuCtrl *n = femu_query_find(path, errp);
 
     if (n) {
-        femu_persist_checkpoint(n, file, errp);
+        femu_persist_checkpoint(n, file, has_background && background, errp);
     }
 }
 
