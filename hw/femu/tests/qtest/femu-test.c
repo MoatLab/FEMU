@@ -1135,6 +1135,12 @@ static void femu_register_nodes(void)
             "id=rwa,sgl=on,nlbaf=8,lba_index=7,multipoller_enabled=1,"
             "poller_ratio=1"
     });
+    qos_add_test("rw-atomic-wu", "femu", femu_test_rw_atomic_wu,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=rwa,sgl=on,nlbaf=8,lba_index=7,multipoller_enabled=1,"
+            "poller_ratio=1,oncs=0x19f"
+    });
     /* one LUN and plane; a 200 ms program against a 40 us read */
     qos_add_test("pe-suspend-bbssd-off", "femu", femu_test_pe_suspend,
                  &(QOSGraphTestOptions) {

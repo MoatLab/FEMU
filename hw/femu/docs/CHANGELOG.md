@@ -445,6 +445,7 @@ The shared namespace model behind `femu-subsys,ns_mgmt=on` is described in
 
 #### Crashes, memory safety and teardown
 
+- Write Uncorrectable, Write Zeroes, deallocate, Copy and Write now change the allocated and uncorrectable bits in the range lock that covers their bytes. A Write Uncorrectable that overlapped a running Write could finish first and then lose its mark. See [data copies and write atomicity](design/nvme-frontend.md#data-copies-and-write-atomicity).
 - A bbssd, KV or CSD device whose FTL tables do not fit in host memory is now refused with an error that names the table. It no longer stops QEMU. This covers the NAND tree, maps, lines, RAIN, namespace slices, durable slots, tier, NAND media lists, die statistics, the hybrid, FAST and DFTL tables and the read cache. A refused FDP controller puts its subsystem back as it found it, and the unit size check uses the incoming geometry. A femu-cxl-ssd whose FTL does not fit is refused, and QEMU runs on.
 - A bbssd, KV or CSD geometry may now have more than 2^31 sectors (1 TiB at 512 B). The limits are now per line, per block count, per page and per NAND size. query-femu reports total-sectors, total-pages and total-blocks for a bbssd namespace.
 - A zoned namespace of more than 2^31 logical pages now sets its whole map at start.

@@ -1625,9 +1625,23 @@ static uint16_t nvme_rw_extended(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_SUCCESS;
 }
 
+typedef struct NvmeMarkRange {
+    NvmeNamespace *ns;
+    uint64_t slba;
+    uint32_t nlb;
+} NvmeMarkRange;
+
+static void nvme_mark_range_cb(void *opaque)
+{
+    NvmeMarkRange *m = opaque;
+
+    nvme_mark_written(m->ns, m->slba, m->nlb);
+}
+
 uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
 {
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    NvmeMarkRange mark;
     uint16_t ctrl = le16_to_cpu(rw->control);
     uint32_t nlb  = le16_to_cpu(rw->nlb) + 1;
     uint64_t slba = le64_to_cpu(rw->slba);
@@ -1816,9 +1830,11 @@ uint16_t nvme_rw(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd, NvmeRequest *req)
                 }
                 return NVME_DATA_TRAS_ERROR | NVME_DNR;
             }
-            backend_unlock_range(n->mbe, moff, data_size);
             if (req->is_write) {
                 nvme_mark_written(ns, slba, nlb);
+            }
+            backend_unlock_range(n->mbe, moff, data_size);
+            if (req->is_write) {
                 nvme_fdp_host_write(n, ns, req->fdp_dtype, req->fdp_dspec,
                                     nlb, true);
             }
@@ -1877,17 +1893,26 @@ mapped:
     if (req->is_write) {
         nvme_note_ns_write(ns);
     }
-    ret = backend_rw(n->mbe, &req->qsg, &data_offset, req->is_write);
+    /*
+     * Without metadata, a write marks its blocks inside the range lock;
+     * with it, they are marked once the metadata is in, under mdata_lock.
+     */
+    mark = (NvmeMarkRange){ .ns = ns, .slba = slba, .nlb = nlb };
+    ret = backend_rw_done(n->mbe, &req->qsg, &data_offset, req->is_write,
+                          req->is_write && !meta_size ? nvme_mark_range_cb :
+                          NULL, &mark);
     if (!ret && meta_size &&
         femu_dma_write(n, mptr, ns->mdata + slba * ms, meta_size)) {
         ret = -EIO;
+    }
+    if (!ret && meta_size && req->is_write) {
+        nvme_mark_written(ns, slba, nlb);
     }
     if (meta_size) {
         qemu_mutex_unlock(&ns->mdata_lock);
     }
     if (!ret) {
         if (req->is_write) {
-            nvme_mark_written(ns, slba, nlb);
             nvme_fdp_host_write(n, ns, req->fdp_dtype, req->fdp_dspec, nlb,
                                 true);
         }
@@ -2478,12 +2503,12 @@ write:
     } else {
         memcpy(base + (sdlba << lbads), data, total << lbads);
     }
+    nvme_mark_written(ns, sdlba, total);
     backend_unlock_range(n->mbe, ns->backend_offset + (sdlba << lbads),
                          total << lbads);
     if (mstage) {
         memcpy(ns->mdata + sdlba * ms, mstage, total * ms);
     }
-    nvme_mark_written(ns, sdlba, total);
     if (mstage) {
         qemu_mutex_unlock(&ns->mdata_lock);
     }
@@ -2791,14 +2816,13 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
      * zeroes the backend; for the non-deallocate case zero then mark written.
      */
     if (deac) {
-        nvme_deallocate_range(n, ns, slba, nlb);
-        /* a write of zeros: the namespace no longer reads as erased */
-        nvme_note_ns_write(ns);
         /*
          * The blocks read back zeros now, also ones Write Uncorrectable
          * marked (OCP NVMe-IO-6): a Write Zeroes modifies them.
          */
-        femu_lsi_clear(ns, slba, nlb);
+        nvme_zero_range(n, ns, slba, nlb, FEMU_ZERO_CLEAR_LSI);
+        /* a write of zeros: the namespace no longer reads as erased */
+        nvme_note_ns_write(ns);
         bbssd_durable_patch(ns, slba, nlb, FEMU_DURABLE_ZEROES_DEAC);
     } else if (n->durable_at_done || n->awupf_lbas || n->sdc) {
         /*
@@ -2809,8 +2833,7 @@ static uint16_t nvme_write_zeros(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
         req->write_data = g_malloc0((size_t)nlb << ns->lbaf.lbads);
         req->slba = slba;
     } else {
-        nvme_deallocate_range(n, ns, slba, nlb);
-        nvme_mark_written(ns, slba, nlb);
+        nvme_zero_range(n, ns, slba, nlb, FEMU_ZERO_WRITTEN);
     }
     /* HBMW counts every Write Zeroes, the Deallocate bit or not (4.1.4.6) */
     nvme_fdp_host_write(n, ns, req->fdp_dtype, req->fdp_dspec, nlb, !deac);

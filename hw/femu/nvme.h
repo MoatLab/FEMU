@@ -3904,6 +3904,10 @@ static inline void femu_note_cqe_time(FemuCtrl *n, NvmeRequest *req)
 
 /* Deallocation-state tracking (TRIM / Write Zeroes / DULBE) from nvme-util.c */
 void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb);
+#define FEMU_ZERO_WRITTEN   (1u << 0)
+#define FEMU_ZERO_CLEAR_LSI (1u << 1)
+void nvme_zero_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
+                     uint32_t nlb, unsigned flags);
 void nvme_mark_uncorrectable(NvmeNamespace *ns, uint64_t slba, uint32_t nlb);
 void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
                            uint32_t nlb);

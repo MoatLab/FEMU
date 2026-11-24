@@ -801,6 +801,7 @@ void femu_test_pmeas_off(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_sgl(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rw_atomic(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rw_atomic_split(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_rw_atomic_wu(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_crypto(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_fw_cost(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_shared_cq(void *obj, void *data, QGuestAllocator *alloc);

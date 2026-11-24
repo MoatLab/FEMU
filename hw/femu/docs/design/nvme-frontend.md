@@ -424,6 +424,23 @@ therefore holds the locks of the 4 KiB granules it touches. The granules share
   block meanwhile. The write goes on once `x-range-waits` shows the read
   waiting for its lock. Without the locks the read returns half old, half
   new data.
+- Six paths change the block state in the same lock acquisition as the
+  bytes. The state is the allocated and uncorrectable bits. The paths are:
+  - the NoSSD inline Write;
+  - a Write through `backend_rw()` without metadata;
+  - the Copy destination;
+  - deallocate, Write Zeroes and Write Uncorrectable.
+
+  Another command on those blocks sees the old bytes and state or the new
+  ones.
+
+  ```text
+   lock(range) --> bytes --> allocated / uncorrectable bits --> unlock
+  ```
+
+- The test `rw-atomic-wu` holds a Write in its copy and sends Write
+  Uncorrectable for the same block. The mark waits for the Write, so the
+  block then reads as uncorrectable.
 - Locks are taken in index order, so two commands never wait in a cycle. A
   namespace with metadata takes its `mdata_lock` first.
 - Two commands on different blocks wait for each other only when their

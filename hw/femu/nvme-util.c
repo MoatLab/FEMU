@@ -38,14 +38,27 @@ void nvme_mark_written(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
  */
 void nvme_mark_uncorrectable(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
 {
+    FemuCtrl *n = ns->ctrl;
+    bool store = n->mbe && n->mbe->logical_space;
+    uint64_t off = ns->backend_offset + (slba << ns->lbaf.lbads);
+    uint64_t len = (uint64_t)nlb << ns->lbaf.lbads;
+
     nvme_note_ns_write(ns);
+    /* a test pause point: it sleeps, so it runs before the range lock */
+    femu_lsi_wu_stop(ns);
+    /* the bits change as one step against bytes a write publishes */
+    if (store) {
+        backend_lock_range(n->mbe, off, len);
+    }
     if (ns->util) {
         bitmap_set_atomic(ns->util, slba, nlb);
     }
-    femu_lsi_wu_stop(ns);
     femu_lost_clear(ns, slba, nlb);
     femu_lsi_mark(ns, slba, nlb);
     femu_sdc_clear(ns, slba, nlb);
+    if (store) {
+        backend_unlock_range(n->mbe, off, len);
+    }
 }
 
 /*
@@ -61,21 +74,47 @@ void nvme_mark_uncorrectable(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
 void nvme_deallocate_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
                            uint32_t nlb)
 {
+    nvme_zero_range(n, ns, slba, nlb, 0);
+}
+
+/*
+ * Zero [slba, slba+nlb) and set the block state in the same range lock
+ * acquisition, so a command on an overlapping range sees the old bytes
+ * and state or the new ones, never a mix. FEMU_ZERO_WRITTEN leaves the
+ * blocks allocated (Write Zeroes without Deallocate); otherwise they are
+ * deallocated. FEMU_ZERO_CLEAR_LSI also drops Write Uncorrectable marks.
+ */
+void nvme_zero_range(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
+                     uint32_t nlb, unsigned flags)
+{
+    uint64_t off = 0;
+    uint64_t len = 0;
+    bool store = n->mbe && n->mbe->logical_space;
+
     if (ns->mdata) {
         qemu_mutex_lock(&ns->mdata_lock);
     }
-    if (ns->util) {
-        bitmap_test_and_clear_atomic(ns->util, slba, nlb);
-    }
-    femu_sdc_clear(ns, slba, nlb);
-    if (n->mbe && n->mbe->logical_space) {
+    if (store) {
         uint8_t lba_index = NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas);
         uint8_t data_shift = ns->id_ns.lbaf[lba_index].lbads;
-        uint64_t off = ns->backend_offset + (slba << data_shift);
-        uint64_t len = (uint64_t)nlb << data_shift;
 
+        off = ns->backend_offset + (slba << data_shift);
+        len = (uint64_t)nlb << data_shift;
         backend_lock_range(n->mbe, off, len);
         memset((uint8_t *)n->mbe->logical_space + off, 0, len);
+    }
+    if (flags & FEMU_ZERO_WRITTEN) {
+        nvme_mark_written(ns, slba, nlb);
+    } else {
+        if (ns->util) {
+            bitmap_test_and_clear_atomic(ns->util, slba, nlb);
+        }
+        femu_sdc_clear(ns, slba, nlb);
+        if (flags & FEMU_ZERO_CLEAR_LSI) {
+            femu_lsi_clear(ns, slba, nlb);
+        }
+    }
+    if (store) {
         backend_unlock_range(n->mbe, off, len);
     }
     /* deallocated and zeroed blocks read back zero metadata (DLFEAT) */

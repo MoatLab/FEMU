@@ -238,6 +238,18 @@ static MemTxResult backend_copy(FemuCtrl *n, dma_addr_t addr, void *ptr,
  */
 int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write)
 {
+    return backend_rw_done(b, qsg, lbal, is_write, NULL, NULL);
+}
+
+/*
+ * backend_rw(), and on a full copy of one contiguous range, @done runs
+ * before the range lock is released: the caller's block state changes in
+ * the same step as the bytes. OCSSD takes a lock per entry and never
+ * calls @done.
+ */
+int backend_rw_done(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal,
+                    bool is_write, void (*done)(void *), void *opaque)
+{
     int sg_cur_index = 0;
     dma_addr_t sg_cur_byte = 0;
     dma_addr_t cur_addr, cur_len;
@@ -316,6 +328,9 @@ int backend_rw(SsdDramBackend *b, QEMUSGList *qsg, uint64_t *lbal, bool is_write
     }
 
     if (!per_entry) {
+        if (!ret && done) {
+            done(opaque);
+        }
         backend_unlock_range(b, lock_oft, lock_len);
     }
     qemu_sglist_destroy(qsg);

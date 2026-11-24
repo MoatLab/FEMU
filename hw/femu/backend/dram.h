@@ -25,6 +25,8 @@ int init_dram_backend(SsdDramBackend **mbe, int64_t nbytes);
 void free_dram_backend(SsdDramBackend *);
 
 int backend_rw(SsdDramBackend *, QEMUSGList *, uint64_t *, bool);
+int backend_rw_done(SsdDramBackend *, QEMUSGList *, uint64_t *, bool,
+                    void (*done)(void *), void *opaque);
 void backend_init_range_locks(SsdDramBackend *b);
 void backend_free_range_locks(SsdDramBackend *b);
 void backend_lock_range(SsdDramBackend *b, uint64_t off, uint64_t len);

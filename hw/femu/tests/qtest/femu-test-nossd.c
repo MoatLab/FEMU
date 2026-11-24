@@ -1421,6 +1421,74 @@ void femu_test_rw_atomic_split(void *obj, void *data,
 }
 
 /*
+ * Write Uncorrectable marks its blocks in the range lock a write holds
+ * while it copies. With the write held halfway (x-copy-hold), the mark
+ * must wait for it, and the block then reads as uncorrectable: Write,
+ * then Write Uncorrectable. A mark made beside the copy finishes first,
+ * and the write's own mark then clears it.
+ */
+void femu_test_rw_atomic_wu(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    FemuQueue q1, q2;
+    uint64_t pat[2], rd;
+    bool early = false;
+    uint64_t waits;
+    int i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_zap_create_queue(&c, &q1, 1);
+    femu_zap_create_queue(&c, &q2, 2);
+
+    for (i = 0; i < 2; i++) {
+        pat[i] = guest_alloc(alloc, RWA_MAX_BS);
+        qtest_memset(qts, pat[i], i ? RWA_B : RWA_A, RWA_MAX_BS);
+    }
+    rd = guest_alloc(alloc, RWA_MAX_BS);
+    femu_rwa_queue_rw(&c, &q1, NVME_CMD_WRITE, 0, pat[0], RWA_MAX_BS);
+    femu_zap_ring(&c, &q1);
+    g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+
+    femu_rwa_hold(qts, 1);
+    femu_rwa_queue_rw(&c, &q1, NVME_CMD_WRITE, 0, pat[1], RWA_MAX_BS);
+    femu_zap_ring(&c, &q1);
+    for (i = 0; i < FEMU_POLL_LIMIT_MS && !femu_rwa_get(qts, "x-copy-held");
+         i++) {
+        g_usleep(1000);
+    }
+    g_assert_cmpuint(femu_rwa_get(qts, "x-copy-held"), ==, 1);
+
+    waits = femu_rwa_get(qts, "x-range-waits");
+    femu_rwa_queue_rw(&c, &q2, NVME_CMD_WRITE_UNCOR, 0, 0, RWA_MAX_BS);
+    femu_zap_ring(&c, &q2);
+    for (i = 0; i < FEMU_POLL_LIMIT_MS && !early &&
+         femu_rwa_get(qts, "x-range-waits") == waits; i++) {
+        g_usleep(1000);
+        early = femu_rwa_cq_ready(&c, &q2);
+    }
+    g_assert_cmpuint(femu_rwa_get(qts, "x-copy-held"), ==, 1);
+    femu_rwa_hold(qts, 0);
+    g_assert_cmpint(femu_zap_complete(&c, &q2, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpint(femu_zap_complete(&c, &q1, NULL), ==, NVME_SUCCESS);
+    g_assert_false(early);
+
+    femu_rwa_queue_rw(&c, &q1, NVME_CMD_READ, 0, rd, RWA_MAX_BS);
+    femu_zap_ring(&c, &q1);
+    g_assert_cmpint(FEMU_SC(femu_zap_complete(&c, &q1, NULL)), ==,
+                    NVME_UNRECOVERED_READ);
+
+    guest_free(alloc, rd);
+    for (i = 0; i < 2; i++) {
+        guest_free(alloc, pat[i]);
+    }
+    femu_queue_free(&c, &q2);
+    femu_queue_free(&c, &q1);
+    femu_disable(&c);
+}
+
+/*
  * The shortest of @tries rounds, each of @nr commands @op sent together from
  * @slba on, in microseconds. A round completes before the next starts, so
  * the engine is idle at its start. A host stall slows one round; time the
