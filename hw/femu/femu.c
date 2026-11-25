@@ -4202,7 +4202,8 @@ static void femu_realize_undo(FemuCtrl *n)
     /* a device that never came up keeps the file it was given */
     femu_persist_abort(n);
     femu_iotrace_abort(n);
-    femu_events_exit(n);
+    femu_events_cancel(n);
+    femu_events_free(n);
     femu_lsi_exit(n);
     g_clear_pointer(&n->die_slow_pct, g_free);
     g_clear_pointer(&n->fw_core_avail, g_free);
@@ -6081,7 +6082,7 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_thermal_stop(n);
     femu_pmeas_stop(n);
     /* no scheduled action may reach a device that is going */
-    femu_events_exit(n);
+    femu_events_cancel(n);
 
     /*
      * Stop every thread first. femu_exit_extensions() releases each mode's FTL
@@ -6096,6 +6097,8 @@ static void femu_exit(PCIDevice *pci_dev)
     femu_persist_quiesce(n);
     femu_stop_pollers(n);
     femu_stop_ftl_thread(n);
+    /* no thread reads the schedule now */
+    femu_events_free(n);
     /* no poller posts a completion now */
     femu_iotrace_exit(n);
     femu_persist_exit(n);

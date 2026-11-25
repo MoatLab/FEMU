@@ -414,8 +414,21 @@ void femu_events_start(FemuCtrl *n)
     femu_events_set_timer(n);
 }
 
-/* realize undo and unplug: the timer goes before anything it reaches */
-void femu_events_exit(FemuCtrl *n)
+/* realize undo and unplug, first step: no event runs from here on */
+void femu_events_cancel(FemuCtrl *n)
+{
+    struct FemuEventSched *s = n->events;
+
+    if (s && s->timer) {
+        timer_del(s->timer);
+    }
+}
+
+/*
+ * Second step, once no FTL thread or poller runs: free the schedule. A
+ * reader on those threads may still hold it until they stop.
+ */
+void femu_events_free(FemuCtrl *n)
 {
     struct FemuEventSched *s = n->events;
 
