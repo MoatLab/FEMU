@@ -80,6 +80,12 @@ enum {
     FEMU_FS_WHY_DURABLE,        /* no buffered page is left volatile */
     FEMU_FS_WHY_SLOTS_FULL,     /* wb-fail: every fault slot is taken */
     FEMU_FS_WHY_MARKED,         /* wb-fail: its pages carry an older mark */
+    /* reclaim: what gave back a command that a hang or a cfs holds */
+    FEMU_FS_WHY_SQ_DELETED,     /* Delete I/O Submission Queue */
+    FEMU_FS_WHY_RESET,          /* Controller Reset (CC.EN to 0) */
+    FEMU_FS_WHY_SHUTDOWN,       /* a shutdown (CC.SHN) */
+    FEMU_FS_WHY_POWER_CUT,      /* simulate-power-loss */
+    FEMU_FS_WHY_UNPLUG,         /* device_del, or QEMU exit */
 };
 
 /* what the FTL did with a command that a lie selected */
@@ -313,6 +319,20 @@ const char *femu_fs_act_name(uint8_t act);
  */
 void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
                    uint8_t *out, uint8_t *why, FemuFsView *eff);
+
+/**
+ * femu_fs_terminal - the terminal action a command runs
+ * @l: the lines, in file order
+ * @nr: their number
+ * @out: the outcomes femu_fs_match() gave
+ *
+ * The terminal group has one winner at most. A superseded line or one
+ * with no effect does not count.
+ *
+ * Returns FEMU_FS_ACT_POWER_LOSS, FEMU_FS_ACT_CFS or FEMU_FS_ACT_HANG,
+ * or FEMU_FS_ACT_NR for none.
+ */
+uint8_t femu_fs_terminal(const FemuFsLine *l, int nr, const uint8_t *out);
 
 /**
  * femu_fs_lie_why - why a selected lie had no effect

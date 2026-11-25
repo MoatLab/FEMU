@@ -232,6 +232,8 @@ const char *femu_fr_name_phase(uint8_t v)
         return "report";
     case FEMU_FR_PHASE_SUPERSEDE:
         return "supersede";
+    case FEMU_FR_PHASE_RECLAIM:
+        return "reclaim";
     }
     return "?";
 }
@@ -255,6 +257,8 @@ const char *femu_fr_name_outcome(uint8_t v)
         return "old";
     case FEMU_FR_OUT_REPORTED:
         return "reported";
+    case FEMU_FR_OUT_RECLAIMED:
+        return "reclaimed";
     }
     return "?";
 }
@@ -297,6 +301,16 @@ const char *femu_fr_name_why(uint8_t v)
         return "slots-full";
     case FEMU_FS_WHY_MARKED:
         return "marked";
+    case FEMU_FS_WHY_SQ_DELETED:
+        return "sq-deleted";
+    case FEMU_FS_WHY_RESET:
+        return "reset";
+    case FEMU_FS_WHY_SHUTDOWN:
+        return "shutdown";
+    case FEMU_FS_WHY_POWER_CUT:
+        return "power-cut";
+    case FEMU_FS_WHY_UNPLUG:
+        return "unplug";
     }
     return "?";
 }
@@ -316,13 +330,17 @@ int femu_fr_json(const FemuFrRec *rec, char *buf, size_t len)
     if (rec->status) {
         snprintf(status, sizeof(status), ",\"status\":%u", rec->status);
     }
-    if (rec->outcome == FEMU_FR_OUT_NO_EFFECT) {
+    /* a reclaim record names its path the same way */
+    if (rec->outcome == FEMU_FR_OUT_NO_EFFECT ||
+        rec->outcome == FEMU_FR_OUT_RECLAIMED) {
         snprintf(why, sizeof(why), ",\"reason\":\"%s\"",
                  femu_fr_name_why(rec->why));
     }
     /* the exposure a lie left: buffered pages a cut would roll back */
     if (rec->phase == FEMU_FR_PHASE_APPLY &&
-        rec->outcome == FEMU_FR_OUT_DONE) {
+        rec->outcome == FEMU_FR_OUT_DONE &&
+        (rec->act == FEMU_FS_ACT_FLUSH_LIE ||
+         rec->act == FEMU_FS_ACT_FUA_LIE)) {
         snprintf(pages, sizeof(pages), ",\"%s\":%u",
                  rec->act == FEMU_FS_ACT_FLUSH_LIE ?
                  "buffered_at_flush_lie" : "lie_pages", rec->pages);

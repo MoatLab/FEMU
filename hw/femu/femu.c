@@ -17,6 +17,7 @@
 #include "./nand/onfi.h"
 #include "./nand/nand-profile.h"
 #include "./femu-props.h"
+#include "./femu-fsched.h"
 #include "./femu-query.h"
 #include "./nvme-opal.h"
 
@@ -911,7 +912,11 @@ static void nvme_reset_features(FemuCtrl *n)
     }
 }
 
-static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
+/*
+ * @why names the path for the records of the commands that an
+ * events_file hang holds: a FEMU_FS_WHY_* reclaim reason.
+ */
+static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown, uint8_t why)
 {
     NvmeAsyncEvent *event;
     int i;
@@ -983,6 +988,10 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
         nvme_clear_virq(n);
     }
 
+    /* before the queues go: a hung command is in none of them */
+    if (unlikely(n->fsched)) {
+        femu_fsched_reclaim(n, NULL, why);
+    }
     for (i = 0; i <= n->nr_io_queues; i++) {
         if (n->sq[i] != NULL) {
             nvme_drain_sq(n, n->sq[i]);
@@ -1323,7 +1332,7 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
              * recovered. A shutdown asked for in the same write still
              * completes below.
              */
-            nvme_clear_ctrl(n, shutdown);
+            nvme_clear_ctrl(n, shutdown, FEMU_FS_WHY_RESET);
             /* wb-fail: a reset ends every report, sticky too */
             if (unlikely(n->wbf)) {
                 femu_wbf_reset(n);
@@ -1355,7 +1364,7 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
                 /* the teardown zeroes CC; the host's value stays readable */
                 uint32_t keep = n->bar.cc;
 
-                nvme_clear_ctrl(n, true);
+                nvme_clear_ctrl(n, true, FEMU_FS_WHY_SHUTDOWN);
                 n->bar.cc = keep;
             }
             /* the queues are idle: KV programs its open pages of values */
@@ -6012,6 +6021,8 @@ static void nvme_destroy_poller(FemuCtrl *n)
     n->poller_args = NULL;
     g_free(n->should_isr);
     g_free(n->cpl_backlog);
+    /* unplug gave back every hung request in femu_events_free() */
+    g_clear_pointer(&n->fs_hung, g_free);
     g_free((void *)n->poller_in_sweep);
     n->poller_in_sweep = NULL;
     g_clear_pointer(&n->adm_freeze_ack, g_free);
@@ -6146,7 +6157,7 @@ static void femu_exit(PCIDevice *pci_dev)
     }
     femu_mem_check_empty(&n->mem, "a controller");
 
-    nvme_clear_ctrl(n, true);
+    nvme_clear_ctrl(n, true, FEMU_FS_WHY_UNPLUG);
     nvme_destroy_poller(n);
     /* the pollers are gone: no grant can read it any more */
     g_clear_pointer(&n->wrr_tried, g_free);
@@ -7600,7 +7611,7 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
         return;
     }
     clean = n->shut == FEMU_SHUT_DONE;
-    nvme_clear_ctrl(n, false);
+    nvme_clear_ctrl(n, false, FEMU_FS_WHY_POWER_CUT);
     /*
      * After a completed shutdown the cut is expected: no recovery, and no
      * unsafe shutdown. Otherwise the next start rebuilds state.

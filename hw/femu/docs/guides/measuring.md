@@ -370,8 +370,9 @@ can mix time lines and command lines. Command lines work on bbssd only.
   handler does, except a PRACT tuple that the controller inserts.
 - With no command line, the FTL thread has no schedule to check: one
   pointer test per command, and no decode, count or draw.
-- Only `flush-lie`, `fua-lie` (see [lies](#lies)) and `wb-fail` (see
-  [write-back failures](#write-back-failures)) have an effect so far.
+- Only `flush-lie`, `fua-lie` (see [lies](#lies)), `wb-fail` (see
+  [write-back failures](#write-back-failures)) and `hang` (see
+  [hang](#hang)) have an effect so far.
   For the other actions a selection moves the counters of its line and
   writes its record only. With no `wb-fail` line, none of its hooks
   runs: the data path tests one pointer or one counter. The qtest property `x-fault-sel` reports, per
@@ -511,6 +512,38 @@ A later completion tells the host.
 | `report` | `reported` | `slot`, `found`: `self` or `pending`, `status`; the reporting command |
 | `supersede` | `superseded` | `slot`; the Write that cleared the mark |
 
+### Hang
+
+`hang` lets its command run, then holds its CQE. A reclaim gives each
+held command back to its queue, with no CQE.
+
+```text
+ hang:  FTL step (the command runs) --> poller: no CQE, held
+          apply record (done, status = the withheld status)
+          x-fault-hung + 1
+ reclaim: Delete SQ (its commands), Controller Reset, shutdown,
+          power cut, unplug (all) --> reclaim record, no CQE
+```
+
+- A hung command did its work: a hung Write programs its data, and a
+  hung Read transfers its data. Its LBA ranges go back, so later
+  commands on the same blocks run. Other commands of the same queue and
+  of other queues complete as usual.
+- An Abort finds no hung command in its SQ, so it is not performed
+  (dword 0 bit 0 set), and the command stays held. A Cancel does not
+  find it either.
+- A hung command reports no `wb-fail` failure. Its failure stays
+  pending, and the next draining completion reports it, with `found`
+  `pending`.
+- The qtest property `x-fault-hung` counts the held commands. A
+  Controller Reset takes it back to 0, and the hang line can select
+  again.
+
+| Phase | Outcome | Fields |
+| --- | --- | --- |
+| `apply` | `done` | `status`: the status its CQE would carry |
+| `reclaim` | `reclaimed` | `reason`: `sq-deleted`, `reset`, `shutdown`, `power-cut` or `unplug` |
+
 ### Fault records
 
 Each command that a command line selects writes one record per line
@@ -535,14 +568,14 @@ Realize allocates the ring only for a file with a command line.
 | `id` | from 1; each record takes one, stored or dropped |
 | `origin` | `sched-cmd`: a command line |
 | `line`, `match` | the line, and its matches so far, this one too |
-| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a lie or a `wb-fail`; `fail`, `report` and `supersede` for a `wb-fail` mark |
+| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a lie, a `wb-fail` or a `hang`; `fail`, `report` and `supersede` for a `wb-fail` mark; `reclaim` for a held command that went back |
 | `step` | commands the FTL thread took so far, this one too |
 | `nsid`, `sqid`, `cid`, `opc`, `fua`, `slba`, `nlb` | the command as the host sent it; `slba` and `nlb` are 0 for a Flush |
-| `outcome` | `selected`, `superseded` or `no-effect`; `done` for an `apply` record; `marked`, `unc`, `old` and `reported` for `wb-fail` |
-| `reason` | for `no-effect`: `fua`, `pre` or `hang`; for a lie also `plp`, `atomic`, `no-buffer`, `cmd-failed` or `durable`; for `wb-fail` also `slots-full` and `marked` |
+| `outcome` | `selected`, `superseded` or `no-effect`; `done` for an `apply` record; `marked`, `unc`, `old` and `reported` for `wb-fail`; `reclaimed` for a `reclaim` record |
+| `reason` | for `no-effect`: `fua`, `pre` or `hang`; for a lie also `plp`, `atomic`, `no-buffer`, `cmd-failed` or `durable`; for `wb-fail` also `slots-full` and `marked`; for `reclaimed`: the path |
 | `buffered_at_flush_lie`, `lie_pages` | for a `done` lie: the pages it left volatile (QMP: `buffered-at-flush-lie`, `lie-pages`) |
 | `cause` | the id of the parent record: an `apply` record names its `select` record |
-| `status` | the status a `fail` or `report` record carries; absent for none |
+| `status` | the status a `fail` or `report` record carries, or the withheld status of a `hang`; absent for none |
 | `slot`, `pages`, `lba_mask`, `lost`, `found` | `wb-fail` only, see [write-back failures](#write-back-failures) (QMP: `lba-mask`) |
 
 ```text
@@ -590,8 +623,9 @@ The ring has two overflow rules. Neither is silent.
   any that came later. A close error is reported too. A realize that
   fails after the writer started also stops it. Exit waits for the
   writer, so a file that stalls also stalls the exit.
-- The FTL thread is the only producer of the ring, and the query takes
-  no lock. A record moves as 64-bit atomic words between two reads of
+- The FTL thread, the pollers (`hang`) and the main loop (`wb-fail`,
+  a reclaim) write records under one lock. The query takes no
+  lock. A record moves as 64-bit atomic words between two reads of
   the slot's sequence word, so a read skips a record that the producer
   replaces during the copy.
 - Two runs with equal input (file, seeds and command stream) make equal

@@ -9436,8 +9436,9 @@ void femu_test_fsched_match(void *obj, void *data, QGuestAllocator *alloc)
         "@write#3 write-fail\n"
         "@read#2 read-unc\n"
         "@write,lba=8-15%1000000~1 delay ms=1\n"
-        "@flush%1000000~3 hang\n", -1, NULL));
-    g_assert_true(g_file_set_contents(p2, "@write#2 hang\n", -1, NULL));
+        "@flush%1000000~3 delay ms=1\n", -1, NULL));
+    g_assert_true(g_file_set_contents(p2, "@write#2 delay ms=1\n", -1,
+                                      NULL));
     g_assert_true(g_file_set_contents(p3, "100 ana=1:2\n", -1, NULL));
     qs = qtest_pc_boot(
         "-machine pc -nodefaults "
@@ -9552,7 +9553,7 @@ void femu_test_fsched_ppm(void *obj, void *data, QGuestAllocator *alloc)
         "@write,lba=0-7%0~1147169 hang\n"
         "@write,lba=0-7%1~1147169 write-fail\n"
         "@write,lba=0-7%999999~221237 delay ms=1\n"
-        "@write,lba=0-7%1000000~221237 hang\n"
+        "@write,lba=0-7%1000000~221237 delay ms=2\n"
         "@write,lba=100-107%500000~1 delay ms=1\n"
         "@write,lba=200-207%500000~2 delay ms=1\n");
     QOSState *qs = qtest_pc_boot(
@@ -9618,7 +9619,7 @@ void femu_test_fsched_mdts(void *obj, void *data, QGuestAllocator *alloc)
 {
     g_autofree char *dir = g_dir_make_tmp("femu-fsched-XXXXXX", NULL);
     g_autofree char *path = femu_events_file(dir,
-                                             "@read%1000000~1 hang\n");
+                                             "@read%1000000~1 read-unc\n");
     QOSState *qs = qtest_pc_boot(
         "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
         "femu_mode=1,meta=8,mc=3,extended=1,mdts=1,events_file=%s", path);
@@ -9723,7 +9724,9 @@ typedef struct FemuFsCase {
  * file order; each pair is also given in reverse order. Eligibility uses
  * the original command: after an applied fua-lie, a later @fua line still
  * matches, and wb-fail alone on a FUA Write has no effect. The same lines
- * on a plain Write are the control: neither @fua line matches.
+ * on a plain Write are the control: neither @fua line matches. Lines of
+ * other groups each apply. Each line here lets its command complete. A
+ * terminal line holds the CQE, so test-fsched.c checks those pairs.
  */
 void femu_test_fsched_groups(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -9743,14 +9746,14 @@ void femu_test_fsched_groups(void *obj, void *data, QGuestAllocator *alloc)
         { "@write,lba=40-47#1 wb-fail", 'X' },          /* FUA Write */
         { "@write,lba=48-55#1 sdc kind=flip", 'A' },
         { "@write,lba=48-55#1 sdc kind=lost", 'S' },
-        { "@write,lba=56-63#1 power-loss", 'A' },
-        { "@write,lba=56-63#1 hang", 'S' },
-        { "@write,lba=56-63#1 write-fail", 'X' },
-        { "@write,lba=64-71#1 hang", 'A' },
-        { "@write,lba=64-71#1 power-loss", 'S' },
-        { "@write,lba=72-79#1 hang", 'A' },
+        { "@write,lba=56-63#1 delay ms=1", 'A' },
+        { "@write,lba=56-63#1 delay ms=2", 'S' },
+        { "@write,lba=56-63#1 write-fail", 'A' },
+        { "@write,lba=64-71#1 sdc kind=lost", 'A' },
+        { "@write,lba=64-71#1 sdc kind=flip", 'S' },
         { "@write,lba=72-79#1 write-fail", 'A' },
-        { "@write,lba=72-79#1 delay ms=1", 'X' },
+        { "@write,lba=72-79#1 sdc kind=flip", 'A' },
+        { "@write,lba=72-79#1 delay ms=1", 'A' },
     };
     g_autofree char *dir = g_dir_make_tmp("femu-fsched-XXXXXX", NULL);
     g_autofree char *path = NULL;
@@ -29559,6 +29562,8 @@ static bool femu_qstat(QList *stats, const char *name, uint64_t *v)
 {
     QObject *o = femu_qstat_obj(stats, name);
 
+    /* a caller may read *v after a failed non-fatal assertion */
+    *v = 0;
     if (!o) {
         return false;
     }
@@ -32901,5 +32906,445 @@ void femu_test_fsched_wbf_slots(void *obj, void *data,
     }
     g_assert_cmpint(femu_wbf_nrec(qts, "sp", "supersede"), ==, 299);
     g_assert_cmpint(femu_wbf_nrec(qts, "sp", "fail"), ==, 0);
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * hang. A hang lets its command run, then holds its CQE until a
+ * reclaim. x-fault-hung counts the hung commands.
+ */
+
+/* the integer, or the bool as 0 or 1, of property @prop of device @id */
+static int64_t femu_hang_prop(QTestState *qts, const char *id,
+                              const char *prop)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':%s}}", path, prop);
+    int64_t v;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = qobject_type(qdict_get(rsp, "return")) == QTYPE_QBOOL ?
+        qdict_get_bool(rsp, "return") : qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    return v;
+}
+
+/* wait until property @prop of device @id reads @want */
+static void femu_hang_wait(QTestState *qts, const char *id, const char *prop,
+                           int64_t want)
+{
+    int64_t got = -1;
+
+    for (int i = 0; i < FEMU_POLL_LIMIT_MS; i++) {
+        got = femu_hang_prop(qts, id, prop);
+        if (got == want) {
+            return;
+        }
+        g_usleep(1000);
+    }
+    g_assert_cmpint(got, ==, want);
+}
+
+/* no CQE comes to @q for 100 ms; each look lets the main loop run */
+static void femu_hang_none(FemuCtrlState *c, FemuQueue *q)
+{
+    for (int i = 0; i < 100; i++) {
+        g_assert_false(femu_rwa_cq_ready(c, q));
+        g_usleep(1000);
+    }
+}
+
+/* submit, with no wait, @opc of page @page on namespace 1 */
+static uint16_t femu_hang_submit(FemuCtrlState *c, FemuQueue *q, uint8_t opc,
+                                 int page, uint64_t buf)
+{
+    NvmeRwCmd rw = { 0 };
+    uint16_t cid = c->cid;
+
+    rw.opcode = opc;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    if (opc != NVME_CMD_FLUSH) {
+        rw.slba = cpu_to_le64(page * 8);
+        rw.nlb = cpu_to_le16(7);
+    }
+    femu_submit(c, q, (NvmeCmd *)&rw);
+    return cid;
+}
+
+/* Abort of @cid on queue 1: dword 0 of its CQE, bit 0 for not aborted */
+static uint32_t femu_hang_abort(FemuCtrlState *c, uint16_t cid)
+{
+    NvmeCmd cmd = { .opcode = NVME_ADM_CMD_ABORT };
+    uint32_t res = 0;
+
+    cmd.cdw10 = cpu_to_le32(((uint32_t)cid << 16) | 1);
+    g_assert_cmphex(FEMU_SC(femu_admin_result(c, &cmd, &res)), ==, 0);
+    return res;
+}
+
+/* the select, apply and reclaim records of one held command */
+static char *femu_hang_recs(const char *act, int match, uint16_t cid,
+                            int opc, int page, const char *why)
+{
+    int slba = opc == NVME_CMD_FLUSH ? 0 : page * 8;
+    int nlb = opc == NVME_CMD_FLUSH ? 0 : 8;
+    g_autofree char *cmd = g_strdup_printf("c%u o%d f0 %d+%d", cid, opc,
+                                           slba, nlb);
+    GString *g = g_string_new(NULL);
+
+    g_string_append_printf(g, "1<0 l1 m%d %s select selected %s; "
+                           "2<1 l1 m%d %s apply done %s", match, act, cmd,
+                           match, act, cmd);
+    if (why) {
+        g_string_append_printf(g, "; 3<1 l1 m%d %s reclaim reclaimed/%s %s",
+                               match, act, why, cmd);
+    }
+    return g_string_free(g, false);
+}
+
+/*
+ * A hung Read, Write and Flush on queue 1, and the control hn whose line
+ * never selects. Page 0 holds 0xa0 from Write 1. Each command runs:
+ * the hung Write leaves 0xb0 on page 0. Its CQE never comes, while
+ * Writes and Reads on queue 1 and on queue 2 complete. An Abort of it is
+ * not performed and leaves it hung. A Delete SQ of queue 1 gives it back
+ * with no CQE: x-fault-hung reads 0 and a reclaim record names
+ * sq-deleted. On hn the same command completes.
+ *
+ * Planted defects and the check that fails:
+ *   the poller posts a hung command      femu_hang_none, the cid of femu_io
+ *   the hang skips the FTL               page 0 of hw
+ *   Delete SQ skips the reclaim          x-fault-hung after it
+ *   an Abort reclaims or posts it        x-fault-hung after it
+ */
+void femu_test_fsched_hang_io(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-hang-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "hr", 5, FEMU_LIE_PL, "@read#1 hang\n" },
+        { "hw", 6, FEMU_LIE_PL, "@write#2 hang\n" },
+        { "hf", 7, FEMU_LIE_PL, "@flush#1 hang\n" },
+        { "hn", 8, FEMU_LIE_PL, "@write#9 hang\n" },
+    };
+    static const uint8_t opc[] = {
+        NVME_CMD_READ, NVME_CMD_WRITE, NVME_CMD_FLUSH, NVME_CMD_WRITE,
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool hang = i < 3;
+        FemuQueue q2 = { 0 };
+        NvmeRwCmd rw = { 0 };
+        g_autofree char *want = NULL;
+        uint16_t a;
+
+        femu_lie_page(c, buf, 0, 0xa0, false);
+        femu_zap_create_queue(c, &q2, 2);
+        qtest_memset(qts, buf, 0xb0, 4096);
+        a = femu_hang_submit(c, &c->io, opc[i], 0, buf);
+        if (!hang) {
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)),
+                            ==, 0);
+        }
+        femu_hang_wait(qts, d[i].id, "x-fault-hung", hang);
+        femu_hang_none(c, &c->io);
+
+        /* queue 1 works: femu_io wants its own CID, not the hung one */
+        femu_lie_page_is(c, buf, 0, opc[i] == NVME_CMD_WRITE ? 0xb0 : 0xa0);
+        /* queue 2 writes the blocks the hung command used */
+        qtest_memset(qts, buf, 0xc0, 4096);
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.nlb = cpu_to_le16(7);
+        femu_zap_queue(c, &q2, (NvmeCmd *)&rw);
+        femu_zap_ring(c, &q2);
+        g_assert_cmphex(femu_zap_complete(c, &q2, NULL), ==, 0);
+        femu_lie_page_is(c, buf, 0, 0xc0);
+
+        /* an Abort finds nothing in the SQ: not performed */
+        g_assert_cmphex(femu_hang_abort(c, a) & 1, ==, 1);
+        g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-hung"), ==,
+                        hang);
+        femu_hang_none(c, &c->io);
+
+        g_assert_cmphex(FEMU_SC(femu_delete_sq(c, 1)), ==, 0);
+        g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-hung"), ==, 0);
+        femu_hang_none(c, &c->io);
+        want = hang ? femu_hang_recs("hang", i == 1 ? 2 : 1, a, opc[i], 0,
+                                     "sq-deleted") : g_strdup("");
+        femu_lie_want(qts, d[i].id, want);
+        femu_queue_free(c, &q2);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * The other reclaim paths of a hung Write 2 of page 1: Controller Reset
+ * (rr), power cut (rp) and a normal shutdown with CC.EN 1 (rs). Before
+ * the path x-fault-hung reads 1, after it 0, and the reclaim record
+ * names the path. The shutdown completes: SHST 10b. Each device then
+ * works after an enable, and page 1 holds the data of the hung Write.
+ *
+ * Planted defects and the check that fails:
+ *   nvme_clear_ctrl() skips the reclaim   x-fault-hung after each path
+ *   the wrong path reason                 the records
+ */
+void femu_test_fsched_hang_reclaim(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-hang-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "rr", 5, FEMU_LIE_PL, "@write#2 hang\n" },
+        { "rp", 6, FEMU_LIE_PL, "@write#2 hang\n" },
+        { "rs", 7, FEMU_LIE_PL, "@write#2 hang\n" },
+    };
+    static const char *const why[] = { "reset", "power-cut", "shutdown" };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        g_autofree char *want = NULL;
+        uint16_t a;
+
+        femu_lie_page(c, buf, 0, 0xa0, false);
+        qtest_memset(qts, buf, 0xb1, 4096);
+        a = femu_hang_submit(c, &c->io, NVME_CMD_WRITE, 1, buf);
+        femu_hang_wait(qts, d[i].id, "x-fault-hung", 1);
+        /* the Flush makes page 1 durable before a cut */
+        femu_power_flush(c, 1);
+        switch (i) {
+        case 0:
+            femu_wbf_ctrl_reset(&d[i]);
+            break;
+        case 1:
+            femu_lie_cut(&d[i]);
+            break;
+        default:
+            qpci_io_writel(c->pdev, c->bar, 0x14,
+                           FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
+            g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(c->pdev, c->bar,
+                                                         0x1c)), ==, 2);
+            femu_wbf_ctrl_reset(&d[i]);
+            break;
+        }
+        g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-hung"), ==, 0);
+        want = femu_hang_recs("hang", 2, a, NVME_CMD_WRITE, 1, why[i]);
+        femu_lie_want(qts, d[i].id, want);
+        femu_lie_page_is(c, buf, 1, 0xb1);
+        for (int p = 3; p < 6; p++) {
+            femu_lie_page(c, buf, p, 0xa0 + p, false);
+            femu_lie_page_is(c, buf, p, 0xa0 + p);
+        }
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * The reset contract of x-fault-hung: three Writes hang on rh, then a
+ * Controller Reset. x-fault-hung reads 3 before and 0 after, and the
+ * hang line selects again: the next Write hangs once more. The control
+ * rc hangs the same Writes and skips the reclaim: it deletes no queue
+ * and resets nothing, so x-fault-hung still reads 3 at the same point.
+ * That shows the 0 on rh comes from the reset.
+ */
+void femu_test_fsched_hang_count(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-hang-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "rh", 5, FEMU_LIE_PL, "@write%1000000~1 hang\n" },
+        { "rc", 6, FEMU_LIE_PL, "@write%1000000~1 hang\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool reset = i == 0;
+
+        for (int p = 0; p < 3; p++) {
+            femu_hang_submit(c, &c->io, NVME_CMD_WRITE, p, buf);
+        }
+        femu_hang_wait(qts, d[i].id, "x-fault-hung", 3);
+        if (reset) {
+            femu_wbf_ctrl_reset(&d[i]);
+        }
+        g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-hung"), ==,
+                        reset ? 0 : 3);
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "reclaim"), ==,
+                        reset ? 3 : 0);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, 4, buf);
+        femu_hang_wait(qts, d[i].id, "x-fault-hung", reset ? 1 : 4);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * A hang with another action on the same command.
+ *   hl: flush-lie and hang on Flush 2. Both apply: the Flush lies, then
+ *       hangs. The power cut reclaims it and rolls page 0 back to 0xa0.
+ *   hk: the control, hang only: the Flush writes page 0 back, so it
+ *       keeps 0xb0 over the cut.
+ *   hb: wb-fail and hang on Write 2 of page 1. The hung Write still
+ *       marks its page: the next Flush gets Write Fault, and block 8
+ *       reads Unrecovered Read Error.
+ *   hd: the control, wb-fail only: the same Flush and Read results.
+ *
+ * Planted defects and the check that fails:
+ *   a hang leaves the lie out        page 0 of hl
+ *   a hang leaves the mark out       the Flush and the Read of hb
+ */
+void femu_test_fsched_hang_mix(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-hang-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "hl", 5, FEMU_LIE_PL, "@flush#2 flush-lie\n@flush#2 hang\n" },
+        { "hk", 6, FEMU_LIE_PL, "@flush#2 hang\n" },
+        { "hb", 7, FEMU_LIE_PL, FEMU_WBF_SEL " report=once\n"
+                                "@write,lba=8-15#2 hang\n" },
+        { "hd", 8, FEMU_LIE_PL, FEMU_WBF_SEL " report=once\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < 2; i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool lie = i == 0;
+        g_autofree char *want = NULL;
+        uint16_t a;
+
+        femu_lie_page(c, buf, 0, 0xa0, false);
+        femu_power_flush(c, 1);
+        femu_lie_page(c, buf, 0, 0xb0, false);
+        a = femu_hang_submit(c, &c->io, NVME_CMD_FLUSH, 0, buf);
+        femu_hang_wait(qts, d[i].id, "x-fault-hung", 1);
+        femu_lie_cut(&d[i]);
+        g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-hung"), ==, 0);
+        femu_lie_page_is(c, buf, 0, lie ? 0xa0 : 0xb0);
+        if (lie) {
+            want = g_strdup_printf(
+                "1<0 l1 m2 flush-lie select selected c%u o0 f0 0+0; "
+                "2<0 l2 m2 hang select selected c%u o0 f0 0+0; "
+                "3<1 l1 m2 flush-lie apply done c%u o0 f0 0+0 B1; "
+                "4<2 l2 m2 hang apply done c%u o0 f0 0+0; "
+                "5<2 l2 m2 hang reclaim reclaimed/power-cut c%u o0 f0 0+0",
+                a, a, a, a, a);
+        } else {
+            want = femu_hang_recs("hang", 2, a, NVME_CMD_FLUSH, 0,
+                                  "power-cut");
+        }
+        femu_lie_want(qts, d[i].id, want);
+    }
+    for (int i = 2; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool hang = i == 2;
+        uint16_t cid;
+
+        femu_lie_page(c, buf, 1, 0xa1, false);
+        femu_power_flush(c, 1);
+        qtest_memset(qts, buf, 0xb1, 4096);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, 1, buf);
+        if (hang) {
+            femu_hang_wait(qts, d[i].id, "x-fault-hung", 1);
+        } else {
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)),
+                            ==, 0);
+        }
+        g_assert_cmphex(femu_wbf_drain(c, buf, FEMU_WBF_FLUSH, 0, &cid), ==,
+                        FEMU_WBF_WF);
+        g_assert_cmphex(femu_fs_io(c, NVME_CMD_READ, 8, 1, false, buf), ==,
+                        FEMU_WBF_URE);
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "fail"), ==, 1);
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "report"), ==, 1);
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "apply"), ==, 1 + hang);
+        g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-hung"), ==,
+                        hang);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * A hung reporting Flush. Flush A on queue 1 drains the wb-fail mark of
+ * page 1 and hangs on hh, so its failure stays pending: Flush C on
+ * queue 2 reports it, with found pending. On the control hc the hang line
+ * never selects: A reports Write Fault and C succeeds.
+ *
+ * Planted defects and the check that fails:
+ *   a hung Flush takes the report        C on hh, and its found
+ *   the hang skips the write-back        the fail record of hh
+ */
+void femu_test_fsched_hang_report(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-hang-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "hh", 5, FEMU_LIE_PL, FEMU_WBF_SEL " report=once\n"
+                                "@flush#2 hang\n" },
+        { "hc", 6, FEMU_LIE_PL, FEMU_WBF_SEL " report=once\n"
+                                "@flush#9 hang\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool hang = i == 0;
+        NvmeCmd flush = { .opcode = NVME_CMD_FLUSH,
+                          .nsid = cpu_to_le32(1) };
+        FemuQueue q2 = { 0 };
+        g_autofree char *last = NULL;
+
+        femu_wbf_seed(c, buf);
+        femu_zap_create_queue(c, &q2, 2);
+        femu_hang_submit(c, &c->io, NVME_CMD_FLUSH, 0, buf);
+        if (hang) {
+            femu_hang_wait(qts, d[i].id, "x-fault-hung", 1);
+        } else {
+            g_assert_cmphex(FEMU_WBF_SC(femu_complete(c, &c->io, NULL,
+                                                      NULL)),
+                            ==, FEMU_WBF_WF);
+        }
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "fail"), ==, 1);
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "report"), ==, !hang);
+
+        /* Flush C */
+        femu_zap_queue(c, &q2, &flush);
+        femu_zap_ring(c, &q2);
+        g_assert_cmphex(FEMU_WBF_SC(femu_zap_complete(c, &q2, NULL)), ==,
+                        hang ? FEMU_WBF_WF : 0);
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "report"), ==, 1);
+        if (hang) {
+            QDict *rsp;
+            QDict *q = femu_events_q(qts, d[i].id, &rsp);
+            QListEntry *e;
+            const char *found = NULL;
+
+            QLIST_FOREACH_ENTRY(qdict_get_qlist(q, "faults"), e) {
+                QDict *r = qobject_to(QDict, qlist_entry_obj(e));
+
+                if (!strcmp(qdict_get_str(r, "phase"), "report")) {
+                    found = qdict_get_str(r, "found");
+                    g_assert_cmpint(qdict_get_int(r, "sqid"), ==, 2);
+                }
+            }
+            g_assert_cmpstr(found, ==, "pending");
+            qobject_unref(rsp);
+        }
+        last = femu_wbf_last(qts, d[i].id, "apply", NULL);
+        g_assert_cmpstr(last, ==, hang ? "done" : "marked S1");
+        femu_hang_none(c, &c->io);
+        femu_queue_free(c, &q2);
+    }
     femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
 }

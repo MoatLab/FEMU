@@ -45,6 +45,7 @@ enum {
     FEMU_FR_PHASE_FAIL,                 /* wb-fail: a write-back met a mark */
     FEMU_FR_PHASE_REPORT,               /* wb-fail: a completion reports it */
     FEMU_FR_PHASE_SUPERSEDE,            /* wb-fail: a full rewrite cleared it */
+    FEMU_FR_PHASE_RECLAIM,              /* hang, cfs: the command went back */
 };
 
 /* what came of the selection */
@@ -57,6 +58,7 @@ enum {
     FEMU_FR_OUT_UNC,                    /* the lost blocks read as errors */
     FEMU_FR_OUT_OLD,                    /* the lost blocks read old data */
     FEMU_FR_OUT_REPORTED,               /* a completion carries the error */
+    FEMU_FR_OUT_RECLAIMED,              /* a held command left with no CQE */
 };
 
 /* wb-fail: who met a failure (fail), or when (report) */
@@ -88,7 +90,8 @@ typedef struct FemuFrRec {
     uint8_t phase;              /* FEMU_FR_PHASE_* */
     uint8_t act;                /* FEMU_FS_ACT_* */
     uint8_t outcome;            /* FEMU_FR_OUT_* */
-    uint8_t why;                /* FEMU_FS_WHY_* for FEMU_FR_OUT_NO_EFFECT */
+    /* FEMU_FS_WHY_*: for FEMU_FR_OUT_NO_EFFECT, or the reclaim path */
+    uint8_t why;
     uint8_t opc;
     uint8_t fua;
     uint8_t found;              /* wb-fail fail and report: FEMU_FR_FOUND_* */

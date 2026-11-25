@@ -18,10 +18,11 @@
  * The FTL thread matches each command against those lines after the first
  * enable. A selection moves the counters of its line, which x-fault-sel
  * reports, and writes one record per line it concerns to the fault record
- * ring (femu-frec.c). flush-lie, fua-lie and wb-fail have an effect so
- * far: after the FTL runs their command, an apply record tells what came
- * of it. A wb-fail mark fails at a later write-back, and a later
- * completion reports it (see "wb-fail" below).
+ * ring (femu-frec.c). flush-lie, fua-lie, wb-fail and hang have an
+ * effect so far: after the FTL runs their command, an apply record tells
+ * what came of it. A wb-fail mark fails at a later write-back, and a
+ * later completion reports it (see "wb-fail" below). A hang holds its
+ * command with no CQE (see "hang" below).
  *
  *   FTL thread: step++, match --> femu_fr_put() per line --> FTL call
  *               --> post: lie or wb-fail apply, wb-fail report
@@ -111,12 +112,12 @@ struct FemuFsched {
     FemuFsView wbf_view;
 
     /*
-     * With wb-fail, the main loop writes records too (Admin reports and
-     * write-backs, a cut), so each producer takes this lock.
+     * The FTL thread, the pollers (hang) and the main loop (wb-fail
+     * reports and write-backs, a cut, a reclaim) write records, so each
+     * producer takes this lock.
      */
     QemuSpin put_lock;
 
-    /* the FTL thread is the one producer of the ring */
     FemuFrRing ring;
     FemuFrSlot *slots;
     bool has_log;               /* events_log is set; fixed at realize */
@@ -949,8 +950,12 @@ void femu_events_free(FemuCtrl *n)
 {
     struct FemuEventSched *s = n->events;
 
-    /* the last records reach events_log, even under x-fault-log-hold */
+    /*
+     * Unplug gives back what a hang holds; then the last records
+     * reach events_log, even under x-fault-log-hold.
+     */
     if (n->fsched) {
+        femu_fsched_reclaim(n, NULL, FEMU_FS_WHY_UNPLUG);
         femu_fsched_log_finish(n);
     }
     femu_fsched_free(n->fsched);
@@ -978,13 +983,9 @@ static uint64_t femu_fsched_put(FemuCtrl *n, FemuFrRec *rec)
     struct FemuFsched *f = n->fsched;
     uint64_t id;
 
-    if (n->wbf) {
-        qemu_spin_lock(&f->put_lock);
-    }
+    qemu_spin_lock(&f->put_lock);
     id = femu_fr_put(&f->ring, rec);
-    if (n->wbf) {
-        qemu_spin_unlock(&f->put_lock);
-    }
+    qemu_spin_unlock(&f->put_lock);
     /* a no-op while the writer is already awake, or after it ended */
     if (f->has_log) {
         qemu_event_set(&f->log_ev);
@@ -1524,9 +1525,10 @@ void femu_wbf_cut(FemuCtrl *n, bool start)
 
 /*
  * The effect of line @i, which won its group on @req, seen as @v; @id
- * is its select record. The lies and wb-fail are modelled: each other
- * case names what it will do, and its selection moves the counters
- * alone. Returns true when the FTL step must call femu_fsched_post().
+ * is its select record. The lies, wb-fail and hang are modelled:
+ * each other case names what it will do, and its selection moves the
+ * counters alone. Returns true when the FTL step must call
+ * femu_fsched_post().
  */
 static bool femu_fsched_act(FemuCtrl *n, NvmeRequest *req, int i,
                             const FemuFsView *v, uint64_t id)
@@ -1550,9 +1552,14 @@ static bool femu_fsched_act(FemuCtrl *n, NvmeRequest *req, int i,
     case FEMU_FS_ACT_WB_FAIL:
         femu_wbf_select(n, req, i, v, id);
         return true;
+    case FEMU_FS_ACT_HANG:
+        /* femu_fsched_match() sets req->fs_hang once the group is known */
+        req->fs_line = l->line;
+        req->fs_match = l->matched;
+        req->fs_cause = id;
+        return false;
     case FEMU_FS_ACT_POWER_LOSS:    /* not modelled yet: a cut at pre */
     case FEMU_FS_ACT_CFS:           /* not modelled yet: CSTS.CFS at pre */
-    case FEMU_FS_ACT_HANG:          /* not modelled yet: no CQE */
     case FEMU_FS_ACT_WRITE_FAIL:    /* not modelled yet: Write Fault */
     case FEMU_FS_ACT_READ_UNC:      /* not modelled yet: Unrecovered Read */
     case FEMU_FS_ACT_SDC:           /* not modelled yet: sdc override */
@@ -1668,7 +1675,8 @@ void femu_fsched_post(FemuCtrl *n, NvmeRequest *req, bool report)
         if (n->fsched->wbf_sel) {
             femu_wbf_apply(n, req);
         }
-        if (report) {
+        /* a hung command never posts, so it reports nothing */
+        if (report && !req->fs_hang) {
             femu_wbf_report_io(n, req, lied);
         }
         femu_wbf_cur = 0;
@@ -1764,6 +1772,13 @@ static bool femu_fsched_match(FemuCtrl *n, NvmeRequest *req)
             lie |= femu_fsched_act(n, req, i, &v, id);
         }
     }
+    /*
+     * A hang lets the command run, and its poller then holds it. A cfs
+     * and a power-loss are not modelled yet.
+     */
+    if (femu_fs_terminal(f->l, f->nr, f->out) == FEMU_FS_ACT_HANG) {
+        req->fs_hang = 1;
+    }
     return lie;
 }
 
@@ -1788,6 +1803,142 @@ bool femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
         return true;
     }
     return post;
+}
+
+/*
+ * hang. A hang lets its command run in the FTL, then the poller keeps it
+ * on a list of its own in place of the pqueue: no CQE. The command goes
+ * back on a reclaim.
+ *
+ *   hang: FTL step --> poller: fs_hung[p], apply record, x-fault-hung++
+ *   reclaim: Delete SQ (its commands), Controller Reset, shutdown, power
+ *            cut, unplug (all) --> SQ request list, reclaim record
+ *
+ * An Abort finds no hung command in its SQ, so it is not performed. A
+ * hung command reports no wb-fail failure: its CQE never posts, so the
+ * failure stays pending for the next draining completion.
+ */
+
+/* the fields of @cmd that a record names, as a line saw them */
+static FemuFsView femu_fsched_cmd_view(const NvmeCmd *cmd)
+{
+    const NvmeRwCmd *rw = (const NvmeRwCmd *)cmd;
+    FemuFsView v = {
+        .opc = cmd->opcode,
+        .nsid = le32_to_cpu(cmd->nsid),
+    };
+
+    if (v.opc != NVME_CMD_FLUSH) {
+        v.slba = le64_to_cpu(rw->slba);
+        v.nlb = le16_to_cpu(rw->nlb) + 1;
+        v.fua = v.opc == NVME_CMD_WRITE &&
+                (le16_to_cpu(rw->control) & NVME_RW_FUA);
+    }
+    return v;
+}
+
+/* a record of the hung command @req */
+static FemuFrRec femu_fsched_hang_rec(FemuCtrl *n, NvmeRequest *req,
+                                      uint8_t phase, uint8_t outcome)
+{
+    FemuFsView v = femu_fsched_cmd_view(&req->cmd);
+
+    return (FemuFrRec) {
+        .cause = req->fs_cause,
+        .step = qatomic_read(&n->fsched->step),
+        .match = req->fs_match,
+        .slba = v.slba,
+        .nlb = v.nlb,
+        .nsid = v.nsid,
+        .line = req->fs_line,
+        .sqid = req->sq ? req->sq->sqid : 0,
+        .cid = le16_to_cpu(req->cmd.cid),
+        .origin = FEMU_FR_ORIGIN_SCHED_CMD,
+        .phase = phase,
+        .act = FEMU_FS_ACT_HANG,
+        .outcome = outcome,
+        .opc = v.opc,
+        .fua = v.fua,
+    };
+}
+
+/**
+ * femu_fsched_hang - a poller holds a command that a hang selected
+ * @n: the controller, with command lines
+ * @poller: the poller, from 1
+ * @req: the command, back from its FTL step
+ *
+ * The command did its work, so its ranges go back and other commands on
+ * the same blocks run. Only its CQE is withheld, an error status too.
+ * The apply record carries that status.
+ */
+void femu_fsched_hang(FemuCtrl *n, int poller, NvmeRequest *req)
+{
+    FemuFrRec rec = femu_fsched_hang_rec(n, req, FEMU_FR_PHASE_APPLY,
+                                         FEMU_FR_OUT_DONE);
+
+    req->fs_hang = 0;
+    rec.status = req->status;
+    nvme_req_release_ranges(req);
+    QTAILQ_INSERT_TAIL(&n->fs_hung[poller], req, entry);
+    qatomic_inc(&n->fault_hung);
+    femu_fsched_put(n, &rec);
+}
+
+/*
+ * A hung request of @sq (NULL: any) that waits in to_poller[@p] has not
+ * reached its poller yet. Hold it now, so the reclaim below gives it back
+ * with its apply and reclaim records, as if the poller had seen it.
+ */
+static void femu_fsched_hang_ring(FemuCtrl *n, int p, NvmeSQueue *sq)
+{
+    struct rte_ring *r = n->to_poller ? n->to_poller[p] : NULL;
+    size_t count = r ? femu_ring_count(r) : 0;
+    NvmeRequest *req;
+
+    for (size_t i = 0; i < count; i++) {
+        if (femu_ring_dequeue(r, (void **)&req, 1) != 1) {
+            break;
+        }
+        if (req->fs_hang && (!sq || req->sq == sq)) {
+            femu_fsched_hang(n, p, req);
+            continue;
+        }
+        /* one rotation keeps the order of the others */
+        femu_ring_enqueue(r, (void **)&req, 1);
+    }
+}
+
+/**
+ * femu_fsched_reclaim - give back the commands a hang holds
+ * @n: the controller, with its dataplane paused or its threads stopped
+ * @sq: only the commands of this queue; NULL for all, a controller clear
+ * @why: the path, a FEMU_FS_WHY_* reclaim reason
+ *
+ * Each command goes back to its SQ request list with no CQE and writes a
+ * reclaim record.
+ */
+void femu_fsched_reclaim(FemuCtrl *n, NvmeSQueue *sq, uint8_t why)
+{
+    NvmeRequest *req;
+    NvmeRequest *next;
+    FemuFrRec rec;
+
+    for (int p = 1; n->fs_hung && p <= (int)n->nr_pollers; p++) {
+        femu_fsched_hang_ring(n, p, sq);
+        QTAILQ_FOREACH_SAFE(req, &n->fs_hung[p], entry, next) {
+            if (sq && req->sq != sq) {
+                continue;
+            }
+            QTAILQ_REMOVE(&n->fs_hung[p], req, entry);
+            QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
+            qatomic_dec(&n->fault_hung);
+            rec = femu_fsched_hang_rec(n, req, FEMU_FR_PHASE_RECLAIM,
+                                       FEMU_FR_OUT_RECLAIMED);
+            rec.why = why;
+            femu_fsched_put(n, &rec);
+        }
+    }
 }
 
 /*
@@ -1931,6 +2082,9 @@ void femu_events_add_test_props(Object *obj)
     object_property_add(obj, "x-fault-log-hold", "bool",
                         femu_fsched_test_log_hold_get,
                         femu_fsched_test_log_hold_set, NULL, NULL);
+    /* requests that a hang holds now; a reclaim takes it back to 0 */
+    object_property_add_uint64_ptr(obj, "x-fault-hung", &n->fault_hung,
+                                   OBJ_PROP_FLAG_READ);
 }
 
 /* the fault records and their counters, for query-femu-events */
@@ -1975,13 +2129,16 @@ static void femu_fsched_info(FemuCtrl *n, FemuEvents *info)
         e->slba = r->slba;
         e->nlb = r->nlb;
         e->outcome = g_strdup(femu_fr_name_outcome(r->outcome));
-        if (r->outcome == FEMU_FR_OUT_NO_EFFECT) {
+        if (r->outcome == FEMU_FR_OUT_NO_EFFECT ||
+            r->outcome == FEMU_FR_OUT_RECLAIMED) {
             e->reason = g_strdup(femu_fr_name_why(r->why));
         }
         e->has_status = r->status != 0;
         e->status = r->status;
         if (r->phase == FEMU_FR_PHASE_APPLY &&
-            r->outcome == FEMU_FR_OUT_DONE) {
+            r->outcome == FEMU_FR_OUT_DONE &&
+            (r->act == FEMU_FS_ACT_FLUSH_LIE ||
+             r->act == FEMU_FS_ACT_FUA_LIE)) {
             if (r->act == FEMU_FS_ACT_FLUSH_LIE) {
                 e->has_buffered_at_flush_lie = true;
                 e->buffered_at_flush_lie = r->pages;

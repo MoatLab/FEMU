@@ -2246,6 +2246,11 @@ typedef struct NvmeRequest {
      */
     uint8_t         fs_lie;
     /*
+     * events_file hang: set in the FTL step of a command that a hang line
+     * selected. Its poller then keeps it on n->fs_hung with no CQE.
+     */
+    uint8_t         fs_hang;
+    /*
      * events_file wb-fail: the fault slot (from 1) whose mark this Write
      * puts on the pages it buffers, or 0. Set and cleared in one FTL step.
      */
@@ -2255,6 +2260,13 @@ typedef struct NvmeRequest {
      * consumed when its CQE posts, and pending again if it never does.
      */
     uint64_t        wbf_tok;
+    /*
+     * events_file hang: the line (from 1), its match count and the id of
+     * the select record, for the records of a hung command.
+     */
+    uint16_t        fs_line;
+    uint64_t        fs_match;
+    uint64_t        fs_cause;
 } NvmeRequest;
 
 /*
@@ -3313,6 +3325,13 @@ typedef struct FemuCtrl {
      */
     struct FemuWbf  *wbf;
     bool            wbf_drained;
+    /*
+     * events_file hang (femu-events.c): per poller, the requests a hang
+     * holds with no CQE; NULL with no command line. The main loop takes
+     * them back with the dataplane paused.
+     */
+    union cq_req_list *fs_hung;
+    uint64_t        fault_hung;         /* requests a hang holds now */
     char            *events_log;        /* fault records, one JSON line each */
     char            *evlog_path;        /* events_log, resolved while open */
     uint32_t        events_max_faults;  /* slots of the fault record ring */
@@ -4138,6 +4157,8 @@ void femu_events_cancel(FemuCtrl *n);
 void femu_events_free(FemuCtrl *n);
 bool femu_fsched_step(FemuCtrl *n, NvmeRequest *req);
 void femu_fsched_post(FemuCtrl *n, NvmeRequest *req, bool report);
+void femu_fsched_hang(FemuCtrl *n, int poller, NvmeRequest *req);
+void femu_fsched_reclaim(FemuCtrl *n, NvmeSQueue *sq, uint8_t why);
 void femu_wbf_mark(FemuCtrl *n, uint16_t fslot, bool marked);
 uint8_t femu_wbf_mode(FemuCtrl *n, uint16_t fslot);
 void femu_wbf_unmark(FemuCtrl *n, uint16_t fslot, NvmeRequest *req,

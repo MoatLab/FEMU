@@ -1,4 +1,5 @@
 #include "./nvme.h"
+#include "./femu-fsched.h"
 #include "./bbssd/ftl.h"
 #include "./kvssd/kvssd.h"
 #include "./ocssd/oc-timing.h"
@@ -442,6 +443,10 @@ static uint16_t nvme_del_sq(FemuCtrl *n, NvmeCmd *cmd)
         }
     }
 
+    /* a hung command of the queue is in no ring */
+    if (unlikely(n->fsched)) {
+        femu_fsched_reclaim(n, sq, FEMU_FS_WHY_SQ_DELETED);
+    }
     nvme_drain_sq(n, sq);
     nvme_free_sq(sq, n);
     nvme_resume_pollers(n, resume);
@@ -689,6 +694,13 @@ static void nvme_init_poller(FemuCtrl *n)
     n->cpl_backlog = g_new0(union cq_req_list, n->nr_pollers + 1);
     for (i = 1; i <= n->nr_pollers; i++) {
         QTAILQ_INIT(&n->cpl_backlog[i]);
+    }
+    /* events_file hang: per poller, the requests it holds with no CQE */
+    if (n->fsched) {
+        n->fs_hung = g_new0(union cq_req_list, n->nr_pollers + 1);
+        for (i = 1; i <= n->nr_pollers; i++) {
+            QTAILQ_INIT(&n->fs_hung[i]);
+        }
     }
 
     /* poller quiesce flags (1-based poller indices); see poller_in_sweep */

@@ -939,6 +939,11 @@ void nvme_retire_ns_requests_status(FemuCtrl *n, NvmeNamespace *ns,
                 int rc = femu_ring_dequeue(rings[r], (void **)&req, 1);
 
                 assert(rc == 1);
+                /* events_file hang: it ran, and it posts no CQE */
+                if (r == 1 && unlikely(req->fs_hang) && req->ns == ns) {
+                    femu_fsched_hang(n, p, req);
+                    continue;
+                }
                 if (req->ns == ns) {
                     bool completed = req->status != NVME_SUCCESS ||
                         req->fused_ran ||

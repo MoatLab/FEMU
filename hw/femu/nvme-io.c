@@ -587,6 +587,7 @@ static inline void nvme_req_start(FemuCtrl *n, NvmeRequest *req,
         femu_wbf_dropped(n, req);
     }
     req->fs_lie = 0;
+    req->fs_hang = 0;
     req->fs_wbf = 0;
     /* every path that frees a request slot released this first */
     assert(!req->csd_use);
@@ -1432,6 +1433,11 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
                 req->status = NVME_CMD_ABORT_REQ;
                 req->cqe.res64 = 0;
             }
+        }
+        /* events_file hang: held with no CQE until a reclaim */
+        if (unlikely(req->fs_hang)) {
+            femu_fsched_hang(n, index_poller, req);
+            continue;
         }
         pqueue_insert(pq, req);
     }

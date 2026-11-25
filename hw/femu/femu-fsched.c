@@ -670,6 +670,17 @@ void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
     }
 }
 
+uint8_t femu_fs_terminal(const FemuFsLine *l, int nr, const uint8_t *out)
+{
+    for (int i = 0; i < nr; i++) {
+        if (l[i].grp == FEMU_FS_GRP_TERMINAL &&
+            out[i] == FEMU_FS_OUT_APPLIED) {
+            return l[i].act;
+        }
+    }
+    return FEMU_FS_ACT_NR;
+}
+
 uint8_t femu_fs_lie_why(const FemuFsLie *s)
 {
     if (s->failed) {

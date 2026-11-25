@@ -1356,6 +1356,129 @@ static void test_wb_json(void)
     CHECK(strstr(buf, "\"reason\":\"marked\"}\n"));
 }
 
+/* the terminal action that a command runs: hang, cfs or power-loss */
+static uint8_t terminal_of(const char *const *t, int nr, FemuFsView v)
+{
+    FemuFsLine l[8];
+    uint8_t out[8];
+
+    lines(l, t, nr);
+    run(l, nr, v, out);
+    return femu_fs_terminal(l, nr, out);
+}
+
+static void test_terminal(void)
+{
+    FemuFsView wr = view(FEMU_FS_OPC_WRITE, 0, 8, false);
+    FemuFsView fl = view(FEMU_FS_OPC_FLUSH, 0, 0, false);
+    FemuFsLine l[3];
+    uint8_t out[3];
+
+    /* the first selected line of the group wins, in file order */
+    CHECK(terminal_of((const char *const[]) { "@write#1 cfs",
+                                              "@write#1 hang" }, 2, wr) ==
+          FEMU_FS_ACT_CFS);
+    CHECK(terminal_of((const char *const[]) { "@write#1 hang",
+                                              "@write#1 cfs" }, 2, wr) ==
+          FEMU_FS_ACT_HANG);
+    CHECK(terminal_of((const char *const[]) { "@write#1 power-loss",
+                                              "@write#1 hang" }, 2, wr) ==
+          FEMU_FS_ACT_POWER_LOSS);
+    /* a line that is not selected takes no part */
+    CHECK(terminal_of((const char *const[]) { "@write#2 cfs",
+                                              "@write#1 hang" }, 2, wr) ==
+          FEMU_FS_ACT_HANG);
+    CHECK(terminal_of((const char *const[]) { "@read#1 hang",
+                                              "@flush#1 cfs" }, 2, fl) ==
+          FEMU_FS_ACT_CFS);
+    /* no terminal line, or one that does not match */
+    CHECK(terminal_of((const char *const[]) { "@write#1 write-fail" }, 1,
+                      wr) == FEMU_FS_ACT_NR);
+    CHECK(terminal_of((const char *const[]) { "@fua#1 cfs" }, 1, wr) ==
+          FEMU_FS_ACT_NR);
+    CHECK(terminal_of((const char *const[]) { "@any#1 hang" }, 1, fl) ==
+          FEMU_FS_ACT_HANG);
+    /* a superseded or no-effect terminal line does not count */
+    lines(l, (const char *const[]) { "@write#1 hang", "@write#1 cfs",
+                                     "@write#1 power-loss" }, 3);
+    out[0] = FEMU_FS_OUT_SUPERSEDED;
+    out[1] = FEMU_FS_OUT_NO_EFFECT;
+    out[2] = FEMU_FS_OUT_APPLIED;
+    CHECK(femu_fs_terminal(l, 3, out) == FEMU_FS_ACT_POWER_LOSS);
+    out[2] = FEMU_FS_OUT_NONE;
+    CHECK(femu_fs_terminal(l, 3, out) == FEMU_FS_ACT_NR);
+    /* an applied line of another group is not terminal */
+    lines(l, (const char *const[]) { "@write#1 write-fail" }, 1);
+    out[0] = FEMU_FS_OUT_APPLIED;
+    CHECK(femu_fs_terminal(l, 1, out) == FEMU_FS_ACT_NR);
+    /* a cfs leaves a wb-fail with no effect, reason pre */
+    outcomes((const char *const[]) { "@write#1 cfs", "@write#1 wb-fail" },
+             2, wr, (const uint8_t[]) { A, X }, NULL);
+}
+
+/*
+ * A hang and a cfs write an apply record, and a reclaim record when the
+ * command goes back: its reason is the path. Neither names lie pages.
+ */
+static void test_reclaim_json(void)
+{
+    static const struct {
+        uint8_t why;
+        const char *name;
+    } path[] = {
+        { FEMU_FS_WHY_SQ_DELETED, "sq-deleted" },
+        { FEMU_FS_WHY_RESET, "reset" },
+        { FEMU_FS_WHY_SHUTDOWN, "shutdown" },
+        { FEMU_FS_WHY_POWER_CUT, "power-cut" },
+        { FEMU_FS_WHY_UNPLUG, "unplug" },
+    };
+    FemuFrRec x = rec_of(5);
+    char buf[FEMU_FR_JSON_MAX];
+
+    x.phase = FEMU_FR_PHASE_APPLY;
+    x.outcome = FEMU_FR_OUT_DONE;
+    x.pages = 7;
+    x.status = 0x281;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"action\":\"hang\",\"phase\":\"apply\","));
+    CHECK(strstr(buf, "\"outcome\":\"done\",\"status\":641}\n"));
+    CHECK(!strstr(buf, "lie") && !strstr(buf, "reason"));
+    x.act = FEMU_FS_ACT_CFS;
+    x.status = 0;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"action\":\"cfs\",") &&
+          strstr(buf, "\"outcome\":\"done\"}\n"));
+    /* control: a lie with the same fields names its pages */
+    x.act = FEMU_FS_ACT_FUA_LIE;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"lie_pages\":7}\n"));
+    x.act = FEMU_FS_ACT_FLUSH_LIE;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"buffered_at_flush_lie\":7}\n"));
+
+    x.act = FEMU_FS_ACT_HANG;
+    x.phase = FEMU_FR_PHASE_RECLAIM;
+    x.outcome = FEMU_FR_OUT_RECLAIMED;
+    for (size_t i = 0; i < ARRAY_SIZE(path); i++) {
+        char want[64];
+
+        x.why = path[i].why;
+        snprintf(want, sizeof(want), "\"reason\":\"%s\"}\n", path[i].name);
+        femu_fr_json(&x, buf, sizeof(buf));
+        CHECK(strstr(buf, "\"phase\":\"reclaim\","));
+        CHECK(strstr(buf, "\"outcome\":\"reclaimed\",") &&
+              strstr(buf, want));
+        CHECK(!strcmp(femu_fr_name_why(path[i].why), path[i].name));
+    }
+    CHECK(!strcmp(femu_fr_name_phase(FEMU_FR_PHASE_RECLAIM), "reclaim"));
+    CHECK(!strcmp(femu_fr_name_outcome(FEMU_FR_OUT_RECLAIMED),
+                  "reclaimed"));
+    /* control: a done record names no reason, though why is set */
+    x.outcome = FEMU_FR_OUT_DONE;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(!strstr(buf, "reason"));
+}
+
 int main(void)
 {
     test_grammar();
@@ -1382,6 +1505,8 @@ int main(void)
     test_wb_lost();
     test_wb_apply_why();
     test_wb_json();
+    test_terminal();
+    test_reclaim_json();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

@@ -1180,6 +1180,14 @@ void femu_test_fsched_wbf_aer(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_fsched_wbf_ns(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_fsched_wbf_slots(void *obj, void *data,
                                 QGuestAllocator *alloc);
+void femu_test_fsched_hang_io(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_hang_reclaim(void *obj, void *data,
+                                   QGuestAllocator *alloc);
+void femu_test_fsched_hang_count(void *obj, void *data,
+                                 QGuestAllocator *alloc);
+void femu_test_fsched_hang_mix(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_hang_report(void *obj, void *data,
+                                  QGuestAllocator *alloc);
 void femu_test_ready_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_recovery_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ready_sysreset(void *obj, void *data, QGuestAllocator *alloc);
