@@ -146,7 +146,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "(state 1 to 3, needs ana=on), power-loss (needs power_loss=on) or "
       "slow=<ch>:<lun>:<pct> (needs die_slow=on); "
       "times count from the first enable and survive resets; see "
-      "query-femu-events; not with csd_pause; unset (default) is off" },
+      "query-femu-events; bbssd: lines '@<op>[,ns=N][,lba=A-B]#N <action>' "
+      "or '@...%PPM~SEED <action>' select commands, with no effect yet; "
+      "not with csd_pause; unset (default) is off" },
     { "die_slow",
       "bbssd, CSD: on makes the array time of each LUN settable at run "
       "time with the die-slow property or a slow= action of events_file, "

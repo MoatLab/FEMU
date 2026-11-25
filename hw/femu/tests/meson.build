@@ -26,6 +26,7 @@ femu_unit_tests = {
   'test-femu-precon-math': files('unit/test-precon-math.c'),
   'test-femu-nand-profile': files('unit/test-nand-profile.c',
                                   '../nand/nand-profile.c'),
+  'test-femu-fsched': files('unit/test-fsched.c'),
   'test-femu-ext-ops': files('unit/test-ext-ops.c', '../femu-ext-ops.c',
                              '../bbssd/ftl-ops.c'),
 }

@@ -1134,6 +1134,14 @@ void femu_test_power_log(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_events(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_events_bad(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_events_timer(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_bad(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_match(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_ppm(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_mdts(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_unplug(void *obj, void *data,
+                             QGuestAllocator *alloc);
+void femu_test_fsched_groups(void *obj, void *data,
+                             QGuestAllocator *alloc);
 void femu_test_ready_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_recovery_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ready_sysreset(void *obj, void *data, QGuestAllocator *alloc);

@@ -289,8 +289,92 @@ reads and checks the whole file and names the line of any error.
 - The times are host time. Events also run while the VM is stopped.
 - `query-femu-events` lists each event with its time, when it ran and
   its result. A failed action stops the events after it.
-- Limits: 1024 lines, each of at most 256 bytes, and 64 KiB a file. Not
-  with `csd_pause`.
+- Limits: 1024 lines, each of at most 256 bytes, and 64 KiB a file. Time
+  lines and command lines share the 1024. Not with `csd_pause`.
+
+### Command lines
+
+A line that starts with `@` names commands, not a time. The FTL thread
+checks each command against these lines after the first enable. A file
+can mix time lines and command lines. Command lines work on bbssd only.
+
+```text
+ # the 3rd Write that touches blocks 0-4095 of namespace 1
+ @write,ns=1,lba=0-4095#3 power-loss
+ # each Flush, odds 1000000 ppm
+ @flush%1000000~7 flush-lie
+ @write#100 wb-fail mode=old report=once
+ @read#50 hang
+ @any#1000 cfs
+```
+
+```text
+ line    = "@" op *("," key "=" value) ("#" N | "%" PPM "~" SEED)
+           SP action *(SP option)
+ op      = any | read | write | fua | flush | wzero
+ key     = ns (an attached namespace) | lba (A-B, blocks, A <= B)
+
+ command --> opcode in the set? namespace attached? range in NSZE?
+             transfer within MDTS (Read, Write; with extended metadata)?
+   no  --> no line counts it
+   yes --> each line that matches, in file order:
+             count the match; #N: select the Nth; %PPM: draw, select
+             when the draw (0 to 999999) is below PPM
+           in each group the first selected line wins; later ones are
+           superseded
+```
+
+- `lba=A-B` matches any command with a block in A to B. A Flush has no
+  blocks, so it never matches `lba=`. `fua` is a Write with FUA set.
+  `any` is each command of the set. Dataset Management and Copy are not
+  matchable, since their ranges are in guest memory.
+- `ns=N` matches the NSID of the command. A Flush to all namespaces
+  (NSID FFFFFFFFh) matches only lines with no `ns=`.
+- `#N` takes N from 1 to 2^64 - 1. `%PPM~SEED` takes PPM 0 to 1000000
+  and a seed 0 to 2^63 - 1. Each line draws from its own splitmix64
+  state, which starts at SEED.
+
+| Action | Options | Op | Group | Needs |
+| --- | --- | --- | --- | --- |
+| `power-loss` | `at=pre`, `keep=PPM`, `grain=page\|lba`, `seed=S` | any | terminal | `power_loss=on`; no `durable_at_done`; `grain=lba` needs `awupf_lbas` 0 |
+| `cfs` | `at=pre` | any | terminal | `power_loss=on` |
+| `hang` | none | any | terminal | |
+| `write-fail` | none | `write`, `fua`, `wzero` | data | |
+| `wb-fail` | `mode=unc\|old`, `report=sticky\|once`, `aer=off\|on` | `write` | data | `power_loss=on`, `vwc=1`; no `durable_at_done`, `buffer_low_pcent` or FDP |
+| `fua-lie` | none | `fua` | data | `power_loss=on`; no `durable_at_done` |
+| `read-unc` | none | `read` | data | |
+| `flush-lie` | none | `flush` | data | `power_loss=on`, `vwc=1`; no `durable_at_done` |
+| `sdc` | `kind=flip\|lost\|misdirect` (needed), `lba=L` | `write` | sdc | `sdc=on` |
+| `delay` | `ms=D`, 1 to 600000 (needed) | any | timing | |
+| `ana=`, `slow=` | none | any | none | as on a time line |
+
+- The group rules: a selected line that an earlier line of its group
+  beat is superseded, and it still uses its count. A winning
+  `power-loss` or `cfs` leaves every other winner with no effect; a
+  winning `hang` does that to a `delay` only. A `wb-fail` on a FUA Write
+  has no effect, since a FUA Write never enters the buffer. These checks
+  use the command as the host sent it, never as another action changes
+  it.
+- Realize refuses command lines with `ns_mgmt`, `namespace_modes`, a
+  `femu-subsys`, `shared_ftl`, `cxl_ssd` and modes other than bbssd. An
+  unknown, repeated or out-of-range op, key or option fails realize, and
+  the error names the line. A time line keeps its grammar: one action of
+  `ana=`, `power-loss` or `slow=`, with no option.
+- A comment takes a whole line: `#` after an action is an option, and
+  realize refuses it.
+- The MDTS check counts extended metadata, as the Read and Write
+  handler does, except a PRACT tuple that the controller inserts.
+- With no command line, the FTL thread has no schedule to check: one
+  pointer test per command, and no decode, count or draw.
+- No action has an effect yet. A selection moves the counters of its
+  line only. The qtest property `x-fault-sel` reports, per command line,
+  `<line>:<matched>:<selected>:<applied>:<superseded>:<no-effect>`.
+  `x-fault-draw` takes a seed and returns its draws in order.
+  `x-fault-hold` parks the FTL thread for that many ms at the next
+  matched command, and `x-fault-held` reads 1 while it is parked.
+- `query-femu-events` lists the time lines only. Its `state` stays
+  `running` while a line can select: a `#N` line before its Nth match,
+  or any `%` line.
 
 ## A slow die (die_slow)
 

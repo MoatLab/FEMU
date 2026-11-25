@@ -9057,6 +9057,678 @@ void femu_test_events_timer(void *obj, void *data,
     rmdir(dir);
 }
 
+/*
+ * Command lines of events_file (femu-fsched.c). No action has an effect
+ * yet, so the tests read x-fault-sel: per line, in file order,
+ * "<line>:<matched>:<selected>:<applied>:<superseded>:<no-effect>".
+ */
+static char *femu_fault_sel(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-fault-sel'}}", path);
+    char *v;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    v = g_strdup(qdict_get_str(rsp, "return"));
+    qobject_unref(rsp);
+    return v;
+}
+
+/* field @f (0 is the line) of entry @i of x-fault-sel of device @id */
+static uint64_t femu_fault_sel_field(QTestState *qts, const char *id, int i,
+                                     int f)
+{
+    g_autofree char *sel = femu_fault_sel(qts, id);
+    g_auto(GStrv) ent = g_strsplit(sel, " ", -1);
+    g_auto(GStrv) fld = NULL;
+
+    g_assert_cmpint(i, <, g_strv_length(ent));
+    fld = g_strsplit(ent[i], ":", -1);
+    g_assert_cmpint(g_strv_length(fld), ==, 6);
+    return g_ascii_strtoull(fld[f], NULL, 10);
+}
+
+/* one command of @nlb blocks at @slba on namespace 1, FUA when @fua */
+static uint16_t femu_fs_io(FemuCtrlState *c, uint8_t opc, uint64_t slba,
+                           uint16_t nlb, bool fua, uint64_t buf)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = opc;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(slba);
+    rw.nlb = cpu_to_le16(nlb - 1);
+    rw.control = cpu_to_le16(fua ? NVME_RW_FUA : 0);
+    return femu_io(c, (NvmeCmd *)&rw);
+}
+
+/* device_add of a femu with @props and events_file @path */
+static QDict *femu_fs_add(QTestState *qts, const char *id, int addr,
+                          const char *props, const char *path)
+{
+    g_autofree char *add = g_strdup_printf(
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'%s',"
+        "'addr':'%d','devsz_mb':16,%s,'events_file':'%s'}}", id, addr,
+        props, path);
+
+    return qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+}
+
+#define FEMU_FS_BB      "'femu_mode':1"
+#define FEMU_FS_ANA     "'femu_mode':1,'ana':true"
+#define FEMU_FS_PL      "'femu_mode':1,'buffer_size':16,'vwc':1," \
+                        "'power_loss':true"
+
+/* @text padded with spaces to @len bytes, then a newline */
+static void femu_fs_pad(GString *g, const char *text, size_t len)
+{
+    g_string_append(g, text);
+    for (size_t i = strlen(text); i < len; i++) {
+        g_string_append_c(g, ' ');
+    }
+    g_string_append_c(g, '\n');
+}
+
+/*
+ * Realize refuses each bad command line and names its line. Each refusal
+ * has an accepted twin that differs in one value, realized at the end,
+ * so a check that refuses everything fails too. Time lines keep their
+ * grammar: no option, and no new action.
+ */
+void femu_test_fsched_bad(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-fsched-XXXXXX", NULL);
+    QOSState *qs = qtest_pc_boot("-machine pc -nodefaults");
+    QTestState *qts = qs->qts;
+    static const struct {
+        const char *props;
+        const char *text;
+        const char *msg;
+    } cases[] = {
+        { FEMU_FS_BB, "# c\n\n@write#0 hang\n", "line 3: #N takes N from 1" },
+        { FEMU_FS_BB, "@write#18446744073709551616 hang\n",
+          "line 1: #N takes N" },
+        { FEMU_FS_BB, "@write%1000001~1 hang\n", "line 1: %PPM~SEED takes" },
+        { FEMU_FS_BB, "@write%5~9223372036854775808 hang\n",
+          "line 1: %PPM~SEED takes" },
+        { FEMU_FS_BB, "@write#1 delay ms=600001\n", "line 1: ms= takes" },
+        { FEMU_FS_ANA, "100 ana=1:2\n@dsm#1 hang\n",
+          "line 2: @dsm: Dataset Management and Copy are not matchable" },
+        { FEMU_FS_BB, "@copy#1 hang\n", "line 1: @copy: Dataset Management" },
+        { FEMU_FS_BB, "@write#1 hang\n@write#1 frob\n",
+          "line 2: unknown action 'frob'" },
+        { FEMU_FS_BB, "@write,ns=1,ns=1#1 hang\n", "line 1: ns= given twice" },
+        { FEMU_FS_BB, "@write#1 delay ms=5 ms=6\n", "line 1: ms= given twice" },
+        { FEMU_FS_BB, "@write#1 hang at=pre\n",
+          "line 1: hang takes no option 'at'" },
+        { FEMU_FS_BB, "@write,zone=1#1 hang\n", "line 1: unknown match key" },
+        { FEMU_FS_BB, "@write,ns=2#1 hang\n", "line 1: ns= names no" },
+        { FEMU_FS_BB, "@write,lba=0-99999999#1 hang\n",
+          "line 1: lba= 0-99999999 is past the namespace" },
+        { FEMU_FS_BB, "@flush,lba=0-1#1 hang\n", "line 1: @flush has no LBA" },
+        { FEMU_FS_BB, "@read#1 write-fail\n",
+          "line 1: action write-fail takes @write, @fua or @wzero only" },
+        { FEMU_FS_PL, "@fua#1 wb-fail\n",
+          "line 1: action wb-fail takes @write" },
+        { FEMU_FS_BB, "@any#1 power-loss\n",
+          "line 1: action power-loss needs power_loss=on" },
+        { FEMU_FS_BB, "@any#1 cfs\n", "line 1: action cfs needs power_loss" },
+        { FEMU_FS_BB, "@fua#1 fua-lie\n", "fua-lie needs power_loss=on" },
+        { FEMU_FS_PL, "@any#1 power-loss keep=1000001\n",
+          "line 1: keep= takes 0 to 1000000" },
+        { FEMU_FS_PL, "@write#1 wb-fail mode=unc mode=old\n",
+          "line 1: mode= given twice" },
+        { FEMU_FS_PL, "@write#1 sdc kind=flip\n",
+          "line 1: action sdc needs sdc=on" },
+        { "'femu_mode':1,'buffer_size':16,'vwc':0,'power_loss':true",
+          "@flush#1 flush-lie\n", "line 1: action flush-lie needs vwc=1" },
+        { FEMU_FS_PL ",'durable_at_done':true", "@any#1 power-loss\n",
+          "power-loss is not supported with durable_at_done" },
+        { FEMU_FS_PL ",'awupf_lbas':2", "@any#1 power-loss keep=5 grain=lba\n",
+          "line 1: grain=lba needs awupf_lbas of 0 or 1" },
+        { "'femu_mode':2", "@any#1 hang\n",
+          "line 1: command lines are not supported with a mode other" },
+        { FEMU_FS_BB ",'ns_mgmt':true", "@any#1 hang\n",
+          "command lines are not supported with ns_mgmt" },
+        /* a time line keeps the time grammar */
+        { FEMU_FS_PL, "5000 power-loss at=pre\n",
+          "line 1: one action after the time" },
+        { FEMU_FS_PL, "5000 cfs\n", "line 1: unknown action 'cfs'" },
+    };
+    GString *g;
+    QDict *rsp;
+
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *path = femu_events_file(dir, cases[i].text);
+        const char *desc;
+
+        rsp = femu_fs_add(qts, "fsbad", 6, cases[i].props, path);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("fsched refused: %s", desc);
+        g_assert_nonnull(strstr(desc, cases[i].msg));
+        qobject_unref(rsp);
+        unlink(path);
+    }
+
+    /* the limits: a line of 257 bytes, 1025 lines, 65537 bytes, 1025 */
+    g = g_string_new(NULL);
+    femu_fs_pad(g, "@write#1 hang", 257);
+    {
+        g_autofree char *path = femu_events_file(dir, g->str);
+
+        rsp = femu_fs_add(qts, "fsbad", 6, FEMU_FS_BB, path);
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"),
+                                "line 1: longer than 256 bytes"));
+        qobject_unref(rsp);
+        unlink(path);
+    }
+    g_string_truncate(g, 0);
+    for (int i = 0; i < 1025; i++) {
+        g_string_append(g, "# c\n");
+    }
+    {
+        g_autofree char *path = femu_events_file(dir, g->str);
+
+        rsp = femu_fs_add(qts, "fsbad", 6, FEMU_FS_BB, path);
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"),
+                                "more than 1024 lines"));
+        qobject_unref(rsp);
+        unlink(path);
+    }
+    g_string_truncate(g, 0);
+    for (int i = 0; i < 1025; i++) {
+        g_string_append(g, i ? "\n@write#1 hang" : "@write#1 hang");
+    }
+    {
+        g_autofree char *path = femu_events_file(dir, g->str);
+
+        rsp = femu_fs_add(qts, "fsbad", 6, FEMU_FS_BB, path);
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"),
+                                "more than 1024 events"));
+        qobject_unref(rsp);
+        unlink(path);
+    }
+    /* 1024 lines of 64 bytes: 65536 bytes, at every limit */
+    g_string_truncate(g, 0);
+    for (int i = 0; i < 1024; i++) {
+        g_autofree char *l = g_strdup_printf("@write%%1~%d hang", i);
+
+        femu_fs_pad(g, l, 63);
+    }
+    g_assert_cmpuint(g->len, ==, 65536);
+    {
+        g_autofree char *path = NULL;
+        g_auto(GStrv) ent = NULL;
+        g_autofree char *sel = NULL;
+
+        g_string_append_c(g, '#');
+        path = femu_events_file(dir, g->str);
+        rsp = femu_fs_add(qts, "fsbad", 6, FEMU_FS_BB, path);
+        g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                              "desc"),
+                                "a text file of at most 64 KiB"));
+        qobject_unref(rsp);
+        unlink(path);
+
+        /* the twin, one byte shorter: every line kept, none cut */
+        g_string_truncate(g, 65536);
+        g_free(path);
+        path = femu_events_file(dir, g->str);
+        rsp = femu_fs_add(qts, "fsok1", 7, FEMU_FS_BB, path);
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        sel = femu_fault_sel(qts, "fsok1");
+        ent = g_strsplit(sel, " ", -1);
+        g_assert_cmpuint(g_strv_length(ent), ==, 1024);
+        g_assert_cmpstr(ent[1023], ==, "1024:0:0:0:0:0");
+        unlink(path);
+    }
+
+    /* the accepted twins of the refusals above */
+    g_string_truncate(g, 0);
+    g_string_append(g, "# the largest values\n100 ana=1:2\n");
+    femu_fs_pad(g, "@write#18446744073709551615 hang", 256);
+    g_string_append(g, "@write%1000000~9223372036854775807 delay ms=600000\n"
+                    "@flush#1 hang\n@any#1 ana=1:3\n@wzero#1 write-fail\n"
+                    "@read#1 read-unc\n@fua#1 write-fail\n");
+    {
+        g_autofree char *path = femu_events_file(dir, g->str);
+        g_autofree char *sel = NULL;
+        QDict *r;
+        QList *ev;
+
+        rsp = femu_fs_add(qts, "fsok2", 8, FEMU_FS_ANA, path);
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        sel = femu_fault_sel(qts, "fsok2");
+        g_assert_cmpstr(sel, ==, "3:0:0:0:0:0 4:0:0:0:0:0 5:0:0:0:0:0 "
+                        "6:0:0:0:0:0 7:0:0:0:0:0 8:0:0:0:0:0 9:0:0:0:0:0");
+        /* query-femu-events lists the time line alone, as before */
+        r = femu_events_q(qts, "fsok2", &rsp);
+        ev = qdict_get_qlist(r, "events");
+        g_assert_cmpuint(qlist_size(ev), ==, 1);
+        g_assert_cmpint(qdict_get_int(qobject_to(QDict, qlist_peek(ev)),
+                                      "line"), ==, 2);
+        g_assert_cmpstr(qdict_get_str(r, "state"), ==, "waiting");
+        qobject_unref(rsp);
+        unlink(path);
+    }
+    {
+        g_autofree char *path = femu_events_file(dir,
+            "@any#1 power-loss at=pre keep=1000000 grain=page "
+            "seed=9223372036854775807\n@any#1 cfs at=pre\n"
+            "@write#1 wb-fail mode=old report=once aer=on\n@fua#1 fua-lie\n"
+            "@flush#1 flush-lie\n@write#1 sdc kind=misdirect lba=0\n"
+            "@any#1 power-loss keep=5 grain=lba\n");
+
+        rsp = femu_fs_add(qts, "fsok3", 9, FEMU_FS_PL ",'sdc':true", path);
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        unlink(path);
+    }
+    g_string_free(g, true);
+    qtest_pc_shutdown(qs);
+    rmdir(dir);
+}
+
+/*
+ * #N selects the Nth match only; a Read does not count for @write, nor
+ * a Write that fails the view checks. lba= matches any overlap. Device
+ * ev2 has one #2 line: its schedule is done after the second Write, and
+ * ev has odds lines, so it stays running. ev3 has time lines only: it
+ * has no matcher, so x-fault-sel fails.
+ */
+void femu_test_fsched_match(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-fsched-XXXXXX", NULL);
+    g_autofree char *p1 = g_build_filename(dir, "m1", NULL);
+    g_autofree char *p2 = g_build_filename(dir, "m2", NULL);
+    g_autofree char *p3 = g_build_filename(dir, "m3", NULL);
+    QOSState *qs;
+    QTestState *qts;
+    QPCIDevice *pdev;
+    QPCIDevice *pdev2;
+    FemuCtrlState c = { 0 };
+    FemuCtrlState c2 = { 0 };
+    g_autofree char *sel = NULL;
+    uint64_t buf;
+    uint64_t nsze;
+    uint32_t lbsz;
+    QDict *rsp;
+
+    g_assert_true(g_file_set_contents(p1,
+        "# match lines\n"
+        "@write#3 write-fail\n"
+        "@read#2 read-unc\n"
+        "@write,lba=8-15%1000000~1 delay ms=1\n"
+        "@flush%1000000~3 hang\n", -1, NULL));
+    g_assert_true(g_file_set_contents(p2, "@write#2 hang\n", -1, NULL));
+    g_assert_true(g_file_set_contents(p3, "100 ana=1:2\n", -1, NULL));
+    qs = qtest_pc_boot(
+        "-machine pc -nodefaults "
+        "-device femu,id=ev,addr=5,devsz_mb=16,femu_mode=1,events_file=%s "
+        "-device femu,id=ev2,addr=6,devsz_mb=16,femu_mode=1,events_file=%s "
+        "-device femu,id=ev3,addr=7,devsz_mb=16,femu_mode=1,ana=on,"
+        "events_file=%s", p1, p2, p3);
+    qts = qs->qts;
+    pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    pdev2 = qpci_device_find(qs->pcibus, QPCI_DEVFN(6, 0));
+    buf = guest_alloc(&qs->alloc, 4096);
+
+    /* no command line: no matcher, so nothing for x-fault-sel to show */
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/ev3',"
+                    "'property':'x-fault-sel'}}");
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), "needs a command line"));
+    qobject_unref(rsp);
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    femu_identify_ns(&c, &nsze, &lbsz);
+    g_assert_cmpuint(lbsz, ==, 512);
+
+    /* Writes 1 and 2 match line 2, and the Read counts for line 3 only */
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 8, false, buf), ==, 0);
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, 0, 8, false, buf), ==, 0);
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 8, false, buf), ==, 0);
+    sel = femu_fault_sel(qts, "ev");
+    g_assert_cmpstr(sel, ==, "2:2:0:0:0:0 3:1:0:0:0:0 4:0:0:0:0:0 "
+                    "5:0:0:0:0:0");
+    g_free(sel);
+    /* the 3rd Write is selected, the 4th (blocks 4 to 11) is not */
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 8, false, buf), ==, 0);
+    g_assert_cmpuint(femu_fault_sel_field(qts, "ev", 0, 3), ==, 1);
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 4, 8, false, buf), ==, 0);
+    /* blocks 0 to 7 and 16 to 23 are next to 8-15 but outside it */
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 16, 8, false, buf), ==, 0);
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 15, 1, false, buf), ==, 0);
+    /* past the namespace: the view check fails, so no line counts it */
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, nsze, 1, false, buf), !=,
+                    0);
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, 0, 8, false, buf), ==, 0);
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_FLUSH, 0, 1, false, buf), ==, 0);
+    sel = femu_fault_sel(qts, "ev");
+    g_assert_cmpstr(sel, ==, "2:6:1:1:0:0 3:2:1:1:0:0 4:2:2:2:0:0 "
+                    "5:1:1:1:0:0");
+    g_assert_cmpstr(qdict_get_str(femu_events_q(qts, "ev", &rsp), "state"),
+                    ==, "running");
+    qobject_unref(rsp);
+
+    /* ev2: running until its one #2 line has seen its second Write */
+    g_assert_cmpstr(qdict_get_str(femu_events_q(qts, "ev2", &rsp), "state"),
+                    ==, "waiting");
+    qobject_unref(rsp);
+    femu_enable(&c2, pdev2, &qs->alloc);
+    femu_create_io_queues(&c2);
+    g_assert_cmphex(femu_fs_io(&c2, NVME_CMD_WRITE, 0, 8, false, buf), ==, 0);
+    g_assert_cmpstr(qdict_get_str(femu_events_q(qts, "ev2", &rsp), "state"),
+                    ==, "running");
+    qobject_unref(rsp);
+    g_assert_cmphex(femu_fs_io(&c2, NVME_CMD_WRITE, 0, 8, false, buf), ==, 0);
+    g_assert_cmpstr(qdict_get_str(femu_events_q(qts, "ev2", &rsp), "state"),
+                    ==, "done");
+    qobject_unref(rsp);
+
+    femu_queue_free(&c2, &c2.io);
+    femu_disable(&c2);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_free(pdev);
+    g_free(pdev2);
+    qtest_pc_shutdown(qs);
+    unlink(p1);
+    unlink(p2);
+    unlink(p3);
+    rmdir(dir);
+}
+
+/* the next draws of x-fault-draw after seed @seed */
+static uint32_t femu_fault_draw(QTestState *qts, uint32_t seed, bool set)
+{
+    QDict *rsp;
+    uint32_t d;
+
+    if (set) {
+        rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                        "'path':'/machine/peripheral/ev',"
+                        "'property':'x-fault-draw','value':%u}}", seed);
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+    }
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/ev',"
+                    "'property':'x-fault-draw'}}");
+    d = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    return d;
+}
+
+/*
+ * %PPM~SEED at the ends of the draw range. Seed 1147169 draws 0 first and
+ * seed 221237 draws 999999, as x-fault-draw shows: PPM 0 and 999999 then
+ * do not select, PPM 1 and 1000000 do. Over 64 matches, seeds 1 and 2
+ * give the masks that x-fault-draw predicts, which differ.
+ */
+void femu_test_fsched_ppm(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-fsched-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir,
+        "@write,lba=0-7%0~1147169 hang\n"
+        "@write,lba=0-7%1~1147169 write-fail\n"
+        "@write,lba=0-7%999999~221237 delay ms=1\n"
+        "@write,lba=0-7%1000000~221237 hang\n"
+        "@write,lba=100-107%500000~1 delay ms=1\n"
+        "@write,lba=200-207%500000~2 delay ms=1\n");
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+        "femu_mode=1,events_file=%s", path);
+    QTestState *qts = qs->qts;
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    g_autofree char *sel = NULL;
+    uint64_t want[2] = { 0, 0 };
+    uint64_t got[2] = { 0, 0 };
+
+    g_assert_cmpuint(femu_fault_draw(qts, 1147169, true), ==, 0);
+    g_assert_cmpuint(femu_fault_draw(qts, 221237, true), ==, 999999);
+    for (int s = 0; s < 2; s++) {
+        for (int i = 0; i < 64; i++) {
+            if (femu_fault_draw(qts, s + 1, i == 0) < 500000) {
+                want[s] |= 1ULL << i;
+            }
+        }
+    }
+    g_test_message("masks 0x%016" PRIx64 " 0x%016" PRIx64, want[0], want[1]);
+    g_assert_cmphex(want[0], ==, 0xdc7631c660aa7582ULL);
+    g_assert_cmphex(want[1], ==, 0xfabb7a286a7d1755ULL);
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 1, false, buf), ==, 0);
+    sel = femu_fault_sel(qts, "ev");
+    g_assert_cmpstr(sel, ==, "1:1:0:0:0:0 2:1:1:1:0:0 3:1:0:0:0:0 "
+                    "4:1:1:1:0:0 5:0:0:0:0:0 6:0:0:0:0:0");
+    for (int s = 0; s < 2; s++) {
+        for (int i = 0; i < 64; i++) {
+            uint64_t before = femu_fault_sel_field(qts, "ev", 4 + s, 2);
+
+            g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 100 + 100 * s, 1,
+                                       false, buf), ==, 0);
+            if (femu_fault_sel_field(qts, "ev", 4 + s, 2) != before) {
+                got[s] |= 1ULL << i;
+            }
+        }
+        g_assert_cmphex(got[s], ==, want[s]);
+    }
+    g_assert_cmphex(got[0], !=, got[1]);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(path);
+    rmdir(dir);
+}
+
+/*
+ * The view counts extended metadata toward MDTS, as nvme_rw() does. With
+ * 512-byte blocks, 8 bytes of extended metadata and MDTS 8 KiB, a 16-block
+ * Read moves 8320 bytes: the controller refuses it, and no line counts
+ * it, though its data alone (8192 bytes) fits. A 7-block Read is the
+ * control: it runs and counts.
+ */
+void femu_test_fsched_mdts(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-fsched-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir,
+                                             "@read%1000000~1 hang\n");
+    QOSState *qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+        "femu_mode=1,meta=8,mc=3,extended=1,mdts=1,events_file=%s", path);
+    QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    g_autofree char *sel = NULL;
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, 0, 16, false, buf), ==,
+                    NVME_INVALID_FIELD);
+    sel = femu_fault_sel(qs->qts, "ev");
+    g_assert_cmpstr(sel, ==, "1:0:0:0:0:0");
+    g_free(sel);
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, 0, 7, false, buf), ==, 0);
+    sel = femu_fault_sel(qs->qts, "ev");
+    g_assert_cmpstr(sel, ==, "1:1:1:1:0:0");
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(path);
+    rmdir(dir);
+}
+
+/*
+ * Unplug while the FTL thread holds the schedule. x-fault-hold parks the
+ * FTL thread inside femu_fsched_step(), the lines in hand, for 1 s; the
+ * time runs out on that thread, since the main loop is busy with the
+ * unplug. Teardown must join the thread before it frees the schedule:
+ * with the free moved back before femu_stop_pollers(), an ASan build
+ * reports a use after free in femu_fs_match(). The unplug also takes
+ * most of the hold, because the join waits for the parked reader.
+ */
+void femu_test_fsched_unplug(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    g_autofree char *dir = g_dir_make_tmp("femu-fsched-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir,
+                                             "@write%1000000~1 hang\n");
+    g_autofree char *add = g_strdup_printf(
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'fh',"
+        "'addr':'5','femu_mode':1,'devsz_mb':16,'events_file':'%s'}}",
+        path);
+    FemuCtrlState c = { 0 };
+    QPCIDevice *pdev;
+    NvmeRwCmd rw = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    int64_t t0;
+    int64_t ms;
+    int waited = 0;
+    QDict *rsp;
+
+    rsp = qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    femu_enable(&c, pdev, alloc);
+    femu_create_io_queues(&c);
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/fh',"
+                             "'property':'x-fault-hold','value':1000}}");
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    for (;;) {
+        rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                        "'path':'/machine/peripheral/fh',"
+                        "'property':'x-fault-held'}}");
+        if (qdict_get_int(rsp, "return") == 1) {
+            qobject_unref(rsp);
+            break;
+        }
+        qobject_unref(rsp);
+        g_assert_cmpint(waited++, <, FEMU_POLL_LIMIT_MS);
+        g_usleep(1000);
+    }
+    t0 = g_get_monotonic_time();
+    qpci_unplug_acpi_device_test(qts, "fh", 5);
+    ms = (g_get_monotonic_time() - t0) / 1000;
+    g_test_message("unplug with a parked reader took %" PRId64 " ms", ms);
+    g_assert_cmpint(ms, >=, 500);
+    g_free(pdev);
+    unlink(path);
+    rmdir(dir);
+    qos_invalidate_command_line();
+}
+
+/* one command line of femu_test_fsched_groups and its outcome */
+typedef struct FemuFsCase {
+    const char *text;
+    char out;           /* N none, A applied, S superseded, X no effect */
+} FemuFsCase;
+
+/*
+ * Conflict groups, on one power_loss device. Each scenario has its own
+ * blocks and one command. The first selected line of a group wins, in
+ * file order; each pair is also given in reverse order. Eligibility uses
+ * the original command: after an applied fua-lie, a later @fua line still
+ * matches, and wb-fail alone on a FUA Write has no effect. The same lines
+ * on a plain Write are the control: neither @fua line matches.
+ */
+void femu_test_fsched_groups(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const FemuFsCase k[] = {
+        { "@write,lba=0-7#1 write-fail", 'A' },
+        { "@write,lba=0-7#1 wb-fail", 'S' },
+        { "@write,lba=8-15#1 wb-fail", 'A' },
+        { "@write,lba=8-15#1 write-fail", 'S' },
+        { "@write,lba=16-23#1 wb-fail mode=unc", 'A' },
+        { "@write,lba=16-23#1 wb-fail mode=old", 'S' },
+        { "@fua,lba=24-31#1 fua-lie", 'A' },            /* FUA Write */
+        { "@fua,lba=24-31#1 delay ms=1", 'A' },
+        { "@write,lba=24-31#1 wb-fail", 'S' },
+        { "@fua,lba=32-39#1 fua-lie", 'N' },            /* plain Write */
+        { "@fua,lba=32-39#1 delay ms=1", 'N' },
+        { "@write,lba=32-39#1 wb-fail", 'A' },
+        { "@write,lba=40-47#1 wb-fail", 'X' },          /* FUA Write */
+        { "@write,lba=48-55#1 sdc kind=flip", 'A' },
+        { "@write,lba=48-55#1 sdc kind=lost", 'S' },
+        { "@write,lba=56-63#1 power-loss", 'A' },
+        { "@write,lba=56-63#1 hang", 'S' },
+        { "@write,lba=56-63#1 write-fail", 'X' },
+        { "@write,lba=64-71#1 hang", 'A' },
+        { "@write,lba=64-71#1 power-loss", 'S' },
+        { "@write,lba=72-79#1 hang", 'A' },
+        { "@write,lba=72-79#1 write-fail", 'A' },
+        { "@write,lba=72-79#1 delay ms=1", 'X' },
+    };
+    g_autofree char *dir = g_dir_make_tmp("femu-fsched-XXXXXX", NULL);
+    g_autofree char *path = NULL;
+    g_autofree char *sel = NULL;
+    GString *text = g_string_new(NULL);
+    GString *want = g_string_new(NULL);
+    QOSState *qs;
+    QPCIDevice *pdev;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+
+    for (size_t i = 0; i < ARRAY_SIZE(k); i++) {
+        bool m = k[i].out != 'N';
+
+        g_string_append_printf(text, "%s\n", k[i].text);
+        g_string_append_printf(want, "%s%zu:%d:%d:%d:%d:%d", i ? " " : "",
+                               i + 1, m, m, k[i].out == 'A',
+                               k[i].out == 'S', k[i].out == 'X');
+    }
+    path = femu_events_file(dir, text->str);
+    qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+        "femu_mode=1,buffer_size=16,vwc=1,power_loss=on,sdc=on,"
+        "events_file=%s", path);
+    pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    buf = guest_alloc(&qs->alloc, 4096);
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    /* one one-block Write per scenario; those at 24 and 40 have FUA */
+    for (uint64_t slba = 0; slba < 80; slba += 8) {
+        g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, slba, 1,
+                                   slba == 24 || slba == 40, buf), ==, 0);
+    }
+    sel = femu_fault_sel(qs->qts, "ev");
+    g_test_message("x-fault-sel %s", sel);
+    g_assert_cmpstr(sel, ==, want->str);
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    g_string_free(text, true);
+    g_string_free(want, true);
+    unlink(path);
+    rmdir(dir);
+}
+
 /* CSTS.RDY of the controller of @c */
 static bool femu_rdy(FemuCtrlState *c)
 {

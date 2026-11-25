@@ -1807,9 +1807,11 @@
 #
 # @waiting: the controller has not been enabled yet
 #
-# @running: times count from the first enable; events are left
+# @running: times count from the first enable; events are left, or a
+#     command line can still select a command
 #
-# @done: every event ran, or one failed
+# @done: every event ran, or one failed, and no command line can
+#     select again
 #
 # Since: 10.1
 ##

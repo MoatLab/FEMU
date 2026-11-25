@@ -13,6 +13,11 @@
  *   power-loss            a power cut, as simulate-power-loss=true
  *   slow=<ch>:<lun>:<pct> the array time of a LUN, as the die-slow property
  * The timeline is host time: events run while the VM is stopped too.
+ *
+ * A line that starts with '@' names commands, not a time (femu-fsched.c).
+ * The FTL thread matches each command against those lines after the first
+ * enable. No action has an effect yet: a selection only moves the
+ * counters of its line, which x-fault-sel reports.
  */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
@@ -22,6 +27,8 @@
 #include "qemu/timer.h"
 #include "nvme.h"
 #include "femu-query.h"
+#include "femu-fsched.h"
+#include "nvme-pi.h"
 #include "trace.h"
 
 #define FEMU_EVENTS_MAX_LINES   1024    /* lines of the file, and events */
@@ -61,14 +68,13 @@ struct FemuEventSched {
     QEMUTimer *timer;
 };
 
-static uint64_t femu_splitmix64(uint64_t *x)
-{
-    uint64_t z = (*x += 0x9e3779b97f4a7c15ULL);
-
-    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
-    return z ^ (z >> 31);
-}
+/* the command lines; the FTL thread reads them, so they outlive it */
+struct FemuFsched {
+    FemuFsLine *l;
+    int nr;
+    uint8_t *out;               /* FTL thread: the outcome of each line */
+    bool running;               /* set at the first enable */
+};
 
 /* a decimal number of at most @max, and the text after it */
 static bool femu_events_num(const char *s, const char **end, uint64_t max,
@@ -186,7 +192,7 @@ static bool femu_events_line(FemuCtrl *n, char *s, int line, FemuEvent *ev,
             error_setg(errp, "the time and window are too large");
             return false;
         }
-        ms += femu_splitmix64(&seed) % win;
+        ms += femu_fs_splitmix64(&seed) % win;
     }
     if (*p != ' ' && *p != '\t') {
         error_setg(errp, "a space after the time");
@@ -220,6 +226,59 @@ static int femu_events_cmp(const void *a, const void *b)
     return x->line - y->line;
 }
 
+/* the facts of @n that decide which command lines realize accepts */
+static void femu_fsched_dev(FemuCtrl *n, FemuFsDev *d, uint64_t *nsze)
+{
+    for (uint32_t i = 0; i < n->namespace_limit; i++) {
+        NvmeNamespace *ns = nvme_ns_allocated(n, i + 1);
+
+        nsze[i] = ns ? le64_to_cpu(ns->id_ns.nsze) : 0;
+    }
+    *d = (FemuFsDev) {
+        .bbssd = BBSSD(n),
+        .ns_mgmt = n->ns_mgmt,
+        .namespace_modes = n->namespace_modes != NULL,
+        .subsys = n->subsys != NULL,
+        .shared_ftl = n->shared_ftl,
+        .cxl_ssd = n->cxl_dev || n->cxl_media,
+        .power_loss = n->power_loss,
+        .vwc = n->vwc,
+        .durable_at_done = n->durable_at_done,
+        .fdp = nvme_fdp_directive(n),
+        .buffer_low = n->bb_params.buffer_low_pcent != 0,
+        .sdc = n->sdc,
+        .awupf_lbas = n->awupf_lbas,
+        .nr_ns = n->namespace_limit,
+        .nsze = nsze,
+    };
+}
+
+/* one command line; an ana= or slow= action is checked as on a time line */
+static bool femu_fsched_line(FemuCtrl *n, const FemuFsDev *d, char *s,
+                             int line, FemuFsLine *l, Error **errp)
+{
+    char why[FEMU_FS_ERR_LEN];
+    FemuEvent ev = { 0 };
+
+    if (!femu_fs_parse(d, s, line, l, why, sizeof(why))) {
+        error_setg(errp, "%s", why);
+        return false;
+    }
+    if (l->act == FEMU_FS_ACT_ANA || l->act == FEMU_FS_ACT_SLOW) {
+        return femu_events_action(n, l->action, &ev, errp);
+    }
+    return true;
+}
+
+static void femu_fsched_free(struct FemuFsched *f)
+{
+    if (f) {
+        g_free(f->l);
+        g_free(f->out);
+        g_free(f);
+    }
+}
+
 /**
  * femu_events_init - read and compile events_file at realize
  * @n: the controller, its namespaces allocated
@@ -227,15 +286,18 @@ static int femu_events_cmp(const void *a, const void *b)
  *
  * Returns true with no file, or with a schedule waiting for the first
  * enable. Refused with csd_pause, whose frozen clock the timer does not
- * follow.
+ * follow. Time lines and command lines share the limit of 1024.
  */
 bool femu_events_init(FemuCtrl *n, Error **errp)
 {
     g_autofree char *text = NULL;
+    g_autofree uint64_t *nsze = NULL;
     g_auto(GStrv) lines = NULL;
     struct FemuEventSched *s;
+    struct FemuFsched *f;
+    FemuFsDev dev;
     size_t len;
-    FILE *f;
+    FILE *f_in;
 
     if (!n->events_file) {
         return true;
@@ -244,15 +306,15 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
         error_setg(errp, "events_file does not work with csd_pause");
         return false;
     }
-    f = fopen(n->events_file, "r");
-    if (!f) {
+    f_in = fopen(n->events_file, "r");
+    if (!f_in) {
         error_setg_errno(errp, errno, "events_file %s", n->events_file);
         return false;
     }
     /* read at most one byte past the limit, so a large file costs nothing */
     text = g_malloc(FEMU_EVENTS_MAX_FILE + 2);
-    len = fread(text, 1, FEMU_EVENTS_MAX_FILE + 1, f);
-    fclose(f);
+    len = fread(text, 1, FEMU_EVENTS_MAX_FILE + 1, f_in);
+    fclose(f_in);
     text[len] = '\0';
     if (len > FEMU_EVENTS_MAX_FILE || memchr(text, '\0', len)) {
         error_setg(errp, "events_file: a text file of at most %d KiB",
@@ -265,11 +327,16 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
                    FEMU_EVENTS_MAX_LINES);
         return false;
     }
+    nsze = g_new0(uint64_t, MAX(n->namespace_limit, 1));
+    femu_fsched_dev(n, &dev, nsze);
     s = g_new0(struct FemuEventSched, 1);
     s->ev = g_new0(FemuEvent, FEMU_EVENTS_MAX_LINES);
+    f = g_new0(struct FemuFsched, 1);
+    f->l = g_new0(FemuFsLine, FEMU_EVENTS_MAX_LINES);
     for (int i = 0; lines[i]; i++) {
         char *l = lines[i];
         Error *err = NULL;
+        bool ok;
 
         if (strlen(l) > FEMU_EVENTS_MAX_LINE) {
             error_setg(errp, "events_file line %d: longer than %d bytes",
@@ -280,21 +347,37 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
         if (!*l || *l == '#') {
             continue;
         }
-        if (s->nr == FEMU_EVENTS_MAX_LINES) {
+        if (s->nr + f->nr == FEMU_EVENTS_MAX_LINES) {
             error_setg(errp, "events_file: more than %d events",
                        FEMU_EVENTS_MAX_LINES);
             goto fail;
         }
-        if (!femu_events_line(n, l, i + 1, &s->ev[s->nr], &err)) {
+        if (*l == '@') {
+            ok = femu_fsched_line(n, &dev, l, i + 1, &f->l[f->nr], &err);
+        } else {
+            ok = femu_events_line(n, l, i + 1, &s->ev[s->nr], &err);
+        }
+        if (!ok) {
             error_setg(errp, "events_file line %d: %s", i + 1,
                        error_get_pretty(err));
             error_free(err);
             goto fail;
         }
-        s->nr++;
+        if (*l == '@') {
+            f->nr++;
+        } else {
+            s->nr++;
+        }
     }
     qsort(s->ev, s->nr, sizeof(*s->ev), femu_events_cmp);
     n->events = s;
+    /* no command line: the FTL thread sees no schedule and does no work */
+    if (f->nr) {
+        f->out = g_new0(uint8_t, f->nr);
+        n->fsched = f;
+    } else {
+        femu_fsched_free(f);
+    }
     return true;
 
 fail:
@@ -303,6 +386,7 @@ fail:
     }
     g_free(s->ev);
     g_free(s);
+    femu_fsched_free(f);
     return false;
 }
 
@@ -399,6 +483,10 @@ void femu_events_start(FemuCtrl *n)
         return;
     }
     s->started = true;
+    if (n->fsched) {
+        /* commands count from here; the FTL thread reads this once a step */
+        qatomic_set(&n->fsched->running, true);
+    }
     s->epoch = femu_io_now(n);
     s->timer = timer_new_ns(QEMU_CLOCK_REALTIME, femu_events_fire, n);
     /* the last time must still fit after the epoch */
@@ -414,11 +502,17 @@ void femu_events_start(FemuCtrl *n)
     femu_events_set_timer(n);
 }
 
-/* realize undo and unplug, first step: no event runs from here on */
+/*
+ * Realize undo and unplug, first step: the timer stops before anything it
+ * reaches goes. The FTL thread may still read the command lines.
+ */
 void femu_events_cancel(FemuCtrl *n)
 {
     struct FemuEventSched *s = n->events;
 
+    if (n->fsched) {
+        qatomic_set(&n->fsched->running, false);
+    }
     if (s && s->timer) {
         timer_del(s->timer);
     }
@@ -432,6 +526,8 @@ void femu_events_free(FemuCtrl *n)
 {
     struct FemuEventSched *s = n->events;
 
+    femu_fsched_free(n->fsched);
+    n->fsched = NULL;
     if (!s) {
         return;
     }
@@ -445,6 +541,119 @@ void femu_events_free(FemuCtrl *n)
     g_free(s->ev);
     g_free(s);
     n->events = NULL;
+}
+
+/*
+ * The effect of a selected line. None is modelled yet: each case only
+ * names what it will do, and a selection moves the counters alone. @eff
+ * is the command as the winners of its groups leave it.
+ */
+static void femu_fsched_act(FemuCtrl *n, NvmeRequest *req,
+                            const FemuFsLine *l, const FemuFsView *eff)
+{
+    switch (l->act) {
+    case FEMU_FS_ACT_POWER_LOSS:    /* not modelled yet: a cut at pre */
+    case FEMU_FS_ACT_CFS:           /* not modelled yet: CSTS.CFS at pre */
+    case FEMU_FS_ACT_HANG:          /* not modelled yet: no CQE */
+    case FEMU_FS_ACT_WRITE_FAIL:    /* not modelled yet: Write Fault */
+    case FEMU_FS_ACT_WB_FAIL:       /* not modelled yet: write-back error */
+    case FEMU_FS_ACT_FUA_LIE:       /* not modelled yet: FUA buffers */
+    case FEMU_FS_ACT_READ_UNC:      /* not modelled yet: Unrecovered Read */
+    case FEMU_FS_ACT_FLUSH_LIE:     /* not modelled yet: no destage */
+    case FEMU_FS_ACT_SDC:           /* not modelled yet: sdc override */
+    case FEMU_FS_ACT_DELAY:         /* not modelled yet: a later CQE */
+    case FEMU_FS_ACT_SLOW:          /* not modelled yet: die-slow by BH */
+    case FEMU_FS_ACT_ANA:           /* not modelled yet: ana-state by BH */
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+/**
+ * femu_fsched_step - match one command against the command lines
+ * @n: the controller, with command lines
+ * @req: the request just taken from a to_ftl ring, not yet run
+ *
+ * Runs on the FTL thread only. The view comes from the SQE copy and the
+ * namespace, never from fields the FTL or nvme_power_io() fill later. A
+ * command outside the matchable set, or one that fails the view checks,
+ * counts for no line.
+ */
+void femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
+{
+    struct FemuFsched *f = n->fsched;
+    const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
+    FemuFsView v = {
+        .opc = req->cmd.opcode,
+        .nsid = le32_to_cpu(req->cmd.nsid),
+    };
+    NvmeNamespace *ns;
+    FemuFsView eff;
+    uint64_t nsze = 0;
+    unsigned lbads = 0;
+    unsigned mdts = 0;
+    uint32_t xfer_ms = 0;
+    uint32_t hold;
+
+    if (!qatomic_read(&f->running)) {
+        return;
+    }
+    switch (v.opc) {
+    case NVME_CMD_FLUSH:
+        if (v.nsid != NVME_NSID_BROADCAST && !nvme_ns(n, v.nsid)) {
+            return;
+        }
+        break;
+    case NVME_CMD_READ:
+    case NVME_CMD_WRITE:
+    case NVME_CMD_WRITE_ZEROES:
+        ns = nvme_ns(n, v.nsid);
+        if (!ns) {
+            return;
+        }
+        v.slba = le64_to_cpu(rw->slba);
+        v.nlb = le16_to_cpu(rw->nlb) + 1;
+        v.fua = v.opc == NVME_CMD_WRITE &&
+                (le16_to_cpu(rw->control) & NVME_RW_FUA);
+        nsze = le64_to_cpu(ns->id_ns.nsze);
+        lbads = ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(ns->id_ns.flbas)].lbads;
+        /* the transfer nvme_rw() checks against MDTS, metadata and all */
+        xfer_ms = femu_fs_xfer_ms(
+            le16_to_cpu(ns->id_ns.lbaf[NVME_ID_NS_FLBAS_INDEX(
+                ns->id_ns.flbas)].ms),
+            NVME_ID_NS_FLBAS_EXTENDED(ns->id_ns.flbas), femu_pi_type(ns),
+            femu_pi_size(ns),
+            le16_to_cpu(rw->control) & NVME_RW_PRINFO_PRACT);
+        break;
+    default:
+        return;
+    }
+    /* as nvme_check_mdts(): in the minimum page size, not the CC one */
+    if (n->mdts) {
+        mdts = 12 + NVME_CAP_MPSMIN(n->bar.cap) + n->mdts;
+    }
+    if (!femu_fs_view_ok(&v, nsze, lbads, xfer_ms, mdts)) {
+        return;
+    }
+    /*
+     * qtest x-fault-hold: park here, the schedule in hand, for that many
+     * ms. The time runs out on this thread, so an unplug that waits for
+     * it on the main loop still ends.
+     */
+    hold = qatomic_read(&n->test_fs_hold_ms);
+    if (unlikely(hold)) {
+        qatomic_set(&n->test_fs_hold_ms, 0);
+        qatomic_set(&n->test_fs_held, 1);
+        g_usleep((gulong)hold * 1000);
+        qatomic_set(&n->test_fs_held, 2);
+    }
+    femu_fs_match(f->l, f->nr, &v, f->out, &eff);
+    for (int i = 0; i < f->nr; i++) {
+        if (f->out[i] == FEMU_FS_OUT_APPLIED) {
+            femu_fsched_act(n, req, &f->l[i], &eff);
+        }
+    }
 }
 
 /*
@@ -475,10 +684,77 @@ static void femu_events_test_now(Object *obj, Visitor *v, const char *name,
     femu_events_run(n, (int64_t)ms * SCALE_MS, false);
 }
 
+/*
+ * x-fault-sel (qtest): per command line, in file order,
+ * "<line>:<matched>:<selected>:<applied>:<superseded>:<no-effect>",
+ * separated by spaces.
+ */
+static char *femu_fsched_test_sel(Object *obj, Error **errp)
+{
+    struct FemuFsched *f = FEMU(obj)->fsched;
+    GString *g;
+
+    if (!f) {
+        error_setg(errp, "x-fault-sel needs a command line in events_file");
+        return NULL;
+    }
+    g = g_string_new(NULL);
+    for (int i = 0; i < f->nr; i++) {
+        FemuFsLine *l = &f->l[i];
+
+        g_string_append_printf(g, "%s%d:%" PRIu64 ":%" PRIu64 ":%" PRIu64
+                               ":%" PRIu64 ":%" PRIu64, i ? " " : "",
+                               l->line, qatomic_read(&l->matched),
+                               qatomic_read(&l->selected),
+                               qatomic_read(&l->applied),
+                               qatomic_read(&l->superseded),
+                               qatomic_read(&l->no_effect));
+    }
+    return g_string_free(g, false);
+}
+
+/*
+ * x-fault-draw (qtest): a set gives the seed, and each get returns the
+ * next draw, 0 to 999999, that a %PPM~SEED line with that seed makes. A
+ * test picks seeds whose draws hit the ends of the range.
+ */
+static void femu_fsched_test_draw_get(Object *obj, Visitor *v,
+                                      const char *name, void *opaque,
+                                      Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    uint32_t d = femu_fs_draw(&n->test_fs_rng);
+
+    visit_type_uint32(v, name, &d, errp);
+}
+
+static void femu_fsched_test_draw_set(Object *obj, Visitor *v,
+                                      const char *name, void *opaque,
+                                      Error **errp)
+{
+    uint64_t seed;
+
+    if (visit_type_uint64(v, name, &seed, errp)) {
+        FEMU(obj)->test_fs_rng = seed;
+    }
+}
+
 void femu_events_add_test_props(Object *obj)
 {
+    FemuCtrl *n = FEMU(obj);
+
     object_property_add(obj, "x-events-now", "uint32", NULL,
                         femu_events_test_now, NULL, NULL);
+    /* the next matched command parks the FTL thread this many ms */
+    object_property_add_uint32_ptr(obj, "x-fault-hold", &n->test_fs_hold_ms,
+                                   OBJ_PROP_FLAG_READWRITE);
+    /* 1 while parked by x-fault-hold, 2 after */
+    object_property_add_uint32_ptr(obj, "x-fault-held", &n->test_fs_held,
+                                   OBJ_PROP_FLAG_READ);
+    object_property_add_str(obj, "x-fault-sel", femu_fsched_test_sel, NULL);
+    object_property_add(obj, "x-fault-draw", "uint64",
+                        femu_fsched_test_draw_get, femu_fsched_test_draw_set,
+                        NULL, NULL);
 }
 
 /* the events of @n for query-femu-events */
@@ -494,9 +770,11 @@ FemuEvents *femu_events_info(FemuCtrl *n, Error **errp)
     }
     info = g_new0(FemuEvents, 1);
     info->path = object_get_canonical_path(OBJECT(n));
+    /* a command line that can still select keeps the schedule running */
     info->state = !s->started ? FEMU_EVENTS_STATE_WAITING :
-                  s->cursor < s->nr ? FEMU_EVENTS_STATE_RUNNING :
-                                      FEMU_EVENTS_STATE_DONE;
+                  s->cursor < s->nr ||
+                  (n->fsched && !femu_fs_done(n->fsched->l, n->fsched->nr)) ?
+                  FEMU_EVENTS_STATE_RUNNING : FEMU_EVENTS_STATE_DONE;
     tail = &info->events;
     for (int i = 0; i < s->nr; i++) {
         FemuEvent *ev = &s->ev[i];

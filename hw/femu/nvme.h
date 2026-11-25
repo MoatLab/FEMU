@@ -3284,6 +3284,11 @@ typedef struct FemuCtrl {
     /* a timed list of actions on the controller (femu-events.c) */
     char            *events_file;
     struct FemuEventSched *events;
+    /* the command lines of events_file; NULL when it has none */
+    struct FemuFsched *fsched;
+    uint64_t        test_fs_rng;    /* qtest x-fault-draw: the draw state */
+    uint32_t        test_fs_hold_ms;    /* qtest x-fault-hold */
+    uint32_t        test_fs_held;       /* qtest x-fault-held */
     char            *iotrace_path;   /* io_trace as an absolute path */
     FILE            *iotrace_f;
     char            *iotrace_buf;    /* the stdio buffer, freed after close */
@@ -4102,9 +4107,11 @@ bool femu_events_init(FemuCtrl *n, Error **errp);
 void femu_events_start(FemuCtrl *n);
 void femu_events_cancel(FemuCtrl *n);
 void femu_events_free(FemuCtrl *n);
+void femu_fsched_step(FemuCtrl *n, NvmeRequest *req);
 void femu_events_add_test_props(Object *obj);
 bool femu_events_installed(FemuCtrl *n);
 struct FemuEventSched;
+struct FemuFsched;
 void femu_iotrace_abort(FemuCtrl *n);
 void femu_persist_exit(FemuCtrl *n);
 void femu_persist_abort(FemuCtrl *n);

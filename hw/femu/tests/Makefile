@@ -20,7 +20,8 @@ PKG_CONFIG ?= pkg-config
 HAVE_GLIB := $(shell $(PKG_CONFIG) --exists glib-2.0 && echo 1)
 UNIT_TESTS = test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-spte \
              test-femu-cxl-cca-ring test-femu-kv-model test-femu-onfi-timing \
-             test-femu-kv-lsm test-femu-kv-pack test-femu-gc-fw
+             test-femu-kv-lsm test-femu-kv-pack test-femu-gc-fw \
+             test-femu-fsched
 ifeq ($(HAVE_GLIB),1)
 UNIT_TESTS += test-femu-cxl-cache
 endif
@@ -54,6 +55,10 @@ test-femu-kv-lsm: unit/test-kv-lsm.c ../kvssd/kv-lsm.c ../kvssd/kv-lsm.h
 # the test includes kv-pack.c itself, to make its allocations fail on cue
 test-femu-kv-pack: unit/test-kv-pack.c ../kvssd/kv-pack.c ../kvssd/kv-pack.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ unit/test-kv-pack.c
+
+# the test includes femu-fsched.c itself: the parser and matcher need no QEMU
+test-femu-fsched: unit/test-fsched.c ../femu-fsched.c ../femu-fsched.h
+	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ unit/test-fsched.c
 
 test-femu-hybrid-oracle: unit/test-hybrid-oracle.c unit/hybrid-oracle.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $<
@@ -106,7 +111,8 @@ check-tools:
 clean:
 	rm -f test-femu-nand-media test-femu-hybrid-oracle test-femu-cxl-cache test-femu-cxl-spte \
 	      test-femu-cxl-cca-ring test-femu-kv-model test-femu-onfi-timing \
-	      test-femu-kv-lsm test-femu-kv-pack test-femu-gc-fw nand-media.o \
+	      test-femu-kv-lsm test-femu-kv-pack test-femu-gc-fw \
+	      test-femu-fsched nand-media.o \
 	      onfi.o
 
 .PHONY: check check-docs check-tools clean

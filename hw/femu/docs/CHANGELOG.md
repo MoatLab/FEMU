@@ -325,6 +325,7 @@ listed one by one.
 
 #### Timing and fault models
 
+- `events_file` takes command lines on bbssd: `@<op>[,ns=N][,lba=A-B]#N <action>` selects the Nth matching Read, Write, Write Zeroes or Flush, and `%PPM~SEED` selects each match with seeded odds. Realize checks the actions and their options. No action has an effect yet: the qtest property `x-fault-sel` shows which lines selected which commands. See [command lines](guides/measuring.md#command-lines).
 - Fault insertion (`err_read_unc_ppm`, `err_write_fail_ppm`), a host link model (`pcie_bandwidth_mbps`, `pcie_prop_delay_ns`) and a controller CPU model (`fw_cpu_ns`), now also applied to NoSSD (7bfac4c3a, 2cdd55c52).
 
 #### Open-Channel SSD

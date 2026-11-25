@@ -3806,6 +3806,10 @@ static void *femu_ftl_thread(void *arg)
                 continue;
             }
 
+            /* command lines of events_file see each command once */
+            if (unlikely(n->fsched)) {
+                femu_fsched_step(n, req);
+            }
             if (nvme_ns_shared(n)) {
                 qemu_mutex_lock(&n->subsys->ns_lock);
                 n->subsys->storage->features.volatile_wc =

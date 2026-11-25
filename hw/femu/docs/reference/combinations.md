@@ -258,6 +258,7 @@ own description allows. A message keeps its format directives (`%s`,
 - test clock does not work with events_file
 - the femu device has no events_file
 - x-events-now needs an events_file
+- x-fault-sel needs a command line in events_file
 
 ## `extended`
 
