@@ -3082,6 +3082,11 @@ static void femu_register_nodes(void)
                  NULL);
     qos_add_test("fsched-log-unplug", "femu", femu_test_fsched_log_unplug,
                  NULL);
+    qos_add_test("fsched-flush-lie", "femu", femu_test_fsched_flush_lie,
+                 NULL);
+    qos_add_test("fsched-fua-lie", "femu", femu_test_fsched_fua_lie, NULL);
+    qos_add_test("fsched-lie-reasons", "femu", femu_test_fsched_lie_reasons,
+                 NULL);
     qos_add_test("io-trace", "femu", femu_test_io_trace, NULL);
     qos_add_test("io-trace-append", "femu", femu_test_io_trace_append, NULL);
     qos_add_test("mode-names", "femu", femu_test_mode_names,

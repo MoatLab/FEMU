@@ -658,6 +658,72 @@ static void test_why(void)
     CHECK(!strcmp(femu_fr_name_why(FEMU_FS_WHY_HANG), "hang"));
 }
 
+/*
+ * What came of a lie, in the order of the checks: a failed command, then
+ * working plp, then no buffer, then (fua-lie only) a transaction, then
+ * no page left volatile. Each case changes one fact of a lie that applies.
+ */
+static void test_lie_why(void)
+{
+    const FemuFsLie fua = {
+        .act = FEMU_FS_ACT_FUA_LIE, .buffer = true, .pages = 2,
+    };
+    const FemuFsLie flush = {
+        .act = FEMU_FS_ACT_FLUSH_LIE, .buffer = true, .pages = 3,
+    };
+    FemuFsLie s;
+
+    CHECK(femu_fs_lie_why(&fua) == FEMU_FS_WHY_NONE);
+    CHECK(femu_fs_lie_why(&flush) == FEMU_FS_WHY_NONE);
+
+    s = fua;
+    s.failed = true;
+    s.plp = true;
+    CHECK(femu_fs_lie_why(&s) == FEMU_FS_WHY_CMD_FAILED);
+    s = flush;
+    s.failed = true;
+    CHECK(femu_fs_lie_why(&s) == FEMU_FS_WHY_CMD_FAILED);
+
+    s = fua;
+    s.plp = true;
+    s.buffer = false;
+    CHECK(femu_fs_lie_why(&s) == FEMU_FS_WHY_PLP);
+    s = flush;
+    s.plp = true;
+    CHECK(femu_fs_lie_why(&s) == FEMU_FS_WHY_PLP);
+
+    s = fua;
+    s.buffer = false;
+    s.atomic = true;
+    CHECK(femu_fs_lie_why(&s) == FEMU_FS_WHY_NO_BUFFER);
+    s = flush;
+    s.buffer = false;
+    CHECK(femu_fs_lie_why(&s) == FEMU_FS_WHY_NO_BUFFER);
+
+    s = fua;
+    s.atomic = true;
+    CHECK(femu_fs_lie_why(&s) == FEMU_FS_WHY_ATOMIC);
+    s = fua;
+    s.pages = 0;
+    CHECK(femu_fs_lie_why(&s) == FEMU_FS_WHY_DURABLE);
+
+    /* an empty buffer leaves nothing volatile; atomic is a FUA fact */
+    s = flush;
+    s.pages = 0;
+    CHECK(femu_fs_lie_why(&s) == FEMU_FS_WHY_DURABLE);
+    s = flush;
+    s.atomic = true;
+    CHECK(femu_fs_lie_why(&s) == FEMU_FS_WHY_NONE);
+
+    CHECK(!strcmp(femu_fr_name_why(FEMU_FS_WHY_PLP), "plp"));
+    CHECK(!strcmp(femu_fr_name_why(FEMU_FS_WHY_ATOMIC), "atomic"));
+    CHECK(!strcmp(femu_fr_name_why(FEMU_FS_WHY_NO_BUFFER), "no-buffer"));
+    CHECK(!strcmp(femu_fr_name_why(FEMU_FS_WHY_CMD_FAILED), "cmd-failed"));
+    CHECK(!strcmp(femu_fr_name_why(FEMU_FS_WHY_DURABLE), "durable"));
+    CHECK(!strcmp(femu_fr_name_phase(FEMU_FR_PHASE_APPLY), "apply"));
+    CHECK(!strcmp(femu_fr_name_outcome(FEMU_FR_OUT_DONE), "done"));
+}
+
 /* a record whose fields all follow from @k, so a reader can check it */
 static FemuFrRec rec_of(uint64_t k)
 {
@@ -817,6 +883,36 @@ static void test_ring_json(void)
     x.outcome = FEMU_FR_OUT_SUPERSEDED;
     femu_fr_json(&x, buf, sizeof(buf));
     CHECK(strstr(buf, "\"outcome\":\"superseded\",\"status\""));
+
+    /* an apply record of a lie: its pages, under the name of its action */
+    x = rec_of(5);
+    x.id = 10;
+    x.cause = 9;
+    x.phase = FEMU_FR_PHASE_APPLY;
+    x.act = FEMU_FS_ACT_FLUSH_LIE;
+    x.opc = FEMU_FS_OPC_FLUSH;
+    x.outcome = FEMU_FR_OUT_DONE;
+    x.pages = 4;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"action\":\"flush-lie\",\"phase\":\"apply\","));
+    CHECK(strstr(buf, "\"outcome\":\"done\",\"buffered_at_flush_lie\":4}"
+                  "\n"));
+    x.act = FEMU_FS_ACT_FUA_LIE;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"outcome\":\"done\",\"lie_pages\":4}\n"));
+    CHECK(!strstr(buf, "buffered_at_flush_lie"));
+    /* no pages without the effect, and none on a select record */
+    x.outcome = FEMU_FR_OUT_NO_EFFECT;
+    x.why = FEMU_FS_WHY_PLP;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"outcome\":\"no-effect\",\"reason\":\"plp\"}\n"));
+    x.why = FEMU_FS_WHY_CMD_FAILED;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"reason\":\"cmd-failed\"}\n"));
+    x.phase = FEMU_FR_PHASE_SELECT;
+    x.outcome = FEMU_FR_OUT_DONE;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(!strstr(buf, "lie_pages") && strstr(buf, "\"phase\":\"select\""));
 }
 
 /*
@@ -1023,6 +1119,7 @@ int main(void)
     test_overlap();
     test_groups();
     test_why();
+    test_lie_why();
     test_ring_window();
     test_ring_drop();
     test_ring_drop_ranges();

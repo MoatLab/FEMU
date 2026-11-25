@@ -8,6 +8,7 @@
 #include "qemu/osdep.h"
 #include "ftl.h"
 #include "ftl-internal.h"
+#include "../femu-fsched.h"
 
 /*
  * Order buffer entries by logical page number. Compared rather than
@@ -495,6 +496,10 @@ bool bbssd_power_loss(NvmeNamespace *ns)
             continue;
         }
         lost = true;
+        /* an acknowledged version that a lie kept volatile is gone */
+        if (entry->lie) {
+            ssd->n->fault_lie_lost++;
+        }
         memcpy(base + offset, entry->undo, page_size);
         for (uint32_t i = 0; i < page_size >> shift; i++) {
             if (entry->lba_state[i] & 1) {
@@ -521,6 +526,112 @@ bool bbssd_power_loss(NvmeNamespace *ns)
         ssd_buffer_discard(ssd, entry->lpn);
     }
     return lost;
+}
+
+/*
+ * awupf_lbas: a write of at most N blocks keeps the before-image of each
+ * page it changes (see ssd_write()).
+ */
+static bool ssd_write_snap_all(struct ssd *ssd, NvmeRequest *req,
+                               uint32_t nlb)
+{
+    return ssd->n->awupf_lbas && req->write_data &&
+           nlb <= ssd->n->awupf_lbas;
+}
+
+/* such a write over more than one page is one transaction off the buffer */
+static bool ssd_write_txn(struct ssd *ssd, NvmeRequest *req, uint32_t nlb,
+                          uint64_t start_lpn, uint64_t end_lpn)
+{
+    return ssd_write_snap_all(ssd, req, nlb) && start_lpn != end_lpn;
+}
+
+/* the facts of a lie in this FTL step, before the FUA pages count */
+static void ssd_lie_facts(NvmeNamespace *ns, uint8_t act, bool failed,
+                          FemuFsLie *s)
+{
+    *s = (FemuFsLie) {
+        .act = act,
+        .failed = failed,
+        .plp = femu_plp_ok(ns->ctrl),
+        .buffer = ssd_buffer_enabled(ns->ssd),
+    };
+    /* a Flush exposes what the buffer holds; empty, it claims nothing */
+    if (act == FEMU_FS_ACT_FLUSH_LIE) {
+        s->pages = ns->ssd->write_buffer_cnt;
+    }
+}
+
+/**
+ * bbssd_flush_lie - whether a Flush that flush-lie selected skips its destage
+ * @ns: the namespace of the Flush, which passed its checks
+ *
+ * The FTL thread asks before the destage; bbssd_lie_apply() asks the
+ * same in the same step, so the two agree.
+ */
+bool bbssd_flush_lie(NvmeNamespace *ns)
+{
+    FemuFsLie s;
+
+    ssd_lie_facts(ns, FEMU_FS_ACT_FLUSH_LIE, false, &s);
+    return femu_fs_lie_why(&s) == FEMU_FS_WHY_NONE;
+}
+
+/**
+ * bbssd_lie_apply - mark the pages a lie left volatile
+ * @ns: the namespace of the command, or NULL
+ * @req: the command, which the FTL has run
+ * @act: FEMU_FS_ACT_FLUSH_LIE or FEMU_FS_ACT_FUA_LIE
+ * @slba: the first block of a FUA Write, as the command line saw it
+ * @nlb: its blocks
+ * @pages: the buffered pages that took the lie mark
+ *
+ * A lying Flush skipped its destage, so every page in the buffer is one
+ * the host now counts as durable. A lying FUA Write took the buffered
+ * path, so each of its pages still in the buffer is such a page. A page
+ * that a write-back in the command programmed is durable and stays
+ * unmarked. With no such page the lie has no effect, reason durable.
+ *
+ * Returns FEMU_FS_WHY_NONE when the lie had its effect, else the reason.
+ */
+uint8_t bbssd_lie_apply(NvmeNamespace *ns, NvmeRequest *req, uint8_t act,
+                        uint64_t slba, uint32_t nlb, uint32_t *pages)
+{
+    struct buffer_entry *entry;
+    struct ssd *ssd;
+    FemuFsLie s;
+    uint64_t start_lpn;
+    uint64_t end_lpn;
+    uint8_t why;
+
+    *pages = 0;
+    if (!ns || !ns->ssd) {
+        return FEMU_FS_WHY_CMD_FAILED;
+    }
+    ssd = ns->ssd;
+    ssd_lie_facts(ns, act, req->status != NVME_SUCCESS, &s);
+    if (act == FEMU_FS_ACT_FUA_LIE && !s.failed && !s.plp && s.buffer) {
+        ssd_lpn_range(ssd, req, slba, nlb, &start_lpn, &end_lpn);
+        s.atomic = ssd_write_txn(ssd, req, nlb, start_lpn, end_lpn);
+        for (uint64_t lpn = start_lpn; !s.atomic && lpn <= end_lpn; lpn++) {
+            entry = ssd_buffer_lookup(ssd, lpn);
+            if (entry) {
+                entry->lie = true;
+                s.pages++;
+            }
+        }
+    }
+    why = femu_fs_lie_why(&s);
+    if (why != FEMU_FS_WHY_NONE) {
+        return why;
+    }
+    if (act == FEMU_FS_ACT_FLUSH_LIE) {
+        QTAILQ_FOREACH(entry, &ssd->write_buffer, b_entry) {
+            entry->lie = true;
+        }
+    }
+    *pages = s.pages;
+    return why;
 }
 
 /*
@@ -1470,7 +1581,9 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     uint64_t lpn;
     uint64_t curlat = 0, maxlat = 0;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
-    bool fua = le16_to_cpu(rw->control) & NVME_RW_FUA;
+    /* events_file fua-lie: the write takes the buffered path */
+    bool fua = (le16_to_cpu(rw->control) & NVME_RW_FUA) &&
+               likely(req->fs_lie != FEMU_FS_ACT_FUA_LIE);
     int stream = ssd->n->streams && req->cmd.opcode == NVME_CMD_WRITE ?
                  nvme_streams_open(req->ns, &req->cmd) : -1;
     int r;
@@ -1502,9 +1615,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
      * inside one page may buffer, but on the direct path it keeps its
      * before-image too, so a failed placement leaves no new byte.
      */
-    snap_all = ssd->n->awupf_lbas && req->write_data &&
-               req->nlb <= ssd->n->awupf_lbas;
-    txn = snap_all && start_lpn != end_lpn;
+    snap_all = ssd_write_snap_all(ssd, req, req->nlb);
+    txn = ssd_write_txn(ssd, req, req->nlb, start_lpn, end_lpn);
 
     if (end_lpn >= spp->tt_pgs) {
         ftl_err("write past device geometry: end_lpn=%" PRIu64 " tt_pgs=%"

@@ -1670,7 +1670,14 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
          *
          * A write protected namespace has nothing buffered: the change to
          * that state destaged it. Its Flush has no effect (Figure 671).
+         *
+         * events_file flush-lie: success with no destage and no wait. The
+         * buffer keeps its pages, so a cut rolls them back;
+         * bbssd_lie_apply() marks them after this step.
          */
+        if (unlikely(req->fs_lie) && bbssd_flush_lie(ns)) {
+            break;
+        }
         if (femu_wp(req->ns)) {
             break;
         }

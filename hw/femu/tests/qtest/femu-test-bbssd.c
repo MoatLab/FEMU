@@ -31416,3 +31416,397 @@ void femu_test_gc_spare_hotcold(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
     qos_invalidate_command_line();
 }
+
+/*
+ * flush-lie and fua-lie. Each test boots devices that differ only in
+ * their events_file: the lie runs on one, and its twin has a line that
+ * never selects, so the same commands keep their data there.
+ */
+typedef struct FemuLieDev {
+    const char *id;
+    int addr;
+    const char *props;
+    const char *lines;
+    FemuCtrlState c;
+    QPCIDevice *pdev;
+} FemuLieDev;
+
+#define FEMU_LIE_PL     "femu_mode=1,buffer_size=16,vwc=1,power_loss=on"
+
+/* boot one QEMU with the devices of @d, each enabled with an I/O queue */
+static QOSState *femu_lie_boot(const char *dir, FemuLieDev *d, int nr)
+{
+    GString *cmd = g_string_new("-machine pc -nodefaults");
+    QOSState *qs;
+
+    for (int i = 0; i < nr; i++) {
+        g_autofree char *name = g_strdup_printf("%s.txt", d[i].id);
+        g_autofree char *path = g_build_filename(dir, name, NULL);
+
+        g_assert_true(g_file_set_contents(path, d[i].lines, -1, NULL));
+        g_string_append_printf(cmd, " -device femu,id=%s,addr=%d,"
+                               "devsz_mb=16,%s,events_file=%s", d[i].id,
+                               d[i].addr, d[i].props, path);
+    }
+    qs = qtest_pc_boot("%s", cmd->str);
+    g_string_free(cmd, true);
+    for (int i = 0; i < nr; i++) {
+        d[i].pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(d[i].addr, 0));
+        g_assert_nonnull(d[i].pdev);
+        memset(&d[i].c, 0, sizeof(d[i].c));
+        femu_enable(&d[i].c, d[i].pdev, &qs->alloc);
+        femu_create_io_queues(&d[i].c);
+    }
+    return qs;
+}
+
+static void femu_lie_end(QOSState *qs, const char *dir, FemuLieDev *d,
+                         int nr)
+{
+    for (int i = 0; i < nr; i++) {
+        g_autofree char *name = g_strdup_printf("%s.txt", d[i].id);
+        g_autofree char *path = g_build_filename(dir, name, NULL);
+
+        femu_queue_free(&d[i].c, &d[i].c.io);
+        femu_disable(&d[i].c);
+        g_free(d[i].pdev);
+        unlink(path);
+    }
+    qtest_pc_shutdown(qs);
+    rmdir(dir);
+}
+
+/* a power cut of device @d, then enable it again with an I/O queue */
+static void femu_lie_cut(FemuLieDev *d)
+{
+    femu_cut_power(d->pdev->bus->qts, d->id);
+    femu_queue_free(&d->c, &d->c.io);
+    femu_disable(&d->c);
+    femu_enable(&d->c, d->pdev, d->c.alloc);
+    femu_create_io_queues(&d->c);
+}
+
+/*
+ * The records of device @id, joined by "; ". One record reads
+ * "<id><<cause> l<line> m<match> <action> <phase> <outcome>[/<reason>]
+ * c<cid> o<opc> f<fua> <slba>+<nlb>[ B<pages>| L<pages>]": B for
+ * buffered-at-flush-lie, L for lie-pages. Each is of queue 1 and
+ * namespace 1.
+ */
+static char *femu_lie_recs(QTestState *qts, const char *id)
+{
+    QDict *rsp;
+    QDict *q = femu_events_q(qts, id, &rsp);
+    GString *g = g_string_new(NULL);
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(q, "faults"), e) {
+        QDict *r = qobject_to(QDict, qlist_entry_obj(e));
+        const char *why = qdict_haskey(r, "reason") ?
+                          qdict_get_str(r, "reason") : NULL;
+        g_autofree char *pages = NULL;
+
+        if (qdict_haskey(r, "buffered-at-flush-lie")) {
+            pages = g_strdup_printf(" B%" PRId64,
+                                    qdict_get_int(r, "buffered-at-flush-lie"));
+        } else if (qdict_haskey(r, "lie-pages")) {
+            pages = g_strdup_printf(" L%" PRId64,
+                                    qdict_get_int(r, "lie-pages"));
+        }
+        g_assert_cmpint(qdict_get_int(r, "sqid"), ==, 1);
+        g_assert_cmpint(qdict_get_int(r, "nsid"), ==, 1);
+        g_string_append_printf(
+            g, "%s%" PRId64 "<%" PRId64 " l%" PRId64 " m%" PRId64
+            " %s %s %s%s%s c%" PRId64 " o%" PRId64 " f%d %" PRId64 "+%"
+            PRId64 "%s", g->len ? "; " : "", qdict_get_int(r, "id"),
+            qdict_haskey(r, "cause") ? qdict_get_int(r, "cause") : 0,
+            qdict_get_int(r, "line"), qdict_get_int(r, "match"),
+            qdict_get_str(r, "action"), qdict_get_str(r, "phase"),
+            qdict_get_str(r, "outcome"), why ? "/" : "", why ? why : "",
+            qdict_get_int(r, "cid"), qdict_get_int(r, "opc"),
+            qdict_get_bool(r, "fua"), qdict_get_int(r, "slba"),
+            qdict_get_int(r, "nlb"), pages ? pages : "");
+    }
+    qobject_unref(rsp);
+    return g_string_free(g, false);
+}
+
+static void femu_lie_want(QTestState *qts, const char *id, const char *want)
+{
+    g_autofree char *got = femu_lie_recs(qts, id);
+
+    g_test_message("%s records: %s", id, got);
+    g_assert_cmpstr(got, ==, want);
+}
+
+/* write version byte @pat to all 8 blocks of page @page (8 blocks a page) */
+static void femu_lie_page(FemuCtrlState *c, uint64_t buf, int page,
+                          uint8_t pat, bool fua)
+{
+    femu_power_write(c, buf, 1, page * 8, 8, pat, fua);
+}
+
+/* page @page reads @pat in its first and its last block */
+static void femu_lie_page_is(FemuCtrlState *c, uint64_t buf, int page,
+                             uint8_t pat)
+{
+    femu_power_read(c, buf, 1, page * 8, pat);
+    femu_power_read(c, buf, 1, page * 8 + 7, pat);
+}
+
+/*
+ * flush-lie. Pages 0 to 3 hold version 0 (0xa0 + page) on the media and
+ * page 8 holds 0xc8. Pages 0, 2 and 3 get version 1 (0xb0 + page) in the
+ * buffer, and the 2nd Flush lies on device lf: B3 in its apply record.
+ * Page 1 gets version 1 after the lie. The cut rolls back all four
+ * pages, and x-fault-lie-lost counts only the three the lie covered.
+ * Device lc runs the same commands with a line that never selects: its
+ * Flush keeps pages 0, 2 and 3. Then on lf a 3rd Flush lies over one
+ * page and a 4th writes it back, so the next cut loses nothing; a 5th
+ * Flush finds the buffer empty and has no effect, reason durable.
+ *
+ * Planted defects and the check that fails:
+ *   the lie marks only some buffered pages   B3; x-fault-lie-lost 3
+ *   a page written after the lie is marked   x-fault-lie-lost 3, not 4
+ *   the lie still writes the buffer back     the reads after the cut
+ *   a write-back keeps the page marked       x-fault-lie-lost stays 3
+ */
+void femu_test_fsched_flush_lie(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-lie-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "lf", 5, FEMU_LIE_PL,
+          "@flush#2 flush-lie\n@flush#3 flush-lie\n@flush#5 flush-lie\n" },
+        { "lc", 6, FEMU_LIE_PL, "@flush#9 flush-lie\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool lie = i == 0;
+        uint16_t cid[3];
+
+        for (int p = 0; p < 4; p++) {
+            femu_lie_page(c, buf, p, 0xa0 + p, false);
+        }
+        femu_lie_page(c, buf, 8, 0xc8, false);
+        femu_power_flush(c, 1);
+        femu_lie_page(c, buf, 0, 0xb0, false);
+        femu_lie_page(c, buf, 2, 0xb2, false);
+        femu_lie_page(c, buf, 3, 0xb3, false);
+        cid[0] = c->cid;
+        femu_power_flush(c, 1);
+        femu_lie_page(c, buf, 1, 0xb1, false);
+        if (lie) {
+            g_autofree char *want = g_strdup_printf(
+                "1<0 l1 m2 flush-lie select selected c%u o0 f0 0+0; "
+                "2<1 l1 m2 flush-lie apply done c%u o0 f0 0+0 B3",
+                cid[0], cid[0]);
+
+            femu_lie_want(qts, d[i].id, want);
+        } else {
+            femu_lie_want(qts, d[i].id, "");
+        }
+        /* the lie marks; only a cut that rolls a page back counts it */
+        g_assert_cmpint(femu_g1_qom_get(qts, d[i].id, "x-fault-lie-lost"),
+                        ==, 0);
+        femu_lie_cut(&d[i]);
+        for (int p = 0; p < 4; p++) {
+            femu_lie_page_is(c, buf, p,
+                             lie || p == 1 ? 0xa0 + p : 0xb0 + p);
+        }
+        femu_lie_page_is(c, buf, 8, 0xc8);
+        g_assert_cmpint(femu_g1_qom_get(qts, d[i].id, "x-fault-lie-lost"),
+                        ==, lie ? 3 : 0);
+
+        /* a lie, then a real Flush: the page reaches the media */
+        femu_lie_page(c, buf, 0, 0xd0, false);
+        cid[1] = c->cid;
+        femu_power_flush(c, 1);
+        femu_power_flush(c, 1);
+        cid[2] = c->cid;
+        femu_power_flush(c, 1);
+        if (lie) {
+            g_autofree char *want = g_strdup_printf(
+                "1<0 l1 m2 flush-lie select selected c%u o0 f0 0+0; "
+                "2<1 l1 m2 flush-lie apply done c%u o0 f0 0+0 B3; "
+                "3<0 l2 m3 flush-lie select selected c%u o0 f0 0+0; "
+                "4<3 l2 m3 flush-lie apply done c%u o0 f0 0+0 B1; "
+                "5<0 l3 m5 flush-lie select selected c%u o0 f0 0+0; "
+                "6<5 l3 m5 flush-lie apply no-effect/durable c%u o0 f0 0+0",
+                cid[0], cid[0], cid[1], cid[1], cid[2], cid[2]);
+
+            femu_lie_want(qts, d[i].id, want);
+        }
+        femu_lie_cut(&d[i]);
+        femu_lie_page_is(c, buf, 0, 0xd0);
+        g_assert_cmpint(femu_g1_qom_get(qts, d[i].id, "x-fault-lie-lost"),
+                        ==, lie ? 3 : 0);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * fua-lie. Pages 0 to 3 hold version 0 (0xa0 + page) on the media.
+ * Pages 0 and 2 get version 1 (0xb0 + page) in the buffer, then a FUA
+ * Write of version 1 to page 1 lies on device uf, and page 3 gets
+ * version 1 after it. The lie takes the buffered path, so the cut gives
+ * page 1 its version 0 back, and x-fault-lie-lost counts that page
+ * only. Device uc matches no FUA Write of these blocks and keeps page 1.
+ * Eligibility uses the original command: on the same FUA Write, wb-fail
+ * loses its group to the lie, and a later @fua line still matches. A
+ * FUA Write whose data transfer fails gets the reason cmd-failed.
+ *
+ * Planted defects and the check that fails:
+ *   the lie marks every buffered page        L1; x-fault-lie-lost 1, not 3
+ *   end_lpn one past the write (page 2)      x-fault-lie-lost 1, not 2
+ *   start_lpn one before the write (page 0)  x-fault-lie-lost 1, not 2
+ *   a page written after the lie is marked   x-fault-lie-lost 1, not 2
+ *   the write still goes to the media        page 1 reads 0xb1 on uf
+ */
+void femu_test_fsched_fua_lie(void *obj, void *data,
+                              QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-lie-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "uf", 5, FEMU_LIE_PL,
+          "@fua,lba=8-15#1 fua-lie\n@write,lba=8-15#2 wb-fail\n"
+          "@fua#1 delay ms=1\n@fua,lba=32-39#1 fua-lie\n" },
+        { "uc", 6, FEMU_LIE_PL, "@fua,lba=64-71#1 fua-lie\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool lie = i == 0;
+        NvmeRwCmd rw = { .opcode = NVME_CMD_WRITE, .nsid = cpu_to_le32(1),
+                         .slba = cpu_to_le64(32), .nlb = cpu_to_le16(7),
+                         .control = cpu_to_le16(NVME_RW_FUA),
+                         .dptr.prp1 = cpu_to_le64(0xfed00000) };
+        uint16_t cid[2];
+
+        for (int p = 0; p < 4; p++) {
+            femu_lie_page(c, buf, p, 0xa0 + p, false);
+        }
+        femu_power_flush(c, 1);
+        femu_lie_page(c, buf, 0, 0xb0, false);
+        femu_lie_page(c, buf, 2, 0xb2, false);
+        cid[0] = c->cid;
+        femu_lie_page(c, buf, 1, 0xb1, true);
+        femu_lie_page(c, buf, 3, 0xb3, false);
+        cid[1] = c->cid;
+        g_assert_cmphex(femu_io(c, (NvmeCmd *)&rw), ==,
+                        NVME_DATA_TRAS_ERROR);
+        if (lie) {
+            g_autofree char *want = g_strdup_printf(
+                "1<0 l1 m1 fua-lie select selected c%u o1 f1 8+8; "
+                "2<0 l2 m2 wb-fail select superseded c%u o1 f1 8+8; "
+                "3<0 l3 m1 delay select selected c%u o1 f1 8+8; "
+                "4<1 l1 m1 fua-lie apply done c%u o1 f1 8+8 L1; "
+                "5<0 l4 m1 fua-lie select selected c%u o1 f1 32+8; "
+                "6<5 l4 m1 fua-lie apply no-effect/cmd-failed c%u o1 f1 "
+                "32+8", cid[0], cid[0], cid[0], cid[0], cid[1], cid[1]);
+
+            femu_lie_want(qts, d[i].id, want);
+        } else {
+            femu_lie_want(qts, d[i].id, "");
+        }
+        g_assert_cmpint(femu_g1_qom_get(qts, d[i].id, "x-fault-lie-lost"),
+                        ==, 0);
+        femu_lie_cut(&d[i]);
+        for (int p = 0; p < 4; p++) {
+            femu_lie_page_is(c, buf, p,
+                             p == 1 && !lie ? 0xb1 : 0xa0 + p);
+        }
+        g_assert_cmpint(femu_g1_qom_get(qts, d[i].id, "x-fault-lie-lost"),
+                        ==, lie);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * The cases where a selected lie has no effect, each with its reason in
+ * the apply record and its data kept as without the line:
+ *   rp  working plp: both lies; the cut writes A1 back
+ *   rq  the same, but the plp has no energy at the cut: A0 comes back,
+ *       which shows the read can see a loss; no page has the lie mark
+ *   ra  awupf_lbas=2: a FUA Write of two blocks over two pages is one
+ *       transaction and programs directly
+ *   rb  vwc=0 and no plp: the buffer takes no write
+ */
+void femu_test_fsched_lie_reasons(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-lie-XXXXXX", NULL);
+    static const char both[] = "@fua,lba=0-7#1 fua-lie\n@flush#1 flush-lie\n";
+    FemuLieDev d[] = {
+        { "rp", 5, FEMU_LIE_PL ",plp=on", both },
+        { "rq", 6, FEMU_LIE_PL ",plp=on", both },
+        { "ra", 7, FEMU_LIE_PL ",awupf_lbas=2", "@fua#1 fua-lie\n" },
+        { "rb", 8, "femu_mode=1,buffer_size=16,vwc=0,power_loss=on",
+          "@fua#1 fua-lie\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < 2; i++) {
+        FemuCtrlState *c = &d[i].c;
+        uint16_t cid[2];
+        g_autofree char *want = NULL;
+
+        /* with plp only a cut puts A0 on the media */
+        femu_power_write(c, buf, 1, 0, 8, 0xa0, false);
+        femu_lie_cut(&d[i]);
+        cid[0] = c->cid;
+        femu_power_write(c, buf, 1, 0, 8, 0xa1, true);
+        cid[1] = c->cid;
+        femu_power_flush(c, 1);
+        want = g_strdup_printf(
+            "1<0 l1 m1 fua-lie select selected c%u o1 f1 0+8; "
+            "2<1 l1 m1 fua-lie apply no-effect/plp c%u o1 f1 0+8; "
+            "3<0 l2 m1 flush-lie select selected c%u o0 f0 0+0; "
+            "4<3 l2 m1 flush-lie apply no-effect/plp c%u o0 f0 0+0",
+            cid[0], cid[0], cid[1], cid[1]);
+        femu_lie_want(qts, d[i].id, want);
+        if (i == 1) {
+            g_autofree char *path = g_strdup_printf("/machine/peripheral/%s",
+                                                    d[i].id);
+
+            qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':"
+                                     "{'path':%s,'property':'plp-health',"
+                                     "'value':0}}", path);
+        }
+        femu_lie_cut(&d[i]);
+        femu_power_read(c, buf, 1, 0, i == 0 ? 0xa1 : 0xa0);
+        g_assert_cmpint(femu_g1_qom_get(qts, d[i].id, "x-fault-lie-lost"),
+                        ==, 0);
+    }
+
+    for (int i = 2; i < 4; i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool atomic = i == 2;
+        uint64_t slba = atomic ? 7 : 0;
+        uint16_t nlb = atomic ? 2 : 8;
+        uint16_t cid = c->cid;
+        g_autofree char *want = NULL;
+
+        femu_power_write(c, buf, 1, slba, nlb, 0xc1, true);
+        want = g_strdup_printf(
+            "1<0 l1 m1 fua-lie select selected c%u o1 f1 %" PRIu64 "+%u; "
+            "2<1 l1 m1 fua-lie apply no-effect/%s c%u o1 f1 %" PRIu64 "+%u",
+            cid, slba, nlb, atomic ? "atomic" : "no-buffer", cid, slba, nlb);
+        femu_lie_want(qts, d[i].id, want);
+        femu_lie_cut(&d[i]);
+        femu_power_read(c, buf, 1, slba, 0xc1);
+        femu_power_read(c, buf, 1, slba + nlb - 1, 0xc1);
+        g_assert_cmpint(femu_g1_qom_get(qts, d[i].id, "x-fault-lie-lost"),
+                        ==, 0);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}

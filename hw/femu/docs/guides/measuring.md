@@ -366,8 +366,10 @@ can mix time lines and command lines. Command lines work on bbssd only.
   handler does, except a PRACT tuple that the controller inserts.
 - With no command line, the FTL thread has no schedule to check: one
   pointer test per command, and no decode, count or draw.
-- No action has an effect yet. A selection moves the counters of its
-  line only. The qtest property `x-fault-sel` reports, per command line,
+- Only `flush-lie` and `fua-lie` have an effect so far (see [lies](#lies)).
+  For the other actions a selection moves the counters of its line and
+  writes its record only. The qtest property `x-fault-sel` reports, per
+  command line,
   `<line>:<matched>:<selected>:<applied>:<superseded>:<no-effect>`.
   `x-fault-draw` takes a seed and returns its draws in order.
   `x-fault-hold` parks the FTL thread for that many ms at the next
@@ -377,13 +379,68 @@ can mix time lines and command lines. Command lines work on bbssd only.
   match, or any `%` line. The fault records of the command lines come
   next.
 
+### Lies
+
+A lie makes a command succeed without the durability it claims. The
+buffered pages stay volatile, so a later power cut
+(`simulate-power-loss`) rolls them back and the host loses a version it
+saw acknowledged.
+
+```text
+ host                      FTL                          power cut
+ ----                      ---                          ---------
+ Write A0, Flush           A0 on the media
+ Write A1                  buffer: A1 (undo image A0)
+ Flush (flush-lie)         no write-back, no wait;
+   <-- success             every buffered page: lie mark
+                                                        A1 rolled back
+ read A --> A0, though the host saw A1 flushed
+```
+
+- `flush-lie`: the Flush skips the write-back of the buffer and the
+  waits after it, and completes with success. Each buffered page gets
+  the lie mark; `buffered_at_flush_lie` counts the buffered pages. With
+  an empty buffer the Flush runs as usual, and the lie has no effect.
+- `fua-lie`: the FUA Write takes the buffered path, as a Write without
+  FUA does. Each buffered page of the write gets the lie mark when the
+  write completes; `lie_pages` counts these buffered pages.
+- The mark goes with the page. A later Flush or write-back that programs
+  the page makes it durable, and a cut then loses nothing. A cut that
+  rolls a marked page back counts it in the qtest property
+  `x-fault-lie-lost`.
+- After the FTL ran the command, the lie writes an `apply` record whose
+  `cause` is its `select` record:
+
+| Outcome | Reason | When |
+| --- | --- | --- |
+| `done` | | the lie took place; the record has its page count |
+| `no-effect` | `cmd-failed` | the command failed after the match, for example on a data transfer error |
+| `no-effect` | `plp` | working `plp`: the cut writes the buffer back. With no energy left at the cut, the pages roll back as they would with no lie |
+| `no-effect` | `no-buffer` | the write buffer takes no write: `vwc=0` with no `plp`, a cache the host disabled, or a failed `plp` in write-through mode |
+| `no-effect` | `atomic` | `fua-lie` on a write that `awupf_lbas` makes one transaction: it programs directly |
+| `no-effect` | `durable` | no buffered page is left volatile: a Flush over an empty buffer (a write-protected namespace has one), or a FUA Write that a stream or a write-back in the command programmed |
+
+```text
+ {"id":2,"cause":1,"origin":"sched-cmd","line":1,"match":2,
+  "action":"flush-lie","phase":"apply","step":5,"nsid":1,"sqid":1,
+  "cid":4,"opc":0,"fua":false,"slba":0,"nlb":0,"outcome":"done",
+  "buffered_at_flush_lie":1}
+```
+
+- The checks of the line use the command as the host sent it, so a
+  later `@fua` line still matches a FUA Write that `fua-lie` selected.
+  The command keeps its FUA bit: the FTL reads the lie from the
+  request. The `select` record keeps `fua` true.
+- The counters of `x-fault-sel` count the selection. A lie with no
+  effect counts as applied there; its `apply` record gives the reason.
+
 ### Fault records
 
 Each command that a command line selects writes one record per line
 that selected it, in file order. A record tells what the line did with
 the command. It is an observation, never an instruction to replay. The
 records go to a ring of `events_max_faults` slots (1 to 65536, default
-4096). A record has 64 bytes and a slot 72, with its sequence word.
+4096). A record has 72 bytes and a slot 80, with its sequence word.
 Realize allocates the ring only for a file with a command line.
 
 ```text
@@ -401,12 +458,14 @@ Realize allocates the ring only for a file with a command line.
 | `id` | from 1; each record takes one, stored or dropped |
 | `origin` | `sched-cmd`: a command line |
 | `line`, `match` | the line, and its matches so far, this one too |
-| `action`, `phase` | the action of the line; `select` |
+| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a lie |
 | `step` | commands the FTL thread took so far, this one too |
 | `nsid`, `sqid`, `cid`, `opc`, `fua`, `slba`, `nlb` | the command as the host sent it; `slba` and `nlb` are 0 for a Flush |
-| `outcome` | `selected`, `superseded` or `no-effect` |
-| `reason` | for `no-effect`: `fua`, `pre` or `hang` |
-| `cause`, `status` | absent here; later fault steps fill them |
+| `outcome` | `selected`, `superseded` or `no-effect`; `done` for an `apply` record |
+| `reason` | for `no-effect`: `fua`, `pre` or `hang`; for a lie also `plp`, `atomic`, `no-buffer`, `cmd-failed` or `durable` |
+| `buffered_at_flush_lie`, `lie_pages` | for a `done` lie: the pages it left volatile (QMP: `buffered-at-flush-lie`, `lie-pages`) |
+| `cause` | the id of the parent record: an `apply` record names its `select` record |
+| `status` | absent here; later fault steps fill it |
 
 ```text
  {"id":3,"origin":"sched-cmd","line":2,"match":2,"action":"wb-fail",

@@ -1862,7 +1862,9 @@
 #
 # @action: the action of the line
 #
-# @phase: the step of the fault: "select"
+# @phase: the step of the fault: "select" when a line selects a
+#     command, "apply" when the FTL has run a command that a lie
+#     selected
 #
 # @step: the commands the FTL thread took so far, this one too
 #
@@ -1882,11 +1884,21 @@
 #
 # @outcome: "selected": the line won its group, "superseded": an
 #     earlier line of its group won, "no-effect": the line won with no
-#     effect
+#     effect, "done": the lie of an "apply" record took place
 #
 # @reason: why a "no-effect" line has none: "fua" (the original
-#     command has FUA), "pre" (a cut or cfs runs before the command)
-#     or "hang" (a hang won, so no completion comes to delay)
+#     command has FUA), "pre" (a cut or cfs runs before the command),
+#     "hang" (a hang won, so no completion comes to delay), "plp"
+#     (working power loss protection keeps the buffer), "atomic" (the
+#     write ran as one awupf transaction), "no-buffer" (the write
+#     buffer takes no write), "cmd-failed" (the command failed) or
+#     "durable" (no buffered page is left volatile)
+#
+# @buffered-at-flush-lie: for a "done" flush-lie, the buffered pages
+#     the Flush left in the buffer; a power cut rolls them back
+#
+# @lie-pages: for a "done" fua-lie, the pages of the write left in
+#     the buffer; a power cut rolls them back
 #
 # @status: the completion status a later record reports; absent for
 #     none
@@ -1899,7 +1911,8 @@
             'phase': 'str', 'step': 'uint64', 'nsid': 'uint32',
             'sqid': 'uint16', 'cid': 'uint16', 'opc': 'uint8',
             'fua': 'bool', 'slba': 'uint64', 'nlb': 'uint32',
-            'outcome': 'str', '*reason': 'str', '*status': 'uint16' } }
+            'outcome': 'str', '*reason': 'str', '*status': 'uint16',
+            '*buffered-at-flush-lie': 'uint32', '*lie-pages': 'uint32' } }
 
 ##
 # @FemuIdRange:

@@ -2240,6 +2240,11 @@ typedef struct NvmeRequest {
     uint32_t        eol_pages;
     bool            eol_held;
     bool            eol_ro;
+    /*
+     * events_file: the lie a command line selected for this command, a
+     * FEMU_FS_ACT_*, or 0. Set and cleared in one FTL step.
+     */
+    uint8_t         fs_lie;
 } NvmeRequest;
 
 /*
@@ -3290,6 +3295,7 @@ typedef struct FemuCtrl {
     uint32_t        test_fs_hold_ms;    /* qtest x-fault-hold */
     uint32_t        test_fs_held;       /* qtest x-fault-held */
     uint32_t        test_fs_log_hold;   /* qtest x-fault-log-hold */
+    uint64_t        fault_lie_lost;     /* lie pages cuts rolled back */
     char            *events_log;        /* fault records, one JSON line each */
     char            *evlog_path;        /* events_log, resolved while open */
     uint32_t        events_max_faults;  /* slots of the fault record ring */
@@ -4113,7 +4119,8 @@ bool femu_events_init(FemuCtrl *n, Error **errp);
 void femu_events_start(FemuCtrl *n);
 void femu_events_cancel(FemuCtrl *n);
 void femu_events_free(FemuCtrl *n);
-void femu_fsched_step(FemuCtrl *n, NvmeRequest *req);
+bool femu_fsched_step(FemuCtrl *n, NvmeRequest *req);
+void femu_fsched_lie(FemuCtrl *n, NvmeRequest *req);
 void femu_events_add_test_props(Object *obj);
 bool femu_events_installed(FemuCtrl *n);
 struct FemuEventSched;
@@ -4544,6 +4551,9 @@ static inline void nvme_note_user_write(FemuCtrl *n)
 void bbssd_deallocate_all(NvmeNamespace *ns);
 void bbssd_deallocate_lbas(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
 bool bbssd_power_loss(NvmeNamespace *ns);
+bool bbssd_flush_lie(NvmeNamespace *ns);
+uint8_t bbssd_lie_apply(NvmeNamespace *ns, NvmeRequest *req, uint8_t act,
+                        uint64_t slba, uint32_t nlb, uint32_t *pages);
 uint16_t bbssd_flush_all(FemuCtrl *n);
 uint16_t bbssd_drain_namespace(NvmeNamespace *ns, uint64_t stime, int64_t *lat);
 uint16_t nvme_power_io(FemuCtrl *n, NvmeRequest *req);

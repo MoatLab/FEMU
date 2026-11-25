@@ -670,6 +670,31 @@ void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
     }
 }
 
+uint8_t femu_fs_lie_why(const FemuFsLie *s)
+{
+    if (s->failed) {
+        return FEMU_FS_WHY_CMD_FAILED;
+    }
+    /* the cut writes a protected buffer back, so nothing is exposed */
+    if (s->plp) {
+        return FEMU_FS_WHY_PLP;
+    }
+    if (!s->buffer) {
+        return FEMU_FS_WHY_NO_BUFFER;
+    }
+    if (s->act == FEMU_FS_ACT_FUA_LIE && s->atomic) {
+        return FEMU_FS_WHY_ATOMIC;
+    }
+    /*
+     * No page is left volatile: the buffer of a Flush is empty, or a
+     * stream write or a write-back in the command programmed the write.
+     */
+    if (!s->pages) {
+        return FEMU_FS_WHY_DURABLE;
+    }
+    return FEMU_FS_WHY_NONE;
+}
+
 bool femu_fs_done(const FemuFsLine *l, int nr)
 {
     for (int i = 0; i < nr; i++) {

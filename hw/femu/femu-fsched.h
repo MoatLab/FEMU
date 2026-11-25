@@ -73,7 +73,22 @@ enum {
     FEMU_FS_WHY_FUA,            /* the original command has FUA */
     FEMU_FS_WHY_PRE,            /* a cut or cfs at pre: no command runs */
     FEMU_FS_WHY_HANG,           /* a hang won: no CQE comes to delay */
+    FEMU_FS_WHY_PLP,            /* working plp: the buffer is power safe */
+    FEMU_FS_WHY_ATOMIC,         /* an awupf transaction programs directly */
+    FEMU_FS_WHY_NO_BUFFER,      /* the write buffer takes no write now */
+    FEMU_FS_WHY_CMD_FAILED,     /* the command failed after the match */
+    FEMU_FS_WHY_DURABLE,        /* no buffered page is left volatile */
 };
+
+/* what the FTL did with a command that a lie selected */
+typedef struct FemuFsLie {
+    uint8_t act;                /* FEMU_FS_ACT_FLUSH_LIE or _FUA_LIE */
+    bool failed;                /* the command did not succeed */
+    bool plp;                   /* plp works */
+    bool buffer;                /* the write buffer takes writes */
+    bool atomic;                /* fua-lie: the write was a transaction */
+    uint32_t pages;             /* buffered pages the lie leaves volatile */
+} FemuFsLie;
 
 enum { FEMU_FS_GRAIN_PAGE, FEMU_FS_GRAIN_LBA };
 enum { FEMU_FS_WB_UNC, FEMU_FS_WB_OLD };
@@ -239,6 +254,18 @@ const char *femu_fs_act_name(uint8_t act);
  */
 void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
                    uint8_t *out, uint8_t *why, FemuFsView *eff);
+
+/**
+ * femu_fs_lie_why - why a selected lie had no effect
+ * @s: what the FTL did with the command
+ *
+ * A lie needs a successful command, a write buffer that plp does not
+ * protect, and a buffered page it leaves volatile: for flush-lie any
+ * page in the buffer, for fua-lie a page of the write.
+ *
+ * Returns FEMU_FS_WHY_NONE when the lie had its effect.
+ */
+uint8_t femu_fs_lie_why(const FemuFsLie *s);
 
 /**
  * femu_fs_done - whether no line can select again

@@ -3703,6 +3703,7 @@ static void *femu_ftl_thread(void *arg)
     uint32_t hold_req;
     uint32_t hold;
     bool stalled;
+    bool lie;
     int rc, i;
 
     while (!n->dataplane_started) {
@@ -3807,8 +3808,9 @@ static void *femu_ftl_thread(void *arg)
             }
 
             /* command lines of events_file see each command once */
+            lie = false;
             if (unlikely(n->fsched)) {
-                femu_fsched_step(n, req);
+                lie = femu_fsched_step(n, req);
             }
             if (nvme_ns_shared(n)) {
                 qemu_mutex_lock(&n->subsys->ns_lock);
@@ -3821,6 +3823,10 @@ static void *femu_ftl_thread(void *arg)
                 lat = femu_fused_run(n, req, true);
             } else {
                 lat = femu_ftl_process_req(n, req);
+                /* a lie marks the pages it left volatile, then records it */
+                if (unlikely(lie)) {
+                    femu_fsched_lie(n, req);
+                }
             }
             /* log 0Ah's FTL state, and the DTWIN limits (MVEAT) */
             if (unlikely(n->plm)) {

@@ -41,6 +41,7 @@ enum {
 /* the step of a fault a record tells of */
 enum {
     FEMU_FR_PHASE_SELECT = 1,           /* a line selected a command */
+    FEMU_FR_PHASE_APPLY,                /* the FTL ran it: what came of it */
 };
 
 /* what came of the selection */
@@ -48,6 +49,7 @@ enum {
     FEMU_FR_OUT_SELECTED = 1,           /* the line won its group */
     FEMU_FR_OUT_SUPERSEDED,             /* an earlier line of its group won */
     FEMU_FR_OUT_NO_EFFECT,              /* won, but with no effect: see why */
+    FEMU_FR_OUT_DONE,                   /* the effect took place */
 };
 
 /*
@@ -75,6 +77,12 @@ typedef struct FemuFrRec {
     uint8_t opc;
     uint8_t fua;
     uint8_t pad;
+    /*
+     * apply of a lie: the buffered pages that took the lie mark. For
+     * flush-lie that is every page the Flush left in the buffer.
+     */
+    uint32_t pages;
+    uint32_t pad2;
 } FemuFrRec;
 
 _Static_assert(sizeof(FemuFrRec) <= FEMU_FR_REC_MAX,
@@ -84,7 +92,7 @@ _Static_assert(sizeof(FemuFrRec) % sizeof(uint64_t) == 0,
 
 #define FEMU_FR_WORDS   (sizeof(FemuFrRec) / sizeof(uint64_t))
 
-/* 72 bytes: the record as atomic words, and its sequence word */
+/* 80 bytes: the record as atomic words, and its sequence word */
 typedef struct FemuFrSlot {
     uint64_t seq;               /* 2k+1 while record k is written, then 2k+2 */
     uint64_t w[FEMU_FR_WORDS];

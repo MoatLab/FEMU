@@ -16,11 +16,13 @@
  *
  * A line that starts with '@' names commands, not a time (femu-fsched.c).
  * The FTL thread matches each command against those lines after the first
- * enable. No action has an effect yet: a selection moves the counters of
- * its line, which x-fault-sel reports, and writes one record per line it
- * concerns to the fault record ring (femu-frec.c):
+ * enable. A selection moves the counters of its line, which x-fault-sel
+ * reports, and writes one record per line it concerns to the fault record
+ * ring (femu-frec.c). Only flush-lie and fua-lie have an effect so far:
+ * after the FTL runs their command, an apply record tells what came of it.
  *
- *   FTL thread: step++, match --> femu_fr_put() per line --> wake writer
+ *   FTL thread: step++, match --> femu_fr_put() per line --> FTL call
+ *               --> lie: mark pages, femu_fr_put() apply --> wake writer
  *   writer thread (events_log only): pop, write a JSON line, free
  *   query-femu-events (main loop): femu_fr_read(), no lock taken
  *
@@ -89,6 +91,14 @@ struct FemuFsched {
     uint8_t *why;               /* FTL thread: why a winner has no effect */
     bool running;               /* set at the first enable */
     uint64_t step;              /* FTL thread: commands taken, atomic */
+
+    /*
+     * FTL thread: the lie selected in this step, for its apply record
+     * once the FTL has run the command. One command per step, so one.
+     */
+    int lie_line;               /* index into @l */
+    uint64_t lie_cause;         /* id of its select record */
+    FemuFsView lie_view;        /* the command as the line saw it */
 
     /* the FTL thread is the one producer of the ring */
     FemuFrRing ring;
@@ -907,27 +917,41 @@ void femu_events_free(FemuCtrl *n)
 }
 
 /*
- * The effect of a selected line. None is modelled yet: each case only
- * names what it will do, and a selection moves the counters alone. @eff
- * is the command as the winners of its groups leave it.
+ * The effect of line @i, which won its group on @req, seen as @v; @id
+ * is its select record. Only the lies are modelled: each other case
+ * names what it will do, and its selection moves the counters alone.
+ * Returns true when the FTL step must call femu_fsched_lie() after it.
  */
-static void femu_fsched_act(FemuCtrl *n, NvmeRequest *req,
-                            const FemuFsLine *l, const FemuFsView *eff)
+static bool femu_fsched_act(FemuCtrl *n, NvmeRequest *req, int i,
+                            const FemuFsView *v, uint64_t id)
 {
+    struct FemuFsched *f = n->fsched;
+    const FemuFsLine *l = &f->l[i];
+
     switch (l->act) {
+    case FEMU_FS_ACT_FUA_LIE:
+    case FEMU_FS_ACT_FLUSH_LIE:
+        /*
+         * The FTL reads req->fs_lie: ssd_write() then takes the buffered
+         * path though the command keeps its FUA bit. The data group has
+         * one winner, so a command has one lie.
+         */
+        req->fs_lie = l->act;
+        f->lie_line = i;
+        f->lie_cause = id;
+        f->lie_view = *v;
+        return true;
     case FEMU_FS_ACT_POWER_LOSS:    /* not modelled yet: a cut at pre */
     case FEMU_FS_ACT_CFS:           /* not modelled yet: CSTS.CFS at pre */
     case FEMU_FS_ACT_HANG:          /* not modelled yet: no CQE */
     case FEMU_FS_ACT_WRITE_FAIL:    /* not modelled yet: Write Fault */
     case FEMU_FS_ACT_WB_FAIL:       /* not modelled yet: write-back error */
-    case FEMU_FS_ACT_FUA_LIE:       /* not modelled yet: FUA buffers */
     case FEMU_FS_ACT_READ_UNC:      /* not modelled yet: Unrecovered Read */
-    case FEMU_FS_ACT_FLUSH_LIE:     /* not modelled yet: no destage */
     case FEMU_FS_ACT_SDC:           /* not modelled yet: sdc override */
     case FEMU_FS_ACT_DELAY:         /* not modelled yet: a later CQE */
     case FEMU_FS_ACT_SLOW:          /* not modelled yet: die-slow by BH */
     case FEMU_FS_ACT_ANA:           /* not modelled yet: ana-state by BH */
-        break;
+        return false;
     default:
         g_assert_not_reached();
     }
@@ -947,10 +971,10 @@ static uint8_t femu_fsched_outcome(uint8_t out)
 
 /*
  * One select record per line that selected @req. The FTL thread is the
- * only producer, so the ring needs no lock here.
+ * only producer, so the ring needs no lock here. Returns its id.
  */
-static void femu_fsched_record(FemuCtrl *n, NvmeRequest *req,
-                               const FemuFsView *v, int i)
+static uint64_t femu_fsched_record(FemuCtrl *n, NvmeRequest *req,
+                                   const FemuFsView *v, int i)
 {
     struct FemuFsched *f = n->fsched;
     const FemuFsLine *l = &f->l[i];
@@ -971,9 +995,60 @@ static void femu_fsched_record(FemuCtrl *n, NvmeRequest *req,
         .opc = v->opc,
         .fua = v->fua,
     };
+    uint64_t id = femu_fr_put(&f->ring, &rec);
+
+    /* a no-op while the writer is already awake, or after it ended */
+    if (f->has_log) {
+        qemu_event_set(&f->log_ev);
+    }
+    return id;
+}
+
+/**
+ * femu_fsched_lie - the apply record of a lie, after the FTL ran it
+ * @n: the controller, with command lines
+ * @req: the command that femu_fsched_step() gave a lie
+ *
+ * Runs on the FTL thread, in the step of @req, after the FTL call. It
+ * marks the buffered pages that the lie left volatile and writes one
+ * record whose cause is the select record: "done" with the pages, or
+ * "no-effect" with the reason.
+ */
+void femu_fsched_lie(FemuCtrl *n, NvmeRequest *req)
+{
+    struct FemuFsched *f = n->fsched;
+    const FemuFsLine *l = &f->l[f->lie_line];
+    const FemuFsView *v = &f->lie_view;
+    uint8_t act = req->fs_lie;
+    uint32_t pages;
+    uint8_t why;
+    FemuFrRec rec;
+
+    /* the FTL call is over: no later code may take the request for a lie */
+    req->fs_lie = 0;
+    why = bbssd_lie_apply(req->ns, req, act, v->slba, v->nlb, &pages);
+    rec = (FemuFrRec) {
+        .cause = f->lie_cause,
+        .step = f->step,
+        .match = l->matched,
+        .slba = v->slba,
+        .nlb = v->nlb,
+        .nsid = v->nsid,
+        .line = l->line,
+        .sqid = req->sq ? req->sq->sqid : 0,
+        .cid = le16_to_cpu(req->cmd.cid),
+        .origin = FEMU_FR_ORIGIN_SCHED_CMD,
+        .phase = FEMU_FR_PHASE_APPLY,
+        .act = act,
+        .outcome = why == FEMU_FS_WHY_NONE ? FEMU_FR_OUT_DONE :
+                                             FEMU_FR_OUT_NO_EFFECT,
+        .why = why,
+        .opc = v->opc,
+        .fua = v->fua,
+        .pages = pages,
+    };
 
     femu_fr_put(&f->ring, &rec);
-    /* a no-op while the writer is already awake, or after it ended */
     if (f->has_log) {
         qemu_event_set(&f->log_ev);
     }
@@ -988,8 +1063,11 @@ static void femu_fsched_record(FemuCtrl *n, NvmeRequest *req,
  * namespace, never from fields the FTL or nvme_power_io() fill later. A
  * command outside the matchable set, or one that fails the view checks,
  * counts for no line. Each command counts as one step, matched or not.
+ *
+ * Returns true when a lie selected @req: the caller then runs
+ * femu_fsched_lie() right after the FTL call.
  */
-void femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
+bool femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
 {
     struct FemuFsched *f = n->fsched;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
@@ -1004,15 +1082,16 @@ void femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
     unsigned mdts = 0;
     uint32_t xfer_ms = 0;
     uint32_t hold;
+    bool lie = false;
 
     qatomic_set(&f->step, f->step + 1);
     if (!qatomic_read(&f->running)) {
-        return;
+        return false;
     }
     switch (v.opc) {
     case NVME_CMD_FLUSH:
         if (v.nsid != NVME_NSID_BROADCAST && !nvme_ns(n, v.nsid)) {
-            return;
+            return false;
         }
         break;
     case NVME_CMD_READ:
@@ -1020,7 +1099,7 @@ void femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
     case NVME_CMD_WRITE_ZEROES:
         ns = nvme_ns(n, v.nsid);
         if (!ns) {
-            return;
+            return false;
         }
         v.slba = le64_to_cpu(rw->slba);
         v.nlb = le16_to_cpu(rw->nlb) + 1;
@@ -1037,14 +1116,14 @@ void femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
             le16_to_cpu(rw->control) & NVME_RW_PRINFO_PRACT);
         break;
     default:
-        return;
+        return false;
     }
     /* as nvme_check_mdts(): in the minimum page size, not the CC one */
     if (n->mdts) {
         mdts = 12 + NVME_CAP_MPSMIN(n->bar.cap) + n->mdts;
     }
     if (!femu_fs_view_ok(&v, nsze, lbads, xfer_ms, mdts)) {
-        return;
+        return false;
     }
     /*
      * qtest x-fault-hold: park here, the schedule in hand, for that many
@@ -1060,14 +1139,17 @@ void femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
     }
     femu_fs_match(f->l, f->nr, &v, f->out, f->why, &eff);
     for (int i = 0; i < f->nr; i++) {
+        uint64_t id;
+
         if (f->out[i] == FEMU_FS_OUT_NONE) {
             continue;
         }
-        femu_fsched_record(n, req, &v, i);
+        id = femu_fsched_record(n, req, &v, i);
         if (f->out[i] == FEMU_FS_OUT_APPLIED) {
-            femu_fsched_act(n, req, &f->l[i], &eff);
+            lie |= femu_fsched_act(n, req, i, &v, id);
         }
     }
+    return lie;
 }
 
 /*
@@ -1199,6 +1281,9 @@ void femu_events_add_test_props(Object *obj)
     object_property_add_uint32_ptr(obj, "x-fault-held", &n->test_fs_held,
                                    OBJ_PROP_FLAG_READ);
     object_property_add_str(obj, "x-fault-sel", femu_fsched_test_sel, NULL);
+    /* buffered pages with the lie mark that power cuts rolled back */
+    object_property_add_uint64_ptr(obj, "x-fault-lie-lost",
+                                   &n->fault_lie_lost, OBJ_PROP_FLAG_READ);
     object_property_add(obj, "x-fault-draw", "uint64",
                         femu_fsched_test_draw_get, femu_fsched_test_draw_set,
                         NULL, NULL);
@@ -1254,6 +1339,16 @@ static void femu_fsched_info(FemuCtrl *n, FemuEvents *info)
         }
         e->has_status = r->status != 0;
         e->status = r->status;
+        if (r->phase == FEMU_FR_PHASE_APPLY &&
+            r->outcome == FEMU_FR_OUT_DONE) {
+            if (r->act == FEMU_FS_ACT_FLUSH_LIE) {
+                e->has_buffered_at_flush_lie = true;
+                e->buffered_at_flush_lie = r->pages;
+            } else {
+                e->has_lie_pages = true;
+                e->lie_pages = r->pages;
+            }
+        }
         QAPI_LIST_APPEND(tail, e);
     }
     info->has_dropped_ids = true;

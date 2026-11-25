@@ -221,7 +221,13 @@ const char *femu_fr_name_origin(uint8_t v)
 
 const char *femu_fr_name_phase(uint8_t v)
 {
-    return v == FEMU_FR_PHASE_SELECT ? "select" : "?";
+    switch (v) {
+    case FEMU_FR_PHASE_SELECT:
+        return "select";
+    case FEMU_FR_PHASE_APPLY:
+        return "apply";
+    }
+    return "?";
 }
 
 const char *femu_fr_name_outcome(uint8_t v)
@@ -233,6 +239,8 @@ const char *femu_fr_name_outcome(uint8_t v)
         return "superseded";
     case FEMU_FR_OUT_NO_EFFECT:
         return "no-effect";
+    case FEMU_FR_OUT_DONE:
+        return "done";
     }
     return "?";
 }
@@ -246,6 +254,16 @@ const char *femu_fr_name_why(uint8_t v)
         return "pre";
     case FEMU_FS_WHY_HANG:
         return "hang";
+    case FEMU_FS_WHY_PLP:
+        return "plp";
+    case FEMU_FS_WHY_ATOMIC:
+        return "atomic";
+    case FEMU_FS_WHY_NO_BUFFER:
+        return "no-buffer";
+    case FEMU_FS_WHY_CMD_FAILED:
+        return "cmd-failed";
+    case FEMU_FS_WHY_DURABLE:
+        return "durable";
     }
     return "?";
 }
@@ -254,7 +272,8 @@ int femu_fr_json(const FemuFrRec *rec, char *buf, size_t len)
 {
     char cause[32] = "";
     char status[24] = "";
-    char why[24] = "";
+    char why[32] = "";
+    char pages[40] = "";
     int n;
 
     if (rec->cause) {
@@ -267,17 +286,24 @@ int femu_fr_json(const FemuFrRec *rec, char *buf, size_t len)
         snprintf(why, sizeof(why), ",\"reason\":\"%s\"",
                  femu_fr_name_why(rec->why));
     }
+    /* the exposure a lie left: buffered pages a cut would roll back */
+    if (rec->phase == FEMU_FR_PHASE_APPLY &&
+        rec->outcome == FEMU_FR_OUT_DONE) {
+        snprintf(pages, sizeof(pages), ",\"%s\":%u",
+                 rec->act == FEMU_FS_ACT_FLUSH_LIE ?
+                 "buffered_at_flush_lie" : "lie_pages", rec->pages);
+    }
     n = snprintf(buf, len,
                  "{\"id\":%" PRIu64 "%s,\"origin\":\"%s\",\"line\":%u,"
                  "\"match\":%" PRIu64 ",\"action\":\"%s\",\"phase\":\"%s\","
                  "\"step\":%" PRIu64 ",\"nsid\":%u,\"sqid\":%u,\"cid\":%u,"
                  "\"opc\":%u,\"fua\":%s,\"slba\":%" PRIu64 ",\"nlb\":%u,"
-                 "\"outcome\":\"%s\"%s%s}\n",
+                 "\"outcome\":\"%s\"%s%s%s}\n",
                  rec->id, cause, femu_fr_name_origin(rec->origin), rec->line,
                  rec->match, femu_fs_act_name(rec->act),
                  femu_fr_name_phase(rec->phase), rec->step, rec->nsid,
                  rec->sqid, rec->cid, rec->opc, rec->fua ? "true" : "false",
                  rec->slba, rec->nlb, femu_fr_name_outcome(rec->outcome), why,
-                 status);
+                 pages, status);
     return n;
 }

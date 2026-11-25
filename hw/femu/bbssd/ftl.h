@@ -431,9 +431,18 @@ typedef struct buffer_entry {
      */
     uint16_t ruhid;
     uint16_t rgid;
+    /*
+     * events_file: a lying Flush or FUA Write told the host this page was
+     * durable. A write-back takes the mark with the entry; a cut that
+     * rolls the page back counts it (FemuCtrl.fault_lie_lost).
+     */
+    bool lie;
     unsigned long *written;
     QTAILQ_ENTRY(buffer_entry) b_entry;
 } buffer_entry;
+
+/* the mark sits in padding: every buffered page keeps its size */
+QEMU_BUILD_BUG_ON(sizeof(void *) == 8 && sizeof(buffer_entry) != 56);
 
 struct nand_cmd {
     int type;
