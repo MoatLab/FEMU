@@ -1160,6 +1160,7 @@ void femu_test_fsched_fua_lie(void *obj, void *data,
                               QGuestAllocator *alloc);
 void femu_test_fsched_lie_reasons(void *obj, void *data,
                                   QGuestAllocator *alloc);
+void femu_test_fsched_fused(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ready_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_recovery_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ready_sysreset(void *obj, void *data, QGuestAllocator *alloc);

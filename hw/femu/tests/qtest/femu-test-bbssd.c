@@ -31810,3 +31810,115 @@ void femu_test_fsched_lie_reasons(void *obj, void *data,
     }
     femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
 }
+
+#define FEMU_FSF_FIRST      1
+#define FEMU_FSF_SECOND     2
+
+/* a command of 8 blocks at @slba of namespace 1, fused by @fuse */
+static void femu_fsf_cmd(NvmeCmd *cmd, uint8_t opc, uint8_t fuse,
+                         uint64_t slba, uint64_t buf)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+
+    memset(cmd, 0, sizeof(*cmd));
+    rw->opcode = opc;
+    rw->flags = fuse;
+    rw->nsid = cpu_to_le32(1);
+    rw->dptr.prp1 = cpu_to_le64(buf);
+    rw->slba = cpu_to_le64(slba);
+    rw->nlb = cpu_to_le16(7);
+}
+
+/* send @nr commands with one doorbell; 0 when each one succeeds */
+static uint16_t femu_fsf_send(FemuCtrlState *c, FemuQueue *q, NvmeCmd *cmds,
+                              int nr)
+{
+    uint16_t st = 0;
+
+    for (int k = 0; k < nr; k++) {
+        femu_zap_queue(c, q, &cmds[k]);
+    }
+    femu_zap_ring(c, q);
+    for (int k = 0; k < nr; k++) {
+        st |= femu_zap_complete(c, q, NULL);
+    }
+    return st;
+}
+
+/*
+ * A fused Compare and Write pair never matches a command line. Device fp
+ * gets a Write, a fused pair, then a Write to blocks 16 to 23: its
+ * @write#2 line selects that last plain Write and counts two matches.
+ * Device fc, the control, gets a plain Write in place of the pair, so
+ * the same line selects the middle Write and counts three. A matcher
+ * that counted the Write of a pair would give fp the result of fc.
+ */
+void femu_test_fsched_fused(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-fused-XXXXXX", NULL);
+    static const char *const id[] = { "fp", "fc" };
+    GString *cmd = g_string_new("-machine pc -nodefaults");
+    char *path[2];
+    QOSState *qs;
+    QTestState *qts;
+    uint64_t buf;
+
+    for (int i = 0; i < 2; i++) {
+        g_autofree char *name = g_strdup_printf("%s.txt", id[i]);
+
+        path[i] = g_build_filename(dir, name, NULL);
+        g_assert_true(g_file_set_contents(path[i], "@write#2 delay ms=1\n",
+                                          -1, NULL));
+        g_string_append_printf(cmd, " -device femu,id=%s,addr=%d,"
+                               "devsz_mb=16,femu_mode=1,fused_cw=on,"
+                               "events_file=%s", id[i], 5 + i, path[i]);
+    }
+    qs = qtest_pc_boot("%s", cmd->str);
+    g_string_free(cmd, true);
+    qts = qs->qts;
+    buf = guest_alloc(&qs->alloc, 4096);
+    qtest_memset(qts, buf, 0x5a, 4096);
+    for (int i = 0; i < 2; i++) {
+        QPCIDevice *pdev = qpci_device_find(qs->pcibus,
+                                            QPCI_DEVFN(5 + i, 0));
+        FemuCtrlState c = { 0 };
+        FemuQueue q;
+        NvmeCmd cmds[2];
+        uint16_t sel;
+        g_autofree char *want = NULL;
+        g_autofree char *got = NULL;
+
+        g_assert_nonnull(pdev);
+        femu_enable(&c, pdev, &qs->alloc);
+        femu_zap_create_queue(&c, &q, 1);
+        femu_fsf_cmd(&cmds[0], NVME_CMD_WRITE, 0, 0, buf);
+        g_assert_cmphex(femu_fsf_send(&c, &q, cmds, 1), ==, 0);
+        if (i == 0) {
+            /* the Compare matches the data just written: both succeed */
+            femu_fsf_cmd(&cmds[0], NVME_CMD_COMPARE, FEMU_FSF_FIRST, 0, buf);
+            femu_fsf_cmd(&cmds[1], NVME_CMD_WRITE, FEMU_FSF_SECOND, 0, buf);
+            g_assert_cmphex(femu_fsf_send(&c, &q, cmds, 2), ==, 0);
+            sel = c.cid;
+        } else {
+            sel = c.cid;
+            femu_fsf_cmd(&cmds[0], NVME_CMD_WRITE, 0, 0, buf);
+            g_assert_cmphex(femu_fsf_send(&c, &q, cmds, 1), ==, 0);
+        }
+        femu_fsf_cmd(&cmds[0], NVME_CMD_WRITE, 0, 16, buf);
+        g_assert_cmphex(femu_fsf_send(&c, &q, cmds, 1), ==, 0);
+        want = g_strdup_printf("1<0 l1 m2 delay select selected c%u o1 f0 "
+                               "%d+8", sel, i == 0 ? 16 : 0);
+        femu_lie_want(qts, id[i], want);
+        got = femu_fault_sel(qts, id[i]);
+        g_assert_cmpstr(got, ==, i == 0 ? "1:2:1:1:0:0" : "1:3:1:1:0:0");
+        femu_queue_free(&c, &q);
+        femu_disable(&c);
+        g_free(pdev);
+    }
+    qtest_pc_shutdown(qs);
+    for (int i = 0; i < 2; i++) {
+        unlink(path[i]);
+        g_free(path[i]);
+    }
+    rmdir(dir);
+}

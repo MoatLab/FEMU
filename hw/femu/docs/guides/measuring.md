@@ -360,6 +360,10 @@ can mix time lines and command lines. Command lines work on bbssd only.
   unknown, repeated or out-of-range op, key or option fails realize, and
   the error names the line. A time line keeps its grammar: one action of
   `ana=`, `power-loss` or `slow=`, with no option.
+- A fused Compare and Write pair (`fused_cw=on`) never matches. Neither
+  command of the pair counts toward `#N` or draws for `%PPM`, so
+  `@write#N` counts plain Writes only. No action applies to half of a
+  pair, which the host asked to run as one atomic unit.
 - A comment takes a whole line: `#` after an action is an option, and
   realize refuses it.
 - The MDTS check counts extended metadata, as the Read and Write

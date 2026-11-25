@@ -3807,7 +3807,12 @@ static void *femu_ftl_thread(void *arg)
                 continue;
             }
 
-            /* command lines of events_file see each command once */
+            /*
+             * Command lines of events_file see each command once. A fused
+             * pair never matches: its Compare is outside the matchable set,
+             * and its Write (req->fused) never comes here, so no action
+             * splits the atomic unit the host asked for.
+             */
             lie = false;
             if (unlikely(n->fsched)) {
                 lie = femu_fsched_step(n, req);
