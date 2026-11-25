@@ -433,10 +433,16 @@ typedef struct buffer_entry {
     uint16_t rgid;
     /*
      * events_file: a lying Flush or FUA Write told the host this page was
-     * durable. A write-back takes the mark with the entry; a cut that
-     * rolls the page back counts it (FemuCtrl.fault_lie_lost).
+     * durable. A write-back takes the mark with the entry; a cut or a
+     * wb-fail that rolls the page back counts it (fault_lie_lost).
      */
     bool lie;
+    /*
+     * events_file wb-fail: the fault slot (from 1) of a selected Write
+     * whose version of the page this is, or 0. A write-back that meets
+     * the mark fails the page instead of programming it.
+     */
+    uint16_t wbf;
     unsigned long *written;
     QTAILQ_ENTRY(buffer_entry) b_entry;
 } buffer_entry;
@@ -680,6 +686,7 @@ struct ssd {
     QTAILQ_HEAD(write_buffer, buffer_entry) write_buffer;   /* LRU order */
     GTree *wb_tree;                                         /* lpn lookup */
     int write_buffer_cnt;
+    uint32_t wbf_marks;     /* buffered pages with a wb-fail mark */
     struct write_pointer log_wp; /* LOG class; its line is taken on first use */
     struct write_pointer hot_wp; /* HOT class; likewise */
     struct write_pointer gc_wp;  /* GC class (gc_frontier); likewise */

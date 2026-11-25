@@ -370,9 +370,11 @@ can mix time lines and command lines. Command lines work on bbssd only.
   handler does, except a PRACT tuple that the controller inserts.
 - With no command line, the FTL thread has no schedule to check: one
   pointer test per command, and no decode, count or draw.
-- Only `flush-lie` and `fua-lie` have an effect so far (see [lies](#lies)).
+- Only `flush-lie`, `fua-lie` (see [lies](#lies)) and `wb-fail` (see
+  [write-back failures](#write-back-failures)) have an effect so far.
   For the other actions a selection moves the counters of its line and
-  writes its record only. The qtest property `x-fault-sel` reports, per
+  writes its record only. With no `wb-fail` line, none of its hooks
+  runs: the data path tests one pointer or one counter. The qtest property `x-fault-sel` reports, per
   command line,
   `<line>:<matched>:<selected>:<applied>:<superseded>:<no-effect>`.
   `x-fault-draw` takes a seed and returns its draws in order.
@@ -409,9 +411,9 @@ saw acknowledged.
   FUA does. Each buffered page of the write gets the lie mark when the
   write completes; `lie_pages` counts these buffered pages.
 - The mark goes with the page. A later Flush or write-back that programs
-  the page makes it durable, and a cut then loses nothing. A cut that
-  rolls a marked page back counts it in the qtest property
-  `x-fault-lie-lost`.
+  the page makes it durable, and a cut then loses nothing. A cut or a
+  `wb-fail` that rolls a marked page back counts it in the qtest
+  property `x-fault-lie-lost`.
 - After the FTL ran the command, the lie writes an `apply` record whose
   `cause` is its `select` record:
 
@@ -438,13 +440,84 @@ saw acknowledged.
 - The counters of `x-fault-sel` count the selection. A lie with no
   effect counts as applied there; its `apply` record gives the reason.
 
+### Write-back failures
+
+`wb-fail` marks the buffered pages of the Write it selects. A
+write-back that meets a marked page fails it: the page never programs.
+A later completion tells the host.
+
+```text
+ select (FTL step)       the Write marks each page it buffers: slot S
+ write-back meets mark   restore the undo image; lost blocks:
+                           mode=unc  Unrecovered Read Error
+                           mode=old  the old data (no error)
+                         fail record, AER if aer=on
+ draining completion     Write Fault (I/O) or Internal Error (Admin)
+ report=once             spent when that CQE posts
+ report=sticky           every later drain fails, until a reset
+```
+
+- A lost block is a block whose bytes or state differ from the undo
+  image. A block that no buffered write changed keeps its data.
+- A page keeps one mark, the oldest. A Write of the whole page before
+  the write-back clears the mark, with a `supersede` record. A
+  partial Write keeps it.
+- A direct program (FUA, a stream, an `awupf_lbas` transaction) over a
+  marked page writes the page back first. The failure fires
+  there, and the Write gets Write Fault. Then the direct program of its
+  new bytes runs as usual.
+- Which completion reports:
+
+| Class | Write-back | The completion that reports |
+| --- | --- | --- |
+| foreground | a Write at the watermark | that Write |
+| drain command | Flush, Write Zeroes, Dataset Management, Copy, Write Uncorrectable | that command, Write Fault |
+| drain command | cache disable (Set Features VWC=0), Write Protect (Set Features 84h), Format NVM, Sanitize | that command, Internal Error |
+| background | the `plp` write-through switch at enable, a shutdown | the next draining completion |
+| power cut | the `plp` write-back of a cut | none: the cut drops every report |
+
+- A completion reports the failures of the namespaces it drains. A
+  Write Protect change and a Format drain the namespace they name, or
+  all of them for FFFFFFFFh. A cache disable and a Sanitize drain all.
+  An I/O command drains its own namespace; a Flush to FFFFFFFFh drains
+  all.
+- A draining completion is a Flush (not a lying one) or any command
+  whose FTL step wrote the buffer back. A Flush over an empty buffer
+  reports a sticky failure too. A fused pair reports nothing; its
+  failure stays pending.
+- A failure is pending, then reserved by the completion that reports
+  it, then spent when that CQE posts. A CQE that never posts (the
+  SQ is deleted, a reset, a cut) puts it back to pending. A reserved
+  failure is not reported again by another completion.
+- `report=sticky` sets DNR. A Controller Reset ends every report and
+  keeps the marks: their pages are still in the buffer. A failed cache
+  disable keeps the cache on. A shutdown that meets a failure
+  keeps SHST at 00b and sets CFS.
+- Error Information log: each failure writes an entry at once, with
+  SQID, CID and location FFFFh, the first lost block and the namespace.
+  Each reporting completion then adds an entry with its own SQID and
+  CID. `csinfo` holds the fault slot in both.
+- `aer=on` queues an Error AER (information 04h, log 01h) after the
+  entry of the failure, except at a power cut. So the host always finds
+  the entry that the AER names. The qtest property `x-fault-wbf-aer`
+  counts these AERs, since the reset after a cut drops queued events.
+- At most 256 fault slots are live. A selection with no free slot has
+  no effect, reason `slots-full`.
+
+| Phase | Outcome | Fields |
+| --- | --- | --- |
+| `apply` | `marked`, or `no-effect` | `slot`, `pages`; the reasons of a lie, `slots-full`, or `marked` when every page kept an older mark |
+| `fail` | `unc` or `old` | `slot`, `lba_mask` (the first 64 blocks), `lost` (every lost block), `found`: `command` or `background`, `status` 640 |
+| `report` | `reported` | `slot`, `found`: `self` or `pending`, `status`; the reporting command |
+| `supersede` | `superseded` | `slot`; the Write that cleared the mark |
+
 ### Fault records
 
 Each command that a command line selects writes one record per line
 that selected it, in file order. A record tells what the line did with
 the command. It is an observation, never an instruction to replay. The
 records go to a ring of `events_max_faults` slots (1 to 65536, default
-4096). A record has 72 bytes and a slot 80, with its sequence word.
+4096). A record has 80 bytes and a slot 88, with its sequence word.
 Realize allocates the ring only for a file with a command line.
 
 ```text
@@ -462,14 +535,15 @@ Realize allocates the ring only for a file with a command line.
 | `id` | from 1; each record takes one, stored or dropped |
 | `origin` | `sched-cmd`: a command line |
 | `line`, `match` | the line, and its matches so far, this one too |
-| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a lie |
+| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a lie or a `wb-fail`; `fail`, `report` and `supersede` for a `wb-fail` mark |
 | `step` | commands the FTL thread took so far, this one too |
 | `nsid`, `sqid`, `cid`, `opc`, `fua`, `slba`, `nlb` | the command as the host sent it; `slba` and `nlb` are 0 for a Flush |
-| `outcome` | `selected`, `superseded` or `no-effect`; `done` for an `apply` record |
-| `reason` | for `no-effect`: `fua`, `pre` or `hang`; for a lie also `plp`, `atomic`, `no-buffer`, `cmd-failed` or `durable` |
+| `outcome` | `selected`, `superseded` or `no-effect`; `done` for an `apply` record; `marked`, `unc`, `old` and `reported` for `wb-fail` |
+| `reason` | for `no-effect`: `fua`, `pre` or `hang`; for a lie also `plp`, `atomic`, `no-buffer`, `cmd-failed` or `durable`; for `wb-fail` also `slots-full` and `marked` |
 | `buffered_at_flush_lie`, `lie_pages` | for a `done` lie: the pages it left volatile (QMP: `buffered-at-flush-lie`, `lie-pages`) |
 | `cause` | the id of the parent record: an `apply` record names its `select` record |
-| `status` | absent here; later fault steps fill it |
+| `status` | the status a `fail` or `report` record carries; absent for none |
+| `slot`, `pages`, `lba_mask`, `lost`, `found` | `wb-fail` only, see [write-back failures](#write-back-failures) (QMP: `lba-mask`) |
 
 ```text
  {"id":3,"origin":"sched-cmd","line":2,"match":2,"action":"wb-fail",

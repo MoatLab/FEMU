@@ -226,6 +226,12 @@ const char *femu_fr_name_phase(uint8_t v)
         return "select";
     case FEMU_FR_PHASE_APPLY:
         return "apply";
+    case FEMU_FR_PHASE_FAIL:
+        return "fail";
+    case FEMU_FR_PHASE_REPORT:
+        return "report";
+    case FEMU_FR_PHASE_SUPERSEDE:
+        return "supersede";
     }
     return "?";
 }
@@ -241,6 +247,29 @@ const char *femu_fr_name_outcome(uint8_t v)
         return "no-effect";
     case FEMU_FR_OUT_DONE:
         return "done";
+    case FEMU_FR_OUT_MARKED:
+        return "marked";
+    case FEMU_FR_OUT_UNC:
+        return "unc";
+    case FEMU_FR_OUT_OLD:
+        return "old";
+    case FEMU_FR_OUT_REPORTED:
+        return "reported";
+    }
+    return "?";
+}
+
+const char *femu_fr_name_found(uint8_t v)
+{
+    switch (v) {
+    case FEMU_FR_FOUND_CMD:
+        return "command";
+    case FEMU_FR_FOUND_BG:
+        return "background";
+    case FEMU_FR_FOUND_SELF:
+        return "self";
+    case FEMU_FR_FOUND_PENDING:
+        return "pending";
     }
     return "?";
 }
@@ -264,6 +293,10 @@ const char *femu_fr_name_why(uint8_t v)
         return "cmd-failed";
     case FEMU_FS_WHY_DURABLE:
         return "durable";
+    case FEMU_FS_WHY_SLOTS_FULL:
+        return "slots-full";
+    case FEMU_FS_WHY_MARKED:
+        return "marked";
     }
     return "?";
 }
@@ -274,6 +307,7 @@ int femu_fr_json(const FemuFrRec *rec, char *buf, size_t len)
     char status[24] = "";
     char why[32] = "";
     char pages[40] = "";
+    char wb[96] = "";
     int n;
 
     if (rec->cause) {
@@ -293,17 +327,39 @@ int femu_fr_json(const FemuFrRec *rec, char *buf, size_t len)
                  rec->act == FEMU_FS_ACT_FLUSH_LIE ?
                  "buffered_at_flush_lie" : "lie_pages", rec->pages);
     }
+    /* wb-fail: its slot, and what each phase adds */
+    if (rec->act == FEMU_FS_ACT_WB_FAIL && rec->fslot) {
+        switch (rec->phase) {
+        case FEMU_FR_PHASE_APPLY:
+            snprintf(wb, sizeof(wb), ",\"slot\":%u,\"pages\":%u",
+                     rec->fslot, rec->pages);
+            break;
+        case FEMU_FR_PHASE_FAIL:
+            snprintf(wb, sizeof(wb), ",\"slot\":%u,\"lba_mask\":%" PRIu64
+                     ",\"lost\":%u,\"found\":\"%s\"", rec->fslot,
+                     rec->lba_mask, rec->lost,
+                     femu_fr_name_found(rec->found));
+            break;
+        case FEMU_FR_PHASE_REPORT:
+            snprintf(wb, sizeof(wb), ",\"slot\":%u,\"found\":\"%s\"",
+                     rec->fslot, femu_fr_name_found(rec->found));
+            break;
+        default:
+            snprintf(wb, sizeof(wb), ",\"slot\":%u", rec->fslot);
+            break;
+        }
+    }
     n = snprintf(buf, len,
                  "{\"id\":%" PRIu64 "%s,\"origin\":\"%s\",\"line\":%u,"
                  "\"match\":%" PRIu64 ",\"action\":\"%s\",\"phase\":\"%s\","
                  "\"step\":%" PRIu64 ",\"nsid\":%u,\"sqid\":%u,\"cid\":%u,"
                  "\"opc\":%u,\"fua\":%s,\"slba\":%" PRIu64 ",\"nlb\":%u,"
-                 "\"outcome\":\"%s\"%s%s%s}\n",
+                 "\"outcome\":\"%s\"%s%s%s%s}\n",
                  rec->id, cause, femu_fr_name_origin(rec->origin), rec->line,
                  rec->match, femu_fs_act_name(rec->act),
                  femu_fr_name_phase(rec->phase), rec->step, rec->nsid,
                  rec->sqid, rec->cid, rec->opc, rec->fua ? "true" : "false",
                  rec->slba, rec->nlb, femu_fr_name_outcome(rec->outcome), why,
-                 pages, status);
+                 pages, wb, status);
     return n;
 }

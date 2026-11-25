@@ -19,7 +19,7 @@ DEVICES = [
                       "x-csd-pause-stats", "x-durable-check", "x-eol-enter",
                       "x-events-now", "x-fault-draw", "x-fault-held",
                       "x-fault-hold", "x-fault-lie-lost", "x-fault-log-hold",
-                      "x-fault-sel",
+                      "x-fault-sel", "x-fault-wbf-aer",
                       "x-fdp-check",
                       "x-fdp-ns-mapped", "x-fdp-slc", "x-fetch-hold",
                       "x-flush-check",

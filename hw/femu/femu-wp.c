@@ -131,6 +131,10 @@ static uint16_t femu_wp_destage(FemuCtrl *n, NvmeNamespace *ns)
     lat = ssd_buffer_destage(ssd, 0, now);
     /* a later Flush waits for these programs, as after a cache disable */
     ssd->buffer_bg_fence = MAX(ssd->buffer_bg_fence, now + lat);
+    /* wb-fail: the Set Features fails as any Admin drain does */
+    if (unlikely(n->wbf) && femu_wbf_pending(n, ns->id)) {
+        return NVME_WRITE_FAULT;
+    }
     return ssd->write_buffer_cnt ? NVME_CAP_EXCEEDED | NVME_DNR :
                                    NVME_SUCCESS;
 }

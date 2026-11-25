@@ -704,3 +704,159 @@ bool femu_fs_done(const FemuFsLine *l, int nr)
     }
     return true;
 }
+
+int femu_wb_slot_get(FemuWbTab *t)
+{
+    for (int s = 0; s < FEMU_WB_SLOTS; s++) {
+        if (!t->slot[s].refs) {
+            memset(&t->slot[s], 0, sizeof(t->slot[s]));
+            t->slot[s].refs = 1;
+            return s;
+        }
+    }
+    return -1;
+}
+
+void femu_wb_slot_put(FemuWbTab *t, int s)
+{
+    if (s < 0 || s >= FEMU_WB_SLOTS || !t->slot[s].refs) {
+        return;
+    }
+    if (!--t->slot[s].refs) {
+        memset(&t->slot[s], 0, sizeof(t->slot[s]));
+    }
+}
+
+void femu_wb_fail_add(FemuWbTab *t, const FemuWbFail *f)
+{
+    FemuWbFail *x = &t->fail[t->nr++];
+
+    *x = *f;
+    x->state = FEMU_WB_PENDING;
+    x->tok = 0;
+}
+
+static bool wb_in_scope(const FemuWbFail *f, uint32_t nsid)
+{
+    return !nsid || f->nsid == nsid;
+}
+
+bool femu_wb_pending(const FemuWbTab *t, uint32_t nsid)
+{
+    for (uint32_t i = 0; i < t->nr; i++) {
+        if (t->fail[i].state == FEMU_WB_PENDING &&
+            wb_in_scope(&t->fail[i], nsid)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+uint16_t femu_wb_collect(FemuWbTab *t, uint32_t nsid, uint64_t tok,
+                         bool admin, bool *held)
+{
+    bool any = false;
+    bool dnr = false;
+
+    *held = false;
+    for (uint32_t i = 0; i < t->nr; i++) {
+        FemuWbFail *f = &t->fail[i];
+
+        if (f->state != FEMU_WB_PENDING || !wb_in_scope(f, nsid)) {
+            continue;
+        }
+        any = true;
+        f->tok = tok;
+        if (f->report == FEMU_FS_REPORT_ONCE) {
+            f->state = FEMU_WB_RESERVED;
+            *held = true;
+        } else {
+            dnr = true;
+        }
+    }
+    if (!any) {
+        return 0;
+    }
+    return (admin ? FEMU_WB_SC_INTERNAL : FEMU_WB_SC_WF) |
+           (dnr ? FEMU_WB_SC_DNR : 0);
+}
+
+/* remove failure @i; the last one moves into its place */
+static void wb_fail_del(FemuWbTab *t, uint32_t i)
+{
+    femu_wb_slot_put(t, t->fail[i].slot);
+    t->fail[i] = t->fail[--t->nr];
+}
+
+uint32_t femu_wb_publish(FemuWbTab *t, uint64_t tok)
+{
+    uint32_t done = 0;
+    uint32_t i = 0;
+
+    while (i < t->nr) {
+        if (t->fail[i].state == FEMU_WB_RESERVED && t->fail[i].tok == tok) {
+            wb_fail_del(t, i);
+            done++;
+        } else {
+            i++;
+        }
+    }
+    return done;
+}
+
+uint32_t femu_wb_unreserve(FemuWbTab *t, uint64_t tok)
+{
+    uint32_t back = 0;
+
+    for (uint32_t i = 0; i < t->nr; i++) {
+        if (t->fail[i].state == FEMU_WB_RESERVED && t->fail[i].tok == tok) {
+            t->fail[i].state = FEMU_WB_PENDING;
+            back++;
+        }
+    }
+    return back;
+}
+
+void femu_wb_clear(FemuWbTab *t, bool slots)
+{
+    while (t->nr) {
+        wb_fail_del(t, t->nr - 1);
+    }
+    if (slots) {
+        memset(t->slot, 0, sizeof(t->slot));
+    }
+}
+
+bool femu_wb_lba_lost(const uint8_t *now, const uint8_t *undo,
+                      const uint8_t *st_now, const uint8_t *st_undo,
+                      uint32_t i, uint32_t lba_bytes)
+{
+    return st_now[i] != st_undo[i] ||
+           memcmp(now + (size_t)i * lba_bytes, undo + (size_t)i * lba_bytes,
+                  lba_bytes) != 0;
+}
+
+uint8_t femu_wb_apply_why(bool slot, bool failed, bool buffer, bool atomic,
+                          bool marked, uint32_t pages)
+{
+    if (!slot) {
+        return FEMU_FS_WHY_SLOTS_FULL;
+    }
+    if (pages) {
+        return FEMU_FS_WHY_NONE;
+    }
+    if (failed) {
+        return FEMU_FS_WHY_CMD_FAILED;
+    }
+    if (!buffer) {
+        return FEMU_FS_WHY_NO_BUFFER;
+    }
+    if (atomic) {
+        return FEMU_FS_WHY_ATOMIC;
+    }
+    if (marked) {
+        return FEMU_FS_WHY_MARKED;
+    }
+    /* a stream write programs directly */
+    return FEMU_FS_WHY_DURABLE;
+}

@@ -2245,6 +2245,16 @@ typedef struct NvmeRequest {
      * FEMU_FS_ACT_*, or 0. Set and cleared in one FTL step.
      */
     uint8_t         fs_lie;
+    /*
+     * events_file wb-fail: the fault slot (from 1) whose mark this Write
+     * puts on the pages it buffers, or 0. Set and cleared in one FTL step.
+     */
+    uint16_t        fs_wbf;
+    /*
+     * The wb-fail report=once failures this completion holds: they are
+     * consumed when its CQE posts, and pending again if it never does.
+     */
+    uint64_t        wbf_tok;
 } NvmeRequest;
 
 /*
@@ -3296,6 +3306,13 @@ typedef struct FemuCtrl {
     uint32_t        test_fs_held;       /* qtest x-fault-held */
     uint32_t        test_fs_log_hold;   /* qtest x-fault-log-hold */
     uint64_t        fault_lie_lost;     /* lie pages cuts rolled back */
+    uint64_t        fault_wbf_aer;      /* AERs that wb-fail queued */
+    /*
+     * events_file wb-fail (femu-events.c): fault slots and failures, NULL
+     * with no wb-fail line. wbf_drained: a write-back ran in this FTL step.
+     */
+    struct FemuWbf  *wbf;
+    bool            wbf_drained;
     char            *events_log;        /* fault records, one JSON line each */
     char            *evlog_path;        /* events_log, resolved while open */
     uint32_t        events_max_faults;  /* slots of the fault record ring */
@@ -4120,7 +4137,21 @@ void femu_events_start(FemuCtrl *n);
 void femu_events_cancel(FemuCtrl *n);
 void femu_events_free(FemuCtrl *n);
 bool femu_fsched_step(FemuCtrl *n, NvmeRequest *req);
-void femu_fsched_lie(FemuCtrl *n, NvmeRequest *req);
+void femu_fsched_post(FemuCtrl *n, NvmeRequest *req, bool report);
+void femu_wbf_mark(FemuCtrl *n, uint16_t fslot, bool marked);
+uint8_t femu_wbf_mode(FemuCtrl *n, uint16_t fslot);
+void femu_wbf_unmark(FemuCtrl *n, uint16_t fslot, NvmeRequest *req,
+                     uint32_t nsid, uint64_t page_slba);
+void femu_wbf_fail(FemuCtrl *n, uint16_t fslot, NvmeNamespace *ns,
+                   uint64_t page_slba, uint32_t lbas, uint64_t mask,
+                   uint32_t lost, uint64_t first_lost);
+bool femu_wbf_pending(FemuCtrl *n, uint32_t nsid);
+void femu_wbf_posted(FemuCtrl *n, NvmeRequest *req);
+void femu_wbf_dropped(FemuCtrl *n, NvmeRequest *req);
+void femu_wbf_admin_begin(FemuCtrl *n);
+uint16_t femu_wbf_admin_end(FemuCtrl *n, const NvmeCmd *cmd, uint16_t status);
+void femu_wbf_reset(FemuCtrl *n);
+void femu_wbf_cut(FemuCtrl *n, bool start);
 void femu_events_add_test_props(Object *obj);
 bool femu_events_installed(FemuCtrl *n);
 struct FemuEventSched;
@@ -4552,6 +4583,8 @@ void bbssd_deallocate_all(NvmeNamespace *ns);
 void bbssd_deallocate_lbas(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
 bool bbssd_power_loss(NvmeNamespace *ns);
 bool bbssd_flush_lie(NvmeNamespace *ns);
+bool bbssd_wbf_facts(NvmeNamespace *ns, NvmeRequest *req, uint64_t slba,
+                     uint32_t nlb, bool *atomic);
 uint8_t bbssd_lie_apply(NvmeNamespace *ns, NvmeRequest *req, uint8_t act,
                         uint64_t slba, uint32_t nlb, uint32_t *pages);
 uint16_t bbssd_flush_all(FemuCtrl *n);

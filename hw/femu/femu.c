@@ -1324,6 +1324,10 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
              * completes below.
              */
             nvme_clear_ctrl(n, shutdown);
+            /* wb-fail: a reset ends every report, sticky too */
+            if (unlikely(n->wbf)) {
+                femu_wbf_reset(n);
+            }
             n->bar.csts &= ~(NVME_CSTS_READY | NVME_CSTS_FAILED);
             femu_shut_clear(n);
             /*
@@ -3703,7 +3707,7 @@ static void *femu_ftl_thread(void *arg)
     uint32_t hold_req;
     uint32_t hold;
     bool stalled;
-    bool lie;
+    bool post;
     int rc, i;
 
     while (!n->dataplane_started) {
@@ -3813,9 +3817,9 @@ static void *femu_ftl_thread(void *arg)
              * and its Write (req->fused) never comes here, so no action
              * splits the atomic unit the host asked for.
              */
-            lie = false;
+            post = false;
             if (unlikely(n->fsched)) {
-                lie = femu_fsched_step(n, req);
+                post = femu_fsched_step(n, req);
             }
             if (nvme_ns_shared(n)) {
                 qemu_mutex_lock(&n->subsys->ns_lock);
@@ -3828,14 +3832,18 @@ static void *femu_ftl_thread(void *arg)
                 lat = femu_fused_run(n, req, true);
             } else {
                 lat = femu_ftl_process_req(n, req);
-                /* a lie marks the pages it left volatile, then records it */
-                if (unlikely(lie)) {
-                    femu_fsched_lie(n, req);
-                }
             }
             /* log 0Ah's FTL state, and the DTWIN limits (MVEAT) */
             if (unlikely(n->plm)) {
                 femu_plm_step(n);
+            }
+            /*
+             * A lie marks the pages it left volatile, wb-fail records its
+             * marks, and a draining command reports a failed write-back.
+             * A fused pair reports none: it stays for the next drain.
+             */
+            if (unlikely(post)) {
+                femu_fsched_post(n, req, !pair);
             }
             /* idle collection counts quiet time from here (gc_idle_ms) */
             if (unlikely(n->gc_idle)) {
@@ -7602,11 +7610,19 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     }
     /* one cut time for every namespace, taken before any restore */
     n->durable_cut = femu_dev_now(n);
+    /* wb-fail: the PLP write-back below meets marks with no AER */
+    if (unlikely(n->wbf)) {
+        femu_wbf_cut(n, true);
+    }
     femu_plp_cut(n);
     for (uint32_t i = 0; i < n->namespace_limit; i++) {
         if (n->namespaces[i].allocated) {
             lost |= bbssd_power_loss(&n->namespaces[i]);
         }
+    }
+    /* no host is left to report to: free every slot and report */
+    if (unlikely(n->wbf)) {
+        femu_wbf_cut(n, false);
     }
     /* OCP C0h: a shutdown that did not complete lost buffered data */
     if (lost && n->ocp_incomplete_shutdowns != UINT32_MAX) {

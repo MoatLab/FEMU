@@ -1038,6 +1038,10 @@ void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)
         if (sq->io_req[i].csd_use) {
             femu_csd_req_done(n, &sq->io_req[i]);
         }
+        /* wb-fail: a report that never reached the host is pending again */
+        if (unlikely(sq->io_req[i].wbf_tok)) {
+            femu_wbf_dropped(n, &sq->io_req[i]);
+        }
     }
     g_free(sq->io_req);
     g_free(sq->abort_cid);

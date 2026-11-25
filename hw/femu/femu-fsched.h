@@ -78,6 +78,8 @@ enum {
     FEMU_FS_WHY_NO_BUFFER,      /* the write buffer takes no write now */
     FEMU_FS_WHY_CMD_FAILED,     /* the command failed after the match */
     FEMU_FS_WHY_DURABLE,        /* no buffered page is left volatile */
+    FEMU_FS_WHY_SLOTS_FULL,     /* wb-fail: every fault slot is taken */
+    FEMU_FS_WHY_MARKED,         /* wb-fail: its pages carry an older mark */
 };
 
 /* what the FTL did with a command that a lie selected */
@@ -89,6 +91,63 @@ typedef struct FemuFsLie {
     bool atomic;                /* fua-lie: the write was a transaction */
     uint32_t pages;             /* buffered pages the lie leaves volatile */
 } FemuFsLie;
+
+/*
+ * wb-fail state. A fault slot holds one selection: the Write as the line
+ * saw it, kept apart from the request, which the queue reuses. A failure
+ * is one marked page that a write-back met. It is pending until a
+ * completion reports it, reserved while that completion waits to post,
+ * and gone when report=once posts it. report=sticky keeps it pending
+ * until a Controller Reset.
+ *
+ *   pending --(collect)--> reserved --(CQE posted, once)--> gone
+ *      ^                       |
+ *      +---(CQE dropped)-------+
+ *
+ * The caller holds one lock around every call here.
+ */
+#define FEMU_WB_SLOTS       256     /* live fault slots of a controller */
+#define FEMU_WB_SC_WF       0x0280  /* Write Fault (SCT 2h, SC 80h) */
+#define FEMU_WB_SC_INTERNAL 0x0006  /* Internal Error (SCT 0h, SC 06h) */
+#define FEMU_WB_SC_DNR      0x4000
+
+enum { FEMU_WB_PENDING = 1, FEMU_WB_RESERVED };
+
+typedef struct FemuWbSlot {
+    uint32_t refs;              /* 0: free; selection, marks and failures */
+    uint8_t mode;               /* FEMU_FS_WB_* */
+    uint8_t report;             /* FEMU_FS_REPORT_* */
+    bool aer;
+    uint16_t line;
+    uint16_t sqid;
+    uint16_t cid;
+    uint32_t nsid;
+    uint32_t nlb;
+    uint64_t slba;
+    uint64_t match;
+    uint64_t sel_id;            /* id of its select record */
+    uint32_t marked;            /* pages it marked */
+    bool skipped;               /* a page it wrote kept an older mark */
+} FemuWbSlot;
+
+typedef struct FemuWbFail {
+    uint16_t slot;              /* index into FemuWbTab.slot */
+    uint8_t state;              /* FEMU_WB_PENDING or FEMU_WB_RESERVED */
+    uint8_t report;             /* FEMU_FS_REPORT_* of its slot */
+    uint32_t nsid;
+    uint32_t lbas;              /* the blocks of the page */
+    uint64_t page_slba;         /* the first block of the page */
+    uint64_t fail_id;           /* id of its fail record */
+    uint64_t found;             /* stamp of the drain that met it */
+    uint64_t tok;               /* the completion that holds or reported it */
+} FemuWbFail;
+
+typedef struct FemuWbTab {
+    FemuWbSlot slot[FEMU_WB_SLOTS];
+    FemuWbFail *fail;
+    uint32_t nr;
+    uint32_t cap;               /* the caller grows @fail before an add */
+} FemuWbTab;
 
 enum { FEMU_FS_GRAIN_PAGE, FEMU_FS_GRAIN_LBA };
 enum { FEMU_FS_WB_UNC, FEMU_FS_WB_OLD };
@@ -266,6 +325,119 @@ void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
  * Returns FEMU_FS_WHY_NONE when the lie had its effect.
  */
 uint8_t femu_fs_lie_why(const FemuFsLie *s);
+
+/**
+ * femu_wb_slot_get - take a free fault slot
+ * @t: the table
+ *
+ * The slot comes back zeroed with one reference, the selection's, which
+ * the caller drops once the command has run.
+ *
+ * Returns its index, or -1 when every slot is taken.
+ */
+int femu_wb_slot_get(FemuWbTab *t);
+
+/**
+ * femu_wb_slot_put - drop one reference of a slot
+ * @t: the table
+ * @s: the slot
+ *
+ * The last reference frees the slot.
+ */
+void femu_wb_slot_put(FemuWbTab *t, int s);
+
+/**
+ * femu_wb_fail_add - note that a write-back met a marked page
+ * @t: the table, with room for one more failure
+ * @f: the failure; its state becomes pending
+ *
+ * The failure takes over the reference that the page's mark held.
+ */
+void femu_wb_fail_add(FemuWbTab *t, const FemuWbFail *f);
+
+/**
+ * femu_wb_pending - whether a drain of @nsid has a failure to report
+ * @t: the table
+ * @nsid: the namespace, or 0 for all
+ *
+ * A failure that another completion holds is not this drain's to report.
+ */
+bool femu_wb_pending(const FemuWbTab *t, uint32_t nsid);
+
+/**
+ * femu_wb_collect - the failures one draining completion reports
+ * @t: the table
+ * @nsid: the namespace, or 0 for all
+ * @tok: the completion, never 0; each failure it reports gets it
+ * @admin: an Admin command, which reports Internal Error
+ * @held: set when the completion now holds a report=once failure
+ *
+ * Every pending failure of @nsid is reported. A report=once failure is
+ * then reserved for @tok, so no other completion reports it. A sticky
+ * one stays pending and sets DNR, since a retry fails too.
+ *
+ * Returns the status, Write Fault for I/O or Internal Error for Admin,
+ * with DNR for a sticky failure; 0 when there is nothing to report.
+ */
+uint16_t femu_wb_collect(FemuWbTab *t, uint32_t nsid, uint64_t tok,
+                         bool admin, bool *held);
+
+/**
+ * femu_wb_publish - the completion @tok posted: consume what it holds
+ * @t: the table
+ * @tok: the completion
+ *
+ * Returns the failures consumed.
+ */
+uint32_t femu_wb_publish(FemuWbTab *t, uint64_t tok);
+
+/**
+ * femu_wb_unreserve - the completion @tok will never post
+ * @t: the table
+ * @tok: the completion
+ *
+ * What it held is pending again, for the next draining completion.
+ *
+ * Returns the failures returned.
+ */
+uint32_t femu_wb_unreserve(FemuWbTab *t, uint64_t tok);
+
+/**
+ * femu_wb_clear - drop every failure
+ * @t: the table
+ * @slots: also free every slot, which no buffered page names any more
+ */
+void femu_wb_clear(FemuWbTab *t, bool slots);
+
+/**
+ * femu_wb_lba_lost - whether a failed write-back loses block @i of a page
+ * @now: the bytes of the page in the buffer
+ * @undo: the bytes of the page on the media
+ * @st_now: the state of each block now (written, uncorrectable, sdc)
+ * @st_undo: the state of each block on the media
+ * @i: the block
+ * @lba_bytes: the bytes of a block
+ *
+ * A block that a buffered write changed loses that version. A block no
+ * buffered write changed keeps its data.
+ */
+bool femu_wb_lba_lost(const uint8_t *now, const uint8_t *undo,
+                      const uint8_t *st_now, const uint8_t *st_undo,
+                      uint32_t i, uint32_t lba_bytes);
+
+/**
+ * femu_wb_apply_why - why a selected wb-fail marked no page
+ * @slot: it got a fault slot
+ * @failed: the Write failed
+ * @buffer: the write buffer took writes
+ * @atomic: the Write was one awupf transaction
+ * @marked: a page of the Write already had a mark
+ * @pages: the pages it marked
+ *
+ * Returns FEMU_FS_WHY_NONE when it marked a page.
+ */
+uint8_t femu_wb_apply_why(bool slot, bool failed, bool buffer, bool atomic,
+                          bool marked, uint32_t pages);
 
 /**
  * femu_fs_done - whether no line can select again

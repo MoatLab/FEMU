@@ -9826,7 +9826,11 @@ static char *femu_fault_str(QDict *r)
                            qdict_get_int(r, "nsid"));
 }
 
-/* the records of device @id, each as femu_fault_str(), joined by "; " */
+/*
+ * The select records of device @id, each as femu_fault_str(), joined by
+ * "; ". An apply record, which a wb-fail selection also writes, is left
+ * out; the caller checks it.
+ */
 static char *femu_fault_list(QTestState *qts, const char *id)
 {
     QDict *rsp;
@@ -9835,9 +9839,13 @@ static char *femu_fault_list(QTestState *qts, const char *id)
     QListEntry *e;
 
     QLIST_FOREACH_ENTRY(qdict_get_qlist(r, "faults"), e) {
-        g_autofree char *one = femu_fault_str(qobject_to(QDict,
-                                                         qlist_entry_obj(e)));
+        QDict *x = qobject_to(QDict, qlist_entry_obj(e));
+        g_autofree char *one = NULL;
 
+        if (!strcmp(qdict_get_str(x, "phase"), "apply")) {
+            continue;
+        }
+        one = femu_fault_str(x);
         g_string_append_printf(g, "%s%s", g->len ? "; " : "", one);
     }
     qobject_unref(rsp);
@@ -9970,7 +9978,24 @@ void femu_test_fsched_records(void *obj, void *data, QGuestAllocator *alloc)
     g_free(got);
     r = femu_events_q(qts, "ev", &rsp);
     g_assert_cmpint(qdict_get_int(r, "step"), ==, 5);
-    g_assert_cmpint(qdict_get_int(r, "last-id"), ==, 5);
+    /* the selected wb-fail marked its one buffered page: record 6 */
+    g_assert_cmpint(qdict_get_int(r, "last-id"), ==, 6);
+    {
+        QList *fl = qdict_get_qlist(r, "faults");
+        QDict *a = NULL;
+        QListEntry *e;
+
+        QLIST_FOREACH_ENTRY(fl, e) {
+            a = qobject_to(QDict, qlist_entry_obj(e));
+        }
+        g_assert_cmpuint(qlist_size(fl), ==, 6);
+        g_assert_cmpint(qdict_get_int(a, "id"), ==, 6);
+        g_assert_cmpint(qdict_get_int(a, "cause"), ==, 5);
+        g_assert_cmpstr(qdict_get_str(a, "phase"), ==, "apply");
+        g_assert_cmpstr(qdict_get_str(a, "outcome"), ==, "marked");
+        g_assert_cmpint(qdict_get_int(a, "pages"), ==, 1);
+        g_assert_cmpint(qdict_get_int(a, "slot"), ==, 1);
+    }
     g_assert_cmpint(qdict_get_int(r, "dropped"), ==, 0);
     g_assert_cmpint(qdict_get_int(r, "overwritten"), ==, 0);
     g_assert_cmpuint(qlist_size(qdict_get_qlist(r, "dropped-ids")), ==, 0);
@@ -31490,8 +31515,10 @@ static void femu_lie_cut(FemuLieDev *d)
  * The records of device @id, joined by "; ". One record reads
  * "<id><<cause> l<line> m<match> <action> <phase> <outcome>[/<reason>]
  * c<cid> o<opc> f<fua> <slba>+<nlb>[ B<pages>| L<pages>]": B for
- * buffered-at-flush-lie, L for lie-pages. Each is of queue 1 and
- * namespace 1.
+ * buffered-at-flush-lie, L for lie-pages. A wb-fail record adds its
+ * slot (S), and when it has them its pages (P), lost blocks (M, hex
+ * mask; N, count), found (F) and status (x, hex). Each is of queue 1
+ * and namespace 1.
  */
 static char *femu_lie_recs(QTestState *qts, const char *id)
 {
@@ -31505,7 +31532,34 @@ static char *femu_lie_recs(QTestState *qts, const char *id)
         const char *why = qdict_haskey(r, "reason") ?
                           qdict_get_str(r, "reason") : NULL;
         g_autofree char *pages = NULL;
+        GString *wb = g_string_new(NULL);
 
+        /* wb-fail: S slot, P pages, M lost mask, N lost, F found, x status */
+        if (qdict_haskey(r, "slot")) {
+            g_string_append_printf(wb, " S%" PRId64,
+                                   qdict_get_int(r, "slot"));
+            if (qdict_haskey(r, "pages")) {
+                g_string_append_printf(wb, " P%" PRId64,
+                                       qdict_get_int(r, "pages"));
+            }
+            if (qdict_haskey(r, "lba-mask")) {
+                g_string_append_printf(wb, " M%" PRIx64,
+                                       (uint64_t)qdict_get_int(r,
+                                                               "lba-mask"));
+            }
+            if (qdict_haskey(r, "lost")) {
+                g_string_append_printf(wb, " N%" PRId64,
+                                       qdict_get_int(r, "lost"));
+            }
+            if (qdict_haskey(r, "found")) {
+                g_string_append_printf(wb, " F%s",
+                                       qdict_get_str(r, "found"));
+            }
+            if (qdict_haskey(r, "status")) {
+                g_string_append_printf(wb, " x%" PRIx64,
+                                       (uint64_t)qdict_get_int(r, "status"));
+            }
+        }
         if (qdict_haskey(r, "buffered-at-flush-lie")) {
             pages = g_strdup_printf(" B%" PRId64,
                                     qdict_get_int(r, "buffered-at-flush-lie"));
@@ -31526,6 +31580,8 @@ static char *femu_lie_recs(QTestState *qts, const char *id)
             qdict_get_int(r, "cid"), qdict_get_int(r, "opc"),
             qdict_get_bool(r, "fua"), qdict_get_int(r, "slba"),
             qdict_get_int(r, "nlb"), pages ? pages : "");
+        g_string_append(g, wb->str);
+        g_string_free(wb, true);
     }
     qobject_unref(rsp);
     return g_string_free(g, false);
@@ -31921,4 +31977,929 @@ void femu_test_fsched_fused(void *obj, void *data, QGuestAllocator *alloc)
         g_free(path[i]);
     }
     rmdir(dir);
+}
+
+/*
+ * wb-fail. Pages 0 to 3 get version 0 (0xa0 + page) on the media, then
+ * version 1 (0xb0 + page) in the buffer, in page order. The Write of
+ * version 1 of page 1 is the 2nd Write of blocks 8 to 15, which
+ * FEMU_WBF_SEL marks. Its twin FEMU_WBF_NONE never selects, so a device
+ * with it runs the same commands as a control.
+ */
+#define FEMU_WBF_SEL    "@write,lba=8-15#2 wb-fail"
+#define FEMU_WBF_NONE   "@write,lba=8-15#9 wb-fail\n"
+#define FEMU_WBF_WF     0x0280      /* Write Fault */
+#define FEMU_WBF_IE     0x0006      /* Internal Error */
+#define FEMU_WBF_DNR    0x4000
+#define FEMU_WBF_URE    0x0281      /* Unrecovered Read Error */
+#define FEMU_WBF_SC(x)  ((x) & (FEMU_WBF_DNR | 0x7ff))
+#define FEMU_CSTS_CFS   (1u << 1)
+
+/* the I/O classes, then the Admin ones from FEMU_WBF_VWC */
+enum {
+    FEMU_WBF_FLUSH,
+    FEMU_WBF_WRITE,
+    FEMU_WBF_WZERO,
+    FEMU_WBF_DSM,
+    FEMU_WBF_COPY,
+    FEMU_WBF_WUNC,
+    FEMU_WBF_VWC,
+    FEMU_WBF_WP,
+    FEMU_WBF_FORMAT,
+    FEMU_WBF_SANITIZE,
+};
+
+/* what page 1 reads after its write-back */
+enum { FEMU_WBF_KEEP, FEMU_WBF_UNC, FEMU_WBF_OLD };
+
+/* the pages as above; returns the CID of the Write that the line marks */
+static uint16_t femu_wbf_seed(FemuCtrlState *c, uint64_t buf)
+{
+    uint16_t cid = 0;
+
+    for (int p = 0; p < 4; p++) {
+        femu_lie_page(c, buf, p, 0xa0 + p, false);
+    }
+    femu_power_flush(c, 1);
+    for (int p = 0; p < 4; p++) {
+        if (p == 1) {
+            cid = c->cid;
+        }
+        femu_lie_page(c, buf, p, 0xb0 + p, false);
+    }
+    return cid;
+}
+
+/* page 1 as @how says; pages 0, 2 and 3 keep version 1 */
+static void femu_wbf_pages(FemuCtrlState *c, uint64_t buf, int how)
+{
+    switch (how) {
+    case FEMU_WBF_KEEP:
+        femu_lie_page_is(c, buf, 1, 0xb1);
+        break;
+    case FEMU_WBF_OLD:
+        femu_lie_page_is(c, buf, 1, 0xa1);
+        break;
+    default:
+        for (int b = 8; b < 16; b++) {
+            g_assert_cmphex(femu_fs_io(c, NVME_CMD_READ, b, 1, false, buf),
+                            ==, FEMU_WBF_URE);
+        }
+        break;
+    }
+    femu_lie_page_is(c, buf, 0, 0xb0);
+    femu_lie_page_is(c, buf, 2, 0xb2);
+    femu_lie_page_is(c, buf, 3, 0xb3);
+}
+
+/* the opcode of the draining command of each class */
+static const uint8_t femu_wbf_opc[] = {
+    [FEMU_WBF_FLUSH] = NVME_CMD_FLUSH,
+    [FEMU_WBF_WRITE] = NVME_CMD_WRITE,
+    [FEMU_WBF_WZERO] = NVME_CMD_WRITE_ZEROES,
+    [FEMU_WBF_DSM] = NVME_CMD_DSM,
+    [FEMU_WBF_COPY] = FEMU_CMD_COPY,
+    [FEMU_WBF_WUNC] = NVME_CMD_WRITE_UNCOR,
+    [FEMU_WBF_VWC] = NVME_ADM_CMD_SET_FEATURES,
+    [FEMU_WBF_WP] = NVME_ADM_CMD_SET_FEATURES,
+    [FEMU_WBF_FORMAT] = NVME_ADM_CMD_FORMAT_NVM,
+    [FEMU_WBF_SANITIZE] = FEMU_ADM_SANITIZE,
+};
+
+/*
+ * One draining command of class @kind; its status with DNR, and
+ * its CID in @cid. Round 0 meets the mark. Round 1 runs the same class
+ * again: a Write fills the buffer to the watermark again, so it writes
+ * back too. Write Zeroes, Dataset Management, Copy and Write
+ * Uncorrectable act on page 6 or 7, away from pages 0 to 3.
+ */
+static uint16_t femu_wbf_drain(FemuCtrlState *c, uint64_t buf, int kind,
+                               int round, uint16_t *cid)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint64_t src = 32;
+    uint16_t nlb = 8;
+    NvmeCmd cmd = { 0 };
+
+    *cid = c->cid;
+    switch (kind) {
+    case FEMU_WBF_FLUSH:
+        femu_fs_io(c, NVME_CMD_FLUSH, 0, 1, false, buf);
+        return FEMU_WBF_SC(femu_io_status);
+    case FEMU_WBF_WRITE:
+        /*
+         * 4 pages buffered, watermark 14, batch 2: pages 4 to 13 fill it,
+         * and page 14 writes back pages 0 and 1. In round 1, page 15
+         * fills it again, and page 16 writes back pages 2 and 3.
+         */
+        if (!round) {
+            for (int p = 4; p < 14; p++) {
+                femu_lie_page(c, buf, p, 0xb0 + p, false);
+            }
+        } else {
+            femu_lie_page(c, buf, 15, 0xbf, false);
+        }
+        *cid = c->cid;
+        femu_fs_io(c, NVME_CMD_WRITE, (round ? 16 : 14) * 8, 8, false, buf);
+        return FEMU_WBF_SC(femu_io_status);
+    case FEMU_WBF_WZERO:
+        femu_fs_io(c, NVME_CMD_WRITE_ZEROES, 48 + round * 8, 8, false, buf);
+        return FEMU_WBF_SC(femu_io_status);
+    case FEMU_WBF_DSM:
+        /* one deallocate range: attributes, blocks, first block */
+        qtest_memset(qts, buf, 0, 16);
+        qtest_writel(qts, buf + 4, 8);
+        qtest_writeq(qts, buf + 8, 48 + round * 8);
+        cmd.opcode = NVME_CMD_DSM;
+        cmd.nsid = cpu_to_le32(1);
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+        femu_io(c, &cmd);
+        return FEMU_WBF_SC(femu_io_status);
+    case FEMU_WBF_COPY:
+        femu_copy(c, buf, 48 + round * 8, &src, &nlb, 1, 1, 0);
+        return FEMU_WBF_SC(femu_io_status);
+    case FEMU_WBF_WUNC:
+        femu_fs_io(c, NVME_CMD_WRITE_UNCOR, 48 + round * 8, 8, false, buf);
+        return FEMU_WBF_SC(femu_io_status);
+    case FEMU_WBF_VWC:
+        return FEMU_WBF_SC(femu_set_feature(c, 0x06, false, 0, 0, NULL));
+    case FEMU_WBF_WP:
+        /* Write Protect on; a failed change keeps the state it had */
+        return FEMU_WBF_SC(femu_set_feature(c, FEMU_FID_NS_WP, false, 1, 1,
+                                            NULL));
+    case FEMU_WBF_FORMAT:
+        return FEMU_WBF_SC(femu_format(c, 1, 0, 0));
+    default:
+        cmd.opcode = FEMU_ADM_SANITIZE;
+        cmd.cdw10 = cpu_to_le32(0x2);       /* Block Erase */
+        return FEMU_WBF_SC(femu_admin(c, &cmd));
+    }
+}
+
+/* the Volatile Write Cache feature: 1 for enabled */
+static uint32_t femu_wbf_vwc(FemuCtrlState *c)
+{
+    uint32_t res = 0;
+
+    g_assert_cmphex(femu_get_feature(c, 0x06, 0, 0, 0, &res), ==, 0);
+    return res & 1;
+}
+
+/* the newest Error Information entry, 64 bytes at @lbuf */
+static uint64_t femu_wbf_elog(FemuCtrlState *c, uint64_t lbuf)
+{
+    g_assert_cmphex(FEMU_SC(femu_get_log(c, 0x01, lbuf, 64, 0)), ==, 0);
+    return qtest_readq(c->pdev->bus->qts, lbuf);
+}
+
+/* the fields of the entry femu_wbf_elog() read (Figure 205) */
+static void femu_wbf_elog_is(FemuCtrlState *c, uint64_t lbuf, uint16_t sqid,
+                             uint16_t cid, uint16_t status, uint64_t lba,
+                             uint8_t opc)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmphex(qtest_readw(qts, lbuf + 8), ==, sqid);
+    g_assert_cmphex(qtest_readw(qts, lbuf + 10), ==, cid);
+    g_assert_cmphex(qtest_readw(qts, lbuf + 12) >> 1, ==, status);
+    g_assert_cmphex(qtest_readw(qts, lbuf + 14), ==, 0xffff);
+    g_assert_cmphex(qtest_readq(qts, lbuf + 16), ==, lba);
+    g_assert_cmphex(qtest_readl(qts, lbuf + 24), ==, 1);
+    g_assert_cmphex(qtest_readb(qts, lbuf + 31), ==, opc);
+    /* the fault slot, so a host can tie the entry to the record */
+    g_assert_cmphex(qtest_readq(qts, lbuf + 32), ==, 1);
+}
+
+/* disable and enable again: a Controller Reset */
+static void femu_wbf_ctrl_reset(FemuLieDev *d)
+{
+    femu_queue_free(&d->c, &d->c.io);
+    femu_disable(&d->c);
+    femu_enable(&d->c, d->pdev, d->c.alloc);
+    femu_create_io_queues(&d->c);
+}
+
+/*
+ * One write-back class, on three devices: wo (report=once,
+ * mode=old, aer=on), ws (sticky, mode=unc) and the control wc. Round 0
+ * of the class meets the mark: Write Fault for I/O and Internal Error
+ * for Admin, with DNR only under sticky. Page 1 then reads old
+ * data on wo and Unrecovered Read Error on ws; its neighbours and the
+ * control keep version 1. Round 1 of the same class succeeds on wo,
+ * since once is spent, and fails again on ws. A failed cache disable
+ * keeps VWC on. Write Protect is an Admin drain of its namespace.
+ *
+ * The Flush class also checks the records, the Error Information entry
+ * of the reporting command, the AER of aer=on (the others must post no
+ * AER, or the next Admin command takes its CQE), a shutdown that finds
+ * a sticky failure (CFS, SHST 00b) and the reset that ends it. Its
+ * round 1 is the sticky Flush over a clean buffer.
+ *
+ * Planted defects and the check that fails:
+ *   once is never consumed           round 1 on wo
+ *   sticky is consumed               round 1 on ws
+ *   DNR on once or none on sticky    round 0 status
+ *   Admin keeps Write Fault          round 0 status of the Admin classes
+ *   the mark is lost or never made   round 0 status, page 1 reads
+ *   the failure restores nothing     page 1 reads on wo
+ *   the failure writes neighbours    page 0, 2 and 3 reads
+ *   VWC goes off on a failure        femu_wbf_vwc() on wo and ws
+ */
+static void femu_wbf_class(int kind)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-wbf-XXXXXX", NULL);
+    /* Write Uncorrectable (ONCS bit 1), and ns_wp for Write Protect */
+    g_autofree char *pl = g_strdup_printf("%s,oncs=415%s", FEMU_LIE_PL,
+                                          kind == FEMU_WBF_WP ?
+                                          ",ns_wp=on" : "");
+    FemuLieDev d[] = {
+        { "wo", 5, pl, FEMU_WBF_SEL " report=once mode=old aer=on\n" },
+        { "ws", 6, pl, FEMU_WBF_SEL "\n" },
+        { "wc", 7, pl, FEMU_WBF_NONE },
+    };
+    bool admin = kind >= FEMU_WBF_VWC;
+    uint16_t sc = admin ? FEMU_WBF_IE : FEMU_WBF_WF;
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    uint64_t lbuf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool flush = kind == FEMU_WBF_FLUSH;
+        uint16_t want0 = i == 2 ? 0 : sc | (i == 1 ? FEMU_WBF_DNR : 0);
+        uint16_t want1 = i == 1 ? sc | FEMU_WBF_DNR : 0;
+        uint16_t aer = 0;
+        uint16_t cid[3];
+        uint64_t nerr = 0;
+
+        cid[0] = femu_wbf_seed(c, buf);
+        nerr = femu_wbf_elog(c, lbuf);
+        if (flush) {
+            aer = femu_aer(c);
+        }
+        g_assert_cmphex(femu_wbf_drain(c, buf, kind, 0, &cid[1]), ==, want0);
+        if (flush && i == 0) {
+            uint16_t got;
+            uint32_t res;
+
+            /* Error, Error Information log, Internal Device Error */
+            g_assert_cmphex(femu_complete(c, &c->admin, &got, &res), ==, 0);
+            g_assert_cmpint(got, ==, aer);
+            g_assert_cmphex(res, ==, 0x010400);
+        }
+        /*
+         * Two entries: the failure's, then the one of the command that
+         * reports. An Admin entry keeps the namespace, the block and
+         * the slot too.
+         */
+        g_assert_cmpint(femu_wbf_elog(c, lbuf), ==, nerr + 2 * (i < 2));
+        if (i < 2) {
+            femu_wbf_elog_is(c, lbuf, admin ? 0 : 1, cid[1], sc, 8,
+                             femu_wbf_opc[kind]);
+        }
+        if (kind == FEMU_WBF_VWC) {
+            g_assert_cmpint(femu_wbf_vwc(c), ==, i < 2);
+        }
+        /* a Format or a Sanitize that succeeds erases the data */
+        if (i < 2 || kind < FEMU_WBF_FORMAT) {
+            femu_wbf_pages(c, buf, i == 0 ? FEMU_WBF_OLD :
+                                   i == 1 ? FEMU_WBF_UNC : FEMU_WBF_KEEP);
+        }
+        g_assert_cmphex(femu_wbf_drain(c, buf, kind, 1, &cid[2]), ==, want1);
+        if (kind == FEMU_WBF_VWC) {
+            g_assert_cmpint(femu_wbf_vwc(c), ==, i == 1);
+        }
+        if (!flush) {
+            continue;
+        }
+        if (i < 2) {
+            g_autofree char *want = g_strdup_printf(
+                "1<0 l1 m2 wb-fail select selected c%u o1 f0 8+8; "
+                "2<1 l1 m2 wb-fail apply marked c%u o1 f0 8+8 S1 P1; "
+                "3<1 l1 m2 wb-fail fail %s c%u o1 f0 8+8 S1 Mff N8 Fcommand "
+                "x280; "
+                "4<3 l1 m2 wb-fail report reported c%u o0 f0 8+8 S1 Fself "
+                "x%x",
+                cid[0], cid[0], i ? "unc" : "old", cid[0], cid[1], want0);
+            g_autofree char *more = g_strdup_printf(
+                "%s; 5<3 l1 m2 wb-fail report reported c%u o0 f0 8+8 S1 "
+                "Fpending x%x", want, cid[2], want1);
+
+            femu_lie_want(qts, d[i].id, i ? more : want);
+        } else {
+            femu_lie_want(qts, d[i].id, "");
+        }
+        /* a shutdown that finds a failure ends with CFS, SHST 00b */
+        qpci_io_writel(c->pdev, c->bar, 0x14,
+                       FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
+        g_assert_cmphex(qpci_io_readl(c->pdev, c->bar, 0x1c) &
+                        FEMU_CSTS_CFS, ==, i == 1 ? FEMU_CSTS_CFS : 0);
+        g_assert_cmpint(FEMU_CSTS_SHST(qpci_io_readl(c->pdev, c->bar, 0x1c)),
+                        ==, i == 1 ? 0 : 2);
+        /* a Controller Reset ends sticky */
+        femu_wbf_ctrl_reset(&d[i]);
+        g_assert_cmphex(femu_wbf_drain(c, buf, kind, 1, &cid[2]), ==, 0);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+void femu_test_fsched_wbf_flush(void *obj, void *data, QGuestAllocator *alloc)
+{
+    femu_wbf_class(FEMU_WBF_FLUSH);
+}
+
+void femu_test_fsched_wbf_write(void *obj, void *data, QGuestAllocator *alloc)
+{
+    femu_wbf_class(FEMU_WBF_WRITE);
+}
+
+void femu_test_fsched_wbf_wzero(void *obj, void *data, QGuestAllocator *alloc)
+{
+    femu_wbf_class(FEMU_WBF_WZERO);
+}
+
+void femu_test_fsched_wbf_dsm(void *obj, void *data, QGuestAllocator *alloc)
+{
+    femu_wbf_class(FEMU_WBF_DSM);
+}
+
+void femu_test_fsched_wbf_copy(void *obj, void *data, QGuestAllocator *alloc)
+{
+    femu_wbf_class(FEMU_WBF_COPY);
+}
+
+void femu_test_fsched_wbf_wunc(void *obj, void *data, QGuestAllocator *alloc)
+{
+    femu_wbf_class(FEMU_WBF_WUNC);
+}
+
+void femu_test_fsched_wbf_vwc(void *obj, void *data, QGuestAllocator *alloc)
+{
+    femu_wbf_class(FEMU_WBF_VWC);
+}
+
+void femu_test_fsched_wbf_wp(void *obj, void *data, QGuestAllocator *alloc)
+{
+    femu_wbf_class(FEMU_WBF_WP);
+}
+
+void femu_test_fsched_wbf_format(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    femu_wbf_class(FEMU_WBF_FORMAT);
+}
+
+void femu_test_fsched_wbf_sanitize(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    femu_wbf_class(FEMU_WBF_SANITIZE);
+}
+
+/* the records of device @id in phase @phase */
+static int femu_wbf_nrec(QTestState *qts, const char *id, const char *phase)
+{
+    QDict *rsp;
+    QDict *q = femu_events_q(qts, id, &rsp);
+    QListEntry *e;
+    int nr = 0;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(q, "faults"), e) {
+        QDict *r = qobject_to(QDict, qlist_entry_obj(e));
+
+        nr += !strcmp(qdict_get_str(r, "phase"), phase);
+    }
+    qobject_unref(rsp);
+    return nr;
+}
+
+/*
+ * The background class and the PLP-first cut, on plp
+ * devices. A Flush with working plp writes nothing back, so the mark
+ * waits in the buffer.
+ *
+ * bg: plp_health 0 and a reset. The enable then fails the protection,
+ * and the wtm write-back meets the mark with no command: an Error
+ * Information entry with SQID, CID and location FFFFh, and a
+ * failure that stays pending. The next Flush reports it, and the reset
+ * before the enable kept the mark.
+ * cp: a power cut. Its PLP write-back meets the mark the same way, then
+ * the post-cut cleanup drops the failure, so the Flush after the cut
+ * succeeds. Page 1 still reads as lost.
+ * bs: bg with report=sticky: both Flushes fail, with DNR.
+ * bc, cc: the same commands with no mark.
+ *
+ * Planted defects and the check that fails:
+ *   no background entry               the entry of bg and cp
+ *   a reset drops the marks           the Flush of bg
+ *   no cleanup after the cut          the Flush of cp
+ *   the cut rolls page 1 back         the reads of cp
+ */
+void femu_test_fsched_wbf_bg(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-wbf-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "bg", 5, FEMU_LIE_PL ",plp=on,plp_fail_mode=wtm",
+          FEMU_WBF_SEL " report=once\n" },
+        { "bc", 6, FEMU_LIE_PL ",plp=on,plp_fail_mode=wtm", FEMU_WBF_NONE },
+        { "cp", 7, FEMU_LIE_PL ",plp=on", FEMU_WBF_SEL "\n" },
+        { "cc", 8, FEMU_LIE_PL ",plp=on", FEMU_WBF_NONE },
+        { "bs", 9, FEMU_LIE_PL ",plp=on,plp_fail_mode=wtm",
+          FEMU_WBF_SEL "\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    uint64_t lbuf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool cut = i == 2 || i == 3;
+        bool mark = !(i & 1);
+        bool sticky = i == 4;
+        uint16_t want = mark && !cut ? FEMU_WBF_WF : 0;
+        uint16_t want1 = sticky ? FEMU_WBF_WF | FEMU_WBF_DNR : 0;
+        uint16_t cid[2];
+        uint64_t nerr;
+
+        cid[0] = femu_wbf_seed(c, buf);
+        nerr = femu_wbf_elog(c, lbuf);
+        if (cut) {
+            femu_lie_cut(&d[i]);
+        } else {
+            femu_cancel_hook(qts, d[i].id, "plp-health", 0);
+            femu_wbf_ctrl_reset(&d[i]);
+        }
+        /* the write-back of the enable or the cut found the mark */
+        g_assert_cmpint(femu_wbf_elog(c, lbuf), ==, nerr + mark);
+        if (mark) {
+            femu_wbf_elog_is(c, lbuf, 0xffff, 0xffff, FEMU_WBF_WF, 8, 0);
+        }
+        g_assert_cmphex(femu_wbf_drain(c, buf, FEMU_WBF_FLUSH, 0, &cid[1]),
+                        ==, want | want1);
+        g_assert_cmphex(femu_wbf_drain(c, buf, FEMU_WBF_FLUSH, 1, &cid[1]),
+                        ==, want1);
+        femu_wbf_pages(c, buf, mark ? FEMU_WBF_UNC : FEMU_WBF_KEEP);
+        if (!mark) {
+            femu_lie_want(qts, d[i].id, "");
+        } else if (cut) {
+            g_autofree char *w = g_strdup_printf(
+                "1<0 l1 m2 wb-fail select selected c%u o1 f0 8+8; "
+                "2<1 l1 m2 wb-fail apply marked c%u o1 f0 8+8 S1 P1; "
+                "3<1 l1 m2 wb-fail fail unc c%u o1 f0 8+8 S1 Mff N8 "
+                "Fbackground x280", cid[0], cid[0], cid[0]);
+
+            femu_lie_want(qts, d[i].id, w);
+        } else {
+            g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "fail"), ==, 1);
+            g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "report"), ==,
+                            1 + sticky);
+        }
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * A report=once failure belongs to the completion that reports
+ * it until its CQE posts. x-cpl-hold 1 keeps each CQE back. Flush A on
+ * queue 1 reports the failure and waits.
+ *   hk: Flush B on queue 2 succeeds, since A holds the failure. A then
+ *       posts Write Fault and B success, and Flush C on queue 2
+ *       succeeds: A spent it.
+ *   hd: queue 1 is deleted with A in it. A never posts, so the failure
+ *       is pending again, and Flush C on queue 2 reports it.
+ *
+ * Planted defects and the check that fails:
+ *   a held failure is reported again   B on hk
+ *   publication consumes nothing       C on hk
+ *   a dropped CQE consumes it          C on hd
+ */
+void femu_test_fsched_wbf_hold(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-wbf-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "hk", 5, FEMU_LIE_PL, FEMU_WBF_SEL " report=once\n" },
+        { "hd", 6, FEMU_LIE_PL, FEMU_WBF_SEL " report=once\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool del = i == 1;
+        NvmeCmd flush = { .opcode = NVME_CMD_FLUSH,
+                          .nsid = cpu_to_le32(1) };
+        FemuQueue q2 = { 0 };
+        uint16_t got;
+        uint16_t a;
+
+        femu_wbf_seed(c, buf);
+        femu_zap_create_queue(c, &q2, 2);
+        femu_cancel_hook(qts, d[i].id, "x-cpl-hold", 1);
+        a = c->cid;
+        femu_submit(c, &c->io, &flush);
+        femu_cancel_wait_cpl(qts, d[i].id, 1);
+        if (del) {
+            g_assert_cmphex(FEMU_SC(femu_delete_sq(c, 1)), ==, 0);
+            femu_cancel_wait_cpl(qts, d[i].id, 0);
+        } else {
+            femu_zap_queue(c, &q2, &flush);
+            femu_zap_ring(c, &q2);
+            femu_cancel_wait_cpl(qts, d[i].id, 2);
+        }
+        femu_cancel_hook(qts, d[i].id, "x-cpl-hold", 0);
+        if (!del) {
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, &got, NULL)),
+                            ==, FEMU_WBF_WF);
+            g_assert_cmpint(got, ==, a);
+            g_assert_cmphex(femu_zap_complete(c, &q2, NULL), ==, 0);
+        }
+        /* Flush C */
+        femu_zap_queue(c, &q2, &flush);
+        femu_zap_ring(c, &q2);
+        g_assert_cmphex(femu_zap_complete(c, &q2, NULL), ==,
+                        del ? FEMU_WBF_WF : 0);
+        /* A reported on both; C reported again on hd only */
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "report"), ==, 1 + del);
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "fail"), ==, 1);
+        femu_queue_free(c, &q2);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * A direct program and a rewrite before the write-back.
+ *   fp: a FUA Write of blocks 10 and 11 over the marked page. The page
+ *       is written back first and fails there, so the FUA Write gets
+ *       Write Fault. Then its own program runs: blocks 10 and 11 read
+ *       its data, the other blocks of the page read as lost.
+ *   fk: a plain Write of blocks 12 and 13 keeps the mark, so the Flush
+ *       fails, and every block of the page reads as lost.
+ *   ff: a plain Write of the whole page clears the mark with a
+ *       supersede record, so the Flush succeeds with its data.
+ *   fc: the FUA Write of fp with no mark.
+ *
+ * Planted defects and the check that fails:
+ *   no write-back before the direct program   the FUA status of fp
+ *   the program skipped after the failure     block 10 of fp
+ *   a partial rewrite clears the mark         the Flush of fk
+ *   a full rewrite keeps the mark             the Flush of ff
+ */
+void femu_test_fsched_wbf_fua(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-wbf-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "fp", 5, FEMU_LIE_PL, FEMU_WBF_SEL " report=once\n" },
+        { "fk", 6, FEMU_LIE_PL, FEMU_WBF_SEL " report=once\n" },
+        { "ff", 7, FEMU_LIE_PL, FEMU_WBF_SEL " report=once\n" },
+        { "fc", 8, FEMU_LIE_PL, FEMU_WBF_NONE },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool fua = i == 0 || i == 3;
+        uint64_t slba = i == 1 ? 12 : i == 2 ? 8 : 10;
+        uint16_t nlb = i == 2 ? 8 : 2;
+        uint16_t cid;
+
+        cid = femu_wbf_seed(c, buf);
+        qtest_memset(qts, buf, 0xe1, nlb * 512);
+        g_assert_cmphex(femu_fs_io(c, NVME_CMD_WRITE, slba, nlb, fua, buf),
+                        ==, i == 0 ? FEMU_WBF_WF : 0);
+        g_assert_cmphex(femu_wbf_drain(c, buf, FEMU_WBF_FLUSH, 0, &cid), ==,
+                        i == 1 ? FEMU_WBF_WF : 0);
+        for (int b = 8; b < 16; b++) {
+            bool mine = b >= slba && b < slba + nlb;
+            /* fk loses its own blocks too: the buffer held them */
+            bool lost = i == 1 || (i == 0 && !mine);
+
+            if (!lost) {
+                femu_power_read(c, buf, 1, b, mine ? 0xe1 : 0xb1);
+            } else {
+                g_assert_cmphex(femu_fs_io(c, NVME_CMD_READ, b, 1, false,
+                                           buf), ==, FEMU_WBF_URE);
+            }
+        }
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "fail"), ==, i < 2);
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "supersede"), ==,
+                        i == 2);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/* the status of a Read or a Flush of @nsid, with DNR */
+static uint16_t femu_wbf_ns_io(FemuCtrlState *c, uint8_t opc, uint32_t nsid,
+                               uint64_t lba, uint64_t buf)
+{
+    NvmeRwCmd rw = { 0 };
+
+    rw.opcode = opc;
+    rw.nsid = cpu_to_le32(nsid);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.slba = cpu_to_le64(lba);
+    femu_io(c, (NvmeCmd *)&rw);
+    return FEMU_WBF_SC(femu_io_status);
+}
+
+/*
+ * The newest record of device @id in @phase, as "<outcome>[/<reason>]
+ * [ S<slot>]", and in @nsids the namespace of each such record, in order.
+ */
+static char *femu_wbf_last(QTestState *qts, const char *id,
+                           const char *phase, GString *nsids)
+{
+    QDict *rsp;
+    QDict *q = femu_events_q(qts, id, &rsp);
+    char *last = g_strdup("");
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(q, "faults"), e) {
+        QDict *r = qobject_to(QDict, qlist_entry_obj(e));
+        GString *g;
+
+        if (strcmp(qdict_get_str(r, "phase"), phase)) {
+            continue;
+        }
+        g = g_string_new(qdict_get_str(r, "outcome"));
+        if (qdict_haskey(r, "reason")) {
+            g_string_append_printf(g, "/%s", qdict_get_str(r, "reason"));
+        }
+        if (qdict_haskey(r, "slot")) {
+            g_string_append_printf(g, " S%" PRId64,
+                                   qdict_get_int(r, "slot"));
+        }
+        g_free(last);
+        last = g_string_free(g, false);
+        if (nsids) {
+            g_string_append_printf(nsids, "%s%" PRId64,
+                                   nsids->len ? " " : "",
+                                   qdict_get_int(r, "nsid"));
+        }
+    }
+    qobject_unref(rsp);
+    return last;
+}
+
+/*
+ * aer= and the power cut. x-fault-wbf-aer counts the AERs that wb-fail
+ * queued, since the reset after a cut drops queued events unseen.
+ *   ac: aer=on with plp. The PLP write-back of a cut meets the mark:
+ *       a fail record, and no AER.
+ *   as: sticky with aer=on: one AER, Error with the Error Information
+ *       log, after the failure. A second Flush reports the same failure
+ *       and queues no new AER.
+ *   an: sticky with aer off: no AER. An AER command waits, so the next
+ *       Admin command must take the next CQE.
+ *
+ * Planted defects and the check that fails:
+ *   an AER at a cut                       x-fault-wbf-aer of ac
+ *   aer= ignored under sticky             the AER CQE of as, counter of an
+ *   an AER per report, not per failure    x-fault-wbf-aer of as
+ */
+void femu_test_fsched_wbf_aer(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-wbf-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "ac", 5, FEMU_LIE_PL ",plp=on", FEMU_WBF_SEL " aer=on\n" },
+        { "as", 6, FEMU_LIE_PL, FEMU_WBF_SEL " aer=on\n" },
+        { "an", 7, FEMU_LIE_PL, FEMU_WBF_SEL "\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    uint64_t lbuf = guest_alloc(&qs->alloc, 4096);
+    const uint16_t sticky = FEMU_WBF_WF | FEMU_WBF_DNR;
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        uint16_t aer = 0;
+        uint16_t cid;
+        uint16_t got;
+        uint32_t res;
+
+        femu_wbf_seed(c, buf);
+        if (i == 0) {
+            femu_lie_cut(&d[i]);
+            g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "fail"), ==, 1);
+            g_assert_cmpint(femu_g1_qom_get(qts, d[i].id, "x-fault-wbf-aer"),
+                            ==, 0);
+            continue;
+        }
+        aer = femu_aer(c);
+        g_assert_cmphex(femu_wbf_drain(c, buf, FEMU_WBF_FLUSH, 0, &cid), ==,
+                        sticky);
+        if (i == 1) {
+            g_assert_cmphex(femu_complete(c, &c->admin, &got, &res), ==, 0);
+            g_assert_cmpint(got, ==, aer);
+            g_assert_cmphex(res, ==, 0x010400);
+        }
+        /* with no AER queued, the AER command still waits */
+        femu_wbf_elog(c, lbuf);
+        femu_wbf_elog_is(c, lbuf, 1, cid, FEMU_WBF_WF, 8, NVME_CMD_FLUSH);
+        g_assert_cmphex(femu_wbf_drain(c, buf, FEMU_WBF_FLUSH, 1, &cid), ==,
+                        sticky);
+        g_assert_cmpint(femu_g1_qom_get(qts, d[i].id, "x-fault-wbf-aer"),
+                        ==, i == 1);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * Two namespaces, each with its own buffer and a once mark on page 1.
+ * plp_health 0 and a reset: the write-through switch writes both
+ * buffers back, and both failures wait.
+ *   Write Protect of namespace 1 reports its failure alone: Internal
+ *   Error. A Flush of namespace 1 then succeeds, and a Flush of
+ *   namespace 2 reports the failure of namespace 2.
+ *   nc: the same commands with no mark.
+ *
+ * Planted defects and the check that fails:
+ *   Write Protect drains every namespace   the 1st Flush of namespace 2
+ *   a drain reports another namespace      the Flush of namespace 1
+ *   the switch writes back one namespace   the 1st Flush of namespace 2
+ */
+#define FEMU_WBF_NS_PL  FEMU_LIE_PL ",plp=on,plp_fail_mode=wtm,ns_wp=on," \
+                        "namespaces=2,secsz=512,secs_per_pg=8," \
+                        "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1," \
+                        "luns_per_ch=4,nchs=4"
+
+void femu_test_fsched_wbf_ns(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-wbf-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "na", 5, FEMU_WBF_NS_PL,
+          "@write,ns=1,lba=8-15#2 wb-fail report=once\n"
+          "@write,ns=2,lba=8-15#2 wb-fail report=once\n" },
+        { "nc", 6, FEMU_WBF_NS_PL,
+          "@write,ns=1,lba=8-15#9 wb-fail\n"
+          "@write,ns=2,lba=8-15#9 wb-fail\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    uint64_t lbuf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool mark = i == 0;
+        g_autoptr(GString) nsids = g_string_new(NULL);
+        g_autofree char *last = NULL;
+        uint64_t nerr;
+
+        for (uint32_t ns = 1; ns <= 2; ns++) {
+            for (int p = 0; p < 4; p++) {
+                femu_power_write(c, buf, ns, p * 8, 8, 0xa0 + p, false);
+            }
+            femu_power_flush(c, ns);
+            for (int p = 0; p < 4; p++) {
+                femu_power_write(c, buf, ns, p * 8, 8, 0xb0 + p, false);
+            }
+        }
+        nerr = femu_wbf_elog(c, lbuf);
+        femu_cancel_hook(qts, d[i].id, "plp-health", 0);
+        femu_wbf_ctrl_reset(&d[i]);
+        /* one entry per failure, at the write-back */
+        g_assert_cmpint(femu_wbf_elog(c, lbuf), ==, nerr + 2 * mark);
+        g_assert_cmphex(FEMU_WBF_SC(femu_set_feature(c, FEMU_FID_NS_WP,
+                                                     false, 1, 1, NULL)),
+                        ==, mark ? FEMU_WBF_IE : 0);
+        g_assert_cmphex(femu_wbf_ns_io(c, NVME_CMD_FLUSH, 1, 0, buf), ==, 0);
+        g_assert_cmphex(femu_wbf_ns_io(c, NVME_CMD_FLUSH, 2, 0, buf), ==,
+                        mark ? FEMU_WBF_WF : 0);
+        g_assert_cmphex(femu_wbf_ns_io(c, NVME_CMD_FLUSH, 2, 0, buf), ==, 0);
+        for (uint32_t ns = 1; ns <= 2; ns++) {
+            for (int b = 0; b < 32; b++) {
+                if (mark && b >= 8 && b < 16) {
+                    g_assert_cmphex(femu_wbf_ns_io(c, NVME_CMD_READ, ns, b,
+                                                   buf), ==,
+                                    FEMU_WBF_URE | FEMU_WBF_DNR);
+                } else {
+                    femu_power_read(c, buf, ns, b, 0xb0 + b / 8);
+                }
+            }
+        }
+        /* the report of namespace 1, then the one of namespace 2 */
+        last = femu_wbf_last(qts, d[i].id, "report", nsids);
+        g_assert_cmpstr(nsids->str, ==, mark ? "1 2" : "");
+        g_assert_cmpstr(last, ==, mark ? "reported S2" : "");
+        g_assert_cmpint(femu_wbf_nrec(qts, d[i].id, "fail"), ==, 2 * mark);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * The 256 fault slots. A line that selects every Write of page 1 marks
+ * it, and a Flush writes it back and fails it.
+ *   so: report=once. The Flush spends the failure and frees its slot,
+ *       so 300 rounds each take slot 1 again and each Flush fails.
+ *   ss: sticky. Each failure keeps its slot until a reset, so the
+ *       257th selection finds none: no-effect, slots-full. After a
+ *       reset the next selection takes slot 1.
+ *   sd: once, and a deallocate of page 1. Dataset Management writes
+ *       the buffer back first, so it meets the mark: Write Fault, and the
+ *       deallocate does not run. The next selection takes slot 1.
+ *   sp: once, and 300 writes of the whole page 1 with no write-back.
+ *       Each write clears the mark of the one before it (supersede).
+ *       The new mark takes its slot before the old one is freed, so
+ *       each mark takes slot 1 or 2, and never a higher one.
+ *
+ * Planted defects and the check that fails:
+ *   a spent failure keeps its slot     the Flushes after 256 on so
+ *   no slot limit                      the apply record of ss
+ *   a reset keeps the slots            the last apply record of ss
+ *   a deallocate leaks the slot        the slot of the last mark on sd
+ *   a supersede leaks the slot         an apply record of sp
+ */
+#define FEMU_WBF_EVERY  "@write,lba=8-15%1000000~1 wb-fail"
+
+void femu_test_fsched_wbf_slots(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-wbf-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "so", 5, FEMU_LIE_PL, FEMU_WBF_EVERY " report=once\n" },
+        { "ss", 6, FEMU_LIE_PL, FEMU_WBF_EVERY "\n" },
+        { "sd", 7, FEMU_LIE_PL, FEMU_WBF_EVERY " report=once\n" },
+        { "sp", 8, FEMU_LIE_PL, FEMU_WBF_EVERY " report=once\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    const uint16_t sticky = FEMU_WBF_WF | FEMU_WBF_DNR;
+    NvmeCmd dsm = { 0 };
+    char *last;
+    uint16_t cid;
+
+    /* so */
+    for (int k = 0; k < 300; k++) {
+        femu_lie_page(&d[0].c, buf, 1, k, false);
+        g_assert_cmphex(femu_wbf_drain(&d[0].c, buf, FEMU_WBF_FLUSH, 0, &cid),
+                        ==, FEMU_WBF_WF);
+    }
+    g_assert_cmpint(femu_wbf_nrec(qts, "so", "fail"), ==, 300);
+    last = femu_wbf_last(qts, "so", "apply", NULL);
+    g_assert_cmpstr(last, ==, "marked S1");
+    g_free(last);
+
+    /* ss */
+    for (int k = 0; k < 257; k++) {
+        femu_lie_page(&d[1].c, buf, 1, k, false);
+        g_assert_cmphex(femu_wbf_drain(&d[1].c, buf, FEMU_WBF_FLUSH, 0, &cid),
+                        ==, sticky);
+        if (k == 255) {
+            last = femu_wbf_last(qts, "ss", "apply", NULL);
+            g_assert_cmpstr(last, ==, "marked S256");
+            g_free(last);
+        }
+    }
+    last = femu_wbf_last(qts, "ss", "apply", NULL);
+    g_assert_cmpstr(last, ==, "no-effect/slots-full");
+    g_free(last);
+    femu_wbf_ctrl_reset(&d[1]);
+    femu_lie_page(&d[1].c, buf, 1, 0x5a, false);
+    g_assert_cmphex(femu_wbf_drain(&d[1].c, buf, FEMU_WBF_FLUSH, 0, &cid), ==,
+                    sticky);
+    last = femu_wbf_last(qts, "ss", "apply", NULL);
+    g_assert_cmpstr(last, ==, "marked S1");
+    g_free(last);
+
+    /* sd: one deallocate range over page 1 */
+    femu_lie_page(&d[2].c, buf, 1, 0xb1, false);
+    qtest_memset(qts, buf, 0, 16);
+    qtest_writel(qts, buf + 4, 8);
+    qtest_writeq(qts, buf + 8, 8);
+    dsm.opcode = NVME_CMD_DSM;
+    dsm.nsid = cpu_to_le32(1);
+    dsm.dptr.prp1 = cpu_to_le64(buf);
+    dsm.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    femu_io(&d[2].c, &dsm);
+    g_assert_cmphex(FEMU_WBF_SC(femu_io_status), ==, FEMU_WBF_WF);
+    for (int b = 8; b < 16; b++) {
+        g_assert_cmphex(femu_fs_io(&d[2].c, NVME_CMD_READ, b, 1, false, buf),
+                        ==, FEMU_WBF_URE);
+    }
+    femu_lie_page(&d[2].c, buf, 1, 0xc1, false);
+    g_assert_cmphex(femu_wbf_drain(&d[2].c, buf, FEMU_WBF_FLUSH, 0, &cid), ==,
+                    FEMU_WBF_WF);
+    last = femu_wbf_last(qts, "sd", "apply", NULL);
+    g_assert_cmpstr(last, ==, "marked S1");
+    g_free(last);
+
+    /* sp: the buffer keeps page 1, so no write-back meets a mark */
+    for (int k = 0; k < 300; k++) {
+        femu_lie_page(&d[3].c, buf, 1, k, false);
+        last = femu_wbf_last(qts, "sp", "apply", NULL);
+        if (strcmp(last, "marked S1")) {
+            g_assert_cmpstr(last, ==, "marked S2");
+        }
+        g_free(last);
+    }
+    g_assert_cmpint(femu_wbf_nrec(qts, "sp", "supersede"), ==, 299);
+    g_assert_cmpint(femu_wbf_nrec(qts, "sp", "fail"), ==, 0);
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
 }

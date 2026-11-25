@@ -6955,7 +6955,14 @@ static void nvme_run_sq_admin(void *opaque)
 
         memset(&cqe, 0, sizeof(cqe));
 
+        if (unlikely(n->wbf)) {
+            femu_wbf_admin_begin(n);
+        }
         status = aborted ? NVME_CMD_ABORT_REQ : nvme_admin_cmd(n, &cmd, &cqe);
+        /* wb-fail: a drain met a failed write-back */
+        if (unlikely(n->wbf)) {
+            status = femu_wbf_admin_end(n, &cmd, status);
+        }
         if (cmd.opcode == NVME_ADM_CMD_ACTIVATE_FW) {
             femu_fw_log_commit(n, &cmd, status);
         }

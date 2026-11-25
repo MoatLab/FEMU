@@ -582,6 +582,12 @@ static inline void nvme_req_start(FemuCtrl *n, NvmeRequest *req,
     req->fdp_dspec = 0;
     req->cxl_seq = 0;
     req->defer = NULL;
+    /* wb-fail: a report left by a lost CQE is pending again */
+    if (unlikely(req->wbf_tok)) {
+        femu_wbf_dropped(n, req);
+    }
+    req->fs_lie = 0;
+    req->fs_wbf = 0;
     /* every path that frees a request slot released this first */
     assert(!req->csd_use);
     assert(!req->eol_held);
@@ -1160,6 +1166,10 @@ static void nvme_post_cqe(NvmeCQueue *cq, NvmeRequest *req)
         femu_note_cqe_time(n, req);
     }
     nvme_inc_cq_tail(cq);
+    /* wb-fail: the host now has the error, so report=once is spent */
+    if (unlikely(req->wbf_tok)) {
+        femu_wbf_posted(n, req);
+    }
     if (unlikely(qatomic_read(&n->iotrace_on)) && cq->cqid) {
         femu_iotrace_note(n, req, req->t_cqe);
     }
@@ -1461,6 +1471,10 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
             /* CQ inactive: return request to SQ free list to avoid leak */
             if (req->csd_use) {
                 femu_csd_req_done(n, req);
+            }
+            /* wb-fail: the host never sees this report */
+            if (unlikely(req->wbf_tok)) {
+                femu_wbf_dropped(n, req);
             }
             QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
             continue;

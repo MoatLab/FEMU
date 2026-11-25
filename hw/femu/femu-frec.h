@@ -42,6 +42,9 @@ enum {
 enum {
     FEMU_FR_PHASE_SELECT = 1,           /* a line selected a command */
     FEMU_FR_PHASE_APPLY,                /* the FTL ran it: what came of it */
+    FEMU_FR_PHASE_FAIL,                 /* wb-fail: a write-back met a mark */
+    FEMU_FR_PHASE_REPORT,               /* wb-fail: a completion reports it */
+    FEMU_FR_PHASE_SUPERSEDE,            /* wb-fail: a full rewrite cleared it */
 };
 
 /* what came of the selection */
@@ -50,6 +53,18 @@ enum {
     FEMU_FR_OUT_SUPERSEDED,             /* an earlier line of its group won */
     FEMU_FR_OUT_NO_EFFECT,              /* won, but with no effect: see why */
     FEMU_FR_OUT_DONE,                   /* the effect took place */
+    FEMU_FR_OUT_MARKED,                 /* wb-fail marked buffered pages */
+    FEMU_FR_OUT_UNC,                    /* the lost blocks read as errors */
+    FEMU_FR_OUT_OLD,                    /* the lost blocks read old data */
+    FEMU_FR_OUT_REPORTED,               /* a completion carries the error */
+};
+
+/* wb-fail: who met a failure (fail), or when (report) */
+enum {
+    FEMU_FR_FOUND_CMD = 1,              /* fail: the drain of a command */
+    FEMU_FR_FOUND_BG,                   /* fail: a drain with no command */
+    FEMU_FR_FOUND_SELF,                 /* report: this command's drain */
+    FEMU_FR_FOUND_PENDING,              /* report: an earlier drain */
 };
 
 /*
@@ -76,13 +91,20 @@ typedef struct FemuFrRec {
     uint8_t why;                /* FEMU_FS_WHY_* for FEMU_FR_OUT_NO_EFFECT */
     uint8_t opc;
     uint8_t fua;
-    uint8_t pad;
+    uint8_t found;              /* wb-fail fail and report: FEMU_FR_FOUND_* */
     /*
      * apply of a lie: the buffered pages that took the lie mark. For
-     * flush-lie that is every page the Flush left in the buffer.
+     * flush-lie that is every page the Flush left in the buffer. apply
+     * of wb-fail: the pages it marked.
      */
     uint32_t pages;
-    uint32_t pad2;
+    uint16_t fslot;             /* wb-fail: the fault slot, from 1 */
+    uint16_t lost;              /* wb-fail fail: the blocks it lost */
+    /*
+     * wb-fail fail: bit i for block slba + i that the failure lost. It
+     * holds the first 64 blocks of the page; lost counts them all.
+     */
+    uint64_t lba_mask;
 } FemuFrRec;
 
 _Static_assert(sizeof(FemuFrRec) <= FEMU_FR_REC_MAX,
@@ -92,7 +114,7 @@ _Static_assert(sizeof(FemuFrRec) % sizeof(uint64_t) == 0,
 
 #define FEMU_FR_WORDS   (sizeof(FemuFrRec) / sizeof(uint64_t))
 
-/* 80 bytes: the record as atomic words, and its sequence word */
+/* 88 bytes: the record as atomic words, and its sequence word */
 typedef struct FemuFrSlot {
     uint64_t seq;               /* 2k+1 while record k is written, then 2k+2 */
     uint64_t w[FEMU_FR_WORDS];
@@ -217,6 +239,12 @@ const char *femu_fr_name_phase(uint8_t v);
  * @v: the value
  */
 const char *femu_fr_name_outcome(uint8_t v);
+
+/**
+ * femu_fr_name_found - the name of a FEMU_FR_FOUND_* value
+ * @v: the value
+ */
+const char *femu_fr_name_found(uint8_t v);
 
 /**
  * femu_fr_name_why - the name of a FEMU_FS_WHY_* reason

@@ -18,11 +18,14 @@
  * The FTL thread matches each command against those lines after the first
  * enable. A selection moves the counters of its line, which x-fault-sel
  * reports, and writes one record per line it concerns to the fault record
- * ring (femu-frec.c). Only flush-lie and fua-lie have an effect so far:
- * after the FTL runs their command, an apply record tells what came of it.
+ * ring (femu-frec.c). flush-lie, fua-lie and wb-fail have an effect so
+ * far: after the FTL runs their command, an apply record tells what came
+ * of it. A wb-fail mark fails at a later write-back, and a later
+ * completion reports it (see "wb-fail" below).
  *
  *   FTL thread: step++, match --> femu_fr_put() per line --> FTL call
- *               --> lie: mark pages, femu_fr_put() apply --> wake writer
+ *               --> post: lie or wb-fail apply, wb-fail report
+ *               --> wake writer
  *   writer thread (events_log only): pop, write a JSON line, free
  *   query-femu-events (main loop): femu_fr_read(), no lock taken
  *
@@ -100,6 +103,19 @@ struct FemuFsched {
     uint64_t lie_cause;         /* id of its select record */
     FemuFsView lie_view;        /* the command as the line saw it */
 
+    /* FTL thread: the wb-fail selected in this step, as for a lie */
+    bool wbf_sel;
+    int wbf_line;
+    uint64_t wbf_cause;
+    int wbf_slot;               /* its fault slot, or -1 for none free */
+    FemuFsView wbf_view;
+
+    /*
+     * With wb-fail, the main loop writes records too (Admin reports and
+     * write-backs, a cut), so each producer takes this lock.
+     */
+    QemuSpin put_lock;
+
     /* the FTL thread is the one producer of the ring */
     FemuFrRing ring;
     FemuFrSlot *slots;
@@ -115,6 +131,29 @@ struct FemuFsched {
     Notifier log_exit;
     FemuCtrl *ctrl;             /* for the exit notifier */
 };
+
+/*
+ * wb-fail. One lock guards the slots and the failures; the FTL thread,
+ * the main loop and the pollers (at CQE post) take it. The lock order is
+ * this lock, then the ring's put_lock, then the error log lock.
+ *
+ *   select (FTL step) --> slot, req->fs_wbf --> ssd_write marks pages
+ *   write-back meets a mark --> fail record, error log, AER --> pending
+ *   draining completion --> collect: status, report record, error log
+ *   CQE posted --> once: consumed | SQ freed --> pending again
+ */
+struct FemuWbf {
+    QemuSpin lock;
+    FemuWbTab t;
+    bool cutting;               /* a power cut: no AER */
+    uint64_t seq;               /* stamps and completion tokens, atomic */
+};
+
+/*
+ * The stamp of the drain that runs on this thread: an FTL step or an
+ * Admin command; 0 for a write-back no command asked for.
+ */
+static __thread uint64_t femu_wbf_cur;
 
 /* records the writer takes in one pass before it looks at stop and hold */
 #define FEMU_FSCHED_LOG_BATCH   256
@@ -575,6 +614,14 @@ in_use:
 }
 
 /* the writer has stopped, or never started */
+static void femu_wbf_free(FemuCtrl *n)
+{
+    if (n->wbf) {
+        g_free(n->wbf->t.fail);
+        g_clear_pointer(&n->wbf, g_free);
+    }
+}
+
 static void femu_fsched_free(struct FemuFsched *f)
 {
     if (f) {
@@ -733,6 +780,14 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
     f->why = g_new0(uint8_t, f->nr);
     f->slots = g_new0(FemuFrSlot, n->events_max_faults);
     femu_fr_init(&f->ring, f->slots, n->events_max_faults, f->log_fd < 0);
+    qemu_spin_init(&f->put_lock);
+    /* no wb-fail line: none of its hooks runs */
+    for (int i = 0; i < f->nr; i++) {
+        if (f->l[i].act == FEMU_FS_ACT_WB_FAIL && !n->wbf) {
+            n->wbf = g_new0(struct FemuWbf, 1);
+            qemu_spin_init(&n->wbf->lock);
+        }
+    }
     n->fsched = f;
     if (f->log_fd >= 0) {
         f->has_log = true;
@@ -899,6 +954,7 @@ void femu_events_free(FemuCtrl *n)
         femu_fsched_log_finish(n);
     }
     femu_fsched_free(n->fsched);
+    femu_wbf_free(n);
     g_clear_pointer(&n->evlog_path, g_free);
     n->fsched = NULL;
     if (!s) {
@@ -916,11 +972,561 @@ void femu_events_free(FemuCtrl *n)
     n->events = NULL;
 }
 
+/* one record to the ring; every producer comes here */
+static uint64_t femu_fsched_put(FemuCtrl *n, FemuFrRec *rec)
+{
+    struct FemuFsched *f = n->fsched;
+    uint64_t id;
+
+    if (n->wbf) {
+        qemu_spin_lock(&f->put_lock);
+    }
+    id = femu_fr_put(&f->ring, rec);
+    if (n->wbf) {
+        qemu_spin_unlock(&f->put_lock);
+    }
+    /* a no-op while the writer is already awake, or after it ended */
+    if (f->has_log) {
+        qemu_event_set(&f->log_ev);
+    }
+    return id;
+}
+
+/* a wb-fail record of slot @s, with what its select record saw */
+static FemuFrRec femu_wbf_rec(FemuCtrl *n, const FemuWbSlot *slot, int s,
+                              uint8_t phase, uint8_t outcome)
+{
+    return (FemuFrRec) {
+        .cause = slot->sel_id,
+        .step = qatomic_read(&n->fsched->step),
+        .match = slot->match,
+        .slba = slot->slba,
+        .nlb = slot->nlb,
+        .nsid = slot->nsid,
+        .line = slot->line,
+        .sqid = slot->sqid,
+        .cid = slot->cid,
+        .origin = FEMU_FR_ORIGIN_SCHED_CMD,
+        .phase = phase,
+        .act = FEMU_FS_ACT_WB_FAIL,
+        .outcome = outcome,
+        .opc = FEMU_FS_OPC_WRITE,
+        .fslot = s + 1,
+    };
+}
+
+/*
+ * FTL thread: wb-fail line @i won on the Write @req. The Write marks the
+ * pages it buffers with the slot; femu_fsched_post() records the result.
+ */
+static void femu_wbf_select(FemuCtrl *n, NvmeRequest *req, int i,
+                            const FemuFsView *v, uint64_t id)
+{
+    struct FemuFsched *f = n->fsched;
+    const FemuFsLine *l = &f->l[i];
+    struct FemuWbf *w = n->wbf;
+    int s;
+
+    qemu_spin_lock(&w->lock);
+    s = femu_wb_slot_get(&w->t);
+    if (s >= 0) {
+        FemuWbSlot *slot = &w->t.slot[s];
+
+        slot->mode = l->wb_mode;
+        slot->report = l->wb_report;
+        slot->aer = l->wb_aer;
+        slot->line = l->line;
+        slot->match = l->matched;
+        slot->sqid = req->sq ? req->sq->sqid : 0;
+        slot->cid = le16_to_cpu(req->cmd.cid);
+        slot->nsid = v->nsid;
+        slot->slba = v->slba;
+        slot->nlb = v->nlb;
+        slot->sel_id = id;
+        req->fs_wbf = s + 1;
+    }
+    qemu_spin_unlock(&w->lock);
+    f->wbf_sel = true;
+    f->wbf_line = i;
+    f->wbf_cause = id;
+    f->wbf_slot = s;
+    f->wbf_view = *v;
+}
+
+/* FTL thread: the apply record of the wb-fail of this step */
+static void femu_wbf_apply(FemuCtrl *n, NvmeRequest *req)
+{
+    struct FemuFsched *f = n->fsched;
+    const FemuFsLine *l = &f->l[f->wbf_line];
+    const FemuFsView *v = &f->wbf_view;
+    struct FemuWbf *w = n->wbf;
+    int s = f->wbf_slot;
+    uint32_t pages = 0;
+    bool skipped = false;
+    bool atomic;
+    bool buffer;
+    uint8_t why;
+    FemuFrRec rec;
+
+    f->wbf_sel = false;
+    req->fs_wbf = 0;
+    buffer = bbssd_wbf_facts(req->ns, req, v->slba, v->nlb, &atomic);
+    qemu_spin_lock(&w->lock);
+    if (s >= 0) {
+        pages = w->t.slot[s].marked;
+        skipped = w->t.slot[s].skipped;
+    }
+    why = femu_wb_apply_why(s >= 0, req->status != NVME_SUCCESS, buffer,
+                            atomic, skipped, pages);
+    /* the selection lets go; each mark keeps its own reference */
+    femu_wb_slot_put(&w->t, s);
+    qemu_spin_unlock(&w->lock);
+    rec = (FemuFrRec) {
+        .cause = f->wbf_cause,
+        .step = f->step,
+        .match = l->matched,
+        .slba = v->slba,
+        .nlb = v->nlb,
+        .nsid = v->nsid,
+        .line = l->line,
+        .sqid = req->sq ? req->sq->sqid : 0,
+        .cid = le16_to_cpu(req->cmd.cid),
+        .origin = FEMU_FR_ORIGIN_SCHED_CMD,
+        .phase = FEMU_FR_PHASE_APPLY,
+        .act = FEMU_FS_ACT_WB_FAIL,
+        .outcome = why == FEMU_FS_WHY_NONE ? FEMU_FR_OUT_MARKED :
+                                             FEMU_FR_OUT_NO_EFFECT,
+        .why = why,
+        .opc = v->opc,
+        .fua = v->fua,
+        .pages = pages,
+        .fslot = s >= 0 ? s + 1 : 0,
+    };
+    femu_fsched_put(n, &rec);
+}
+
+/**
+ * femu_wbf_mark - a Write of slot @fslot buffered a page
+ * @n: the controller
+ * @fslot: the slot, from 1
+ * @marked: the page took the mark; false when it kept an older one
+ */
+void femu_wbf_mark(FemuCtrl *n, uint16_t fslot, bool marked)
+{
+    struct FemuWbf *w = n->wbf;
+    FemuWbSlot *slot = &w->t.slot[fslot - 1];
+
+    qemu_spin_lock(&w->lock);
+    if (marked) {
+        slot->marked++;
+        slot->refs++;
+    } else {
+        slot->skipped = true;
+    }
+    qemu_spin_unlock(&w->lock);
+}
+
+/**
+ * femu_wbf_mode - the mode of slot @fslot
+ * @n: the controller
+ * @fslot: the slot, from 1, which a mark holds
+ *
+ * Returns FEMU_FS_WB_UNC or FEMU_FS_WB_OLD.
+ */
+uint8_t femu_wbf_mode(FemuCtrl *n, uint16_t fslot)
+{
+    struct FemuWbf *w = n->wbf;
+    uint8_t mode;
+
+    qemu_spin_lock(&w->lock);
+    mode = w->t.slot[fslot - 1].mode;
+    qemu_spin_unlock(&w->lock);
+    return mode;
+}
+
+/**
+ * femu_wbf_unmark - a marked page left the buffer with no write-back
+ * @n: the controller
+ * @fslot: the slot of the mark, from 1
+ * @req: the Write that replaced the whole page, or NULL
+ * @nsid: the namespace of the page
+ * @page_slba: the first block of the page
+ *
+ * With @req the mark never fails, and a supersede record says so.
+ */
+void femu_wbf_unmark(FemuCtrl *n, uint16_t fslot, NvmeRequest *req,
+                     uint32_t nsid, uint64_t page_slba)
+{
+    struct FemuWbf *w = n->wbf;
+    int s = fslot - 1;
+    FemuFrRec rec;
+
+    /* unplug frees the schedule before the buffer */
+    if (!w) {
+        return;
+    }
+    qemu_spin_lock(&w->lock);
+    rec = femu_wbf_rec(n, &w->t.slot[s], s, FEMU_FR_PHASE_SUPERSEDE,
+                       FEMU_FR_OUT_SUPERSEDED);
+    femu_wb_slot_put(&w->t, s);
+    qemu_spin_unlock(&w->lock);
+    if (!req) {
+        return;
+    }
+    rec.sqid = req->sq ? req->sq->sqid : 0;
+    rec.cid = le16_to_cpu(req->cmd.cid);
+    rec.nsid = nsid;
+    rec.slba = page_slba;
+    rec.nlb = 0;
+    femu_fsched_put(n, &rec);
+}
+
+/*
+ * Room for one more failure in the table of @w, which the caller locks.
+ * The allocation runs with the lock dropped, so the lock may be released
+ * and taken again before this returns.
+ */
+static void femu_wbf_room(struct FemuWbf *w)
+{
+    while (w->t.nr == w->t.cap) {
+        uint32_t cap = MAX(16, w->t.cap * 2);
+        FemuWbFail *a;
+
+        qemu_spin_unlock(&w->lock);
+        a = g_new(FemuWbFail, cap);
+        qemu_spin_lock(&w->lock);
+        if (w->t.cap < cap) {
+            FemuWbFail *old = w->t.fail;
+
+            /* the first growth has no old table to copy */
+            if (w->t.nr) {
+                memcpy(a, old, w->t.nr * sizeof(*a));
+            }
+            w->t.fail = a;
+            w->t.cap = cap;
+            a = old;
+        }
+        qemu_spin_unlock(&w->lock);
+        g_free(a);
+        qemu_spin_lock(&w->lock);
+    }
+}
+
+/**
+ * femu_wbf_fail - a write-back met the mark of slot @fslot
+ * @n: the controller
+ * @fslot: the slot, from 1; the failure takes the reference of the mark
+ * @ns: the namespace of the page
+ * @page_slba: the first block of the page
+ * @lbas: the blocks of the page
+ * @mask: bit i for block @page_slba + i that the failure lost, i < 64
+ * @lost: the blocks the failure lost
+ * @first_lost: the first lost block, or @page_slba for none
+ *
+ * Writes the fail record and an Error Information entry with SQID, CID
+ * and location FFFFh, for every failure. The completion that reports it
+ * adds an entry of its own. aer=on then queues an AER, except at a
+ * power cut, so the host always finds the entry the AER names.
+ */
+void femu_wbf_fail(FemuCtrl *n, uint16_t fslot, NvmeNamespace *ns,
+                   uint64_t page_slba, uint32_t lbas, uint64_t mask,
+                   uint32_t lost, uint64_t first_lost)
+{
+    struct FemuWbf *w = n->wbf;
+    int s = fslot - 1;
+    FemuWbFail fail = {
+        .slot = s,
+        .nsid = ns->id,
+        .lbas = lbas,
+        .page_slba = page_slba,
+        .found = femu_wbf_cur,
+    };
+    FemuWbSlot *slot = &w->t.slot[s];
+    FemuFrRec rec;
+    bool aer;
+
+    qemu_spin_lock(&w->lock);
+    rec = femu_wbf_rec(n, slot, s, FEMU_FR_PHASE_FAIL,
+                       slot->mode == FEMU_FS_WB_UNC ? FEMU_FR_OUT_UNC :
+                                                      FEMU_FR_OUT_OLD);
+    fail.report = slot->report;
+    aer = slot->aer && !w->cutting;
+    qemu_spin_unlock(&w->lock);
+    rec.found = femu_wbf_cur ? FEMU_FR_FOUND_CMD : FEMU_FR_FOUND_BG;
+    rec.slba = page_slba;
+    rec.nlb = lbas;
+    rec.lba_mask = mask;
+    rec.lost = lost;
+    rec.status = NVME_WRITE_FAULT;
+    fail.fail_id = femu_fsched_put(n, &rec);
+    qemu_spin_lock(&w->lock);
+    femu_wbf_room(w);
+    femu_wb_fail_add(&w->t, &fail);
+    qemu_spin_unlock(&w->lock);
+    nvme_set_error_info(n, 0xffff, 0xffff, NVME_WRITE_FAULT, 0xffff,
+                        first_lost, ns->id, fslot, 0, ns->csi);
+    if (aer) {
+        qatomic_inc(&n->fault_wbf_aer);
+        nvme_enqueue_event(n, NVME_AER_TYPE_ERROR,
+                           NVME_AER_INFO_ERR_TRANS_INTERNAL_ERR,
+                           NVME_LOG_ERROR_INFO);
+    }
+}
+
+/**
+ * femu_wbf_pending - whether a drain of @nsid fails
+ * @n: the controller, with a wb-fail line
+ * @nsid: the namespace, or 0 for all
+ */
+bool femu_wbf_pending(FemuCtrl *n, uint32_t nsid)
+{
+    struct FemuWbf *w = n->wbf;
+    bool pending;
+
+    qemu_spin_lock(&w->lock);
+    pending = femu_wb_pending(&w->t, nsid);
+    qemu_spin_unlock(&w->lock);
+    return pending;
+}
+
+/*
+ * A draining completion reports what is pending for @nsid. One report
+ * record per failure, and one Error Information entry for the command.
+ * The records are built under the lock and written after it.
+ * Returns the status, or 0 for nothing.
+ */
+static uint16_t femu_wbf_collect(FemuCtrl *n, uint32_t nsid, uint16_t sqid,
+                                 uint16_t cid, uint8_t opc, bool admin,
+                                 uint64_t *held_tok)
+{
+    struct FemuWbf *w = n->wbf;
+    uint64_t tok = qatomic_fetch_inc(&w->seq) + 1;
+    g_autofree FemuFrRec *recs = NULL;
+    uint32_t room = 0;
+    uint32_t nr = 0;
+    uint64_t lba = 0;
+    uint32_t fnsid = 0;
+    uint16_t fslot = 0;
+    uint16_t status;
+    uint8_t csi = 0;
+    bool held;
+
+    *held_tok = 0;
+    qemu_spin_lock(&w->lock);
+    /* one record per failure at most; allocate with the lock dropped */
+    while (room < w->t.nr) {
+        room = w->t.nr;
+        qemu_spin_unlock(&w->lock);
+        g_free(recs);
+        recs = g_new(FemuFrRec, room);
+        qemu_spin_lock(&w->lock);
+    }
+    status = femu_wb_collect(&w->t, nsid, tok, admin, &held);
+    for (uint32_t i = 0; status && i < w->t.nr; i++) {
+        const FemuWbFail *x = &w->t.fail[i];
+        FemuFrRec *rec = &recs[nr];
+
+        if (x->tok != tok) {
+            continue;
+        }
+        *rec = femu_wbf_rec(n, &w->t.slot[x->slot], x->slot,
+                            FEMU_FR_PHASE_REPORT, FEMU_FR_OUT_REPORTED);
+        rec->cause = x->fail_id;
+        rec->sqid = sqid;
+        rec->cid = cid;
+        rec->opc = opc;
+        rec->nsid = x->nsid;
+        rec->slba = x->page_slba;
+        rec->nlb = x->lbas;
+        rec->status = status;
+        rec->found = femu_wbf_cur && x->found == femu_wbf_cur ?
+                     FEMU_FR_FOUND_SELF : FEMU_FR_FOUND_PENDING;
+        if (!nr) {
+            lba = x->page_slba;
+            fnsid = x->nsid;
+            fslot = x->slot + 1;
+        }
+        nr++;
+    }
+    qemu_spin_unlock(&w->lock);
+    for (uint32_t i = 0; i < nr; i++) {
+        femu_fsched_put(n, &recs[i]);
+    }
+    if (!status) {
+        return 0;
+    }
+    if (fnsid && nvme_ns(n, fnsid)) {
+        csi = nvme_ns(n, fnsid)->csi;
+    }
+    /* an Admin entry keeps the namespace, block and slot too */
+    nvme_set_error_info(n, sqid, cpu_to_le16(cid), status & ~NVME_DNR,
+                        0xffff, lba, fnsid, fslot, opc, csi);
+    *held_tok = held ? tok : 0;
+    return status;
+}
+
+/* FTL thread: a draining I/O completion reports */
+static void femu_wbf_report_io(FemuCtrl *n, NvmeRequest *req, bool lied)
+{
+    uint8_t opc = req->cmd.opcode;
+    uint32_t nsid = le32_to_cpu(req->cmd.nsid);
+    uint16_t sc = req->status & ~NVME_DNR;
+    uint16_t status;
+    uint64_t tok = 0;
+
+    /* a lying Flush drains nothing; another command must have drained */
+    if (opc == NVME_CMD_FLUSH ? lied : !n->wbf_drained) {
+        return;
+    }
+    /* a command that failed for its own reason reports nothing */
+    if (sc != NVME_SUCCESS && sc != NVME_CAP_EXCEEDED &&
+        sc != NVME_WRITE_FAULT) {
+        return;
+    }
+    if (opc == NVME_CMD_FLUSH && nsid == NVME_NSID_BROADCAST) {
+        nsid = 0;
+    }
+    status = femu_wbf_collect(n, nsid, req->sq ? req->sq->sqid : 0,
+                              le16_to_cpu(req->cmd.cid), opc, false, &tok);
+    if (status) {
+        req->status = status;
+        req->wbf_tok = tok;
+    }
+}
+
+/**
+ * femu_wbf_posted - the CQE of @req reached the host
+ * @n: the controller
+ * @req: the completion, which holds report=once failures
+ */
+void femu_wbf_posted(FemuCtrl *n, NvmeRequest *req)
+{
+    struct FemuWbf *w = n->wbf;
+
+    qemu_spin_lock(&w->lock);
+    femu_wb_publish(&w->t, req->wbf_tok);
+    qemu_spin_unlock(&w->lock);
+    req->wbf_tok = 0;
+}
+
+/**
+ * femu_wbf_dropped - the CQE of @req will never post
+ * @n: the controller
+ * @req: the completion, which holds report=once failures
+ */
+void femu_wbf_dropped(FemuCtrl *n, NvmeRequest *req)
+{
+    struct FemuWbf *w = n->wbf;
+
+    /* unplug frees the schedule before the queues */
+    if (!w) {
+        req->wbf_tok = 0;
+        return;
+    }
+    qemu_spin_lock(&w->lock);
+    femu_wb_unreserve(&w->t, req->wbf_tok);
+    qemu_spin_unlock(&w->lock);
+    req->wbf_tok = 0;
+}
+
+/* an Admin drain of the namespace in CDW1 alone */
+static bool femu_wbf_scoped(const NvmeCmd *cmd)
+{
+    if (cmd->opcode == NVME_ADM_CMD_FORMAT_NVM) {
+        return true;
+    }
+    return cmd->opcode == NVME_ADM_CMD_SET_FEATURES &&
+           (le32_to_cpu(cmd->cdw10) & 0xff) == NVME_NS_WRITE_PROTECT;
+}
+
+/**
+ * femu_wbf_admin_begin - an Admin command starts on the main loop
+ * @n: the controller, with a wb-fail line
+ */
+void femu_wbf_admin_begin(FemuCtrl *n)
+{
+    femu_wbf_cur = qatomic_fetch_inc(&n->wbf->seq) + 1;
+}
+
+/**
+ * femu_wbf_admin_end - the status of an Admin command, after wb-fail
+ * @n: the controller, with a wb-fail line
+ * @cmd: the command
+ * @status: what the command returned
+ *
+ * A drain that met a failure returns Write Fault. An Admin command says
+ * Internal Error instead, with DNR under report=sticky. Its CQE
+ * posts now, so report=once is spent at once.
+ *
+ * Returns the status to post.
+ */
+uint16_t femu_wbf_admin_end(FemuCtrl *n, const NvmeCmd *cmd, uint16_t status)
+{
+    struct FemuWbf *w = n->wbf;
+    uint32_t nsid = le32_to_cpu(cmd->nsid);
+    uint16_t got;
+    uint64_t tok = 0;
+
+    if ((status & ~NVME_DNR) == NVME_WRITE_FAULT) {
+        /*
+         * Format and Write Protect drain the namespace they name; the
+         * rest, and FFFFFFFFh, drain all of them.
+         */
+        if (!femu_wbf_scoped(cmd) || nsid == NVME_NSID_BROADCAST) {
+            nsid = 0;
+        }
+        got = femu_wbf_collect(n, nsid, 0, le16_to_cpu(cmd->cid),
+                               cmd->opcode, true, &tok);
+        status = got ? got : NVME_INTERNAL_DEV_ERROR;
+        if (got && tok) {
+            qemu_spin_lock(&w->lock);
+            femu_wb_publish(&w->t, tok);
+            qemu_spin_unlock(&w->lock);
+        }
+    }
+    femu_wbf_cur = 0;
+    return status;
+}
+
+/**
+ * femu_wbf_reset - a Controller Reset ends every report
+ * @n: the controller, with a wb-fail line
+ *
+ * The marks stay: their pages are still in the buffer.
+ */
+void femu_wbf_reset(FemuCtrl *n)
+{
+    struct FemuWbf *w = n->wbf;
+
+    qemu_spin_lock(&w->lock);
+    femu_wb_clear(&w->t, false);
+    qemu_spin_unlock(&w->lock);
+}
+
+/**
+ * femu_wbf_cut - a power cut starts or ends
+ * @n: the controller, with a wb-fail line
+ * @start: true before the PLP write-back, false after the rollback
+ *
+ * At the end no host is left to tell: every slot and report goes.
+ */
+void femu_wbf_cut(FemuCtrl *n, bool start)
+{
+    struct FemuWbf *w = n->wbf;
+
+    qemu_spin_lock(&w->lock);
+    w->cutting = start;
+    if (!start) {
+        femu_wb_clear(&w->t, true);
+    }
+    qemu_spin_unlock(&w->lock);
+}
+
 /*
  * The effect of line @i, which won its group on @req, seen as @v; @id
- * is its select record. Only the lies are modelled: each other case
- * names what it will do, and its selection moves the counters alone.
- * Returns true when the FTL step must call femu_fsched_lie() after it.
+ * is its select record. The lies and wb-fail are modelled: each other
+ * case names what it will do, and its selection moves the counters
+ * alone. Returns true when the FTL step must call femu_fsched_post().
  */
 static bool femu_fsched_act(FemuCtrl *n, NvmeRequest *req, int i,
                             const FemuFsView *v, uint64_t id)
@@ -941,11 +1547,13 @@ static bool femu_fsched_act(FemuCtrl *n, NvmeRequest *req, int i,
         f->lie_cause = id;
         f->lie_view = *v;
         return true;
+    case FEMU_FS_ACT_WB_FAIL:
+        femu_wbf_select(n, req, i, v, id);
+        return true;
     case FEMU_FS_ACT_POWER_LOSS:    /* not modelled yet: a cut at pre */
     case FEMU_FS_ACT_CFS:           /* not modelled yet: CSTS.CFS at pre */
     case FEMU_FS_ACT_HANG:          /* not modelled yet: no CQE */
     case FEMU_FS_ACT_WRITE_FAIL:    /* not modelled yet: Write Fault */
-    case FEMU_FS_ACT_WB_FAIL:       /* not modelled yet: write-back error */
     case FEMU_FS_ACT_READ_UNC:      /* not modelled yet: Unrecovered Read */
     case FEMU_FS_ACT_SDC:           /* not modelled yet: sdc override */
     case FEMU_FS_ACT_DELAY:         /* not modelled yet: a later CQE */
@@ -969,10 +1577,7 @@ static uint8_t femu_fsched_outcome(uint8_t out)
     }
 }
 
-/*
- * One select record per line that selected @req. The FTL thread is the
- * only producer, so the ring needs no lock here. Returns its id.
- */
+/* one select record per line that selected @req; returns its id */
 static uint64_t femu_fsched_record(FemuCtrl *n, NvmeRequest *req,
                                    const FemuFsView *v, int i)
 {
@@ -995,26 +1600,17 @@ static uint64_t femu_fsched_record(FemuCtrl *n, NvmeRequest *req,
         .opc = v->opc,
         .fua = v->fua,
     };
-    uint64_t id = femu_fr_put(&f->ring, &rec);
 
-    /* a no-op while the writer is already awake, or after it ended */
-    if (f->has_log) {
-        qemu_event_set(&f->log_ev);
-    }
-    return id;
+    return femu_fsched_put(n, &rec);
 }
 
-/**
- * femu_fsched_lie - the apply record of a lie, after the FTL ran it
- * @n: the controller, with command lines
- * @req: the command that femu_fsched_step() gave a lie
- *
- * Runs on the FTL thread, in the step of @req, after the FTL call. It
- * marks the buffered pages that the lie left volatile and writes one
- * record whose cause is the select record: "done" with the pages, or
- * "no-effect" with the reason.
+/*
+ * The apply record of a lie, after the FTL ran it. It marks the buffered
+ * pages that the lie left volatile and writes one record whose cause is
+ * the select record: "done" with the pages, or "no-effect" with the
+ * reason.
  */
-void femu_fsched_lie(FemuCtrl *n, NvmeRequest *req)
+static void femu_fsched_lie(FemuCtrl *n, NvmeRequest *req)
 {
     struct FemuFsched *f = n->fsched;
     const FemuFsLine *l = &f->l[f->lie_line];
@@ -1048,26 +1644,45 @@ void femu_fsched_lie(FemuCtrl *n, NvmeRequest *req)
         .pages = pages,
     };
 
-    femu_fr_put(&f->ring, &rec);
-    if (f->has_log) {
-        qemu_event_set(&f->log_ev);
-    }
+    femu_fsched_put(n, &rec);
 }
 
 /**
- * femu_fsched_step - match one command against the command lines
+ * femu_fsched_post - the FTL ran a command that femu_fsched_step() saw
  * @n: the controller, with command lines
- * @req: the request just taken from a to_ftl ring, not yet run
+ * @req: the command
+ * @report: a wb-fail failure may fail @req; false for a fused pair
  *
- * Runs on the FTL thread only. The view comes from the SQE copy and the
- * namespace, never from fields the FTL or nvme_power_io() fill later. A
- * command outside the matchable set, or one that fails the view checks,
- * counts for no line. Each command counts as one step, matched or not.
- *
- * Returns true when a lie selected @req: the caller then runs
- * femu_fsched_lie() right after the FTL call.
+ * Runs on the FTL thread, in the step of @req, after the FTL call and
+ * before the CQE. It writes the apply record of a lie or a wb-fail, then
+ * lets a draining command report a failed write-back.
  */
-bool femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
+void femu_fsched_post(FemuCtrl *n, NvmeRequest *req, bool report)
+{
+    bool lied = req->fs_lie == FEMU_FS_ACT_FLUSH_LIE;
+
+    if (req->fs_lie) {
+        femu_fsched_lie(n, req);
+    }
+    if (n->wbf) {
+        if (n->fsched->wbf_sel) {
+            femu_wbf_apply(n, req);
+        }
+        if (report) {
+            femu_wbf_report_io(n, req, lied);
+        }
+        femu_wbf_cur = 0;
+    }
+}
+
+/*
+ * Match @req against the command lines. The view comes from the SQE copy
+ * and the namespace, never from fields the FTL or nvme_power_io() fill
+ * later. A command outside the matchable set, or one that fails the view
+ * checks, counts for no line. Each command counts as one step, matched
+ * or not. Returns true when a line needs femu_fsched_post().
+ */
+static bool femu_fsched_match(FemuCtrl *n, NvmeRequest *req)
 {
     struct FemuFsched *f = n->fsched;
     const NvmeRwCmd *rw = (const NvmeRwCmd *)&req->cmd;
@@ -1150,6 +1765,29 @@ bool femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
         }
     }
     return lie;
+}
+
+/**
+ * femu_fsched_step - match one command against the command lines
+ * @n: the controller, with command lines
+ * @req: the request just taken from a to_ftl ring, not yet run
+ *
+ * Runs on the FTL thread only. With a wb-fail line every command is a
+ * possible drain, so each step gets a stamp and a femu_fsched_post().
+ *
+ * Returns true when the caller must run femu_fsched_post() right after
+ * the FTL call.
+ */
+bool femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
+{
+    bool post = femu_fsched_match(n, req);
+
+    if (unlikely(n->wbf)) {
+        n->wbf_drained = false;
+        femu_wbf_cur = qatomic_fetch_inc(&n->wbf->seq) + 1;
+        return true;
+    }
+    return post;
 }
 
 /*
@@ -1284,6 +1922,9 @@ void femu_events_add_test_props(Object *obj)
     /* buffered pages with the lie mark that power cuts rolled back */
     object_property_add_uint64_ptr(obj, "x-fault-lie-lost",
                                    &n->fault_lie_lost, OBJ_PROP_FLAG_READ);
+    /* AERs that wb-fail queued: a host reset can drop them unseen */
+    object_property_add_uint64_ptr(obj, "x-fault-wbf-aer",
+                                   &n->fault_wbf_aer, OBJ_PROP_FLAG_READ);
     object_property_add(obj, "x-fault-draw", "uint64",
                         femu_fsched_test_draw_get, femu_fsched_test_draw_set,
                         NULL, NULL);
@@ -1347,6 +1988,23 @@ static void femu_fsched_info(FemuCtrl *n, FemuEvents *info)
             } else {
                 e->has_lie_pages = true;
                 e->lie_pages = r->pages;
+            }
+        }
+        if (r->act == FEMU_FS_ACT_WB_FAIL && r->fslot) {
+            e->has_slot = true;
+            e->slot = r->fslot;
+            if (r->phase == FEMU_FR_PHASE_APPLY) {
+                e->has_pages = true;
+                e->pages = r->pages;
+            }
+            if (r->phase == FEMU_FR_PHASE_FAIL) {
+                e->has_lba_mask = true;
+                e->lba_mask = r->lba_mask;
+                e->has_lost = true;
+                e->lost = r->lost;
+            }
+            if (r->found) {
+                e->found = g_strdup(femu_fr_name_found(r->found));
             }
         }
         QAPI_LIST_APPEND(tail, e);

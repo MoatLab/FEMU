@@ -143,9 +143,42 @@ int ssd_buffer_batch(struct ssd *ssd)
     return batch > 0 ? batch : 1;
 }
 
+/*
+ * The namespace and first block of page @lpn. Pages split no namespace,
+ * since a namespace starts on a page.
+ */
+static NvmeNamespace *ssd_lpn_ns(struct ssd *ssd, uint64_t lpn);
+
+static uint64_t buffer_page_slba(struct ssd *ssd, NvmeNamespace *ns,
+                                 uint64_t lpn)
+{
+    return (lpn * ssd_page_size(ssd) - ns->backend_offset) >> ns->lbaf.lbads;
+}
+
+/*
+ * events_file wb-fail: page @entry no longer holds the marked version.
+ * With @req, a write of the whole page replaced it before a write-back,
+ * so nothing failed: the slot records the supersession. Otherwise the
+ * host deallocated it, or a cut dropped it.
+ */
+static void buffer_wbf_unmark(struct ssd *ssd, struct buffer_entry *entry,
+                              NvmeRequest *req)
+{
+    NvmeNamespace *ns = ssd_lpn_ns(ssd, entry->lpn);
+    uint16_t fslot = entry->wbf;
+
+    entry->wbf = 0;
+    ssd->wbf_marks--;
+    femu_wbf_unmark(ssd->n, fslot, req, ns->id,
+                    buffer_page_slba(ssd, ns, entry->lpn));
+}
+
 /* free a buffer entry once its page no longer needs the buffer */
 static void buffer_remove(struct ssd *ssd, struct buffer_entry *entry)
 {
+    if (unlikely(entry->wbf)) {
+        buffer_wbf_unmark(ssd, entry, NULL);
+    }
     QTAILQ_REMOVE(&ssd->write_buffer, entry, b_entry);
     g_tree_remove(ssd->wb_tree, entry);
     g_free(entry->undo);
@@ -262,6 +295,7 @@ void ssd_free_write_buffer(struct ssd *ssd)
         g_free(entry);
     }
     ssd->write_buffer_cnt = 0;
+    ssd->wbf_marks = 0;
     if (ssd->wb_tree) {
         g_tree_destroy(ssd->wb_tree);
         ssd->wb_tree = NULL;
@@ -422,6 +456,92 @@ static void buffer_write_data(struct ssd *ssd, NvmeRequest *req, uint64_t lpn,
     }
 }
 
+/*
+ * events_file wb-fail: a write-back met the marked page @entry. It fails
+ * as a program that never ran: the page gets back the bytes and block
+ * states of its undo image, which the media still holds, and leaves the
+ * buffer. A block whose buffered version that loses is a lost block:
+ * mode=unc makes it read as an error, mode=old leaves the old data. A
+ * block no buffered write changed keeps its data.
+ */
+static void buffer_wbf_fail(struct ssd *ssd, struct buffer_entry *entry)
+{
+    NvmeNamespace *ns = ssd_lpn_ns(ssd, entry->lpn);
+    uint8_t shift = ns->lbaf.lbads;
+    uint32_t lbas = ssd_page_size(ssd) >> shift;
+    uint64_t slba = buffer_page_slba(ssd, ns, entry->lpn);
+    uint16_t fslot = entry->wbf;
+    bool unc = femu_wbf_mode(ssd->n, fslot) == FEMU_FS_WB_UNC;
+    g_autofree uint8_t *now = NULL;
+    g_autofree uint8_t *state = NULL;
+    uint64_t first = slba;
+    uint64_t mask = 0;
+    uint32_t lost = 0;
+
+    entry->wbf = 0;
+    ssd->wbf_marks--;
+    /* the command that met it drained the buffer, whatever path it took */
+    ssd->n->wbf_drained = true;
+    if (entry->undo) {
+        ssd_page_snapshot(ssd, ns, entry->lpn, &now, &state);
+        ssd_page_restore(ssd, ns, entry->lpn, entry->undo, entry->lba_state);
+        for (uint32_t i = 0; i < lbas; i++) {
+            if (!femu_wb_lba_lost(now, entry->undo, state, entry->lba_state,
+                                  i, 1u << shift)) {
+                continue;
+            }
+            if (!lost++) {
+                first = slba + i;
+            }
+            if (i < 64) {
+                mask |= 1ull << i;
+            }
+            if (unc) {
+                nvme_mark_uncorrectable(ns, slba + i, 1);
+            }
+        }
+    }
+    /* a version a lie called durable is gone, as at a cut */
+    if (entry->lie && entry->undo) {
+        ssd->n->fault_lie_lost++;
+    }
+    /* the failure takes the reference the mark held */
+    femu_wbf_fail(ssd->n, fslot, ns, slba, lbas, mask, lost, first);
+    buffer_remove(ssd, entry);
+}
+
+/*
+ * events_file wb-fail, as a Write puts page @entry in the buffer. A write
+ * of the whole page replaces a marked version, which then never fails;
+ * a partial write leaves the failed bytes in the page and keeps the
+ * mark. A Write that a wb-fail line selected marks each page it buffers,
+ * so a write-back in this same command meets the mark too.
+ */
+static void buffer_wbf_mark(struct ssd *ssd, NvmeRequest *req,
+                            struct buffer_entry *entry)
+{
+    NvmeNamespace *ns = req->ns;
+    uint8_t shift = ns->lbaf.lbads;
+    uint32_t page_size = ssd_page_size(ssd);
+    uint64_t start = entry->lpn * page_size - ns->backend_offset;
+
+    if (entry->wbf && (req->slba << shift) <= start &&
+        ((req->slba + req->nlb) << shift) >= start + page_size) {
+        buffer_wbf_unmark(ssd, entry, req);
+    }
+    if (!req->fs_wbf) {
+        return;
+    }
+    /* a page carries one mark: the older one keeps it */
+    if (entry->wbf) {
+        femu_wbf_mark(ssd->n, req->fs_wbf, false);
+        return;
+    }
+    entry->wbf = req->fs_wbf;
+    ssd->wbf_marks++;
+    femu_wbf_mark(ssd->n, req->fs_wbf, true);
+}
+
 /* The caller is the FTL thread or an admin handler with processing paused. */
 uint16_t bbssd_drain_namespace(NvmeNamespace *ns, uint64_t stime, int64_t *lat)
 {
@@ -433,6 +553,10 @@ uint16_t bbssd_drain_namespace(NvmeNamespace *ns, uint64_t stime, int64_t *lat)
     elapsed = ssd_buffer_destage(ns->ssd, 0, stime);
     if (lat) {
         *lat = MAX(*lat, elapsed);
+    }
+    /* wb-fail: no success after a loss, and Write Fault wins */
+    if (unlikely(ns->ctrl->wbf) && femu_wbf_pending(ns->ctrl, ns->id)) {
+        return NVME_WRITE_FAULT;
     }
     return ns->ssd->write_buffer_cnt ? NVME_CAP_EXCEEDED | NVME_DNR :
                                       NVME_SUCCESS;
@@ -466,6 +590,10 @@ uint16_t bbssd_flush_all(FemuCtrl *n)
                 status = NVME_CAP_EXCEEDED | NVME_DNR;
             }
         }
+    }
+    /* wb-fail: no success after a loss, and Write Fault wins */
+    if (unlikely(n->wbf) && femu_wbf_pending(n, 0)) {
+        status = NVME_WRITE_FAULT;
     }
     return status;
 }
@@ -632,6 +760,31 @@ uint8_t bbssd_lie_apply(NvmeNamespace *ns, NvmeRequest *req, uint8_t act,
     }
     *pages = s.pages;
     return why;
+}
+
+/**
+ * bbssd_wbf_facts - what the FTL did with a Write that wb-fail selected
+ * @ns: the namespace of the Write, or NULL
+ * @req: the Write, which the FTL has run
+ * @slba: its first block, as the command line saw it
+ * @nlb: its blocks
+ * @atomic: set when the Write was one awupf transaction off the buffer
+ *
+ * Returns whether the write buffer took writes.
+ */
+bool bbssd_wbf_facts(NvmeNamespace *ns, NvmeRequest *req, uint64_t slba,
+                     uint32_t nlb, bool *atomic)
+{
+    uint64_t start_lpn;
+    uint64_t end_lpn;
+
+    *atomic = false;
+    if (!ns || !ns->ssd) {
+        return false;
+    }
+    ssd_lpn_range(ns->ssd, req, slba, nlb, &start_lpn, &end_lpn);
+    *atomic = ssd_write_txn(ns->ssd, req, nlb, start_lpn, end_lpn);
+    return ssd_buffer_enabled(ns->ssd);
 }
 
 /*
@@ -1186,6 +1339,10 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
     if (ssd->fdp_enabled) {
         return fdp_buffer_destage(ssd, budget, stime);
     }
+    /* wb-fail: the command of this FTL step drains the buffer */
+    if (unlikely(ssd->n->wbf)) {
+        ssd->n->wbf_drained = true;
+    }
 
     while (budget <= 0 || done < budget) {
         /* no line left: nothing can be placed */
@@ -1228,6 +1385,12 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
         victim = QTAILQ_FIRST(&ssd->write_buffer);
         if (!victim) {
             break;
+        }
+        /* events_file wb-fail: the program of a marked page fails */
+        if (unlikely(victim->wbf)) {
+            buffer_wbf_fail(ssd, victim);
+            done++;
+            continue;
         }
         /*
          * durable_at_done: no program without room for its generation,
@@ -1697,13 +1860,17 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
                 }
             }
 
+            struct buffer_entry *entry;
             bool held;
 
-            ssd_buffer_insert(ssd, lpn, &held);
+            entry = ssd_buffer_insert(ssd, lpn, &held);
             if (held) {
                 ssd->sp.write_hit_cnt++;
             }
             buffer_write_data(ssd, req, lpn, true);
+            if (unlikely(ssd->wbf_marks || req->fs_wbf)) {
+                buffer_wbf_mark(ssd, req, entry);
+            }
         }
 
         /* accepting into DRAM is not free, even though it is not a program */
@@ -1727,6 +1894,23 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
      * owed. A disabled cache then writes back the rest.
      */
     drain = ssd->write_buffer_cnt && !ssd_buffer_enabled(ssd);
+
+    /*
+     * events_file wb-fail: a direct program never takes a marked page
+     * silently. The page is written back first, through the same failure
+     * as any write-back, so this command is the one that drained it.
+     * Before the snapshots of a transaction, which must see it failed.
+     */
+    if (unlikely(ssd->wbf_marks)) {
+        for (lpn = start_lpn; lpn <= end_lpn; lpn++) {
+            struct buffer_entry *entry = ssd_buffer_lookup(ssd, lpn);
+
+            if (entry && entry->wbf) {
+                buffer_wbf_fail(ssd, entry);
+            }
+        }
+        drain = ssd->write_buffer_cnt && !ssd_buffer_enabled(ssd);
+    }
 
     /* a partial indirection unit: read and rewrite the rest of it */
     if (unlikely(spp->iu_pages > 1)) {

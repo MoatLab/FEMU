@@ -1161,6 +1161,25 @@ void femu_test_fsched_fua_lie(void *obj, void *data,
 void femu_test_fsched_lie_reasons(void *obj, void *data,
                                   QGuestAllocator *alloc);
 void femu_test_fsched_fused(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_flush(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_write(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_wzero(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_dsm(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_copy(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_wunc(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_vwc(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_wp(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_format(void *obj, void *data,
+                                 QGuestAllocator *alloc);
+void femu_test_fsched_wbf_sanitize(void *obj, void *data,
+                                   QGuestAllocator *alloc);
+void femu_test_fsched_wbf_bg(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_hold(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_fua(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_aer(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_ns(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_wbf_slots(void *obj, void *data,
+                                QGuestAllocator *alloc);
 void femu_test_ready_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_recovery_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ready_sysreset(void *obj, void *data, QGuestAllocator *alloc);

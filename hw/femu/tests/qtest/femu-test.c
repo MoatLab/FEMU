@@ -3088,6 +3088,28 @@ static void femu_register_nodes(void)
     qos_add_test("fsched-lie-reasons", "femu", femu_test_fsched_lie_reasons,
                  NULL);
     qos_add_test("fsched-fused", "femu", femu_test_fsched_fused, NULL);
+    qos_add_test("fsched-wbf-flush", "femu", femu_test_fsched_wbf_flush,
+                 NULL);
+    qos_add_test("fsched-wbf-write", "femu", femu_test_fsched_wbf_write,
+                 NULL);
+    qos_add_test("fsched-wbf-wzero", "femu", femu_test_fsched_wbf_wzero,
+                 NULL);
+    qos_add_test("fsched-wbf-dsm", "femu", femu_test_fsched_wbf_dsm, NULL);
+    qos_add_test("fsched-wbf-copy", "femu", femu_test_fsched_wbf_copy, NULL);
+    qos_add_test("fsched-wbf-wunc", "femu", femu_test_fsched_wbf_wunc, NULL);
+    qos_add_test("fsched-wbf-vwc", "femu", femu_test_fsched_wbf_vwc, NULL);
+    qos_add_test("fsched-wbf-wp", "femu", femu_test_fsched_wbf_wp, NULL);
+    qos_add_test("fsched-wbf-format", "femu", femu_test_fsched_wbf_format,
+                 NULL);
+    qos_add_test("fsched-wbf-sanitize", "femu",
+                 femu_test_fsched_wbf_sanitize, NULL);
+    qos_add_test("fsched-wbf-bg", "femu", femu_test_fsched_wbf_bg, NULL);
+    qos_add_test("fsched-wbf-hold", "femu", femu_test_fsched_wbf_hold, NULL);
+    qos_add_test("fsched-wbf-fua", "femu", femu_test_fsched_wbf_fua, NULL);
+    qos_add_test("fsched-wbf-aer", "femu", femu_test_fsched_wbf_aer, NULL);
+    qos_add_test("fsched-wbf-ns", "femu", femu_test_fsched_wbf_ns, NULL);
+    qos_add_test("fsched-wbf-slots", "femu", femu_test_fsched_wbf_slots,
+                 NULL);
     qos_add_test("io-trace", "femu", femu_test_io_trace, NULL);
     qos_add_test("io-trace-append", "femu", femu_test_io_trace_append, NULL);
     qos_add_test("mode-names", "femu", femu_test_mode_names,

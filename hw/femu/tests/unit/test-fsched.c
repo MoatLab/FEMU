@@ -1107,6 +1107,255 @@ static void test_ring_threads(void)
     CHECK(r.overwritten == STRESS_PUTS - 16);
 }
 
+/*
+ * wb-fail fault slots: 256 at most, freed by the last reference. The
+ * slot the 257th selection asks for is refused, and a freed slot comes
+ * back zeroed.
+ */
+static void test_wb_slots(void)
+{
+    static FemuWbTab t;
+    bool ok = true;
+    int s;
+
+    memset(&t, 0, sizeof(t));
+    for (int i = 0; i < FEMU_WB_SLOTS; i++) {
+        ok = ok && femu_wb_slot_get(&t) == i;
+    }
+    CHECK(ok);
+    CHECK(femu_wb_slot_get(&t) == -1);
+    /* a mark adds a reference: one put keeps the slot */
+    t.slot[7].refs++;
+    t.slot[7].marked = 3;
+    femu_wb_slot_put(&t, 7);
+    CHECK(femu_wb_slot_get(&t) == -1);
+    femu_wb_slot_put(&t, 7);
+    s = femu_wb_slot_get(&t);
+    CHECK(s == 7 && t.slot[7].refs == 1 && t.slot[7].marked == 0);
+    /* a put of a free or bad slot does nothing */
+    femu_wb_slot_put(&t, -1);
+    femu_wb_slot_put(&t, FEMU_WB_SLOTS);
+    t.slot[9].refs = 0;
+    femu_wb_slot_put(&t, 9);
+    CHECK(t.slot[9].refs == 0);
+}
+
+static FemuWbFail wb_fail_of(int slot, uint8_t report, uint32_t nsid,
+                             uint64_t slba)
+{
+    FemuWbFail f = {
+        .slot = slot, .report = report, .nsid = nsid, .page_slba = slba,
+        .lbas = 8, .fail_id = slba + 100,
+    };
+
+    return f;
+}
+
+static int wb_state(const FemuWbTab *t, uint64_t slba)
+{
+    for (uint32_t i = 0; i < t->nr; i++) {
+        if (t->fail[i].page_slba == slba) {
+            return t->fail[i].state;
+        }
+    }
+    return 0;
+}
+
+/*
+ * The life of a failure: pending, reserved by the completion that
+ * reports it, consumed when that CQE posts, pending again when it never
+ * does. sticky never leaves pending and sets DNR.
+ */
+static void test_wb_collect(void)
+{
+    static FemuWbTab t;
+    FemuWbFail fail[8];
+    bool held;
+    int a;
+    int b;
+
+    memset(&t, 0, sizeof(t));
+    t.fail = fail;
+    t.cap = 8;
+    a = femu_wb_slot_get(&t);
+    b = femu_wb_slot_get(&t);
+    t.slot[a].report = FEMU_FS_REPORT_ONCE;
+    t.slot[b].report = FEMU_FS_REPORT_STICKY;
+    /* each mark holds a reference; the failures take them over */
+    t.slot[a].refs += 2;
+    t.slot[b].refs += 1;
+    femu_wb_slot_put(&t, a);
+    femu_wb_slot_put(&t, b);
+
+    CHECK(!femu_wb_pending(&t, 0));
+    CHECK(femu_wb_collect(&t, 0, 1, false, &held) == 0 && !held);
+    femu_wb_fail_add(&t, &(FemuWbFail){ .slot = a, .report = 1, .nsid = 1,
+                                        .page_slba = 8, .tok = 77 });
+    CHECK(t.nr == 1 && t.fail[0].state == FEMU_WB_PENDING &&
+          t.fail[0].tok == 0);
+    t.nr = 0;
+    {
+        FemuWbFail x = wb_fail_of(a, FEMU_FS_REPORT_ONCE, 1, 8);
+
+        femu_wb_fail_add(&t, &x);
+    }
+
+    /* scope: another namespace sees nothing, 0 sees all */
+    CHECK(femu_wb_pending(&t, 1) && !femu_wb_pending(&t, 2) &&
+          femu_wb_pending(&t, 0));
+    CHECK(femu_wb_collect(&t, 2, 5, false, &held) == 0 && !held);
+
+    /* I/O: Write Fault, no DNR for once; the failure is reserved */
+    CHECK(femu_wb_collect(&t, 1, 5, false, &held) == FEMU_WB_SC_WF);
+    CHECK(held && wb_state(&t, 8) == FEMU_WB_RESERVED);
+    /* reserved: no other completion reports it */
+    CHECK(!femu_wb_pending(&t, 0));
+    CHECK(femu_wb_collect(&t, 0, 6, false, &held) == 0 && !held);
+    /* the CQE never posts: pending again, for the next drain */
+    CHECK(femu_wb_publish(&t, 6) == 0);
+    CHECK(femu_wb_unreserve(&t, 5) == 1);
+    CHECK(wb_state(&t, 8) == FEMU_WB_PENDING);
+    CHECK(femu_wb_unreserve(&t, 5) == 0);
+    /* Admin: Internal Error */
+    CHECK(femu_wb_collect(&t, 0, 7, true, &held) == FEMU_WB_SC_INTERNAL);
+    CHECK(held && femu_wb_publish(&t, 7) == 1 && t.nr == 0);
+    CHECK(!femu_wb_pending(&t, 0));
+    /* the last reference went with it */
+    CHECK(t.slot[a].refs == 1);
+
+    /* sticky: DNR, never reserved, never consumed */
+    {
+        FemuWbFail x = wb_fail_of(b, FEMU_FS_REPORT_STICKY, 2, 16);
+
+        femu_wb_fail_add(&t, &x);
+    }
+    for (uint64_t tok = 10; tok < 13; tok++) {
+        CHECK(femu_wb_collect(&t, 2, tok, false, &held) ==
+              (FEMU_WB_SC_WF | FEMU_WB_SC_DNR) && !held);
+        CHECK(femu_wb_publish(&t, tok) == 0 && t.nr == 1);
+        CHECK(t.fail[0].tok == tok);
+    }
+    CHECK(femu_wb_collect(&t, 0, 13, true, &held) ==
+          (FEMU_WB_SC_INTERNAL | FEMU_WB_SC_DNR));
+
+    /* a once next to a sticky: DNR, and the once one is held */
+    {
+        FemuWbFail x = wb_fail_of(a, FEMU_FS_REPORT_ONCE, 2, 24);
+
+        t.slot[a].refs++;
+        femu_wb_fail_add(&t, &x);
+    }
+    CHECK(femu_wb_collect(&t, 2, 20, false, &held) ==
+          (FEMU_WB_SC_WF | FEMU_WB_SC_DNR) && held);
+    CHECK(femu_wb_publish(&t, 20) == 1 && t.nr == 1 &&
+          t.fail[0].page_slba == 16);
+
+    /* reset: every failure goes, slots that marks hold stay */
+    femu_wb_clear(&t, false);
+    CHECK(t.nr == 0 && t.slot[a].refs == 1 && t.slot[b].refs == 0);
+    /* cut: the slots go too */
+    femu_wb_clear(&t, true);
+    CHECK(t.slot[a].refs == 0);
+}
+
+/* lost blocks: a byte or a state that differs from the media copy */
+static void test_wb_lost(void)
+{
+    uint8_t now[4 * 16];
+    uint8_t undo[4 * 16];
+    uint8_t st_now[4] = { 1, 1, 0, 3 };
+    uint8_t st_undo[4] = { 1, 1, 0, 1 };
+
+    memset(now, 0xa5, sizeof(now));
+    memset(undo, 0xa5, sizeof(undo));
+    now[16 + 15] ^= 1;
+    CHECK(!femu_wb_lba_lost(now, undo, st_now, st_undo, 0, 16));
+    CHECK(femu_wb_lba_lost(now, undo, st_now, st_undo, 1, 16));
+    CHECK(!femu_wb_lba_lost(now, undo, st_now, st_undo, 2, 16));
+    /* same bytes, but the buffered write made it uncorrectable */
+    CHECK(femu_wb_lba_lost(now, undo, st_now, st_undo, 3, 16));
+}
+
+/* why an apply marked nothing, first match wins */
+static void test_wb_apply_why(void)
+{
+    CHECK(femu_wb_apply_why(false, false, true, false, false, 0) ==
+          FEMU_FS_WHY_SLOTS_FULL);
+    CHECK(femu_wb_apply_why(true, false, true, false, false, 2) ==
+          FEMU_FS_WHY_NONE);
+    /* a mark is a mark, whatever the status says */
+    CHECK(femu_wb_apply_why(true, true, true, false, false, 1) ==
+          FEMU_FS_WHY_NONE);
+    CHECK(femu_wb_apply_why(true, true, true, false, false, 0) ==
+          FEMU_FS_WHY_CMD_FAILED);
+    CHECK(femu_wb_apply_why(true, false, false, false, false, 0) ==
+          FEMU_FS_WHY_NO_BUFFER);
+    CHECK(femu_wb_apply_why(true, false, true, true, false, 0) ==
+          FEMU_FS_WHY_ATOMIC);
+    CHECK(femu_wb_apply_why(true, false, true, false, true, 0) ==
+          FEMU_FS_WHY_MARKED);
+    CHECK(femu_wb_apply_why(true, false, true, false, false, 0) ==
+          FEMU_FS_WHY_DURABLE);
+}
+
+/* the JSON of each wb-fail phase */
+static void test_wb_json(void)
+{
+    FemuFrRec x = rec_of(5);
+    char buf[FEMU_FR_JSON_MAX];
+
+    CHECK(sizeof(FemuFrRec) == 80 && sizeof(FemuFrSlot) == 88);
+    x.act = FEMU_FS_ACT_WB_FAIL;
+    x.phase = FEMU_FR_PHASE_APPLY;
+    x.outcome = FEMU_FR_OUT_MARKED;
+    x.pages = 3;
+    x.fslot = 2;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"outcome\":\"marked\",\"slot\":2,\"pages\":3}\n"));
+    x.phase = FEMU_FR_PHASE_FAIL;
+    x.outcome = FEMU_FR_OUT_UNC;
+    x.found = FEMU_FR_FOUND_BG;
+    x.lba_mask = 0xf0;
+    x.lost = 4;
+    x.status = 0x280;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"phase\":\"fail\","));
+    CHECK(strstr(buf, "\"outcome\":\"unc\",\"slot\":2,\"lba_mask\":240,"
+                  "\"lost\":4,\"found\":\"background\",\"status\":640}\n"));
+    x.outcome = FEMU_FR_OUT_OLD;
+    x.found = FEMU_FR_FOUND_CMD;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"outcome\":\"old\",") &&
+          strstr(buf, "\"found\":\"command\""));
+    x.phase = FEMU_FR_PHASE_REPORT;
+    x.outcome = FEMU_FR_OUT_REPORTED;
+    x.found = FEMU_FR_FOUND_PENDING;
+    x.status = 0x4280;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"phase\":\"report\","));
+    CHECK(strstr(buf, "\"outcome\":\"reported\",\"slot\":2,"
+                  "\"found\":\"pending\",\"status\":17024}\n"));
+    x.found = FEMU_FR_FOUND_SELF;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"found\":\"self\""));
+    x.phase = FEMU_FR_PHASE_SUPERSEDE;
+    x.outcome = FEMU_FR_OUT_SUPERSEDED;
+    x.status = 0;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"phase\":\"supersede\",") &&
+          strstr(buf, "\"outcome\":\"superseded\",\"slot\":2}\n"));
+    x.outcome = FEMU_FR_OUT_NO_EFFECT;
+    x.phase = FEMU_FR_PHASE_APPLY;
+    x.why = FEMU_FS_WHY_SLOTS_FULL;
+    x.fslot = 0;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"reason\":\"slots-full\"}\n") &&
+          !strstr(buf, "slot\":"));
+    x.why = FEMU_FS_WHY_MARKED;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"reason\":\"marked\"}\n"));
+}
+
 int main(void)
 {
     test_grammar();
@@ -1128,6 +1377,11 @@ int main(void)
     test_ring_pending();
     test_ring_ends();
     test_ring_threads();
+    test_wb_slots();
+    test_wb_collect();
+    test_wb_lost();
+    test_wb_apply_why();
+    test_wb_json();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

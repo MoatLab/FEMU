@@ -1863,8 +1863,14 @@
 # @action: the action of the line
 #
 # @phase: the step of the fault: "select" when a line selects a
-#     command, "apply" when the FTL has run a command that a lie
-#     selected
+#     command, "apply" when the FTL has run a command that a lie or a
+#     wb-fail selected, "fail" when a write-back meets a wb-fail
+#     mark, "report" when a completion carries that failure,
+#     "supersede" when a write of the whole page clears a mark before
+#     a write-back.
+#     A "fail", "report" or "supersede" record names the selected
+#     Write, except for its page and, in "report", the reporting
+#     command
 #
 # @step: the commands the FTL thread took so far, this one too
 #
@@ -1883,16 +1889,22 @@
 # @nlb: its blocks, from 1; 0 for a Flush
 #
 # @outcome: "selected": the line won its group, "superseded": an
-#     earlier line of its group won, "no-effect": the line won with no
-#     effect, "done": the lie of an "apply" record took place
+#     earlier line of its group won, or a full write cleared a mark,
+#     "no-effect": the line won with no effect, "done": the lie of an
+#     "apply" record took place, "marked": wb-fail marked buffered
+#     pages, "unc" or "old": the lost blocks of a failed write-back
+#     read as Unrecovered Read Error or as their old data, "reported":
+#     a completion carries the failure
 #
 # @reason: why a "no-effect" line has none: "fua" (the original
 #     command has FUA), "pre" (a cut or cfs runs before the command),
 #     "hang" (a hang won, so no completion comes to delay), "plp"
 #     (working power loss protection keeps the buffer), "atomic" (the
 #     write ran as one awupf transaction), "no-buffer" (the write
-#     buffer takes no write), "cmd-failed" (the command failed) or
-#     "durable" (no buffered page is left volatile)
+#     buffer takes no write), "cmd-failed" (the command failed),
+#     "durable" (no buffered page is left volatile), "slots-full"
+#     (wb-fail found no free fault slot) or "marked" (each page of the
+#     write keeps an older wb-fail mark)
 #
 # @buffered-at-flush-lie: for a "done" flush-lie, the buffered pages
 #     the Flush left in the buffer; a power cut rolls them back
@@ -1903,6 +1915,20 @@
 # @status: the completion status a later record reports; absent for
 #     none
 #
+# @slot: wb-fail: the fault slot, from 1
+#
+# @pages: wb-fail "apply": the pages the write marked
+#
+# @lba-mask: wb-fail "fail": bit i for block @slba + i that the
+#     failure lost; the first 64 blocks of the page only
+#
+# @lost: wb-fail "fail": the blocks the failure lost, all of them
+#
+# @found: wb-fail "fail": "command" when a command drained the page,
+#     "background" when no command did; "report": "self" when this
+#     completion's drain met the failure, "pending" when an earlier
+#     drain did
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuFaultRecord',
@@ -1912,7 +1938,9 @@
             'sqid': 'uint16', 'cid': 'uint16', 'opc': 'uint8',
             'fua': 'bool', 'slba': 'uint64', 'nlb': 'uint32',
             'outcome': 'str', '*reason': 'str', '*status': 'uint16',
-            '*buffered-at-flush-lie': 'uint32', '*lie-pages': 'uint32' } }
+            '*buffered-at-flush-lie': 'uint32', '*lie-pages': 'uint32',
+            '*slot': 'uint16', '*pages': 'uint32', '*lba-mask': 'uint64',
+            '*lost': 'uint16', '*found': 'str' } }
 
 ##
 # @FemuIdRange:
