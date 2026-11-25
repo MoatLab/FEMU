@@ -321,6 +321,16 @@
     "kind": "static",
     "type": "str"
    },
+   "events_log": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
+   "events_max_faults": {
+    "default": 4096,
+    "kind": "static",
+    "type": "uint32"
+   },
    "extended": {
     "default": 0,
     "kind": "static",

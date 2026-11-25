@@ -729,9 +729,25 @@ char *femu_path_resolve(const char *file)
 
 typedef struct FemuPathUse {
     FemuCtrl *self;
-    const char *path;
+    const char *path;           /* NULL: match by @st only */
+    const struct stat *st;      /* NULL: match by @path only */
     bool traces_only;
 } FemuPathUse;
+
+/* @file names the file of @u: the same path, or a link to the same inode */
+static bool persist_same(const char *file, const FemuPathUse *u)
+{
+    struct stat st;
+
+    if (!file) {
+        return false;
+    }
+    if (u->path && !strcmp(file, u->path)) {
+        return true;
+    }
+    return u->st && stat(file, &st) == 0 && st.st_dev == u->st->st_dev &&
+           st.st_ino == u->st->st_ino;
+}
 
 static int persist_path_match(Object *obj, void *opaque)
 {
@@ -747,7 +763,8 @@ static int persist_path_match(Object *obj, void *opaque)
     if (persist_job_path(n, u->path)) {
         return 1;
     }
-    if (n != u->self && n->iotrace_path && !strcmp(n->iotrace_path, u->path)) {
+    if (n != u->self && (persist_same(n->iotrace_path, u) ||
+                         persist_same(n->evlog_path, u))) {
         return 1;
     }
     if (u->traces_only) {
@@ -755,18 +772,31 @@ static int persist_path_match(Object *obj, void *opaque)
     }
     persist = n->persist_file ? persist_resolve(n->persist_file, NULL) : NULL;
     pel = n->pel_file ? persist_resolve(n->pel_file, NULL) : NULL;
-    return (persist && !strcmp(persist, u->path)) ||
-           (pel && !strcmp(pel, u->path));
+    return persist_same(persist, u) || persist_same(pel, u);
 }
 
 /*
- * Whether @path is a file a femu device keeps: another device's io_trace,
- * or (unless @traces_only) any device's persist_file or pel_file, @self
- * included. Those files are saved by rename, which would replace a trace.
+ * Whether @path is a file a femu device keeps: another device's io_trace
+ * or events_log, or (unless @traces_only) any device's persist_file or
+ * pel_file, @self included. Those files are saved by rename, which would
+ * replace a trace.
  */
 bool femu_path_in_use(FemuCtrl *self, const char *path, bool traces_only)
 {
     FemuPathUse u = { .self = self, .path = path, .traces_only = traces_only };
+
+    return object_child_foreach_recursive(object_get_root(),
+                                          persist_path_match, &u);
+}
+
+/*
+ * femu_path_in_use() by inode: whether one of those files is a hard link
+ * to the file that @st describes.
+ */
+bool femu_inode_in_use(FemuCtrl *self, const struct stat *st,
+                       bool traces_only)
+{
+    FemuPathUse u = { .self = self, .st = st, .traces_only = traces_only };
 
     return object_child_foreach_recursive(object_get_root(),
                                           persist_path_match, &u);
@@ -1171,6 +1201,7 @@ short_file:
 bool femu_persist_init(FemuCtrl *n, Error **errp)
 {
     g_autofree char *pel = NULL;
+    struct stat lst;
     int fd;
     bool ok;
 
@@ -1213,6 +1244,23 @@ bool femu_persist_init(FemuCtrl *n, Error **errp)
             persist_unlock(n);
             return false;
         }
+    }
+    /* a background save renames its file over the path when it ends */
+    if (object_child_foreach_recursive(object_get_root(), persist_job_match,
+                                       n->persist_path)) {
+        error_setg(errp, "persist_file '%s' is in use by a background "
+                   "femu-save-data", n->persist_path);
+        persist_unlock(n);
+        return false;
+    }
+    /* a save by rename would replace the trace of a device made earlier */
+    if (femu_path_in_use(n, n->persist_path, true) ||
+        (stat(n->persist_path, &lst) == 0 && S_ISREG(lst.st_mode) &&
+         femu_inode_in_use(n, &lst, true))) {
+        error_setg(errp, "persist_file: '%s' is an io_trace or events_log "
+                   "of a device", n->persist_path);
+        persist_unlock(n);
+        return false;
     }
     /* a checkpoint is never saved, so its directory need not take a file */
     if (!persist_lock(n, errp) ||
@@ -1381,6 +1429,7 @@ bool femu_persist_checkpoint(FemuCtrl *n, const char *file, bool background,
 {
     g_autofree char *path = NULL;
     g_autofree char *lock = NULL;
+    struct stat st;
     int fd = -1;
     int held;
     bool absent;
@@ -1409,8 +1458,11 @@ bool femu_persist_checkpoint(FemuCtrl *n, const char *file, bool background,
         error_setg(errp, "femu-save-data: '%s' is a device's pel_file", path);
         return false;
     }
-    if (femu_path_in_use(NULL, path, true)) {
-        error_setg(errp, "femu-save-data: '%s' is a device's io_trace", path);
+    if (femu_path_in_use(NULL, path, true) ||
+        (stat(path, &st) == 0 && S_ISREG(st.st_mode) &&
+         femu_inode_in_use(NULL, &st, true))) {
+        error_setg(errp, "femu-save-data: '%s' is a device's io_trace or "
+                   "events_log", path);
         return false;
     }
     /*

@@ -538,13 +538,22 @@ bool femu_pel_init(FemuCtrl *n, Error **errp)
                    "file", n->pel_file);
         return false;
     }
-    /* a background femu-save-data renames its file over the path */
     if (n->pel_file) {
         g_autofree char *res = femu_path_resolve(n->pel_file);
+        struct stat st;
 
+        /* a background femu-save-data renames its file over the path */
         if (res && femu_save_path_busy(res)) {
             error_setg(errp, "pel_file '%s' is the file of a background "
                        "femu-save-data", n->pel_file);
+            return false;
+        }
+        /* a save by rename would replace the trace of a device made earlier */
+        if (res && (femu_path_in_use(n, res, true) ||
+                    (stat(res, &st) == 0 && S_ISREG(st.st_mode) &&
+                     femu_inode_in_use(n, &st, true)))) {
+            error_setg(errp, "pel_file: '%s' is an io_trace or events_log "
+                       "of a device", res);
             return false;
         }
     }

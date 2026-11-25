@@ -325,6 +325,7 @@ listed one by one.
 
 #### Timing and fault models
 
+- Each selection of an `events_file` command line writes a fault record: line, match, step, the command, and the outcome (`selected`, `superseded`, or `no-effect` with a reason). `query-femu-events` shows them with `step`, `last-id` and the overflow counts. `events_max_faults` sizes the ring, and `events_log` appends one JSON line per record from a thread of its own, writes the rest at exit, takes only a regular file, `/dev/null` or `/dev/full`, and refuses a file other femu files use (hard links too) or a partial last line. See [fault records](guides/measuring.md#fault-records).
 - `events_file` takes command lines on bbssd: `@<op>[,ns=N][,lba=A-B]#N <action>` selects the Nth matching Read, Write, Write Zeroes or Flush, and `%PPM~SEED` selects each match with seeded odds. Realize checks the actions and their options. No action has an effect yet: the qtest property `x-fault-sel` shows which lines selected which commands. See [command lines](guides/measuring.md#command-lines).
 - Fault insertion (`err_read_unc_ppm`, `err_write_fail_ppm`), a host link model (`pcie_bandwidth_mbps`, `pcie_prop_delay_ns`) and a controller CPU model (`fw_cpu_ns`), now also applied to NoSSD (7bfac4c3a, 2cdd55c52).
 

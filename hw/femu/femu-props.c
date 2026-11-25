@@ -149,6 +149,19 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "query-femu-events; bbssd: lines '@<op>[,ns=N][,lba=A-B]#N <action>' "
       "or '@...%PPM~SEED <action>' select commands, with no effect yet; "
       "not with csd_pause; unset (default) is off" },
+    { "events_log",
+      "with command lines in events_file: host file that gets one JSON "
+      "line per fault record, appended by a thread of its own; the ring "
+      "then keeps the records not yet written, and a full ring drops new "
+      "records and counts them; a write error stops the file, not the "
+      "run; only a regular file, /dev/null or /dev/full; refused: a file "
+      "another femu file uses, also by a hard link, and a file that ends "
+      "in a partial line; unset (default) keeps the last "
+      "events_max_faults records for query-femu-events" },
+    { "events_max_faults",
+      "slots of the fault record ring of events_file command lines, 1 to "
+      "65536 entries of 72 bytes; allocated only with a command line; "
+      "4096 (default)" },
     { "die_slow",
       "bbssd, CSD: on makes the array time of each LUN settable at run "
       "time with the die-slow property or a slow= action of events_file, "

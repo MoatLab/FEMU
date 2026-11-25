@@ -9798,6 +9798,879 @@ void femu_test_fsched_groups(void *obj, void *data, QGuestAllocator *alloc)
     rmdir(dir);
 }
 
+/*
+ * The fault record ring (femu-frec.c). A record reads as one string here:
+ * "<id> l<line> m<match> <action> <outcome>[/<reason>] s<step> q<sqid>
+ * c<cid> o<opc> f<fua> <slba>+<nlb> n<nsid>".
+ */
+static char *femu_fault_str(QDict *r)
+{
+    const char *why = qdict_haskey(r, "reason") ?
+                      qdict_get_str(r, "reason") : NULL;
+
+    g_assert_cmpstr(qdict_get_str(r, "origin"), ==, "sched-cmd");
+    g_assert_cmpstr(qdict_get_str(r, "phase"), ==, "select");
+    g_assert_false(qdict_haskey(r, "cause"));
+    g_assert_false(qdict_haskey(r, "status"));
+    return g_strdup_printf("%" PRId64 " l%" PRId64 " m%" PRId64 " %s %s%s%s "
+                           "s%" PRId64 " q%" PRId64 " c%" PRId64 " o%" PRId64
+                           " f%d %" PRId64 "+%" PRId64 " n%" PRId64,
+                           qdict_get_int(r, "id"), qdict_get_int(r, "line"),
+                           qdict_get_int(r, "match"),
+                           qdict_get_str(r, "action"),
+                           qdict_get_str(r, "outcome"), why ? "/" : "",
+                           why ? why : "", qdict_get_int(r, "step"),
+                           qdict_get_int(r, "sqid"), qdict_get_int(r, "cid"),
+                           qdict_get_int(r, "opc"), qdict_get_bool(r, "fua"),
+                           qdict_get_int(r, "slba"), qdict_get_int(r, "nlb"),
+                           qdict_get_int(r, "nsid"));
+}
+
+/* the records of device @id, each as femu_fault_str(), joined by "; " */
+static char *femu_fault_list(QTestState *qts, const char *id)
+{
+    QDict *rsp;
+    QDict *r = femu_events_q(qts, id, &rsp);
+    GString *g = g_string_new(NULL);
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(r, "faults"), e) {
+        g_autofree char *one = femu_fault_str(qobject_to(QDict,
+                                                         qlist_entry_obj(e)));
+
+        g_string_append_printf(g, "%s%s", g->len ? "; " : "", one);
+    }
+    qobject_unref(rsp);
+    return g_string_free(g, false);
+}
+
+/* the counter @key of query-femu-events of device @id */
+static int64_t femu_fault_ctr(QTestState *qts, const char *id,
+                              const char *key)
+{
+    QDict *rsp;
+    int64_t v = qdict_get_int(femu_events_q(qts, id, &rsp), key);
+
+    qobject_unref(rsp);
+    return v;
+}
+
+/* @n one-block Writes at block 0 */
+static void femu_fault_writes(FemuCtrlState *c, int n, uint64_t buf)
+{
+    for (int i = 0; i < n; i++) {
+        g_assert_cmphex(femu_fs_io(c, NVME_CMD_WRITE, 0, 1, false, buf), ==,
+                        0);
+    }
+}
+
+/* the expected string of a record of a one-block command on queue 1 */
+static char *femu_fault_want(int id, int line, int match, const char *act,
+                             const char *out, int step, uint16_t cid,
+                             int opc, bool fua, uint64_t slba)
+{
+    return g_strdup_printf("%d l%d m%d %s %s s%d q1 c%u o%d f%d %" PRIu64
+                           "+1 n1", id, line, match, act, out, step, cid, opc,
+                           fua, slba);
+}
+
+/*
+ * One record per line a command selects, in file order: a #2 line on its
+ * 2nd match, the line of its group that it beats (superseded) and a
+ * wb-fail on a FUA Write (no effect, reason fua). Each has a control:
+ * the 1st match makes no record, and wb-fail alone on a plain Write is
+ * selected. Device ev3 has time lines only: no ring, no step.
+ */
+void femu_test_fsched_records(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-frec-XXXXXX", NULL);
+    g_autofree char *p1 = g_build_filename(dir, "r1", NULL);
+    g_autofree char *p3 = g_build_filename(dir, "r3", NULL);
+    QOSState *qs;
+    QTestState *qts;
+    QPCIDevice *pdev;
+    FemuCtrlState c = { 0 };
+    GString *want = g_string_new(NULL);
+    uint16_t cid[4];
+    uint64_t buf;
+    char *got;
+    QDict *rsp;
+    QDict *r;
+
+    g_assert_true(g_file_set_contents(p1,
+        "@write,lba=0-7#2 write-fail\n"
+        "@write,lba=0-7#2 wb-fail\n"
+        "@write,lba=40-47#1 wb-fail\n"
+        "@read#1 read-unc\n"
+        "@write,lba=80-87#1 wb-fail\n", -1, NULL));
+    g_assert_true(g_file_set_contents(p3, "100 ana=1:2\n", -1, NULL));
+    qs = qtest_pc_boot(
+        "-machine pc -nodefaults "
+        "-device femu,id=ev,addr=5,devsz_mb=16,femu_mode=1,buffer_size=16,"
+        "vwc=1,power_loss=on,events_file=%s "
+        "-device femu,id=ev3,addr=7,devsz_mb=16,femu_mode=1,ana=on,"
+        "events_file=%s", p1, p3);
+    qts = qs->qts;
+    pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    buf = guest_alloc(&qs->alloc, 4096);
+
+    /* the off case: a file of time lines has no ring and counts no step */
+    r = femu_events_q(qts, "ev3", &rsp);
+    g_assert_false(qdict_haskey(r, "faults"));
+    g_assert_false(qdict_haskey(r, "step"));
+    g_assert_false(qdict_haskey(r, "last-id"));
+    qobject_unref(rsp);
+    /* its control: the file with command lines has both, still empty */
+    r = femu_events_q(qts, "ev", &rsp);
+    g_assert_cmpuint(qlist_size(qdict_get_qlist(r, "faults")), ==, 0);
+    g_assert_cmpint(qdict_get_int(r, "step"), ==, 0);
+    qobject_unref(rsp);
+
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmpint(c.io.qid, ==, 1);
+
+    /* the 1st match of lines 1 and 2 counts a step and makes no record */
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 1, false, buf), ==, 0);
+    got = femu_fault_list(qts, "ev");
+    g_assert_cmpstr(got, ==, "");
+    g_free(got);
+    g_assert_cmpint(femu_fault_ctr(qts, "ev", "step"), ==, 1);
+    g_assert_cmpint(femu_fault_ctr(qts, "ev", "last-id"), ==, 0);
+
+    cid[0] = c.cid;
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, 0, 1, false, buf), ==, 0);
+    cid[1] = c.cid;
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 1, false, buf), ==, 0);
+    cid[2] = c.cid;
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 40, 1, true, buf), ==, 0);
+    cid[3] = c.cid;
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 80, 1, false, buf), ==, 0);
+
+    {
+        g_autofree char *w1 = femu_fault_want(1, 4, 1, "read-unc", "selected",
+                                              2, cid[0], 2, false, 0);
+        g_autofree char *w2 = femu_fault_want(2, 1, 2, "write-fail",
+                                              "selected", 3, cid[1], 1, false,
+                                              0);
+        g_autofree char *w3 = femu_fault_want(3, 2, 2, "wb-fail",
+                                              "superseded", 3, cid[1], 1,
+                                              false, 0);
+        g_autofree char *w4 = femu_fault_want(4, 3, 1, "wb-fail",
+                                              "no-effect/fua", 4, cid[2], 1,
+                                              true, 40);
+        g_autofree char *w5 = femu_fault_want(5, 5, 1, "wb-fail", "selected",
+                                              5, cid[3], 1, false, 80);
+
+        g_string_printf(want, "%s; %s; %s; %s; %s", w1, w2, w3, w4, w5);
+    }
+    got = femu_fault_list(qts, "ev");
+    g_test_message("records %s", got);
+    g_assert_cmpstr(got, ==, want->str);
+    g_free(got);
+    r = femu_events_q(qts, "ev", &rsp);
+    g_assert_cmpint(qdict_get_int(r, "step"), ==, 5);
+    g_assert_cmpint(qdict_get_int(r, "last-id"), ==, 5);
+    g_assert_cmpint(qdict_get_int(r, "dropped"), ==, 0);
+    g_assert_cmpint(qdict_get_int(r, "overwritten"), ==, 0);
+    g_assert_cmpuint(qlist_size(qdict_get_qlist(r, "dropped-ids")), ==, 0);
+    g_assert_false(qdict_haskey(r, "log-error"));
+    qobject_unref(rsp);
+
+    /* ev3 takes I/O and still counts no step: it has no schedule */
+    {
+        FemuCtrlState c3 = { 0 };
+
+        femu_enable(&c3, qpci_device_find(qs->pcibus, QPCI_DEVFN(7, 0)),
+                    &qs->alloc);
+        femu_create_io_queues(&c3);
+        femu_fault_writes(&c3, 2, buf);
+        r = femu_events_q(qts, "ev3", &rsp);
+        g_assert_false(qdict_haskey(r, "step"));
+        g_assert_false(qdict_haskey(r, "faults"));
+        qobject_unref(rsp);
+        femu_queue_free(&c3, &c3.io);
+        femu_disable(&c3);
+        g_free(c3.pdev);
+    }
+
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    g_string_free(want, true);
+    unlink(p1);
+    unlink(p3);
+    rmdir(dir);
+}
+
+/* the ids of the records of device @id, joined by spaces */
+static char *femu_fault_ids(QTestState *qts, const char *id)
+{
+    QDict *rsp;
+    QDict *r = femu_events_q(qts, id, &rsp);
+    GString *g = g_string_new(NULL);
+    QListEntry *e;
+
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(r, "faults"), e) {
+        g_string_append_printf(g, "%s%" PRId64, g->len ? " " : "",
+                               qdict_get_int(qobject_to(QDict,
+                                                        qlist_entry_obj(e)),
+                                             "id"));
+    }
+    qobject_unref(rsp);
+    return g_string_free(g, false);
+}
+
+/*
+ * With no events_log the ring is a window: events_max_faults=4 and 10
+ * selections leave ids 7 to 10, and 6 count as overwritten. The control
+ * is ev2, with 16 slots: all 10 stay. Realize checks the two properties,
+ * each refusal with an accepted twin.
+ */
+void femu_test_fsched_window(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-frec-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir,
+        "@write%1000000~1 delay ms=1\n");
+    g_autofree char *tpath = g_build_filename(dir, "time", NULL);
+    g_autofree char *lpath = g_build_filename(dir, "log", NULL);
+    QOSState *qs;
+    QTestState *qts;
+    FemuCtrlState c[2] = { { 0 }, { 0 } };
+    uint64_t buf;
+    char *ids;
+    /* each with events_log when @log, and a file of time lines when @time */
+    static const struct {
+        const char *props;
+        bool log;
+        bool time;
+        const char *msg;
+    } bad[] = {
+        { "'events_max_faults':0", false, false,
+          "events_max_faults takes 1 to" },
+        { "'events_max_faults':65537", false, false, "takes 1 to 65536" },
+        /* the time line needs ana=on, so the log check is what refuses */
+        { "'ana':true,'events_max_faults':4", true, true,
+          "events_log needs a command line in events_file" },
+    }, good[] = {
+        { "'events_max_faults':1", false, false, NULL },
+        { "'events_max_faults':65536", false, false, NULL },
+        { "'events_max_faults':4", true, false, NULL },
+    };
+    QDict *rsp;
+
+    g_assert_true(g_file_set_contents(tpath, "100 ana=1:2\n", -1, NULL));
+    qs = qtest_pc_boot(
+        "-machine pc -nodefaults "
+        "-device femu,id=ev,addr=5,devsz_mb=16,femu_mode=1,"
+        "events_max_faults=4,events_file=%s "
+        "-device femu,id=ev2,addr=6,devsz_mb=16,femu_mode=1,"
+        "events_max_faults=16,events_file=%s", path, path);
+    qts = qs->qts;
+    buf = guest_alloc(&qs->alloc, 4096);
+    for (int i = 0; i < 2; i++) {
+        QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5 + i, 0));
+
+        femu_enable(&c[i], pdev, &qs->alloc);
+        femu_create_io_queues(&c[i]);
+        femu_fault_writes(&c[i], 10, buf);
+    }
+    ids = femu_fault_ids(qts, "ev");
+    g_assert_cmpstr(ids, ==, "7 8 9 10");
+    g_free(ids);
+    g_assert_cmpint(femu_fault_ctr(qts, "ev", "overwritten"), ==, 6);
+    g_assert_cmpint(femu_fault_ctr(qts, "ev", "dropped"), ==, 0);
+    g_assert_cmpint(femu_fault_ctr(qts, "ev", "last-id"), ==, 10);
+    ids = femu_fault_ids(qts, "ev2");
+    g_assert_cmpstr(ids, ==, "1 2 3 4 5 6 7 8 9 10");
+    g_free(ids);
+    g_assert_cmpint(femu_fault_ctr(qts, "ev2", "overwritten"), ==, 0);
+
+    /* realize refusals, then their twins */
+    for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *all = g_strdup_printf(
+            "'femu_mode':1,%s%s%s%s", bad[i].props,
+            bad[i].log ? ",'events_log':'" : "", bad[i].log ? lpath : "",
+            bad[i].log ? "'" : "");
+        const char *desc;
+
+        rsp = femu_fs_add(qts, "frbad", 8, all, bad[i].time ? tpath : path);
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("refused: %s", desc);
+        g_assert_nonnull(strstr(desc, bad[i].msg));
+        qobject_unref(rsp);
+    }
+    /* events_log with no events_file at all */
+    rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
+                    "'driver':'femu','id':'frbad','addr':'8',"
+                    "'devsz_mb':16,'femu_mode':1,'events_log':%s}}", lpath);
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"),
+                            "events_log needs events_file"));
+    qobject_unref(rsp);
+    for (size_t i = 0; i < ARRAY_SIZE(good); i++) {
+        g_autofree char *all = g_strdup_printf(
+            "'femu_mode':1,%s%s%s%s", good[i].props,
+            good[i].log ? ",'events_log':'" : "", good[i].log ? lpath : "",
+            good[i].log ? "'" : "");
+        g_autofree char *id = g_strdup_printf("frok%zu", i);
+
+        rsp = femu_fs_add(qts, id, 9 + i, all, path);
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+    }
+
+    for (int i = 0; i < 2; i++) {
+        femu_queue_free(&c[i], &c[i].io);
+        femu_disable(&c[i]);
+        g_free(c[i].pdev);
+    }
+    qtest_pc_shutdown(qs);
+    unlink(path);
+    unlink(tpath);
+    unlink(lpath);
+    rmdir(dir);
+}
+
+/* poll device @id until the log BH has emptied its ring; false on time out */
+static bool femu_fault_drained(QTestState *qts, const char *id)
+{
+    for (int i = 0; i < 5000; i++) {
+        QDict *rsp;
+        QDict *r = femu_events_q(qts, id, &rsp);
+        bool empty = qlist_empty(qdict_get_qlist(r, "faults"));
+
+        qobject_unref(rsp);
+        if (empty) {
+            return true;
+        }
+        g_usleep(1000);
+    }
+    return false;
+}
+
+/* the "id" of each line of events_log file @path, joined by spaces */
+static char *femu_fault_log_ids(const char *path)
+{
+    g_autofree char *text = NULL;
+    g_auto(GStrv) lines = NULL;
+    GString *g = g_string_new(NULL);
+
+    g_assert_true(g_file_get_contents(path, &text, NULL, NULL));
+    lines = g_strsplit(text, "\n", -1);
+    for (int i = 0; lines[i] && *lines[i]; i++) {
+        QDict *d = qobject_to(QDict, qobject_from_json(lines[i],
+                                                       &error_abort));
+
+        g_assert_nonnull(d);
+        g_string_append_printf(g, "%s%" PRId64, g->len ? " " : "",
+                               qdict_get_int(d, "id"));
+        qobject_unref(d);
+    }
+    return g_string_free(g, false);
+}
+
+/*
+ * With events_log a full ring drops. events_max_faults=4, the writer held
+ * by x-fault-log-hold, 10 selections: ids 1 to 4 stay, 5 to 10 are
+ * dropped and named. The control is the release: the writer puts 1 to 4
+ * in the file, and the next 2 selections are stored, so the drop count
+ * stops at 6 and the file shows the gap. Device ev2 logs to /dev/full:
+ * log-error is set, and records keep their ids; ev has no error, as its
+ * control. Last, a quit with the writer held still writes ids 13 and 14,
+ * which the file lacks just before the quit.
+ */
+void femu_test_fsched_overflow(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-frec-XXXXXX", NULL);
+    g_autofree char *path = femu_events_file(dir,
+        "@write%1000000~1 delay ms=1\n");
+    g_autofree char *lpath = g_build_filename(dir, "log", NULL);
+    QOSState *qs;
+    QTestState *qts;
+    FemuCtrlState c[2] = { { 0 }, { 0 } };
+    uint64_t buf;
+    char *ids;
+    QDict *rsp;
+    QDict *r;
+    QList *d;
+
+    qs = qtest_pc_boot(
+        "-machine pc -nodefaults "
+        "-device femu,id=ev,addr=5,devsz_mb=16,femu_mode=1,"
+        "events_max_faults=4,events_log=%s,events_file=%s "
+        "-device femu,id=ev2,addr=6,devsz_mb=16,femu_mode=1,"
+        "events_log=/dev/full,events_file=%s", lpath, path, path);
+    qts = qs->qts;
+    buf = guest_alloc(&qs->alloc, 4096);
+    for (int i = 0; i < 2; i++) {
+        QPCIDevice *pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5 + i, 0));
+
+        femu_enable(&c[i], pdev, &qs->alloc);
+        femu_create_io_queues(&c[i]);
+    }
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/ev',"
+                    "'property':'x-fault-log-hold','value':true}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    femu_fault_writes(&c[0], 10, buf);
+    ids = femu_fault_ids(qts, "ev");
+    g_assert_cmpstr(ids, ==, "1 2 3 4");
+    g_free(ids);
+    r = femu_events_q(qts, "ev", &rsp);
+    g_assert_cmpint(qdict_get_int(r, "dropped"), ==, 6);
+    g_assert_cmpint(qdict_get_int(r, "overwritten"), ==, 0);
+    g_assert_cmpint(qdict_get_int(r, "last-id"), ==, 10);
+    d = qdict_get_qlist(r, "dropped-ids");
+    g_assert_cmpuint(qlist_size(d), ==, 1);
+    g_assert_cmpint(qdict_get_int(qobject_to(QDict, qlist_peek(d)), "lo"),
+                    ==, 5);
+    g_assert_cmpint(qdict_get_int(qobject_to(QDict, qlist_peek(d)), "hi"),
+                    ==, 10);
+    qobject_unref(rsp);
+    /* nothing is written while the BH is held */
+    ids = femu_fault_log_ids(lpath);
+    g_assert_cmpstr(ids, ==, "");
+    g_free(ids);
+
+    /* the release: 1 to 4 reach the file; 11 and 12 are stored */
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/ev',"
+                    "'property':'x-fault-log-hold','value':false}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    g_assert_true(femu_fault_drained(qts, "ev"));
+    femu_fault_writes(&c[0], 2, buf);
+    g_assert_true(femu_fault_drained(qts, "ev"));
+    ids = femu_fault_log_ids(lpath);
+    g_assert_cmpstr(ids, ==, "1 2 3 4 11 12");
+    g_free(ids);
+    g_assert_cmpint(femu_fault_ctr(qts, "ev", "dropped"), ==, 6);
+    g_assert_cmpint(femu_fault_ctr(qts, "ev", "last-id"), ==, 12);
+    r = femu_events_q(qts, "ev", &rsp);
+    g_assert_false(qdict_haskey(r, "log-error"));
+    qobject_unref(rsp);
+
+    /* /dev/full: the file stops, the records go on */
+    femu_fault_writes(&c[1], 3, buf);
+    g_assert_true(femu_fault_drained(qts, "ev2"));
+    r = femu_events_q(qts, "ev2", &rsp);
+    g_test_message("log-error %s", qdict_get_try_str(r, "log-error") ?: "");
+    g_assert_nonnull(strstr(qdict_get_try_str(r, "log-error") ?: "",
+                            "events_log /dev/full"));
+    qobject_unref(rsp);
+    femu_fault_writes(&c[1], 2, buf);
+    g_assert_true(femu_fault_drained(qts, "ev2"));
+    g_assert_cmpint(femu_fault_ctr(qts, "ev2", "last-id"), ==, 5);
+    g_assert_cmpint(femu_fault_ctr(qts, "ev2", "dropped"), ==, 0);
+
+    /* QEMU exit: the held records still reach the file */
+    rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                    "'path':'/machine/peripheral/ev',"
+                    "'property':'x-fault-log-hold','value':true}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+    femu_fault_writes(&c[0], 2, buf);
+    ids = femu_fault_ids(qts, "ev");
+    g_assert_cmpstr(ids, ==, "13 14");
+    g_free(ids);
+    ids = femu_fault_log_ids(lpath);
+    g_assert_cmpstr(ids, ==, "1 2 3 4 11 12");
+    g_free(ids);
+    for (int i = 0; i < 2; i++) {
+        femu_queue_free(&c[i], &c[i].io);
+        femu_disable(&c[i]);
+        g_free(c[i].pdev);
+    }
+    qtest_qmp_send(qts, "{'execute':'quit'}");
+    qtest_set_expected_status(qts, 0);
+    qtest_wait_qemu(qts);
+    qtest_pc_shutdown(qs);
+    ids = femu_fault_log_ids(lpath);
+    g_assert_cmpstr(ids, ==, "1 2 3 4 11 12 13 14");
+    g_free(ids);
+    unlink(path);
+    unlink(lpath);
+    rmdir(dir);
+}
+
+/* device_add of femu @id with the members @fmt gives; the error, or NULL */
+static char *femu_fault_add(QTestState *qts, const char *id, int addr,
+                            const char *fmt, ...) G_GNUC_PRINTF(4, 5);
+
+static char *femu_fault_add(QTestState *qts, const char *id, int addr,
+                            const char *fmt, ...)
+{
+    g_autofree char *props = NULL;
+    g_autofree char *add = NULL;
+    QDict *rsp;
+    char *err = NULL;
+    va_list ap;
+
+    va_start(ap, fmt);
+    props = g_strdup_vprintf(fmt, ap);
+    va_end(ap);
+    add = g_strdup_printf(
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'%s',"
+        "'addr':'%d','devsz_mb':16,'femu_mode':1,%s}}", id, addr, props);
+    rsp = qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+
+    if (qdict_haskey(rsp, "error")) {
+        err = g_strdup(qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+        g_test_message("refused %s: %s", id, err);
+    }
+    qobject_unref(rsp);
+    return err;
+}
+
+/* remove @dir and the files in it, whatever the devices made there */
+static void femu_fault_rmdir(const char *dir)
+{
+    GDir *d = g_dir_open(dir, 0, NULL);
+    const char *name;
+
+    g_assert_nonnull(d);
+    while ((name = g_dir_read_name(d))) {
+        g_autofree char *p = g_build_filename(dir, name, NULL);
+
+        g_assert_cmpint(unlink(p), ==, 0);
+    }
+    g_dir_close(d);
+    g_assert_cmpint(rmdir(dir), ==, 0);
+}
+
+#define FEMU_FL_LOG     "'events_file':'%s','events_log':'%s'"
+
+/*
+ * The files events_log refuses, each with an accepted control: a path
+ * that the device's own pel_file, events_file or io_trace uses, or the
+ * io_trace or events_log of another device, by an alias or a hard link
+ * too; a pel_file or persist_file of a later device on a live
+ * events_log, and femu-save-data to it; a FIFO and /dev/zero, while two
+ * devices share /dev/null; a link to nothing; a file that ends in a
+ * partial line. A file that ends in a newline is appended to.
+ */
+void femu_test_fsched_log_files(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-frec-XXXXXX", NULL);
+    g_autofree char *ev = femu_events_file(dir, "@write#1 hang\n");
+    g_autofree char *log = g_build_filename(dir, "log", NULL);
+    g_autofree char *alias = g_strdup_printf("%s/./log", dir);
+    g_autofree char *hard = g_build_filename(dir, "hard", NULL);
+    g_autofree char *dead = g_build_filename(dir, "dead", NULL);
+    g_autofree char *none = g_build_filename(dir, "none", NULL);
+    g_autofree char *other = g_build_filename(dir, "other", NULL);
+    g_autofree char *pel = g_build_filename(dir, "pel", NULL);
+    g_autofree char *trace = g_build_filename(dir, "trace", NULL);
+    g_autofree char *fifo = g_build_filename(dir, "fifo", NULL);
+    g_autofree char *part = g_build_filename(dir, "part", NULL);
+    g_autofree char *text = NULL;
+    QOSState *qs = qtest_pc_boot("-machine pc -nodefaults");
+    QTestState *qts = qs->qts;
+    const char *msg = "is the events_file, or a persist_file, pel_file, "
+                      "io_trace or events_log of a device";
+    char *err;
+
+    /* the device's own files */
+    err = femu_fault_add(qts, "a", 5, FEMU_FL_LOG ",'pel_file':'%s'", ev,
+                         log, log);
+    g_assert_nonnull(strstr(err ?: "", msg));
+    g_free(err);
+    err = femu_fault_add(qts, "a", 5, FEMU_FL_LOG, ev, ev);
+    g_assert_nonnull(strstr(err ?: "", msg));
+    g_free(err);
+    err = femu_fault_add(qts, "a", 5, FEMU_FL_LOG ",'io_trace':'%s'", ev,
+                         trace, trace);
+    g_assert_nonnull(strstr(err ?: "", msg));
+    g_free(err);
+    unlink(trace);
+
+    /* the control: distinct files; then a live log of device a */
+    err = femu_fault_add(qts, "a", 5, FEMU_FL_LOG ",'pel_file':'%s'", ev,
+                         log, pel);
+    g_assert_null(err);
+    /* another device: its events_log on a's log, by an alias */
+    err = femu_fault_add(qts, "b", 6, FEMU_FL_LOG, ev, alias);
+    g_assert_nonnull(strstr(err ?: "", msg));
+    g_free(err);
+    /* and by a hard link, and a hard link to a's pel_file */
+    g_assert_cmpint(link(log, hard), ==, 0);
+    err = femu_fault_add(qts, "b", 6, FEMU_FL_LOG, ev, hard);
+    g_assert_nonnull(strstr(err ?: "", msg));
+    g_free(err);
+    g_assert_cmpint(unlink(hard), ==, 0);
+    if (!g_file_test(pel, G_FILE_TEST_EXISTS)) {
+        g_assert_true(g_file_set_contents(pel, "", 0, NULL));
+    }
+    g_assert_cmpint(link(pel, hard), ==, 0);
+    err = femu_fault_add(qts, "b", 6, FEMU_FL_LOG, ev, hard);
+    g_assert_nonnull(strstr(err ?: "", msg));
+    g_free(err);
+    g_assert_cmpint(unlink(hard), ==, 0);
+    /* a later device's files on a's log; femu-save-data too */
+    err = femu_fault_add(qts, "b", 6, "'pel_file':'%s'", log);
+    g_assert_nonnull(strstr(err ?: "", "pel_file: "));
+    g_assert_nonnull(strstr(err, "is an io_trace or events_log"));
+    g_free(err);
+    err = femu_fault_add(qts, "b", 6, "'persist_file':'%s'", log);
+    g_assert_nonnull(strstr(err ?: "", "is an io_trace or events_log"));
+    g_free(err);
+    err = femu_fault_add(qts, "b", 6, "'io_trace':'%s'", log);
+    g_assert_nonnull(strstr(err ?: "", "io_trace: "));
+    g_free(err);
+    err = femu_save_data(qts, "a", log);
+    g_assert_nonnull(strstr(err ?: "", "io_trace or events_log"));
+    g_free(err);
+    /* the control: device b with a log of its own */
+    err = femu_fault_add(qts, "b", 6, FEMU_FL_LOG, ev, other);
+    g_assert_null(err);
+
+    /* a FIFO: with no reader it would stall the writer */
+    g_assert_cmpint(mkfifo(fifo, 0600), ==, 0);
+    err = femu_fault_add(qts, "c", 7, FEMU_FL_LOG, ev, fifo);
+    g_assert_nonnull(strstr(err ?: "", "not a regular file, /dev/null"));
+    g_free(err);
+    err = femu_fault_add(qts, "c", 7, FEMU_FL_LOG, ev, "/dev/zero");
+    g_assert_nonnull(strstr(err ?: "", "not a regular file, /dev/null"));
+    g_free(err);
+    /* the control: a device is not a file, so two may share it */
+    err = femu_fault_add(qts, "c", 7, FEMU_FL_LOG, ev, "/dev/null");
+    g_assert_null(err);
+    err = femu_fault_add(qts, "d", 8, FEMU_FL_LOG, ev, "/dev/null");
+    g_assert_null(err);
+
+    /* a link to nothing is refused by name; a missing file is made */
+    g_assert_cmpint(symlink(none, dead), ==, 0);
+    err = femu_fault_add(qts, "e", 9, FEMU_FL_LOG, ev, dead);
+    g_assert_nonnull(strstr(err ?: "", "is a link to nothing"));
+    g_free(err);
+    g_assert_cmpint(unlink(dead), ==, 0);
+
+    /* a partial last line, then its control with the newline */
+    g_assert_true(g_file_set_contents(part, "{\"id\":1,\"or", -1, NULL));
+    err = femu_fault_add(qts, "e", 9, FEMU_FL_LOG, ev, part);
+    g_assert_nonnull(strstr(err ?: "", "ends in a partial line"));
+    g_free(err);
+    g_assert_true(g_file_set_contents(part, "{\"id\":1}\n", -1, NULL));
+    err = femu_fault_add(qts, "e", 9, FEMU_FL_LOG, ev, part);
+    g_assert_null(err);
+
+    qtest_pc_shutdown(qs);
+    /* the old line stays first; the device added nothing yet */
+    g_assert_true(g_file_get_contents(part, &text, NULL, NULL));
+    g_assert_true(g_str_has_prefix(text, "{\"id\":1}\n"));
+    femu_fault_rmdir(dir);
+}
+
+/*
+ * The writer ends with its device. A realize that fails after the writer
+ * started (pel_file is checked after events_log) must join it and drop
+ * its exit notifier, and free the path for reuse. An unplug with the
+ * writer held must still put the held records in the file before it
+ * returns. Each failure shows here:
+ *   femu_events_free() left out of femu_realize_undo():
+ *       the log path stays taken, so device u is refused;
+ *   femu_events_free() left out of femu_exit(), or its log finish:
+ *       the file lacks ids 1 to 3 after the unplug;
+ *   the exit notifier kept in femu_fsched_free():
+ *       the quit runs it on freed memory, and QEMU does not exit with 0.
+ */
+void femu_test_fsched_log_unplug(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-frec-XXXXXX", NULL);
+    g_autofree char *ev = femu_events_file(dir,
+                                           "@write%1000000~1 delay ms=1\n");
+    g_autofree char *log = g_build_filename(dir, "log", NULL);
+    g_autofree char *lock = g_build_filename(dir, "pel.lock", NULL);
+    QOSState *qs = qtest_pc_boot("-machine pc -nodefaults");
+    QTestState *qts = qs->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    char *ids;
+    char *err;
+
+    /* realize fails at pel_file, after the writer of r started */
+    err = femu_fault_add(qts, "r", 5, FEMU_FL_LOG ",'pel_file':'%s'", ev,
+                         log, lock);
+    g_assert_nonnull(strstr(err ?: "", "ends in .lock"));
+    g_free(err);
+    /* the control: the same log, a good device */
+    err = femu_fault_add(qts, "u", 5, FEMU_FL_LOG, ev, log);
+    g_assert_null(err);
+
+    femu_enable(&c, qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0)),
+                &qs->alloc);
+    femu_create_io_queues(&c);
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/u',"
+                             "'property':'x-fault-log-hold','value':true}}");
+    femu_fault_writes(&c, 3, buf);
+    ids = femu_fault_ids(qts, "u");
+    g_assert_cmpstr(ids, ==, "1 2 3");
+    g_free(ids);
+    /* the control: held, so nothing is in the file yet */
+    ids = femu_fault_log_ids(log);
+    g_assert_cmpstr(ids, ==, "");
+    g_free(ids);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_free(c.pdev);
+    qpci_unplug_acpi_device_test(qts, "u", 5);
+    ids = femu_fault_log_ids(log);
+    g_assert_cmpstr(ids, ==, "1 2 3");
+    g_free(ids);
+
+    qtest_qmp_send(qts, "{'execute':'quit'}");
+    qtest_set_expected_status(qts, 0);
+    qtest_wait_qemu(qts);
+    qtest_pc_shutdown(qs);
+    femu_fault_rmdir(dir);
+}
+
+/*
+ * One run of the selection replay: seed @seed on a %50 line and a #3
+ * Read line, a fixed stream of 24 Writes with a Read after every 4th.
+ * Returns the events_log text; @wstep gets the step of each Write.
+ */
+static char *femu_fault_replay_run(const char *dir, int run, uint32_t seed,
+                                   int *wstep)
+{
+    g_autofree char *text = g_strdup_printf(
+        "@write%%500000~%u delay ms=1\n@read#3 read-unc\n", seed);
+    g_autofree char *name = g_strdup_printf("ev%d", run);
+    g_autofree char *lname = g_strdup_printf("log%d", run);
+    g_autofree char *path = g_build_filename(dir, name, NULL);
+    g_autofree char *lpath = g_build_filename(dir, lname, NULL);
+    QOSState *qs;
+    QPCIDevice *pdev;
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    char *log;
+    int step = 0;
+
+    g_assert_true(g_file_set_contents(path, text, -1, NULL));
+    qs = qtest_pc_boot(
+        "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+        "femu_mode=1,events_log=%s,events_file=%s", lpath, path);
+    pdev = qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0));
+    buf = guest_alloc(&qs->alloc, 4096);
+    femu_enable(&c, pdev, &qs->alloc);
+    femu_create_io_queues(&c);
+    for (int i = 0; i < 24; i++) {
+        g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, i, 1, false, buf), ==,
+                        0);
+        wstep[i] = ++step;
+        if (i % 4 == 3) {
+            g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, i, 1, false, buf),
+                            ==, 0);
+            step++;
+        }
+    }
+    g_assert_true(femu_fault_drained(qs->qts, "ev"));
+    g_assert_cmpint(femu_fault_ctr(qs->qts, "ev", "step"), ==, step);
+    g_assert_true(g_file_get_contents(lpath, &log, NULL, NULL));
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    g_free(pdev);
+    qtest_pc_shutdown(qs);
+    unlink(path);
+    unlink(lpath);
+    return log;
+}
+
+/* the "step" of line @i of an events_log text, or -1 past its end */
+static int64_t femu_fault_log_step(char **lines, int i)
+{
+    QDict *d;
+    int64_t step;
+
+    for (int k = 0; k <= i; k++) {
+        if (!lines[k] || !*lines[k]) {
+            return -1;
+        }
+    }
+    d = qobject_to(QDict, qobject_from_json(lines[i], &error_abort));
+    step = qdict_get_int(d, "step");
+    qobject_unref(d);
+    return step;
+}
+
+/*
+ * Selection replay (design 17.6): two QEMU runs with equal input and no
+ * lost record write equal events_log files. A third run with seed 960 in
+ * place of 1 must differ first at the Write whose selection first
+ * differs; x-fault-draw says that is draw 12 (from 0), the 13th Write,
+ * so the logs agree up to its step.
+ */
+void femu_test_fsched_replay(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-frec-XXXXXX", NULL);
+    g_autofree char *a = NULL;
+    g_autofree char *b = NULL;
+    g_autofree char *x = NULL;
+    g_auto(GStrv) la = NULL;
+    g_auto(GStrv) lx = NULL;
+    int wstep[24];
+    int first = -1;
+    int i;
+
+    /* where the draws of seeds 1 and 960 first part, from the device */
+    {
+        g_autofree char *e = femu_events_file(dir, "@write#1 hang\n");
+        QOSState *qs = qtest_pc_boot(
+            "-machine pc -nodefaults -device femu,id=ev,addr=5,devsz_mb=16,"
+            "femu_mode=1,events_file=%s", e);
+        bool sel[2][24];
+
+        for (int k = 0; k < 2; k++) {
+            for (i = 0; i < 24; i++) {
+                sel[k][i] = femu_fault_draw(qs->qts, k ? 960 : 1, i == 0) <
+                            500000;
+            }
+        }
+        for (i = 0; i < 24 && first < 0; i++) {
+            if (sel[0][i] != sel[1][i]) {
+                first = i;
+            }
+        }
+        qtest_pc_shutdown(qs);
+        unlink(e);
+    }
+    g_assert_cmpint(first, ==, 12);
+
+    a = femu_fault_replay_run(dir, 1, 1, wstep);
+    b = femu_fault_replay_run(dir, 2, 1, wstep);
+    x = femu_fault_replay_run(dir, 3, 960, wstep);
+    g_test_message("run 1: %s", a);
+    g_assert_cmpuint(strlen(a), >, 0);
+    g_assert_cmpstr(a, ==, b);
+    g_assert_cmpstr(a, !=, x);
+
+    /* the first line that differs is at the step of the 13th Write */
+    la = g_strsplit(a, "\n", -1);
+    lx = g_strsplit(x, "\n", -1);
+    for (i = 0; la[i] && lx[i] && !strcmp(la[i], lx[i]); i++) {
+        g_assert_cmpint(femu_fault_log_step(la, i), <, wstep[first]);
+    }
+    {
+        int64_t sa = femu_fault_log_step(la, i);
+        int64_t sx = femu_fault_log_step(lx, i);
+
+        g_test_message("first difference: line %d, steps %" PRId64
+                       " and %" PRId64 ", 13th Write at step %d", i, sa, sx,
+                       wstep[first]);
+        g_assert_cmpint(sa < 0 ? sx : sx < 0 ? sa : MIN(sa, sx), ==,
+                        wstep[first]);
+    }
+    rmdir(dir);
+}
+
 /* CSTS.RDY of the controller of @c */
 static bool femu_rdy(FemuCtrlState *c)
 {

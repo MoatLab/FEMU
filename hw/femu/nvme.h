@@ -3289,6 +3289,10 @@ typedef struct FemuCtrl {
     uint64_t        test_fs_rng;    /* qtest x-fault-draw: the draw state */
     uint32_t        test_fs_hold_ms;    /* qtest x-fault-hold */
     uint32_t        test_fs_held;       /* qtest x-fault-held */
+    uint32_t        test_fs_log_hold;   /* qtest x-fault-log-hold */
+    char            *events_log;        /* fault records, one JSON line each */
+    char            *evlog_path;        /* events_log, resolved while open */
+    uint32_t        events_max_faults;  /* slots of the fault record ring */
     char            *iotrace_path;   /* io_trace as an absolute path */
     FILE            *iotrace_f;
     char            *iotrace_buf;    /* the stdio buffer, freed after close */
@@ -4101,6 +4105,8 @@ bool femu_path_in_use(FemuCtrl *self, const char *path, bool traces_only);
 bool femu_save_path_busy(const char *path);
 void femu_save_job_exit(FemuCtrl *n);
 void femu_save_hold_set(FemuCtrl *n, bool hold);
+bool femu_inode_in_use(FemuCtrl *self, const struct stat *st,
+                       bool traces_only);
 void femu_iotrace_note(FemuCtrl *n, NvmeRequest *req, int64_t now);
 void femu_iotrace_exit(FemuCtrl *n);
 bool femu_events_init(FemuCtrl *n, Error **errp);

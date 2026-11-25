@@ -1142,6 +1142,18 @@ void femu_test_fsched_unplug(void *obj, void *data,
                              QGuestAllocator *alloc);
 void femu_test_fsched_groups(void *obj, void *data,
                              QGuestAllocator *alloc);
+void femu_test_fsched_records(void *obj, void *data,
+                              QGuestAllocator *alloc);
+void femu_test_fsched_window(void *obj, void *data,
+                             QGuestAllocator *alloc);
+void femu_test_fsched_overflow(void *obj, void *data,
+                               QGuestAllocator *alloc);
+void femu_test_fsched_replay(void *obj, void *data,
+                             QGuestAllocator *alloc);
+void femu_test_fsched_log_files(void *obj, void *data,
+                                QGuestAllocator *alloc);
+void femu_test_fsched_log_unplug(void *obj, void *data,
+                                 QGuestAllocator *alloc);
 void femu_test_ready_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_recovery_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ready_sysreset(void *obj, void *data, QGuestAllocator *alloc);

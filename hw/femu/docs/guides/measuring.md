@@ -372,9 +372,100 @@ can mix time lines and command lines. Command lines work on bbssd only.
   `x-fault-draw` takes a seed and returns its draws in order.
   `x-fault-hold` parks the FTL thread for that many ms at the next
   matched command, and `x-fault-held` reads 1 while it is parked.
-- `query-femu-events` lists the time lines only. Its `state` stays
-  `running` while a line can select: a `#N` line before its Nth match,
-  or any `%` line.
+- `query-femu-events` lists the time lines in `events`. Its `state`
+  stays `running` while a line can select: a `#N` line before its Nth
+  match, or any `%` line. The fault records of the command lines come
+  next.
+
+### Fault records
+
+Each command that a command line selects writes one record per line
+that selected it, in file order. A record tells what the line did with
+the command. It is an observation, never an instruction to replay. The
+records go to a ring of `events_max_faults` slots (1 to 65536, default
+4096). A record has 64 bytes and a slot 72, with its sequence word.
+Realize allocates the ring only for a file with a command line.
+
+```text
+ FTL thread                        ring       readers
+ ----------                        ----       -------
+ step++ (each command)
+ match --> one record per line --> slot  --> query-femu-events "faults"
+           id = next id (always)         \-> writer thread (events_log):
+                                             write one JSON line, then
+                                             free the slot
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | from 1; each record takes one, stored or dropped |
+| `origin` | `sched-cmd`: a command line |
+| `line`, `match` | the line, and its matches so far, this one too |
+| `action`, `phase` | the action of the line; `select` |
+| `step` | commands the FTL thread took so far, this one too |
+| `nsid`, `sqid`, `cid`, `opc`, `fua`, `slba`, `nlb` | the command as the host sent it; `slba` and `nlb` are 0 for a Flush |
+| `outcome` | `selected`, `superseded` or `no-effect` |
+| `reason` | for `no-effect`: `fua`, `pre` or `hang` |
+| `cause`, `status` | absent here; later fault steps fill them |
+
+```text
+ {"id":3,"origin":"sched-cmd","line":2,"match":2,"action":"wb-fail",
+  "phase":"select","step":3,"nsid":1,"sqid":1,"cid":5,"opc":1,
+  "fua":false,"slba":0,"nlb":1,"outcome":"superseded"}
+```
+
+The ring has two overflow rules. Neither is silent.
+
+| `events_log` | Ring | When it is full |
+| --- | --- | --- |
+| unset | the last `events_max_faults` records | the oldest gives way; `overwritten` counts it |
+| a host file | the records not yet written | the new record is dropped; `dropped` counts it, `dropped-ids` names the first 16 id ranges |
+
+- `query-femu-events` adds `step`, `faults`, `last-id`, `dropped`,
+  `dropped-ids`, `overwritten` and `log-error` for a file with a command
+  line. A file of time lines only has none of them, and the FTL thread
+  counts no step for it.
+- Ids come from their own counter. A dropped record leaves a gap that
+  `dropped-ids` names, and a later child record can still name it.
+- `events_log` needs a command line in `events_file`. Realize opens the
+  file write-only to append. It takes only a regular file, `/dev/null`
+  or `/dev/full`, and refuses:
+  - a FIFO, a socket, a directory or another device: a FIFO with no
+    reader would stall the writer;
+  - a link to nothing;
+  - a regular file that a `persist_file`, `pel_file`, `io_trace` or
+    `events_log` of a device uses, or the device's own `events_file`,
+    by an alias or a hard link too; several devices may share
+    `/dev/null` or `/dev/full`;
+  - a file whose last line has no newline: the next record would join
+    that partial line. A file that the QEMU user cannot read skips this
+    check.
+- A later device refuses a `pel_file` or `persist_file` on a live
+  `events_log`, and `femu-save-data` refuses it as a target. Their save
+  by rename would replace the log.
+- A thread of its own writes the file, so a slow file never holds the
+  main loop. It frees a slot only after it writes its line. A write
+  error stops the file, not the run: later records free their slots
+  unwritten, `log-error` says why, and QEMU reports the first error.
+- Unplug and QEMU exit stop the writer after it writes what the ring
+  holds at that time. QEMU then reports the records that did not reach
+  the file: the dropped ones, the ones freed after a write error, and
+  any that came later. A close error is reported too. A realize that
+  fails after the writer started also stops it. Exit waits for the
+  writer, so a file that stalls also stalls the exit.
+- The FTL thread is the only producer of the ring, and the query takes
+  no lock. A record moves as 64-bit atomic words between two reads of
+  the slot's sequence word, so a read skips a record that the producer
+  replaces during the copy.
+- Two runs with equal input (file, seeds and command stream) make equal
+  selections. Their `events_log` files are equal only when neither run
+  loses a record: a full ring drops by timing, and a host error stops a
+  file. With a different seed, the selections first differ at the match
+  where one draw is below PPM and the other is not; a different draw on
+  the same side changes nothing. The qtest `fsched-replay` checks both
+  with no record lost.
+- The qtest property `x-fault-log-hold` stops the `events_log` writer, so
+  a test can fill the ring.
 
 ## A slow die (die_slow)
 

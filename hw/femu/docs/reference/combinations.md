@@ -255,10 +255,32 @@ own description allows. A message keeps its format directives (`%s`,
 - events_file: a text file of at most %d KiB
 - events_file: more than %d events
 - events_file: more than %d lines
+- events_log needs a command line in events_file
+- events_log needs events_file
+- events_log: '%s' is the events_file, or a persist_file, pel_file, io_trace or events_log of a device
 - test clock does not work with events_file
 - the femu device has no events_file
 - x-events-now needs an events_file
 - x-fault-sel needs a command line in events_file
+
+## `events_log`
+
+- events_log must not be empty
+- events_log needs a command line in events_file
+- events_log needs events_file
+- events_log: '%s' ends in a partial line, which the next record would join
+- events_log: '%s' is a link to nothing
+- events_log: '%s' is not a regular file, /dev/null or /dev/full
+- events_log: '%s' is the events_file, or a persist_file, pel_file, io_trace or events_log of a device
+- events_log: no directory for '%s'
+- femu-save-data: '%s' is a device's io_trace or events_log
+- pel_file: '%s' is an io_trace or events_log of a device
+- persist_file: '%s' is an io_trace or events_log of a device
+- x-fault-log-hold needs an events_log
+
+## `events_max_faults`
+
+- events_max_faults takes %u to %u
 
 ## `extended`
 
@@ -441,11 +463,14 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `io_trace`
 
-- femu-save-data: '%s' is a device's io_trace
+- events_log: '%s' is the events_file, or a persist_file, pel_file, io_trace or events_log of a device
+- femu-save-data: '%s' is a device's io_trace or events_log
 - io_trace must not be empty
 - io_trace: '%s' is a persist_file, pel_file or io_trace of a device
 - io_trace: cannot write '%s'
 - io_trace: no directory for '%s'
+- pel_file: '%s' is an io_trace or events_log of a device
+- persist_file: '%s' is an io_trace or events_log of a device
 
 ## `iu_pages`
 
@@ -897,10 +922,12 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `pel_file`
 
+- events_log: '%s' is the events_file, or a persist_file, pel_file, io_trace or events_log of a device
 - femu-save-data: '%s' is a device's pel_file
 - io_trace: '%s' is a persist_file, pel_file or io_trace of a device
 - pel_file '%s' ends in .lock, which names a lock file
 - pel_file '%s' is the file of a background femu-save-data
+- pel_file: '%s' is an io_trace or events_log of a device
 - persist_file and pel_file name one file
 
 ## `perf_hints`
@@ -910,6 +937,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `persist_file`
 
 - FEMU: rrl is not supported with persist_file
+- events_log: '%s' is the events_file, or a persist_file, pel_file, io_trace or events_log of a device
 - femu-save-data: background=true cannot write this device's own persist_file '%s'
 - femu: rain_loss is not supported with persist_file
 - io_trace: '%s' is a persist_file, pel_file or io_trace of a device
@@ -919,6 +947,7 @@ own description allows. A message keeps its format directives (`%s`,
 - persist_file '%s' has a short LBA status section
 - persist_file '%s' has bytes past its FTL state
 - persist_file '%s' has no FTL state, and an aging model needs the media history
+- persist_file '%s' is in use by a background femu-save-data
 - persist_file '%s' is in use by another device
 - persist_file '%s', namespace %u: %s
 - persist_file '%s', namespace %u: the FTL section is longer than this FTL's
@@ -929,6 +958,7 @@ own description allows. A message keeps its format directives (`%s`,
 - persist_file must not be empty
 - persist_file: '%s' ends in .lock, which names a lock file
 - persist_file: '%s' is a link to nothing
+- persist_file: '%s' is an io_trace or events_log of a device
 - persist_ftl needs persist_file
 - persist_load_only needs an existing persist_file; '%s' does not exist
 - persist_load_only needs persist_file

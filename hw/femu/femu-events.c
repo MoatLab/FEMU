@@ -16,8 +16,17 @@
  *
  * A line that starts with '@' names commands, not a time (femu-fsched.c).
  * The FTL thread matches each command against those lines after the first
- * enable. No action has an effect yet: a selection only moves the
- * counters of its line, which x-fault-sel reports.
+ * enable. No action has an effect yet: a selection moves the counters of
+ * its line, which x-fault-sel reports, and writes one record per line it
+ * concerns to the fault record ring (femu-frec.c):
+ *
+ *   FTL thread: step++, match --> femu_fr_put() per line --> wake writer
+ *   writer thread (events_log only): pop, write a JSON line, free
+ *   query-femu-events (main loop): femu_fr_read(), no lock taken
+ *
+ * The file writes run on their own thread, so a slow file never holds the
+ * main loop. Unplug and QEMU exit stop the writer after it writes what the
+ * ring holds at that time, and report the records it could not write.
  */
 #include "qemu/osdep.h"
 #include "qapi/error.h"
@@ -25,9 +34,13 @@
 #include "qapi/visitor.h"
 #include "qom/object.h"
 #include "qemu/timer.h"
+#include "qemu/error-report.h"
+#include "qemu/thread.h"
+#include "system/system.h"
 #include "nvme.h"
 #include "femu-query.h"
 #include "femu-fsched.h"
+#include "femu-frec.h"
 #include "nvme-pi.h"
 #include "trace.h"
 
@@ -73,8 +86,28 @@ struct FemuFsched {
     FemuFsLine *l;
     int nr;
     uint8_t *out;               /* FTL thread: the outcome of each line */
+    uint8_t *why;               /* FTL thread: why a winner has no effect */
     bool running;               /* set at the first enable */
+    uint64_t step;              /* FTL thread: commands taken, atomic */
+
+    /* the FTL thread is the one producer of the ring */
+    FemuFrRing ring;
+    FemuFrSlot *slots;
+    bool has_log;               /* events_log is set; fixed at realize */
+    int log_fd;                 /* events_log; -1 for none or closed */
+    bool log_failed;            /* writer: write nothing after an error */
+    uint64_t log_unwritten;     /* writer: records freed after an error */
+    char *log_error;            /* set once, published with a release */
+    bool log_running;           /* the writer thread exists */
+    bool log_stop;              /* main loop asks the writer to end */
+    QemuThread log_thread;
+    QemuEvent log_ev;           /* a record or a stop waits */
+    Notifier log_exit;
+    FemuCtrl *ctrl;             /* for the exit notifier */
 };
+
+/* records the writer takes in one pass before it looks at stop and hold */
+#define FEMU_FSCHED_LOG_BATCH   256
 
 /* a decimal number of at most @max, and the text after it */
 static bool femu_events_num(const char *s, const char **end, uint64_t max,
@@ -270,11 +303,283 @@ static bool femu_fsched_line(FemuCtrl *n, const FemuFsDev *d, char *s,
     return true;
 }
 
+/* the first error of events_log: kept for the query, and said once */
+static void femu_fsched_log_fail(FemuCtrl *n, const char *op, int err)
+{
+    struct FemuFsched *f = n->fsched;
+    char *msg;
+
+    f->log_failed = true;
+    if (qatomic_read(&f->log_error)) {
+        return;
+    }
+    msg = g_strdup_printf("events_log %s: %s failed: %s", n->evlog_path, op,
+                          strerror(err));
+    error_report("femu: %s; later records are not written", msg);
+    qatomic_store_release(&f->log_error, msg);
+}
+
+/* the whole line, or the error of the write that failed */
+static int femu_fsched_log_write(int fd, const char *buf, size_t len)
+{
+    while (len) {
+        ssize_t w = write(fd, buf, len);
+
+        if (w < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return errno;
+        }
+        buf += w;
+        len -= w;
+    }
+    return 0;
+}
+
+/*
+ * Take at most @max records and write each as one line. A write error
+ * stops the file, not the run: later records free their slots unwritten.
+ * Returns the number taken.
+ */
+static uint64_t femu_fsched_log_batch(FemuCtrl *n, uint64_t max)
+{
+    struct FemuFsched *f = n->fsched;
+    char line[FEMU_FR_JSON_MAX];
+    FemuFrRec rec;
+    uint64_t i;
+
+    /* a slot is freed once its line is written, so the query lags the file */
+    for (i = 0; i < max && femu_fr_peek(&f->ring, &rec); i++) {
+        if (!f->log_failed) {
+            int len = femu_fr_json(&rec, line, sizeof(line));
+            int err = femu_fsched_log_write(f->log_fd, line, len);
+
+            if (err) {
+                femu_fsched_log_fail(n, "a write", err);
+            }
+        }
+        if (f->log_failed) {
+            f->log_unwritten++;
+        }
+        femu_fr_release(&f->ring);
+    }
+    return i;
+}
+
+/*
+ * The writer. x-fault-log-hold (qtest) leaves the records in the ring, so
+ * it fills and drops. A stop writes what the ring holds when the stop is
+ * seen, held or not, so a busy producer cannot keep the writer alive.
+ */
+static void *femu_fsched_log_thread(void *opaque)
+{
+    FemuCtrl *n = opaque;
+    struct FemuFsched *f = n->fsched;
+
+    for (;;) {
+        qemu_event_reset(&f->log_ev);
+        if (qatomic_load_acquire(&f->log_stop)) {
+            femu_fsched_log_batch(n, femu_fr_pending(&f->ring));
+            return NULL;
+        }
+        while (!qatomic_read(&n->test_fs_log_hold) &&
+               femu_fsched_log_batch(n, FEMU_FSCHED_LOG_BATCH) ==
+               FEMU_FSCHED_LOG_BATCH &&
+               !qatomic_read(&f->log_stop)) {
+            /* more waits: go on, a batch at a time */
+        }
+        if (!qatomic_read(&f->log_stop)) {
+            qemu_event_wait(&f->log_ev);
+        }
+    }
+}
+
+/*
+ * Unplug or QEMU exit: stop the writer after it writes the ring as it is
+ * now, close the file, and say how many records did not reach it. The
+ * FTL thread may still add records at exit; those are counted too.
+ */
+static void femu_fsched_log_finish(FemuCtrl *n)
+{
+    struct FemuFsched *f = n->fsched;
+    uint64_t lost;
+
+    if (!f->log_running) {
+        return;
+    }
+    qatomic_store_release(&f->log_stop, true);
+    qemu_event_set(&f->log_ev);
+    qemu_thread_join(&f->log_thread);
+    f->log_running = false;
+    /* the writer has ended, so its count is safe to read */
+    lost = femu_fr_pending(&f->ring) + qatomic_read(&f->ring.dropped) +
+           f->log_unwritten;
+    if (close(f->log_fd) < 0) {
+        femu_fsched_log_fail(n, "the close", errno);
+    }
+    f->log_fd = -1;
+    if (lost) {
+        warn_report("femu: events_log %s: %" PRIu64 " records not written",
+                    n->evlog_path, lost);
+    }
+}
+
+static void femu_fsched_log_exit(Notifier *notifier, void *data)
+{
+    struct FemuFsched *f = container_of(notifier, struct FemuFsched,
+                                        log_exit);
+
+    femu_fsched_log_finish(f->ctrl);
+}
+
+/* /dev/null or /dev/full: the only devices events_log takes */
+static bool femu_fsched_log_dev(const struct stat *st)
+{
+    static const char *const ok[] = { "/dev/null", "/dev/full" };
+    struct stat d;
+
+    if (!S_ISCHR(st->st_mode)) {
+        return false;
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(ok); i++) {
+        if (stat(ok[i], &d) == 0 && S_ISCHR(d.st_mode) &&
+            d.st_rdev == st->st_rdev) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* whether @file of this device is a link to the inode @st describes */
+static bool femu_fsched_log_same(const char *file, const struct stat *st)
+{
+    struct stat o;
+
+    return file && stat(file, &o) == 0 && o.st_dev == st->st_dev &&
+           o.st_ino == st->st_ino;
+}
+
+/*
+ * The last byte of a regular file, by a read-only open of its own, as the
+ * log is opened write-only. A file that cannot be read is not refused.
+ */
+static bool femu_fsched_log_partial(const char *path, off_t size)
+{
+    char last;
+    bool partial;
+    int fd;
+
+    if (size <= 0) {
+        return false;
+    }
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) {
+        return false;
+    }
+    partial = pread(fd, &last, 1, size - 1) == 1 && last != '\n';
+    close(fd);
+    return partial;
+}
+
+/*
+ * Realize: open events_log to append. Only a regular file, /dev/null or
+ * /dev/full: a FIFO with no reader would stall the writer and with it the
+ * exit. Refused: a regular file that another femu file uses, by path or
+ * by a hard link, as a save by rename would replace the log or lines
+ * would mix; and a file whose last line has no newline, as the next
+ * record would join that partial line.
+ */
+static int femu_fsched_log_open(FemuCtrl *n, Error **errp)
+{
+    g_autofree char *path = NULL;
+    g_autofree char *evf = NULL;
+    struct stat st;
+    int fd;
+
+    if (!*n->events_log) {
+        error_setg(errp, "events_log must not be empty");
+        return -1;
+    }
+    if (lstat(n->events_log, &st) == 0 && S_ISLNK(st.st_mode) &&
+        stat(n->events_log, &st) < 0) {
+        error_setg(errp, "events_log: '%s' is a link to nothing",
+                   n->events_log);
+        return -1;
+    }
+    path = femu_path_resolve(n->events_log);
+    if (!path) {
+        error_setg(errp, "events_log: no directory for '%s'", n->events_log);
+        return -1;
+    }
+    if (stat(path, &st) == 0 && !S_ISREG(st.st_mode) &&
+        !femu_fsched_log_dev(&st)) {
+        goto bad_type;
+    }
+    /* devices are shared, so only a file can collide */
+    evf = femu_path_resolve(n->events_file);
+    if ((stat(path, &st) < 0 || S_ISREG(st.st_mode)) &&
+        ((evf && !strcmp(evf, path)) ||
+         (n->iotrace_path && !strcmp(n->iotrace_path, path)) ||
+         femu_path_in_use(n, path, false))) {
+        goto in_use;
+    }
+    /* O_NONBLOCK: a FIFO made after the check fails here, never blocks */
+    fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC | O_NONBLOCK,
+              0644);
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "events_log: cannot open '%s'", path);
+        return -1;
+    }
+    if (fstat(fd, &st) < 0 ||
+        (!S_ISREG(st.st_mode) && !femu_fsched_log_dev(&st))) {
+        close(fd);
+        goto bad_type;
+    }
+    if (S_ISREG(st.st_mode)) {
+        if (femu_fsched_log_same(n->events_file, &st) ||
+            femu_fsched_log_same(n->iotrace_path, &st) ||
+            femu_inode_in_use(n, &st, false)) {
+            close(fd);
+            goto in_use;
+        }
+        if (femu_fsched_log_partial(path, st.st_size)) {
+            error_setg(errp, "events_log: '%s' ends in a partial line, "
+                       "which the next record would join", path);
+            close(fd);
+            return -1;
+        }
+    }
+    n->evlog_path = g_steal_pointer(&path);
+    return fd;
+
+bad_type:
+    error_setg(errp, "events_log: '%s' is not a regular file, /dev/null or "
+               "/dev/full", path);
+    return -1;
+in_use:
+    error_setg(errp, "events_log: '%s' is the events_file, or a "
+               "persist_file, pel_file, io_trace or events_log of a "
+               "device", path);
+    return -1;
+}
+
+/* the writer has stopped, or never started */
 static void femu_fsched_free(struct FemuFsched *f)
 {
     if (f) {
+        if (f->log_exit.notify) {
+            qemu_remove_exit_notifier(&f->log_exit);
+            qemu_event_destroy(&f->log_ev);
+        }
+        if (f->log_fd >= 0) {
+            close(f->log_fd);
+        }
+        g_free(f->log_error);
+        g_free(f->slots);
         g_free(f->l);
         g_free(f->out);
+        g_free(f->why);
         g_free(f);
     }
 }
@@ -286,7 +591,8 @@ static void femu_fsched_free(struct FemuFsched *f)
  *
  * Returns true with no file, or with a schedule waiting for the first
  * enable. Refused with csd_pause, whose frozen clock the timer does not
- * follow. Time lines and command lines share the limit of 1024.
+ * follow. Time lines and command lines share the limit of 1024. Only a
+ * schedule with a command line gets a record ring and events_log.
  */
 bool femu_events_init(FemuCtrl *n, Error **errp)
 {
@@ -300,7 +606,17 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
     size_t len;
     FILE *f_in;
 
+    if (n->events_max_faults < FEMU_FR_SLOTS_MIN ||
+        n->events_max_faults > FEMU_FR_SLOTS_MAX) {
+        error_setg(errp, "events_max_faults takes %u to %u",
+                   FEMU_FR_SLOTS_MIN, FEMU_FR_SLOTS_MAX);
+        return false;
+    }
     if (!n->events_file) {
+        if (n->events_log) {
+            error_setg(errp, "events_log needs events_file");
+            return false;
+        }
         return true;
     }
     if (n->csd_params.pause) {
@@ -347,6 +663,8 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
     s = g_new0(struct FemuEventSched, 1);
     s->ev = g_new0(FemuEvent, FEMU_EVENTS_MAX_LINES);
     f = g_new0(struct FemuFsched, 1);
+    f->log_fd = -1;
+    f->ctrl = n;
     f->l = g_new0(FemuFsLine, FEMU_EVENTS_MAX_LINES);
     for (int i = 0; lines[i]; i++) {
         char *l = lines[i];
@@ -387,21 +705,46 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
     qsort(s->ev, s->nr, sizeof(*s->ev), femu_events_cmp);
     n->events = s;
     /* no command line: the FTL thread sees no schedule and does no work */
-    if (f->nr) {
-        f->out = g_new0(uint8_t, f->nr);
-        n->fsched = f;
-    } else {
+    if (!f->nr) {
         femu_fsched_free(f);
+        if (n->events_log) {
+            error_setg(errp, "events_log needs a command line in events_file");
+            goto fail_events;
+        }
+        return true;
+    }
+    if (n->events_log) {
+        f->log_fd = femu_fsched_log_open(n, errp);
+        if (f->log_fd < 0) {
+            goto fail;
+        }
+    }
+    f->out = g_new0(uint8_t, f->nr);
+    f->why = g_new0(uint8_t, f->nr);
+    f->slots = g_new0(FemuFrSlot, n->events_max_faults);
+    femu_fr_init(&f->ring, f->slots, n->events_max_faults, f->log_fd < 0);
+    n->fsched = f;
+    if (f->log_fd >= 0) {
+        f->has_log = true;
+        qemu_event_init(&f->log_ev, false);
+        f->log_exit.notify = femu_fsched_log_exit;
+        qemu_add_exit_notifier(&f->log_exit);
+        f->log_running = true;
+        qemu_thread_create(&f->log_thread, "femu-events-log",
+                           femu_fsched_log_thread, n, QEMU_THREAD_JOINABLE);
     }
     return true;
 
 fail:
+    femu_fsched_free(f);
+fail_events:
+    g_clear_pointer(&n->evlog_path, g_free);
     for (int i = 0; i < s->nr; i++) {
         g_free(s->ev[i].action);
     }
     g_free(s->ev);
     g_free(s);
-    femu_fsched_free(f);
+    n->events = NULL;
     return false;
 }
 
@@ -541,7 +884,12 @@ void femu_events_free(FemuCtrl *n)
 {
     struct FemuEventSched *s = n->events;
 
+    /* the last records reach events_log, even under x-fault-log-hold */
+    if (n->fsched) {
+        femu_fsched_log_finish(n);
+    }
     femu_fsched_free(n->fsched);
+    g_clear_pointer(&n->evlog_path, g_free);
     n->fsched = NULL;
     if (!s) {
         return;
@@ -585,6 +933,52 @@ static void femu_fsched_act(FemuCtrl *n, NvmeRequest *req,
     }
 }
 
+static uint8_t femu_fsched_outcome(uint8_t out)
+{
+    switch (out) {
+    case FEMU_FS_OUT_APPLIED:
+        return FEMU_FR_OUT_SELECTED;
+    case FEMU_FS_OUT_SUPERSEDED:
+        return FEMU_FR_OUT_SUPERSEDED;
+    default:
+        return FEMU_FR_OUT_NO_EFFECT;
+    }
+}
+
+/*
+ * One select record per line that selected @req. The FTL thread is the
+ * only producer, so the ring needs no lock here.
+ */
+static void femu_fsched_record(FemuCtrl *n, NvmeRequest *req,
+                               const FemuFsView *v, int i)
+{
+    struct FemuFsched *f = n->fsched;
+    const FemuFsLine *l = &f->l[i];
+    FemuFrRec rec = {
+        .step = f->step,
+        .match = l->matched,
+        .slba = v->slba,
+        .nlb = v->nlb,
+        .nsid = v->nsid,
+        .line = l->line,
+        .sqid = req->sq ? req->sq->sqid : 0,
+        .cid = le16_to_cpu(req->cmd.cid),
+        .origin = FEMU_FR_ORIGIN_SCHED_CMD,
+        .phase = FEMU_FR_PHASE_SELECT,
+        .act = l->act,
+        .outcome = femu_fsched_outcome(f->out[i]),
+        .why = f->why[i],
+        .opc = v->opc,
+        .fua = v->fua,
+    };
+
+    femu_fr_put(&f->ring, &rec);
+    /* a no-op while the writer is already awake, or after it ended */
+    if (f->has_log) {
+        qemu_event_set(&f->log_ev);
+    }
+}
+
 /**
  * femu_fsched_step - match one command against the command lines
  * @n: the controller, with command lines
@@ -593,7 +987,7 @@ static void femu_fsched_act(FemuCtrl *n, NvmeRequest *req,
  * Runs on the FTL thread only. The view comes from the SQE copy and the
  * namespace, never from fields the FTL or nvme_power_io() fill later. A
  * command outside the matchable set, or one that fails the view checks,
- * counts for no line.
+ * counts for no line. Each command counts as one step, matched or not.
  */
 void femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
 {
@@ -611,6 +1005,7 @@ void femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
     uint32_t xfer_ms = 0;
     uint32_t hold;
 
+    qatomic_set(&f->step, f->step + 1);
     if (!qatomic_read(&f->running)) {
         return;
     }
@@ -663,8 +1058,12 @@ void femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
         g_usleep((gulong)hold * 1000);
         qatomic_set(&n->test_fs_held, 2);
     }
-    femu_fs_match(f->l, f->nr, &v, f->out, NULL, &eff);
+    femu_fs_match(f->l, f->nr, &v, f->out, f->why, &eff);
     for (int i = 0; i < f->nr; i++) {
+        if (f->out[i] == FEMU_FS_OUT_NONE) {
+            continue;
+        }
+        femu_fsched_record(n, req, &v, i);
         if (f->out[i] == FEMU_FS_OUT_APPLIED) {
             femu_fsched_act(n, req, &f->l[i], &eff);
         }
@@ -754,6 +1153,39 @@ static void femu_fsched_test_draw_set(Object *obj, Visitor *v,
     }
 }
 
+/*
+ * x-fault-log-hold (qtest): while set, the events_log writer frees no
+ * slot, so the ring fills and drops. Clearing it wakes the writer.
+ */
+static void femu_fsched_test_log_hold_get(Object *obj, Visitor *v,
+                                          const char *name, void *opaque,
+                                          Error **errp)
+{
+    bool hold = qatomic_read(&FEMU(obj)->test_fs_log_hold);
+
+    visit_type_bool(v, name, &hold, errp);
+}
+
+static void femu_fsched_test_log_hold_set(Object *obj, Visitor *v,
+                                          const char *name, void *opaque,
+                                          Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    bool hold;
+
+    if (!visit_type_bool(v, name, &hold, errp)) {
+        return;
+    }
+    if (!n->fsched || !n->fsched->log_running) {
+        error_setg(errp, "x-fault-log-hold needs an events_log");
+        return;
+    }
+    qatomic_set(&n->test_fs_log_hold, hold);
+    if (!hold) {
+        qemu_event_set(&n->fsched->log_ev);
+    }
+}
+
 void femu_events_add_test_props(Object *obj)
 {
     FemuCtrl *n = FEMU(obj);
@@ -770,6 +1202,68 @@ void femu_events_add_test_props(Object *obj)
     object_property_add(obj, "x-fault-draw", "uint64",
                         femu_fsched_test_draw_get, femu_fsched_test_draw_set,
                         NULL, NULL);
+    object_property_add(obj, "x-fault-log-hold", "bool",
+                        femu_fsched_test_log_hold_get,
+                        femu_fsched_test_log_hold_set, NULL, NULL);
+}
+
+/* the fault records and their counters, for query-femu-events */
+static void femu_fsched_info(FemuCtrl *n, FemuEvents *info)
+{
+    struct FemuFsched *f = n->fsched;
+    g_autofree FemuFrRec *rec = g_new(FemuFrRec, f->ring.size);
+    FemuFrIdRange drop[FEMU_FR_DROP_RANGES];
+    FemuFaultRecordList **tail = &info->faults;
+    FemuIdRangeList **dtail = &info->dropped_ids;
+    uint32_t nr = femu_fr_read(&f->ring, rec, f->ring.size);
+    uint32_t nd = femu_fr_dropped_ids(&f->ring, drop);
+
+    info->has_step = true;
+    info->step = qatomic_read(&f->step);
+    info->has_last_id = true;
+    info->last_id = qatomic_read(&f->ring.next_id);
+    info->has_dropped = true;
+    info->dropped = qatomic_read(&f->ring.dropped);
+    info->has_overwritten = true;
+    info->overwritten = qatomic_read(&f->ring.overwritten);
+    info->log_error = g_strdup(qatomic_load_acquire(&f->log_error));
+    info->has_faults = true;
+    for (uint32_t i = 0; i < nr; i++) {
+        FemuFaultRecord *e = g_new0(FemuFaultRecord, 1);
+        const FemuFrRec *r = &rec[i];
+
+        e->id = r->id;
+        e->has_cause = r->cause != 0;
+        e->cause = r->cause;
+        e->origin = g_strdup(femu_fr_name_origin(r->origin));
+        e->line = r->line;
+        e->match = r->match;
+        e->action = g_strdup(femu_fs_act_name(r->act));
+        e->phase = g_strdup(femu_fr_name_phase(r->phase));
+        e->step = r->step;
+        e->nsid = r->nsid;
+        e->sqid = r->sqid;
+        e->cid = r->cid;
+        e->opc = r->opc;
+        e->fua = r->fua;
+        e->slba = r->slba;
+        e->nlb = r->nlb;
+        e->outcome = g_strdup(femu_fr_name_outcome(r->outcome));
+        if (r->outcome == FEMU_FR_OUT_NO_EFFECT) {
+            e->reason = g_strdup(femu_fr_name_why(r->why));
+        }
+        e->has_status = r->status != 0;
+        e->status = r->status;
+        QAPI_LIST_APPEND(tail, e);
+    }
+    info->has_dropped_ids = true;
+    for (uint32_t i = 0; i < nd; i++) {
+        FemuIdRange *d = g_new0(FemuIdRange, 1);
+
+        d->lo = drop[i].lo;
+        d->hi = drop[i].hi;
+        QAPI_LIST_APPEND(dtail, d);
+    }
 }
 
 /* the events of @n for query-femu-events */
@@ -805,6 +1299,9 @@ FemuEvents *femu_events_info(FemuCtrl *n, Error **errp)
         e->result = ev->result;
         e->error = g_strdup(ev->error);
         QAPI_LIST_APPEND(tail, e);
+    }
+    if (n->fsched) {
+        femu_fsched_info(n, info);
     }
     return info;
 }
