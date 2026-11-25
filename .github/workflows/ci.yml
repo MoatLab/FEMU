@@ -254,6 +254,15 @@ jobs:
         python3 -I hw/femu/scripts/plm-verdict.py --self-test
         python3 -I hw/femu/scripts/plm-guest.py --self-test
 
+    - name: Check the fault schedule guest test verdicts
+      run: |
+        # The self-test plants a fault for each check of each verdict
+        # rule, so a rule that cannot fail fails here. The guest script
+        # runs only in a guest; here it must compile.
+        python3 -I hw/femu/scripts/fault-verdict.py --self-test
+        python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' \
+          hw/femu/scripts/fault-guest.py
+
     - name: Check the guest image builder
       # Planted bad kernels, digests, CHECKSUMS files, check records and
       # GRUB menus must each fail; no network, no QEMU.

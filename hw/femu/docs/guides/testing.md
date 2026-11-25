@@ -546,6 +546,111 @@ All of them write to the namespace. The nvme-cli suite can format it, and
 `zenfs-crash-guest.sh` formats it with ZenFS. `kv-bench-guest.sh` needs
 `kv-probe.c` and `kv-bench.c` in its own directory.
 
+### Fault schedule guest tests
+
+These tests show how Linux and its file systems see the faults of an
+`events_file` command line (see
+[timed actions](measuring.md#timed-actions-events_file)). Two scripts
+share the work:
+
+- `fault-guest.py` runs in the guest as root. It does the guest steps of
+  each test and prints facts as `FG key=value` lines.
+- `fault-verdict.py` runs on the host. It reads the guest output, the
+  `events_log` file and the guest kernel messages, and prints one
+  verdict line.
+
+```
+ host                               guest (fault-guest.py)
+ ----                               ----------------------
+ QEMU: femu, events_file, events_log
+                                    setup steps (real Flush)
+ schedule starts (first enable)
+                                    test steps --> FG facts
+ QMP: simulate-power-loss, system_reset (G1 only)
+                                    checks after the reboot --> FG facts
+ fault-verdict.py TEST --guest OUT --log EVENTS_LOG [--dmesg FILE]
+   --> VERDICT TEST PASS|FAIL|INVALID|INCOMPLETE|BLOCKED|RECORDED|SETUP-ERROR
+```
+
+| Test | Device and line | Pass rule |
+| --- | --- | --- |
+| G1 | `buffer_size=16384,power_loss=on,vwc=1`; `@flush%1000000~1 flush-lie` | After a cut and a reboot, the last record that `fsync()` acknowledged is gone. Either the cut evidence names its blocks, or a raw read of its blocks finds the record (lost through metadata) |
+| G2 | `buffer_size=16384,power_loss=on,vwc=1`; `@write,lba=L-L#N wb-fail mode=old report=once` | With `max_retries=0` in `nvme_core`, `fsync()` on the raw block device fails with `ENODATA`. Block L reads its old data, and one `report` record with `found` `self` names the failure of L |
+| G3 | `buffer_size=16384,power_loss=on,vwc=1`; `@any#N power-loss keep=300000 seed=S` | After a cut during fsstress, ext4 and XFS mount, and `e2fsck -fn` or `xfs_repair -n` finds no error, for each seed |
+| G4a | `@read#K hang` | dmesg shows the I/O timeout of the held SQID and CID, then a reset. fio ends, the next read works, and no command stays held |
+| G4b | `buffer_size=16384,power_loss=on,vwc=1`; `@read#K cfs` | dmesg shows a CSTS value with CFS set. FEMU gives the parked command back at the reset, fio ends, and the next read works |
+
+`power_loss=on` needs a write buffer, so these devices set `buffer_size` to
+16384 pages.
+
+Each test has a control. The control must make its pass rule fail and show that it ran as planned. A QEMU that ends during a run makes the run INVALID, and an INVALID control makes its test INVALID. A record id that repeats in the `events_log` also makes the run INVALID, because the log then holds an older run. Give each run a new log file:
+
+| Test | Control |
+| --- | --- |
+| G1 | no lie line: the cut and the reboot are confirmed, and the record survives |
+| G2 | (a) no `wb-fail` line: the first `fsync()` returns 0; (b) `max_retries=5`: a write-back fails, and the first `fsync()` returns 0 |
+| G3 | a cleared root inode (`debugfs` or `xfs_db`): the checker exits with its error code and names the root inode |
+| G4a | (a) no hang line: dmesg has NVMe lines but no timeout, and fio runs its whole time with exit 0; (b) a build with no reclaim of held commands: the records show a command that stays held |
+| G4b | a build that leaves CSTS.CFS clear: a `cfs` takes effect, dmesg has NVMe lines, and no CSTS value has CFS set |
+
+Some runs test nothing, and the verdict says so:
+
+- G1 is INVALID when the cut rolled back no lie page. A drain, for
+  example a Write Zeroes, can empty the buffer before the cut.
+- G1 reads the blocks of the record from the device with `O_DIRECT`
+  (`g1_raw_m_present`). The verdicts after a cut that rolled back lie
+  pages:
+
+  ```
+   file has M? --yes--> cut names its blocks? --yes--> FAIL
+        |                      `--no--> INVALID or INCOMPLETE
+        no
+        v
+   raw read finds M? --yes--> cut names its blocks? --yes--> FAIL
+        |                      `--no--> PASS (lost through metadata)
+        no
+        v
+   cut names its blocks? --yes--> PASS
+        `--no--> ranges truncated? --yes--> INCOMPLETE
+                   `--no--> INVALID
+  ```
+
+  A PASS through metadata means the data blocks survived, and the lie
+  rolled back the inode size or the journal.
+- G3 is SETUP-ERROR when the guest cannot make or mount the file system.
+- `e2fsck -n` exits 12 (4 + 8) when it cannot make a new root inode.
+  The G3 control accepts 4 and 12.
+
+The guest makes ext4 with `lazy_itable_init=0,lazy_journal_init=0`. Lazy
+init zeroes the inode tables after the mount, and that drains the buffer.
+
+A guest `mkfs.xfs` newer than the guest kernel can turn on features that
+the kernel cannot mount. The guest picks the options in this order:
+
+1. Use the `lts_X.Y.conf` profile of the running kernel, or the nearest lower one.
+2. Look first in `PREFIX/share/xfsprogs/mkfs` of the `mkfs.xfs` that runs.
+3. Run `mkfs.xfs -N`. Add `-i exchange=0` (kernel below 6.10) or `-n parent=0` (kernel below 6.12) when it shows the feature on.
+4. Keep an option only when a dry run accepts it.
+
+Each mkfs prints an `FG` line with `mkfs_profile` and `mkfs_cmd`, before
+the mount, for the control and for every seed.
+
+G4b claims only the I/O timeout path: Linux reads CSTS after the timeout
+and resets the controller. A shutdown after `cfs` times out in Linux,
+and G4b does not test that.
+
+This version starts a schedule at the first enable. G2 and G4 therefore
+count the matches from boot. G1 and G3 need a start after their setup,
+so a host driver reports them `BLOCKED` until FEMU has such a start.
+G3 also needs a command `power-loss` that cuts power.
+
+Run the self-test of the verdict rules, which plants a fault for each
+check:
+
+```sh
+python3 -I hw/femu/scripts/fault-verdict.py --self-test
+```
+
 ## Adding a test
 
 ### A qtest
