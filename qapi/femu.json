@@ -1879,7 +1879,8 @@
 #
 # @origin: who made it: "sched-cmd" for a command line,
 #     "sched-time" for the power cut of a time line, "qmp" for
-#     simulate-power-loss
+#     simulate-power-loss, "prop" for an sdc_ppm or x-sdc fault that
+#     an sdc line replaced
 #
 # @line: the command line or the time line, in the file; 0 for "qmp"
 #
@@ -1889,7 +1890,7 @@
 #
 # @phase: the step of the fault: "select" when a line selects a
 #     command, "apply" when the FTL has run a command that a
-#     read-unc, write-fail, delay, lie or wb-fail line selected,
+#     read-unc, write-fail, sdc, delay, lie or wb-fail line selected,
 #     when a hang or a cfs holds its command, or when a power-loss
 #     cut the power before its command ran, or when a time line or
 #     simulate-power-loss cut the power,
@@ -1918,10 +1919,11 @@
 # @nlb: its blocks, from 1; 0 for a Flush
 #
 # @outcome: "selected": the line won its group, "superseded": an
-#     earlier line of its group won, or a full write cleared a mark,
-#     "no-effect": the line won with no effect, "done": the read-unc,
-#     write-fail, delay, lie, hang, cfs or cut of an "apply" record,
-#     or an "evidence" record, took place, "marked": wb-fail marked
+#     earlier line of its group won, a full write cleared a mark, or
+#     an sdc line replaced the fault of a "prop" record, "no-effect":
+#     the line won with no effect, "done": the read-unc, write-fail,
+#     sdc, delay, lie, hang, cfs or cut of an "apply" record, or an
+#     "evidence" record, took place, "marked": wb-fail marked
 #     buffered pages, "unc" or "old": the lost blocks of a failed
 #     write-back read as Unrecovered Read Error or as their old data,
 #     "reported": a completion carries the failure, "reclaimed": a
@@ -1935,8 +1937,9 @@
 #     buffer takes no write), "cmd-failed" (the command failed),
 #     "durable" (no buffered page is left volatile), "slots-full"
 #     (wb-fail found no free fault slot), "marked" (each page of the
-#     write keeps an older wb-fail mark) or "not-modelled" (ana= and
-#     slow= act on time lines only); for "reclaimed", the path:
+#     write keeps an older wb-fail mark), "not-modelled" (ana= and
+#     slow= act on time lines only) or "outside" (the Write installs
+#     no page that holds the sdc block); for "reclaimed", the path:
 #     "sq-deleted", "reset", "shutdown", "power-cut" or "unplug"
 #
 # @buffered-at-flush-lie: for a "done" flush-lie, the buffered pages
@@ -1951,6 +1954,11 @@
 #
 # @ms: delay "apply": the ms of the line.  A "done" record added them
 #     to the completion; a "no-effect" record added none
+#
+# @sdc-kind: sdc "apply": "flip", "lost" or "misdirect", the fault of
+#     the line; for "prop", the fault the line replaced
+#
+# @sdc-lba: sdc "apply": the block of that fault
 #
 # @slot: wb-fail: the fault slot, from 1
 #
@@ -2009,7 +2017,8 @@
             'fua': 'bool', 'slba': 'uint64', 'nlb': 'uint32',
             'outcome': 'str', '*reason': 'str', '*status': 'uint16',
             '*buffered-at-flush-lie': 'uint32', '*lie-pages': 'uint32',
-            '*ms': 'uint32', '*slot': 'uint16', '*pages': 'uint32',
+            '*ms': 'uint32', '*sdc-kind': 'str', '*sdc-lba': 'uint64',
+            '*slot': 'uint16', '*pages': 'uint32',
             '*lba-mask': 'uint64',
             '*lost': 'uint16', '*found': 'str', '*at': 'str',
             '*rolled-back-pages': 'uint32',

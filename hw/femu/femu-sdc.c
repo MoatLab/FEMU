@@ -26,6 +26,13 @@
 #include "qapi/visitor.h"
 #include "qemu/cutils.h"
 #include "nvme.h"
+#include "femu-fsched.h"
+
+/* an sdc line of events_file names its fault as the draws do */
+_Static_assert((int)FEMU_FS_SDC_FLIP == (int)FEMU_SDC_FLIP &&
+               (int)FEMU_FS_SDC_LOST == (int)FEMU_SDC_LOST &&
+               (int)FEMU_FS_SDC_MISDIRECT == (int)FEMU_SDC_MISDIRECT,
+               "one value for each sdc fault");
 
 static const char *const sdc_names[] = {
     [FEMU_SDC_FLIP] = "flip",
@@ -158,22 +165,13 @@ static uint64_t sdc_next(FemuCtrl *n)
     return x;
 }
 
-/*
- * The FTL thread installs blocks [@slba, @elba) of one page: the fault
- * this install takes, 0 for none. *@flip_lba is the block a flip spoils.
- */
-int femu_sdc_fault(NvmeNamespace *ns, uint64_t slba, uint64_t elba,
-                   uint64_t *flip_lba)
+/* the x-sdc slot, then the sdc_ppm draws, of one install */
+static int sdc_draw(FemuCtrl *n, NvmeNamespace *ns, uint64_t slba,
+                    uint64_t elba, uint64_t *flip_lba)
 {
-    FemuCtrl *n = ns->ctrl;
-    int kind;
-
-    if (!ns->sdc || slba >= elba) {
-        return 0;
-    }
-    *flip_lba = slba;
     /* x-sdc fills the slot only while it is empty, so it holds still here */
-    kind = qatomic_load_acquire(&n->sdc_one_kind);
+    int kind = qatomic_load_acquire(&n->sdc_one_kind);
+
     if (kind) {
         uint64_t lba = n->sdc_one_lba;
 
@@ -188,6 +186,30 @@ int femu_sdc_fault(NvmeNamespace *ns, uint64_t slba, uint64_t elba,
     }
     kind = n->sdc_kind_v ? n->sdc_kind_v : 1 + sdc_next(n) % 3;
     *flip_lba = slba + sdc_next(n) % (elba - slba);
+    return kind;
+}
+
+/*
+ * The FTL thread installs blocks [@slba, @elba) of one page of @req: the
+ * fault this install takes, 0 for none. *@flip_lba is the block a flip
+ * spoils. An sdc line of events_file overrides the result for its Write,
+ * after the draws, so the draws of every later install stay the same.
+ */
+int femu_sdc_fault(NvmeNamespace *ns, const NvmeRequest *req, uint64_t slba,
+                   uint64_t elba, uint64_t *flip_lba)
+{
+    FemuCtrl *n = ns->ctrl;
+    FemuFsSdc *o = n->fs_sdc;
+    int kind;
+
+    if (!ns->sdc || slba >= elba) {
+        return 0;
+    }
+    *flip_lba = slba;
+    kind = sdc_draw(n, ns, slba, elba, flip_lba);
+    if (unlikely(o) && o->req == req) {
+        femu_fs_sdc_take(o, slba, elba, &kind, flip_lba);
+    }
     return kind;
 }
 

@@ -436,7 +436,7 @@ static void buffer_write_data(struct ssd *ssd, NvmeRequest *req, uint64_t lpn,
             }
         }
     }
-    fault = femu_sdc_fault(ns, first >> shift, end >> shift, &flip_lba);
+    fault = femu_sdc_fault(ns, req, first >> shift, end >> shift, &flip_lba);
     if (fault != FEMU_SDC_LOST && fault != FEMU_SDC_MISDIRECT) {
         memcpy(base + first, req->write_data + first - (req->slba << shift),
                end - first);

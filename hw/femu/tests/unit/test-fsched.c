@@ -1944,6 +1944,129 @@ static void test_fail_json(void)
                   "\"cmd-failed\"}\n"));
 }
 
+/* sdc needs sdc=on, and FDP installs no page through the draws */
+static void test_sdc_device(void)
+{
+    FemuFsDev d = dev_full();
+
+    accepted(&d, "@write#1 sdc kind=flip lba=1023");
+    refused(&d, "@write#1 sdc kind=flip lba=1024", "lba= of sdc names no");
+    accepted(&d, "@write,ns=2#1 sdc kind=lost lba=511");
+    refused(&d, "@write,ns=2#1 sdc kind=lost lba=512", "lba= of sdc");
+    refused(&d, "@write#1 sdc", "action sdc needs kind=");
+    d.fdp = true;
+    refused(&d, "@write#1 sdc kind=flip", "sdc is not supported with FDP");
+    d.fdp = false;
+    d.sdc = false;
+    refused(&d, "@write#1 sdc kind=flip", "sdc needs sdc=on");
+}
+
+/*
+ * An sdc line with lba= has no effect, reason outside, on a Write that
+ * does not hold the block. Each end of the Write holds it; one block
+ * past either end does not. With no lba= the first block of the Write
+ * takes it.
+ */
+static void test_sdc_outside(void)
+{
+    static const struct {
+        uint64_t lba;
+        bool in;
+    } k[] = {
+        { 99, false }, { 100, true }, { 107, true }, { 108, false },
+    };
+    FemuFsView v = view(FEMU_FS_OPC_WRITE, 100, 8, false);
+    FemuFsLine l[1];
+    uint8_t out[1];
+    uint8_t why[1];
+    FemuFsView eff;
+    FemuFsSdc o;
+    int dummy = 0;
+
+    for (size_t i = 0; i < ARRAY_SIZE(k); i++) {
+        char t[64];
+        const char *const p[] = { t };
+
+        snprintf(t, sizeof(t), "@write#1 sdc kind=flip lba=%" PRIu64,
+                 k[i].lba);
+        lines(l, p, 1);
+        femu_fs_match(l, 1, &v, out, why, &eff);
+        CHECK(out[0] == (k[i].in ? A : X));
+        CHECK(why[0] == (k[i].in ? FEMU_FS_WHY_NONE : FEMU_FS_WHY_OUTSIDE));
+    }
+    lines(l, (const char *const[]) { "@write#1 sdc kind=lost" }, 1);
+    femu_fs_match(l, 1, &v, out, why, &eff);
+    CHECK(out[0] == A);
+    femu_fs_sdc_set(&o, &l[0], &v, &dummy);
+    CHECK(o.lba == 100 && o.kind == FEMU_FS_SDC_LOST && o.req == &dummy);
+    CHECK(!o.hit && !o.was_kind);
+    lines(l, (const char *const[]) { "@write#1 sdc kind=flip lba=105" }, 1);
+    femu_fs_sdc_set(&o, &l[0], &v, &dummy);
+    CHECK(o.lba == 105 && o.kind == FEMU_FS_SDC_FLIP);
+    CHECK(!strcmp(femu_fr_name_why(FEMU_FS_WHY_OUTSIDE), "outside"));
+}
+
+/*
+ * The install that holds the block takes the override, once, and keeps
+ * what the draws gave it as the replaced fault. Installs before and
+ * after it keep their own result; [s, e) holds s, not e.
+ */
+static void test_sdc_take(void)
+{
+    FemuFsSdc o = { .kind = FEMU_FS_SDC_MISDIRECT, .lba = 16 };
+    uint64_t lba = 9;
+    int kind = FEMU_FS_SDC_FLIP;
+
+    /* [8, 16) ends before the block: the draw stays */
+    CHECK(!femu_fs_sdc_take(&o, 8, 16, &kind, &lba));
+    CHECK(kind == FEMU_FS_SDC_FLIP && lba == 9 && !o.hit);
+    /* [17, 24) starts past it */
+    CHECK(!femu_fs_sdc_take(&o, 17, 24, &kind, &lba));
+    CHECK(kind == FEMU_FS_SDC_FLIP && !o.hit);
+    /* [16, 24) holds it: the override replaces the flip at 9 */
+    CHECK(femu_fs_sdc_take(&o, 16, 24, &kind, &lba));
+    CHECK(kind == FEMU_FS_SDC_MISDIRECT && lba == 16 && o.hit);
+    CHECK(o.was_kind == FEMU_FS_SDC_FLIP && o.was_lba == 9);
+    /* once: a second install of the block keeps its own result */
+    kind = 0;
+    lba = 16;
+    CHECK(!femu_fs_sdc_take(&o, 16, 24, &kind, &lba));
+    CHECK(kind == 0 && o.was_kind == FEMU_FS_SDC_FLIP);
+    /* no draw: nothing replaced */
+    o = (FemuFsSdc) { .kind = FEMU_FS_SDC_LOST, .lba = 23 };
+    kind = 0;
+    lba = 16;
+    CHECK(femu_fs_sdc_take(&o, 16, 24, &kind, &lba));
+    CHECK(kind == FEMU_FS_SDC_LOST && lba == 23 && o.was_kind == 0);
+}
+
+/* the sdc apply record and the prop record of a replaced draw */
+static void test_sdc_json(void)
+{
+    FemuFrRec x = rec_of(8);
+    char buf[FEMU_FR_JSON_MAX];
+
+    x.act = FEMU_FS_ACT_SDC;
+    x.phase = FEMU_FR_PHASE_APPLY;
+    x.outcome = FEMU_FR_OUT_DONE;
+    x.sdc.kind = FEMU_FS_SDC_MISDIRECT;
+    x.sdc.lba = 4100;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"outcome\":\"done\",\"sdc_kind\":\"misdirect\","
+                  "\"sdc_lba\":4100}\n"));
+    x.origin = FEMU_FR_ORIGIN_PROP;
+    x.outcome = FEMU_FR_OUT_SUPERSEDED;
+    x.sdc.kind = FEMU_FS_SDC_FLIP;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"origin\":\"prop\","));
+    CHECK(strstr(buf, "\"outcome\":\"superseded\",\"sdc_kind\":\"flip\","));
+    CHECK(!strcmp(femu_fr_name_sdc(FEMU_FS_SDC_LOST), "lost"));
+    /* control: a select record names no fault */
+    x.phase = FEMU_FR_PHASE_SELECT;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(!strstr(buf, "sdc_kind"));
+}
+
 int main(void)
 {
     test_grammar();
@@ -1981,6 +2104,10 @@ int main(void)
     test_not_modelled();
     test_delay_json();
     test_fail_json();
+    test_sdc_device();
+    test_sdc_outside();
+    test_sdc_take();
+    test_sdc_json();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

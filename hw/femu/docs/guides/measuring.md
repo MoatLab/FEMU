@@ -403,12 +403,12 @@ can mix time lines and command lines. Command lines work on bbssd only.
   handler does, except a PRACT tuple that the controller inserts.
 - With no command line, the FTL thread has no schedule to check: one
   pointer test per command, and no decode, count or draw.
-- Each action but `sdc` has an effect: `flush-lie`, `fua-lie` (see
+- Each action has an effect: `flush-lie`, `fua-lie` (see
   [lies](#lies)), `wb-fail` (see
   [write-back failures](#write-back-failures)), `hang` and `cfs` (see
   [hang and controller fatal status](#hang-and-controller-fatal-status)),
   `power-loss` (see [a cut at a command](#a-cut-at-a-command)), and
-  `delay`, `read-unc` and `write-fail` (see
+  `delay`, `read-unc`, `write-fail` and `sdc` (see
   [one-command faults](#one-command-faults)).
 - `ana=` and `slow=` act on time lines only. On a command line each
   selection has no effect, reason `not-modelled`: their change runs
@@ -715,6 +715,7 @@ These actions change one command and nothing after it. Each writes an
                    apply record "done"
    S is an error:  the command keeps S; apply record "no-effect",
                    reason cmd-failed
+ sdc: the install of the page that holds the block takes the fault
 ```
 
 - `delay ms=D` holds the CQE of its command for D ms more, 1 to 600000.
@@ -737,11 +738,32 @@ These actions change one command and nothing after it. Each writes an
   reason `cmd-failed`, and gets no `prop` record.
 - The failure check uses the status the FTL gave, before any line of
   the step changed it. So a `delay` beside a `write-fail` still applies.
+- `sdc kind=K` puts fault K (`flip`, `lost` or `misdirect`, as
+  `sdc_kind`) on block `lba=L` of its Write, or on the first block of
+  the Write with no `lba=`. It needs `sdc=on`, so the FTL thread
+  installs each page of the Write. The draws of `sdc_ppm` and the `x-sdc`
+  slot run for each install as without the line, then the install that
+  holds the block takes K in place of their result. So every later
+  fault of `sdc_ppm` stays where it was.
+- When the draws gave that install a fault, a second record names it:
+  origin `prop`, outcome `superseded`, its own `sdc_kind` and `sdc_lba`,
+  and `cause` the `apply` record.
+- `sdc_lba` names one block. A `flip` spoils that block only. A `lost`
+  or `misdirect` fault spoils each block of the page install that holds
+  it, and `misdirect` also the page after it.
+- An `sdc` line with `lba=` outside the Write has no effect, reason
+  `outside`, at the selection. An `sdc` whose Write fails before it
+  installs the block has no effect, reason `cmd-failed`. One that
+  installed the block is `done`, even if the Write fails later: the
+  stored bytes are wrong. Realize refuses `sdc` with FDP, whose write
+  path installs no page through the draws.
+
 | Action | `apply` outcome | Fields |
 | --- | --- | --- |
 | `delay` | `done`, or `no-effect` | `ms` |
 | `read-unc` | `done`, or `no-effect` | `status` 17025 (4281h) |
 | `write-fail` | `done`, or `no-effect` | `status` 640 (280h) |
+| `sdc` | `done`, or `no-effect` | `sdc_kind`, `sdc_lba` (QMP: `sdc-kind`, `sdc-lba`) |
 
 ```text
  {"id":2,"cause":1,"origin":"sched-cmd","line":1,"match":2,
@@ -772,17 +794,17 @@ Realize allocates the ring only for a file with a command line.
 | Field | Meaning |
 | --- | --- |
 | `id` | from 1; each record takes one, stored or dropped |
-| `origin` | `sched-cmd`: a command line; `sched-time` or `qmp`: a cut summary and its evidence |
+| `origin` | `sched-cmd`: a command line; `sched-time` or `qmp`: a cut summary and its evidence; `prop`: an `sdc_ppm` or `x-sdc` fault that an `sdc` line replaced |
 | `line`, `match` | the line, and its matches so far, this one too |
-| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a `delay`, `read-unc`, `write-fail`, lie, `wb-fail`, `hang`, `cfs` or `power-loss`; `fail`, `report` and `supersede` for a `wb-fail` mark; `reclaim` for a held command that went back; `evidence` for a chunk of a cut |
+| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a `delay`, `read-unc`, `write-fail`, `sdc`, lie, `wb-fail`, `hang`, `cfs` or `power-loss`; `fail`, `report` and `supersede` for a `wb-fail` mark; `reclaim` for a held command that went back; `evidence` for a chunk of a cut |
 | `step` | commands the FTL thread took so far, this one too |
 | `nsid`, `sqid`, `cid`, `opc`, `fua`, `slba`, `nlb` | the command as the host sent it; `slba` and `nlb` are 0 for a Flush |
-| `outcome` | `selected`, `superseded` or `no-effect`; `done` for an `apply` record; `marked`, `unc`, `old` and `reported` for `wb-fail`; `reclaimed` for a `reclaim` record |
-| `reason` | for `no-effect`: `fua`, `pre` or `hang`; for a lie also `plp`, `atomic`, `no-buffer`, `cmd-failed` or `durable`; for `wb-fail` also `slots-full` and `marked`; `cmd-failed` for `delay`, `read-unc` and `write-fail`; `not-modelled` for `ana=` and `slow=`; for `reclaimed`: the path |
+| `outcome` | `selected`, `superseded` or `no-effect`; `done` for an `apply` record; `superseded` for a `prop` record; `marked`, `unc`, `old` and `reported` for `wb-fail`; `reclaimed` for a `reclaim` record |
+| `reason` | for `no-effect`: `fua`, `pre` or `hang`; for a lie also `plp`, `atomic`, `no-buffer`, `cmd-failed` or `durable`; for `wb-fail` also `slots-full` and `marked`; `cmd-failed` for `delay`, `read-unc`, `write-fail` and `sdc`; `outside` for `sdc`; `not-modelled` for `ana=` and `slow=`; for `reclaimed`: the path |
 | `buffered_at_flush_lie`, `lie_pages` | for a `done` lie: the pages it left volatile (QMP: `buffered-at-flush-lie`, `lie-pages`) |
 | `cause` | the id of the parent record: an `apply` record names its `select` record |
 | `status` | the status a `fail` or `report` record carries, the withheld status of a `hang`, or the status a `done` `read-unc` or `write-fail` gave; absent for none |
-| `ms` | see [one-command faults](#one-command-faults) |
+| `ms`, `sdc_kind`, `sdc_lba` | see [one-command faults](#one-command-faults) |
 | `slot`, `pages`, `lba_mask`, `lost`, `found` | `wb-fail` only, see [write-back failures](#write-back-failures) (QMP: `lba-mask`) |
 
 ```text

@@ -35707,3 +35707,213 @@ void femu_test_fsched_fail_wbf(void *obj, void *data, QGuestAllocator *alloc)
     }
     femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
 }
+
+/* qom-set x-sdc of device @id: one fault on the next install of a block */
+static void femu_cmd_sdc_one(QTestState *qts, const char *id,
+                             const char *spec)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':%s,'property':'x-sdc','value':%s}}",
+                           path, spec);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+#define FEMU_CMD_SDC    FEMU_LIE_PL ",sdc=on"
+
+/*
+ * sdc on device sa, with e2e_check, so a read of a spoiled block fails:
+ *   Write 2, lba=13 lost    blocks 8 to 15 keep the old data: done
+ *   Write 3, lba=40         outside its blocks 16 to 23: no-effect
+ *   Write 4, flip           the first block, 24: done
+ *   Write 5                 the data transfer fails: cmd-failed
+ *   Write 6, lba=44 lost    x-sdc put a flip on 41 of the same install:
+ *                           lost replaces it, and a prop record names it
+ * Devices sp and sq draw flips at sdc_ppm 200000 with one seed over
+ * pages 0 to 39; sp has a lost line on Write 11. Every page but page 10
+ * must read the same on both: the line leaves the draws in place. On
+ * page 10, sp's prop record names the flip sq has, or there is none.
+ *
+ * Planted defects and the check that fails:
+ *   the override skips the draws        sp and sq differ after page 10
+ *   the override runs before the draws  sa record 10 names no flip
+ *   lba= ignored                        sa record 2
+ *   no prop record                      sa record 10
+ *   no outside check                    sa record 3
+ */
+void femu_test_fsched_sdc(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cmd-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "sa", 5, FEMU_CMD_SDC,
+          "@write#2 sdc kind=lost lba=13\n@write#3 sdc kind=flip lba=40\n"
+          "@write#4 sdc kind=flip\n@write#5 sdc kind=flip\n"
+          "@write#6 sdc kind=lost lba=44\n" },
+        { "sp", 6, FEMU_CMD_SDC ",sdc_ppm=200000,sdc_kind=flip,sdc_seed=7",
+          "@write#11 sdc kind=lost lba=83\n" },
+        { "sq", 7, FEMU_CMD_SDC ",sdc_ppm=200000,sdc_kind=flip,sdc_seed=7",
+          NULL },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    FemuCtrlState *c = &d[0].c;
+    g_autofree char *recs = NULL;
+    g_autofree char *want = NULL;
+    uint16_t sc[2][320];
+    int later = 0;
+    int flip = -1;
+    uint8_t b0;
+    uint8_t b1;
+
+    /* sa: Write 1 has no line */
+    femu_lie_page(c, buf, 0, 0xb0, false);
+    femu_cmd_want(qts, "sa", "");
+    femu_lie_page(c, buf, 1, 0xb1, false);
+    femu_lie_page(c, buf, 2, 0xb2, false);
+    femu_lie_page(c, buf, 3, 0xb3, false);
+    g_assert_cmphex(femu_cmd_bad_write(c, 4), ==, NVME_DATA_TRAS_ERROR);
+    femu_cmd_sdc_one(qts, "sa", "1:flip:41");
+    femu_lie_page(c, buf, 5, 0xb5, false);
+    femu_cmd_want(qts, "sa",
+                  "1<0 l1 m2 sched-cmd sdc select selected 8+8; "
+                  "2<1 l1 m2 sched-cmd sdc apply done 8+8 lost@13; "
+                  "3<0 l2 m3 sched-cmd sdc select no-effect/outside 16+8; "
+                  "4<0 l3 m4 sched-cmd sdc select selected 24+8; "
+                  "5<4 l3 m4 sched-cmd sdc apply done 24+8 flip@24; "
+                  "6<0 l4 m5 sched-cmd sdc select selected 32+8; "
+                  "7<6 l4 m5 sched-cmd sdc apply no-effect/cmd-failed "
+                  "32+8 flip@32; "
+                  "8<0 l5 m6 sched-cmd sdc select selected 40+8; "
+                  "9<8 l5 m6 sched-cmd sdc apply done 40+8 lost@44; "
+                  "10<9 l0 m0 prop sdc apply superseded 40+8 flip@41");
+    for (int b = 8; b < 16; b++) {
+        g_assert_cmphex(femu_sdc_read(c, buf, b, &b0, &b1), ==,
+                        NVME_UNRECOVERED_READ);
+    }
+    femu_lie_page_is(c, buf, 2, 0xb2);
+    g_assert_cmphex(femu_sdc_read(c, buf, 24, &b0, &b1), ==,
+                    NVME_UNRECOVERED_READ);
+    femu_power_read(c, buf, 1, 25, 0xb3);
+    for (int b = 40; b < 48; b++) {
+        g_assert_cmphex(femu_sdc_read(c, buf, b, &b0, &b1), ==,
+                        NVME_UNRECOVERED_READ);
+    }
+
+    /* sp and sq: one page per Write, in order, then each block once */
+    for (int i = 0; i < 2; i++) {
+        for (int p = 0; p < 40; p++) {
+            femu_lie_page(&d[1 + i].c, buf, p, 0xc0, false);
+        }
+        for (int b = 0; b < 320; b++) {
+            sc[i][b] = femu_sdc_read(&d[1 + i].c, buf, b, &b0, &b1);
+        }
+    }
+    for (int b = 0; b < 320; b++) {
+        if (b / 8 == 10) {
+            g_assert_cmphex(sc[0][b], ==, NVME_UNRECOVERED_READ);
+            continue;
+        }
+        g_assert_cmphex(sc[0][b], ==, sc[1][b]);
+        later += b >= 88 && sc[1][b];
+    }
+    /* the seed puts a flip after page 10, so the compare can fail */
+    g_assert_cmpint(later, >, 0);
+    /* sq page 10: one install, so one flip at most */
+    for (int b = 80; b < 88; b++) {
+        if (sc[1][b]) {
+            g_assert_cmpint(flip, ==, -1);
+            flip = b;
+        }
+    }
+    want = g_strdup_printf("1<0 l1 m11 sched-cmd sdc select selected 80+8; "
+                           "2<1 l1 m11 sched-cmd sdc apply done 80+8 "
+                           "lost@83%s", flip < 0 ? "" : "; 3<2 l0 m0 prop "
+                           "sdc apply superseded 80+8 flip@");
+    if (flip >= 0) {
+        g_autofree char *at = g_strdup_printf("%s%d", want, flip);
+
+        g_free(want);
+        want = g_steal_pointer(&at);
+    }
+    recs = femu_cmd_recs(qts, "sp");
+    g_test_message("sp records: %s", recs);
+    g_assert_cmpstr(recs, ==, want);
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/* one block of namespace @nsid: the status of its Read */
+static uint16_t femu_cmd_read_one(FemuCtrlState *c, uint64_t buf,
+                                  uint32_t nsid, uint64_t lba)
+{
+    NvmeRwCmd rw = { .opcode = NVME_CMD_READ, .nsid = cpu_to_le32(nsid),
+                     .slba = cpu_to_le64(lba),
+                     .dptr.prp1 = cpu_to_le64(buf) };
+
+    return femu_io(c, (NvmeCmd *)&rw);
+}
+
+#define FEMU_CMD_SDC_NS FEMU_CMD_SDC ",namespaces=2,secsz=512," \
+                        "secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80," \
+                        "pls_per_lun=1,luns_per_ch=4,nchs=4"
+
+/*
+ * sdc on the second page of a two-page Write, and on a second namespace.
+ * On device sb, Write 1 puts blocks 16 to 31 of namespace 1 in two page
+ * installs, and its line flips block 27, in the second one. The first
+ * Write of namespace 2 flips its block 13. A Write of blocks 8 to 15 of
+ * namespace 1 stays clean. Device sk, the control, has its lines on
+ * Write 9: every block reads back.
+ *
+ * Planted defects and the check that fails:
+ *   the first install takes the override   sb block 16 or 27
+ *   the override reaches another namespace sb namespace 1 block 13
+ *   no override on namespace 2             sb namespace 2 block 13
+ */
+void femu_test_fsched_sdc_span(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cmd-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "sk", 5, FEMU_CMD_SDC_NS,
+          "@write#9 sdc kind=flip lba=27\n"
+          "@write,ns=2#9 sdc kind=flip lba=13\n" },
+        { "sb", 6, FEMU_CMD_SDC_NS,
+          "@write#1 sdc kind=flip lba=27\n"
+          "@write,ns=2#1 sdc kind=flip lba=13\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 8192);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool on = i == 1;
+        uint16_t bad = on ? NVME_UNRECOVERED_READ : NVME_SUCCESS;
+        NvmeRwCmd rw = { .opcode = NVME_CMD_WRITE, .nsid = cpu_to_le32(1),
+                         .slba = cpu_to_le64(16), .nlb = cpu_to_le16(15),
+                         .dptr.prp1 = cpu_to_le64(buf),
+                         .dptr.prp2 = cpu_to_le64(buf + 4096) };
+
+        qtest_memset(qts, buf, 0xc1, 8192);
+        g_assert_cmphex(femu_io(c, (NvmeCmd *)&rw), ==, NVME_SUCCESS);
+        femu_power_write(c, buf, 2, 8, 8, 0xc2, false);
+        femu_power_write(c, buf, 1, 8, 8, 0xc3, false);
+        for (uint64_t b = 8; b < 32; b++) {
+            g_assert_cmphex(femu_cmd_read_one(c, buf, 1, b), ==,
+                            b == 27 ? bad : NVME_SUCCESS);
+        }
+        for (uint64_t b = 8; b < 16; b++) {
+            g_assert_cmphex(femu_cmd_read_one(c, buf, 2, b), ==,
+                            b == 13 ? bad : NVME_SUCCESS);
+        }
+    }
+    femu_cmd_want(qts, "sk", "");
+    femu_cmd_want(qts, "sb",
+                  "1<0 l1 m1 sched-cmd sdc select selected 16+16; "
+                  "2<1 l1 m1 sched-cmd sdc apply done 16+16 flip@27; "
+                  "3<0 l2 m1 sched-cmd sdc select selected 8+8; "
+                  "4<3 l2 m1 sched-cmd sdc apply done 8+8 flip@13");
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}

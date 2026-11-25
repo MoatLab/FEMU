@@ -21,11 +21,11 @@
  * The FTL thread matches each command against those lines after the first
  * enable. A selection moves the counters of its line, which x-fault-sel
  * reports, and writes one record per line it concerns to the fault record
- * ring (femu-frec.c). Each action but sdc has an effect, and an apply
- * record tells what came of it, except ana= and slow=: they act on time
- * lines only, and a command line with them has no effect, reason
- * not-modelled. A wb-fail mark fails at a later write-back, and a later
- * completion reports it (see "wb-fail" below). A hang, a cfs or a
+ * ring (femu-frec.c). Each action has an effect, and an apply record
+ * tells what came of it, except ana= and slow=: they act on time lines
+ * only, and a command line with them has no effect, reason not-modelled.
+ * A wb-fail mark fails at a later write-back, and a later completion
+ * reports it (see "wb-fail" below). A hang, a cfs or a
  * power-loss holds its command with no CQE (see "hang, cfs and
  * power-loss" below). Every power cut writes a cut summary.
  *
@@ -118,6 +118,16 @@ struct FemuFsched {
     int fail_line;
     uint64_t fail_cause;
     FemuFsView fail_view;
+
+    /*
+     * FTL thread: the sdc override of this step, as for a lie. While it
+     * is set, n->fs_sdc points at @sdc.
+     */
+    bool sdc_sel;
+    int sdc_line;
+    uint64_t sdc_cause;
+    FemuFsView sdc_view;
+    FemuFsSdc sdc;
 
     /* FTL thread: the delay selected in this step, as for a lie */
     bool delay_sel;
@@ -1742,8 +1752,15 @@ static bool femu_fsched_act(FemuCtrl *n, NvmeRequest *req, int i,
         f->fail_cause = id;
         f->fail_view = *v;
         return true;
-    case FEMU_FS_ACT_SDC:           /* not modelled yet: sdc override */
-        return false;
+    case FEMU_FS_ACT_SDC:
+        /* femu_sdc_fault() reads it while the FTL installs the Write */
+        f->sdc_sel = true;
+        f->sdc_line = i;
+        f->sdc_cause = id;
+        f->sdc_view = *v;
+        femu_fs_sdc_set(&f->sdc, l, v, req);
+        n->fs_sdc = &f->sdc;
+        return true;
     case FEMU_FS_ACT_SLOW:
     case FEMU_FS_ACT_ANA:
         /* femu_fs_match() gives them no effect, reason not-modelled */
@@ -1880,6 +1897,60 @@ static bool femu_fsched_fail(FemuCtrl *n, NvmeRequest *req, uint16_t status)
 }
 
 /*
+ * The sdc override, after the FTL ran the Write. An install that took it
+ * left the fault in the store: "done", with its kind and block, though
+ * the Write may have failed later. Else no install held its block, as
+ * the Write failed first: "no-effect", reason cmd-failed; or it never
+ * reached that block: reason outside. A prop record, whose cause is the
+ * apply record, names the x-sdc or sdc_ppm fault the override replaced.
+ */
+static void femu_fsched_sdc(FemuCtrl *n, NvmeRequest *req, uint16_t status)
+{
+    struct FemuFsched *f = n->fsched;
+    const FemuFsLine *l = &f->l[f->sdc_line];
+    const FemuFsView *v = &f->sdc_view;
+    const FemuFsSdc *o = &f->sdc;
+    FemuFrRec rec;
+    uint64_t id;
+
+    f->sdc_sel = false;
+    n->fs_sdc = NULL;
+    rec = (FemuFrRec) {
+        .cause = f->sdc_cause,
+        .step = f->step,
+        .match = l->matched,
+        .slba = v->slba,
+        .nlb = v->nlb,
+        .nsid = v->nsid,
+        .line = l->line,
+        .sqid = req->sq ? req->sq->sqid : 0,
+        .cid = le16_to_cpu(req->cmd.cid),
+        .origin = FEMU_FR_ORIGIN_SCHED_CMD,
+        .phase = FEMU_FR_PHASE_APPLY,
+        .act = FEMU_FS_ACT_SDC,
+        .outcome = o->hit ? FEMU_FR_OUT_DONE : FEMU_FR_OUT_NO_EFFECT,
+        .why = o->hit ? FEMU_FS_WHY_NONE :
+               status != NVME_SUCCESS ? FEMU_FS_WHY_CMD_FAILED :
+                                        FEMU_FS_WHY_OUTSIDE,
+        .opc = v->opc,
+        .fua = v->fua,
+        .sdc = { .kind = o->kind, .lba = o->lba },
+    };
+    id = femu_fsched_put(n, &rec);
+    if (!o->hit || !o->was_kind) {
+        return;
+    }
+    rec.cause = id;
+    rec.line = 0;
+    rec.match = 0;
+    rec.origin = FEMU_FR_ORIGIN_PROP;
+    rec.outcome = FEMU_FR_OUT_SUPERSEDED;
+    rec.sdc.kind = o->was_kind;
+    rec.sdc.lba = o->was_lba;
+    femu_fsched_put(n, &rec);
+}
+
+/*
  * The apply record of a delay, after the FTL ran the command. A command
  * that succeeded completes the line's ms later: its poller adds them to
  * the expire time (req->fs_delay_ms). One that failed for its own reason
@@ -1949,8 +2020,8 @@ static uint16_t femu_fsched_ftl_status(FemuCtrl *n, NvmeRequest *req)
  *
  * Runs on the FTL thread, in the step of @req, after the FTL call and
  * before the CQE. It writes the apply record of a read-unc, a
- * write-fail, a delay, a lie or a wb-fail, then lets a draining command
- * report a failed write-back.
+ * write-fail, an sdc, a delay, a lie or a wb-fail, then lets a draining
+ * command report a failed write-back.
  */
 void femu_fsched_post(FemuCtrl *n, NvmeRequest *req, bool report)
 {
@@ -1962,6 +2033,9 @@ void femu_fsched_post(FemuCtrl *n, NvmeRequest *req, bool report)
 
     if (f->fail_act) {
         failed = femu_fsched_fail(n, req, status);
+    }
+    if (f->sdc_sel) {
+        femu_fsched_sdc(n, req, status);
     }
     if (f->delay_sel) {
         femu_fsched_delay(n, req, status);
@@ -2847,6 +2921,12 @@ static void femu_fsched_info(FemuCtrl *n, FemuEvents *info)
         if (r->act == FEMU_FS_ACT_DELAY && r->phase == FEMU_FR_PHASE_APPLY) {
             e->has_ms = true;
             e->ms = r->delay_ms;
+        }
+        if (r->act == FEMU_FS_ACT_SDC && r->phase == FEMU_FR_PHASE_APPLY &&
+            r->sdc.kind) {
+            e->sdc_kind = g_strdup(femu_fr_name_sdc(r->sdc.kind));
+            e->has_sdc_lba = true;
+            e->sdc_lba = r->sdc.lba;
         }
         QAPI_LIST_APPEND(tail, e);
     }

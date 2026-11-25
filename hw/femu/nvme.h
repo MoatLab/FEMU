@@ -3146,6 +3146,11 @@ typedef struct FemuCtrl {
     uint32_t    sdc_one_nsid;   /* qtest x-sdc: one fault, next install */
     uint8_t     sdc_one_kind;
     uint64_t    sdc_one_lba;
+    /*
+     * events_file sdc: the override of the Write in this FTL step, or
+     * NULL. Only the FTL thread sets, reads and clears it.
+     */
+    struct FemuFsSdc *fs_sdc;
     QEMUTimer   *plp_timer;
     /*
      * die_slow: a table of array time in percent of nominal for each LUN,
@@ -4419,8 +4424,8 @@ void femu_sdc_clear(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
 void femu_lost_read(NvmeNamespace *ns, uint64_t slba, uint64_t elba);
 bool femu_lba_bad(NvmeNamespace *ns, uint64_t slba, uint64_t elba,
                   uint64_t *bad);
-int femu_sdc_fault(NvmeNamespace *ns, uint64_t slba, uint64_t elba,
-                   uint64_t *flip_lba);
+int femu_sdc_fault(NvmeNamespace *ns, const NvmeRequest *req, uint64_t slba,
+                   uint64_t elba, uint64_t *flip_lba);
 void femu_sdc_add_props(Object *obj);
 void femu_plp_enable(FemuCtrl *n);
 void femu_plp_restart(FemuCtrl *n);

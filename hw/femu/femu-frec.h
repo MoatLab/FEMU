@@ -41,6 +41,7 @@ enum {
     FEMU_FR_ORIGIN_SCHED_CMD = 1,       /* a command line of events_file */
     FEMU_FR_ORIGIN_SCHED_TIME,          /* a time line: a power cut */
     FEMU_FR_ORIGIN_QMP,                 /* simulate-power-loss */
+    FEMU_FR_ORIGIN_PROP,                /* sdc_ppm or x-sdc: an sdc draw */
 };
 
 /* the step of a fault a record tells of */
@@ -117,6 +118,11 @@ typedef struct FemuFrRec {
         uint64_t lba_mask;
         /* delay apply: the ms of the line, which a "done" added */
         uint32_t delay_ms;
+        /* sdc apply, and the prop record of a draw that it replaced */
+        struct {
+            uint64_t lba;               /* the block a flip spoils */
+            uint8_t kind;               /* FEMU_FS_SDC_* */
+        } sdc;
         /* power-loss apply: the cut summary */
         struct {
             uint64_t cqe_boundary;      /* I/O CQEs posted at the fence */
@@ -282,6 +288,12 @@ const char *femu_fr_name_found(uint8_t v);
  * @v: the value, not FEMU_FS_WHY_NONE
  */
 const char *femu_fr_name_why(uint8_t v);
+
+/**
+ * femu_fr_name_sdc - the name of a FEMU_FS_SDC_* fault
+ * @v: the value
+ */
+const char *femu_fr_name_sdc(uint8_t v);
 
 /**
  * femu_fr_name_kind - the name of a FEMU_FS_KIND_* value of cut evidence

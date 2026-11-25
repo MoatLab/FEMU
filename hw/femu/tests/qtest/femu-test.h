@@ -1218,6 +1218,9 @@ void femu_test_fsched_delay_link(void *obj, void *data,
 void femu_test_fsched_media_fault(void *obj, void *data,
                                   QGuestAllocator *alloc);
 void femu_test_fsched_fail_wbf(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_sdc(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_sdc_span(void *obj, void *data,
+                               QGuestAllocator *alloc);
 void femu_test_ready_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_recovery_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ready_sysreset(void *obj, void *data, QGuestAllocator *alloc);

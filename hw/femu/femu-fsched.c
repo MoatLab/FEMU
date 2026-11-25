@@ -417,6 +417,10 @@ static bool fs_needs(const FemuFsDev *dev, const FsAction *a,
     if (a->act == FEMU_FS_ACT_SDC && !dev->sdc) {
         return fs_fail(err, errlen, "action sdc needs sdc=on");
     }
+    /* the FDP write path installs no page through the sdc draws */
+    if (a->act == FEMU_FS_ACT_SDC && dev->fdp) {
+        return fs_fail(err, errlen, "action sdc is not supported with FDP");
+    }
     return true;
 }
 
@@ -587,13 +591,18 @@ static bool fs_line_matches(const FemuFsLine *l, const FemuFsView *v)
 /*
  * Why the original command gives a winning action no effect, or
  * FEMU_FS_WHY_NONE. A FUA Write never enters the write buffer, so a
- * write-back failure has no page. ana= and slow= change the device
- * from a BH, which a command line does not order against its command.
+ * write-back failure has no page. An sdc block outside the Write is not
+ * one it installs. ana= and slow= change the device from a BH, which a
+ * command line does not order against its command.
  */
 static uint8_t fs_why(const FemuFsLine *l, const FemuFsView *v)
 {
     if (l->act == FEMU_FS_ACT_WB_FAIL && v->fua) {
         return FEMU_FS_WHY_FUA;
+    }
+    if (l->act == FEMU_FS_ACT_SDC && l->has_sdc_lba &&
+        (l->sdc_lba < v->slba || l->sdc_lba - v->slba >= v->nlb)) {
+        return FEMU_FS_WHY_OUTSIDE;
     }
     if (l->act == FEMU_FS_ACT_ANA || l->act == FEMU_FS_ACT_SLOW) {
         return FEMU_FS_WHY_NOT_MODELLED;
@@ -687,6 +696,30 @@ void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
             break;
         }
     }
+}
+
+void femu_fs_sdc_set(FemuFsSdc *o, const FemuFsLine *l, const FemuFsView *v,
+                     const void *req)
+{
+    *o = (FemuFsSdc) {
+        .req = req,
+        .kind = l->sdc_kind,
+        .lba = l->has_sdc_lba ? l->sdc_lba : v->slba,
+    };
+}
+
+bool femu_fs_sdc_take(FemuFsSdc *o, uint64_t slba, uint64_t elba, int *kind,
+                      uint64_t *lba)
+{
+    if (o->hit || o->lba < slba || o->lba >= elba) {
+        return false;
+    }
+    o->hit = true;
+    o->was_kind = *kind;
+    o->was_lba = *lba;
+    *kind = o->kind;
+    *lba = o->lba;
+    return true;
 }
 
 uint8_t femu_fs_terminal(const FemuFsLine *l, int nr, const uint8_t *out)

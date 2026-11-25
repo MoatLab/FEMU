@@ -223,6 +223,8 @@ const char *femu_fr_name_origin(uint8_t v)
         return "sched-time";
     case FEMU_FR_ORIGIN_QMP:
         return "qmp";
+    case FEMU_FR_ORIGIN_PROP:
+        return "prop";
     }
     return "?";
 }
@@ -313,6 +315,8 @@ const char *femu_fr_name_why(uint8_t v)
         return "marked";
     case FEMU_FS_WHY_NOT_MODELLED:
         return "not-modelled";
+    case FEMU_FS_WHY_OUTSIDE:
+        return "outside";
     case FEMU_FS_WHY_SQ_DELETED:
         return "sq-deleted";
     case FEMU_FS_WHY_RESET:
@@ -323,6 +327,19 @@ const char *femu_fr_name_why(uint8_t v)
         return "power-cut";
     case FEMU_FS_WHY_UNPLUG:
         return "unplug";
+    }
+    return "?";
+}
+
+const char *femu_fr_name_sdc(uint8_t v)
+{
+    switch (v) {
+    case FEMU_FS_SDC_FLIP:
+        return "flip";
+    case FEMU_FS_SDC_LOST:
+        return "lost";
+    case FEMU_FS_SDC_MISDIRECT:
+        return "misdirect";
     }
     return "?";
 }
@@ -436,6 +453,13 @@ int femu_fr_json(const FemuFrRec *rec, char *buf, size_t len)
     }
     if (rec->act == FEMU_FS_ACT_DELAY && rec->phase == FEMU_FR_PHASE_APPLY) {
         snprintf(extra, sizeof(extra), ",\"ms\":%u", rec->delay_ms);
+    }
+    /* sdc: the fault an install took, or the draw an override replaced */
+    if (rec->act == FEMU_FS_ACT_SDC && rec->phase == FEMU_FR_PHASE_APPLY &&
+        rec->sdc.kind) {
+        snprintf(extra, sizeof(extra), ",\"sdc_kind\":\"%s\","
+                 "\"sdc_lba\":%" PRIu64, femu_fr_name_sdc(rec->sdc.kind),
+                 rec->sdc.lba);
     }
     n = snprintf(buf, len,
                  "{\"id\":%" PRIu64 "%s,\"origin\":\"%s\",\"line\":%u,"

@@ -81,6 +81,7 @@ enum {
     FEMU_FS_WHY_SLOTS_FULL,     /* wb-fail: every fault slot is taken */
     FEMU_FS_WHY_MARKED,         /* wb-fail: its pages carry an older mark */
     FEMU_FS_WHY_NOT_MODELLED,   /* ana= and slow= act on time lines only */
+    FEMU_FS_WHY_OUTSIDE,        /* sdc: its block is not one the Write puts */
     /* reclaim: what gave back a command that a hang or a cfs holds */
     FEMU_FS_WHY_SQ_DELETED,     /* Delete I/O Submission Queue */
     FEMU_FS_WHY_RESET,          /* Controller Reset (CC.EN to 0) */
@@ -339,6 +340,52 @@ typedef struct FemuFsLine {
      */
     bool done;
 } FemuFsLine;
+
+/*
+ * The sdc override of one Write. The FTL thread installs the Write a page
+ * at a time; femu_sdc_fault() runs the x-sdc slot and the sdc_ppm draws
+ * of each install as without the override, so their sequence stays the
+ * same, then asks here. The install that holds @lba takes the override
+ * in place of what they gave, once:
+ *
+ *   install [s, e) --> x-sdc slot, draws --> kind K, block B
+ *              @lba in [s, e), not hit? --> kind @kind, block @lba;
+ *                                           @was_kind = K, @was_lba = B
+ */
+typedef struct FemuFsSdc {
+    const void *req;            /* the Write; no other request takes it */
+    uint8_t kind;               /* FEMU_FS_SDC_* */
+    uint64_t lba;               /* the block it spoils */
+    bool hit;                   /* an install took it */
+    uint8_t was_kind;           /* the fault it replaced, 0 for none */
+    uint64_t was_lba;           /* the block of that fault */
+} FemuFsSdc;
+
+/**
+ * femu_fs_sdc_set - prepare the override of a Write that an sdc line won
+ * @o: the override
+ * @l: the line
+ * @v: the Write as the line saw it
+ * @req: the request of the Write
+ *
+ * The block is lba= of the line, or the first block of the Write.
+ */
+void femu_fs_sdc_set(FemuFsSdc *o, const FemuFsLine *l, const FemuFsView *v,
+                     const void *req);
+
+/**
+ * femu_fs_sdc_take - the fault one page install takes, with the override
+ * @o: the override
+ * @slba: the first block of the install
+ * @elba: the block after its last
+ * @kind: in, the fault the slot or the draws gave, 0 for none; out, the
+ *        fault the install takes
+ * @lba: in and out, the same for the block a flip spoils
+ *
+ * Returns true when the install takes the override.
+ */
+bool femu_fs_sdc_take(FemuFsSdc *o, uint64_t slba, uint64_t elba, int *kind,
+                      uint64_t *lba);
 
 /**
  * femu_fs_draw - the next draw of a splitmix64 stream, 0 to 999999
