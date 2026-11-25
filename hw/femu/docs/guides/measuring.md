@@ -403,13 +403,12 @@ can mix time lines and command lines. Command lines work on bbssd only.
   handler does, except a PRACT tuple that the controller inserts.
 - With no command line, the FTL thread has no schedule to check: one
   pointer test per command, and no decode, count or draw.
-- Each action but `read-unc`, `write-fail` and `sdc` has an effect:
-  `flush-lie`, `fua-lie` (see
+- Each action but `sdc` has an effect: `flush-lie`, `fua-lie` (see
   [lies](#lies)), `wb-fail` (see
   [write-back failures](#write-back-failures)), `hang` and `cfs` (see
   [hang and controller fatal status](#hang-and-controller-fatal-status)),
   `power-loss` (see [a cut at a command](#a-cut-at-a-command)), and
-  `delay` (see
+  `delay`, `read-unc` and `write-fail` (see
   [one-command faults](#one-command-faults)).
 - `ana=` and `slow=` act on time lines only. On a command line each
   selection has no effect, reason `not-modelled`: their change runs
@@ -526,6 +525,10 @@ A later completion tells the host.
   whose FTL step wrote the buffer back. A Flush over an empty buffer
   reports a sticky failure too. A fused pair reports nothing; its
   failure stays pending.
+- A command that `read-unc` or `write-fail` ended reports no failed
+  write-back. It keeps its own status and its one Error Information
+  entry, and the failure stays pending for the next draining
+  completion.
 - A failure is pending, then reserved by the completion that reports
   it, then spent when that CQE posts. A CQE that never posts (the
   SQ is deleted, a reset, a cut) puts it back to pending. A reserved
@@ -707,6 +710,8 @@ These actions change one command and nothing after it. Each writes an
 ```text
  FTL step: match --> select record --> FTL call --> FTL status S
    S is success:   delay       expire time + ms: the CQE posts ms later
+                   read-unc    Unrecovered Read Error, DNR
+                   write-fail  Write Fault
                    apply record "done"
    S is an error:  the command keeps S; apply record "no-effect",
                    reason cmd-failed
@@ -720,10 +725,23 @@ These actions change one command and nothing after it. Each writes an
   bookings (`pcie_bandwidth_mbps`, `crypto_mbps`, `fw_cores`), so it
   moves no other command. `nr_model_ns` counts the delay, and the
   `io_trace` time `t_cqe_ns` shows it.
-- The failure check uses the status the FTL gave.
+- `read-unc` and `write-fail` give the status, the SMART media error
+  count and the Error Information entry that `err_read_unc_ppm` and
+  `err_write_fail_ppm` give, with location `slba` and the first block of
+  the command. The data the command moved stays, as with those
+  properties. They need no `power_loss`. A `write-fail` takes a Write,
+  a FUA Write or a Write Zeroes; a `read-unc` takes a Read.
+- `read-unc` and `write-fail` take no draw of `err_read_unc_ppm` or
+  `err_write_fail_ppm`, so a line leaves those faults on the same
+  commands. A command that one of them failed first has no effect,
+  reason `cmd-failed`, and gets no `prop` record.
+- The failure check uses the status the FTL gave, before any line of
+  the step changed it. So a `delay` beside a `write-fail` still applies.
 | Action | `apply` outcome | Fields |
 | --- | --- | --- |
 | `delay` | `done`, or `no-effect` | `ms` |
+| `read-unc` | `done`, or `no-effect` | `status` 17025 (4281h) |
+| `write-fail` | `done`, or `no-effect` | `status` 640 (280h) |
 
 ```text
  {"id":2,"cause":1,"origin":"sched-cmd","line":1,"match":2,
@@ -756,14 +774,14 @@ Realize allocates the ring only for a file with a command line.
 | `id` | from 1; each record takes one, stored or dropped |
 | `origin` | `sched-cmd`: a command line; `sched-time` or `qmp`: a cut summary and its evidence |
 | `line`, `match` | the line, and its matches so far, this one too |
-| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a `delay`, lie, `wb-fail`, `hang`, `cfs` or `power-loss`; `fail`, `report` and `supersede` for a `wb-fail` mark; `reclaim` for a held command that went back; `evidence` for a chunk of a cut |
+| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a `delay`, `read-unc`, `write-fail`, lie, `wb-fail`, `hang`, `cfs` or `power-loss`; `fail`, `report` and `supersede` for a `wb-fail` mark; `reclaim` for a held command that went back; `evidence` for a chunk of a cut |
 | `step` | commands the FTL thread took so far, this one too |
 | `nsid`, `sqid`, `cid`, `opc`, `fua`, `slba`, `nlb` | the command as the host sent it; `slba` and `nlb` are 0 for a Flush |
 | `outcome` | `selected`, `superseded` or `no-effect`; `done` for an `apply` record; `marked`, `unc`, `old` and `reported` for `wb-fail`; `reclaimed` for a `reclaim` record |
-| `reason` | for `no-effect`: `fua`, `pre` or `hang`; for a lie also `plp`, `atomic`, `no-buffer`, `cmd-failed` or `durable`; for `wb-fail` also `slots-full` and `marked`; `cmd-failed` for `delay`; `not-modelled` for `ana=` and `slow=`; for `reclaimed`: the path |
+| `reason` | for `no-effect`: `fua`, `pre` or `hang`; for a lie also `plp`, `atomic`, `no-buffer`, `cmd-failed` or `durable`; for `wb-fail` also `slots-full` and `marked`; `cmd-failed` for `delay`, `read-unc` and `write-fail`; `not-modelled` for `ana=` and `slow=`; for `reclaimed`: the path |
 | `buffered_at_flush_lie`, `lie_pages` | for a `done` lie: the pages it left volatile (QMP: `buffered-at-flush-lie`, `lie-pages`) |
 | `cause` | the id of the parent record: an `apply` record names its `select` record |
-| `status` | the status a `fail` or `report` record carries, or the withheld status of a `hang`; absent for none |
+| `status` | the status a `fail` or `report` record carries, the withheld status of a `hang`, or the status a `done` `read-unc` or `write-fail` gave; absent for none |
 | `ms` | see [one-command faults](#one-command-faults) |
 | `slot`, `pages`, `lba_mask`, `lost`, `found` | `wb-fail` only, see [write-back failures](#write-back-failures) (QMP: `lba-mask`) |
 

@@ -1888,8 +1888,8 @@
 # @action: the action of the line
 #
 # @phase: the step of the fault: "select" when a line selects a
-#     command, "apply" when the FTL has run a command that a delay,
-#     lie or wb-fail line selected,
+#     command, "apply" when the FTL has run a command that a
+#     read-unc, write-fail, delay, lie or wb-fail line selected,
 #     when a hang or a cfs holds its command, or when a power-loss
 #     cut the power before its command ran, or when a time line or
 #     simulate-power-loss cut the power,
@@ -1919,9 +1919,9 @@
 #
 # @outcome: "selected": the line won its group, "superseded": an
 #     earlier line of its group won, or a full write cleared a mark,
-#     "no-effect": the line won with no effect, "done": the delay,
-#     lie, hang, cfs or cut of an "apply" record, or an "evidence"
-#     record, took place, "marked": wb-fail marked
+#     "no-effect": the line won with no effect, "done": the read-unc,
+#     write-fail, delay, lie, hang, cfs or cut of an "apply" record,
+#     or an "evidence" record, took place, "marked": wb-fail marked
 #     buffered pages, "unc" or "old": the lost blocks of a failed
 #     write-back read as Unrecovered Read Error or as their old data,
 #     "reported": a completion carries the failure, "reclaimed": a
@@ -1945,8 +1945,9 @@
 # @lie-pages: for a "done" fua-lie, the pages of the write left in
 #     the buffer; a power cut rolls them back
 #
-# @status: the completion status a later record reports, or the
-#     status a hung command holds back; absent for none
+# @status: the completion status a later record reports, the status
+#     a hung command holds back, or the status that a "done" read-unc
+#     or write-fail gives its command; absent for none
 #
 # @ms: delay "apply": the ms of the line.  A "done" record added them
 #     to the completion; a "no-effect" record added none

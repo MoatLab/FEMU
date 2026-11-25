@@ -1921,6 +1921,29 @@ static void test_delay_json(void)
     CHECK(!strstr(buf, "\"ms\""));
 }
 
+/* the apply record of read-unc or write-fail carries the status it gave */
+static void test_fail_json(void)
+{
+    FemuFrRec x = rec_of(6);
+    char buf[FEMU_FR_JSON_MAX];
+
+    x.act = FEMU_FS_ACT_READ_UNC;
+    x.phase = FEMU_FR_PHASE_APPLY;
+    x.outcome = FEMU_FR_OUT_DONE;
+    x.status = 0x4281;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"action\":\"read-unc\",\"phase\":\"apply\","));
+    CHECK(strstr(buf, "\"outcome\":\"done\",\"status\":17025}\n"));
+    x.act = FEMU_FS_ACT_WRITE_FAIL;
+    x.outcome = FEMU_FR_OUT_NO_EFFECT;
+    x.why = FEMU_FS_WHY_CMD_FAILED;
+    x.status = 0;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"action\":\"write-fail\","));
+    CHECK(strstr(buf, "\"outcome\":\"no-effect\",\"reason\":"
+                  "\"cmd-failed\"}\n"));
+}
+
 int main(void)
 {
     test_grammar();
@@ -1957,6 +1980,7 @@ int main(void)
     test_cut_json();
     test_not_modelled();
     test_delay_json();
+    test_fail_json();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

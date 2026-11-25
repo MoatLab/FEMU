@@ -4641,6 +4641,8 @@ bool bbssd_wbf_facts(NvmeNamespace *ns, NvmeRequest *req, uint64_t slba,
                      uint32_t nlb, bool *atomic);
 uint8_t bbssd_lie_apply(NvmeNamespace *ns, NvmeRequest *req, uint8_t act,
                         uint64_t slba, uint32_t nlb, uint32_t *pages);
+void bbssd_fs_fail(NvmeNamespace *ns, NvmeRequest *req, bool read,
+                   uint64_t slba);
 uint16_t bbssd_flush_all(FemuCtrl *n);
 uint16_t bbssd_drain_namespace(NvmeNamespace *ns, uint64_t stime, int64_t *lat);
 uint16_t nvme_power_io(FemuCtrl *n, NvmeRequest *req);

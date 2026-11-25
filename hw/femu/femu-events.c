@@ -21,16 +21,17 @@
  * The FTL thread matches each command against those lines after the first
  * enable. A selection moves the counters of its line, which x-fault-sel
  * reports, and writes one record per line it concerns to the fault record
- * ring (femu-frec.c). Each action but read-unc, write-fail and sdc has an
- * effect, and an apply record tells what came of it, except ana= and
- * slow=: they act on time lines only, and a command line with them has no
- * effect, reason not-modelled. A wb-fail mark fails at a later
- * write-back, and a later completion reports it (see "wb-fail" below). A
- * hang, a cfs or a power-loss holds its command with no CQE (see "hang,
- * cfs and power-loss" below). Every power cut writes a cut summary.
+ * ring (femu-frec.c). Each action but sdc has an effect, and an apply
+ * record tells what came of it, except ana= and slow=: they act on time
+ * lines only, and a command line with them has no effect, reason
+ * not-modelled. A wb-fail mark fails at a later write-back, and a later
+ * completion reports it (see "wb-fail" below). A hang, a cfs or a
+ * power-loss holds its command with no CQE (see "hang, cfs and
+ * power-loss" below). Every power cut writes a cut summary.
  *
  *   FTL thread: step++, match --> femu_fr_put() per line --> FTL call
- *               --> post: delay, lie or wb-fail apply, wb-fail report
+ *               --> post: data fault, delay, lie or wb-fail apply,
+ *                   wb-fail report
  *               --> wake writer
  *   writer thread (events_log only): pop, write a JSON line, free
  *   query-femu-events (main loop): femu_fr_read(), no lock taken
@@ -111,6 +112,12 @@ struct FemuFsched {
     int lie_line;               /* index into @l */
     uint64_t lie_cause;         /* id of its select record */
     FemuFsView lie_view;        /* the command as the line saw it */
+
+    /* FTL thread: the read-unc or write-fail of this step, as for a lie */
+    uint8_t fail_act;           /* FEMU_FS_ACT_*, or 0 for none */
+    int fail_line;
+    uint64_t fail_cause;
+    FemuFsView fail_view;
 
     /* FTL thread: the delay selected in this step, as for a lie */
     bool delay_sel;
@@ -1727,8 +1734,14 @@ static bool femu_fsched_act(FemuCtrl *n, NvmeRequest *req, int i,
         f->delay_cause = id;
         f->delay_view = *v;
         return true;
-    case FEMU_FS_ACT_WRITE_FAIL:    /* not modelled yet: Write Fault */
-    case FEMU_FS_ACT_READ_UNC:      /* not modelled yet: Unrecovered Read */
+    case FEMU_FS_ACT_WRITE_FAIL:
+    case FEMU_FS_ACT_READ_UNC:
+        /* the data group has one winner, so a command has one of these */
+        f->fail_act = l->act;
+        f->fail_line = i;
+        f->fail_cause = id;
+        f->fail_view = *v;
+        return true;
     case FEMU_FS_ACT_SDC:           /* not modelled yet: sdc override */
         return false;
     case FEMU_FS_ACT_SLOW:
@@ -1823,6 +1836,50 @@ static void femu_fsched_lie(FemuCtrl *n, NvmeRequest *req)
 }
 
 /*
+ * read-unc or write-fail, after the FTL ran the command. A command that
+ * succeeded ends with Unrecovered Read Error and DNR, or Write Fault, as
+ * err_read_unc_ppm and err_write_fail_ppm give, with the same Error
+ * Information entry. One that failed for its own reason keeps its
+ * status: "no-effect", reason cmd-failed. @status is the FTL status.
+ * Returns true when the line ended the command.
+ */
+static bool femu_fsched_fail(FemuCtrl *n, NvmeRequest *req, uint16_t status)
+{
+    struct FemuFsched *f = n->fsched;
+    const FemuFsLine *l = &f->l[f->fail_line];
+    const FemuFsView *v = &f->fail_view;
+    uint8_t act = f->fail_act;
+    bool ok = status == NVME_SUCCESS;
+    FemuFrRec rec;
+
+    f->fail_act = 0;
+    if (ok) {
+        bbssd_fs_fail(req->ns, req, act == FEMU_FS_ACT_READ_UNC, v->slba);
+    }
+    rec = (FemuFrRec) {
+        .cause = f->fail_cause,
+        .step = f->step,
+        .match = l->matched,
+        .slba = v->slba,
+        .nlb = v->nlb,
+        .nsid = v->nsid,
+        .line = l->line,
+        .sqid = req->sq ? req->sq->sqid : 0,
+        .cid = le16_to_cpu(req->cmd.cid),
+        .origin = FEMU_FR_ORIGIN_SCHED_CMD,
+        .phase = FEMU_FR_PHASE_APPLY,
+        .act = act,
+        .outcome = ok ? FEMU_FR_OUT_DONE : FEMU_FR_OUT_NO_EFFECT,
+        .why = ok ? FEMU_FS_WHY_NONE : FEMU_FS_WHY_CMD_FAILED,
+        .opc = v->opc,
+        .fua = v->fua,
+        .status = ok ? req->status : 0,
+    };
+    femu_fsched_put(n, &rec);
+    return ok;
+}
+
+/*
  * The apply record of a delay, after the FTL ran the command. A command
  * that succeeded completes the line's ms later: its poller adds them to
  * the expire time (req->fs_delay_ms). One that failed for its own reason
@@ -1863,6 +1920,27 @@ static void femu_fsched_delay(FemuCtrl *n, NvmeRequest *req, uint16_t status)
     femu_fsched_put(n, &rec);
 }
 
+/*
+ * The status of @req from the FTL call, as a line of this step sees it.
+ * A drain that finds a wb-fail failure pending gives Write Fault
+ * (bbssd_drain_namespace()), but that status is the wb-fail line's, not
+ * the command's own, and femu_wbf_report_io() sets it again. So it counts
+ * as success here, and a read-unc, write-fail, sdc or delay still applies.
+ */
+static uint16_t femu_fsched_ftl_status(FemuCtrl *n, NvmeRequest *req)
+{
+    uint32_t nsid = le32_to_cpu(req->cmd.nsid);
+
+    if (!n->wbf || !n->wbf_drained ||
+        (req->status & 0x7ff) != NVME_WRITE_FAULT) {
+        return req->status;
+    }
+    if (nsid == NVME_NSID_BROADCAST) {
+        nsid = 0;
+    }
+    return femu_wbf_pending(n, nsid) ? NVME_SUCCESS : req->status;
+}
+
 /**
  * femu_fsched_post - the FTL ran a command that femu_fsched_step() saw
  * @n: the controller, with command lines
@@ -1870,16 +1948,21 @@ static void femu_fsched_delay(FemuCtrl *n, NvmeRequest *req, uint16_t status)
  * @report: a wb-fail failure may fail @req; false for a fused pair
  *
  * Runs on the FTL thread, in the step of @req, after the FTL call and
- * before the CQE. It writes the apply record of a delay, a lie or a
- * wb-fail, then lets a draining command report a failed write-back.
+ * before the CQE. It writes the apply record of a read-unc, a
+ * write-fail, a delay, a lie or a wb-fail, then lets a draining command
+ * report a failed write-back.
  */
 void femu_fsched_post(FemuCtrl *n, NvmeRequest *req, bool report)
 {
     struct FemuFsched *f = n->fsched;
     bool lied = req->fs_lie == FEMU_FS_ACT_FLUSH_LIE;
     /* the FTL status, before a line of this step changes it */
-    uint16_t status = req->status;
+    uint16_t status = femu_fsched_ftl_status(n, req);
+    bool failed = false;
 
+    if (f->fail_act) {
+        failed = femu_fsched_fail(n, req, status);
+    }
     if (f->delay_sel) {
         femu_fsched_delay(n, req, status);
     }
@@ -1890,8 +1973,13 @@ void femu_fsched_post(FemuCtrl *n, NvmeRequest *req, bool report)
         if (n->fsched->wbf_sel) {
             femu_wbf_apply(n, req);
         }
-        /* a hung command never posts, so it reports nothing */
-        if (report && !req->fs_hang) {
+        /*
+         * A hung command never posts, so it reports nothing. One that
+         * read-unc or write-fail ended keeps its status and its one Error
+         * Information entry: a failed write-back stays pending for the
+         * next draining completion.
+         */
+        if (report && !req->fs_hang && !failed) {
             femu_wbf_report_io(n, req, lied);
         }
         femu_wbf_cur = 0;

@@ -1605,6 +1605,57 @@ static void ssd_plm_after_req(struct ssd *ssd)
     }
 }
 
+/*
+ * The Error Information entry of a media error that @req ends with, at
+ * block @slba, and the SMART count of a returned read error. Nothing for
+ * another status.
+ */
+static void ssd_media_error(FemuCtrl *n, struct ssd *ssd, NvmeNamespace *ns,
+                            NvmeRequest *req, uint64_t slba)
+{
+    uint16_t sc = req->status & 0x7ff;
+
+    if (sc != NVME_UNRECOVERED_READ && sc != NVME_WRITE_FAULT) {
+        return;
+    }
+    if (sc == NVME_UNRECOVERED_READ) {
+        qatomic_set(&ssd->err_read_injected, ssd->err_read_injected + 1);
+    }
+    nvme_set_error_page(n, req->sq->sqid, req->cmd.cid, sc,
+                        offsetof(NvmeRwCmd, slba), slba, ns->id,
+                        req->cmd.opcode, ns->csi);
+}
+
+/**
+ * bbssd_fs_fail - end a command with the error a command line selected
+ * @ns: the namespace of the command
+ * @req: the command, which the FTL ran with success
+ * @read: read-unc, which gives Unrecovered Read Error; false for
+ *        write-fail, which gives Write Fault
+ * @slba: the first block of the command, for the entry; a Write Zeroes
+ *        leaves req->slba unset
+ *
+ * Runs on the FTL thread, in the step of @req. It gives the status,
+ * SMART count and Error Information entry that err_read_unc_ppm and
+ * err_write_fail_ppm give, so a host sees the same fault. The data the
+ * command moved stays, as with those properties.
+ */
+void bbssd_fs_fail(NvmeNamespace *ns, NvmeRequest *req, bool read,
+                   uint64_t slba)
+{
+    struct ssd *ssd = ns->ssd;
+
+    if (read) {
+        req->status = NVME_UNRECOVERED_READ | NVME_DNR;
+    } else {
+        req->status = NVME_WRITE_FAULT;
+        ssd->err_write_injected++;
+    }
+    /* the waits the FTL noted no longer set what the host sees */
+    req->wait_covered = false;
+    ssd_media_error(ns->ctrl, ssd, ns, req, slba);
+}
+
 uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
 {
     struct ssd *ssd = ns->ssd;
@@ -1881,17 +1932,8 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
      * by the final status. A Compare or Verify that failed its check keeps
      * that status, and its read error does not count as returned.
      */
-    if (status0 == NVME_SUCCESS &&
-        (req->status & 0x7ff) == NVME_UNRECOVERED_READ) {
-        qatomic_set(&ssd->err_read_injected, ssd->err_read_injected + 1);
-        nvme_set_error_page(n, req->sq->sqid, req->cmd.cid,
-                            NVME_UNRECOVERED_READ, offsetof(NvmeRwCmd, slba),
-                            req->slba, ns->id, req->cmd.opcode, ns->csi);
-    } else if (status0 == NVME_SUCCESS &&
-               (req->status & 0x7ff) == NVME_WRITE_FAULT) {
-        nvme_set_error_page(n, req->sq->sqid, req->cmd.cid, NVME_WRITE_FAULT,
-                            offsetof(NvmeRwCmd, slba), req->slba, ns->id,
-                            req->cmd.opcode, ns->csi);
+    if (status0 == NVME_SUCCESS) {
+        ssd_media_error(n, ssd, ns, req, req->slba);
     }
 
     /* io_causes: an error has no cause, whatever the media did */

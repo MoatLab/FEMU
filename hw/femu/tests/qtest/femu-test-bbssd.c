@@ -9472,8 +9472,12 @@ void femu_test_fsched_match(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpstr(sel, ==, "2:2:0:0:0:0 3:1:0:0:0:0 4:0:0:0:0:0 "
                     "5:0:0:0:0:0");
     g_free(sel);
-    /* the 3rd Write is selected, the 4th (blocks 4 to 11) is not */
-    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 8, false, buf), ==, 0);
+    /*
+     * the 3rd Write is selected, and write-fail ends it with Write Fault;
+     * the 4th (blocks 4 to 11) is not
+     */
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 8, false, buf), ==,
+                    NVME_WRITE_FAULT);
     g_assert_cmpuint(femu_fault_sel_field(qts, "ev", 0, 3), ==, 1);
     g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 4, 8, false, buf), ==, 0);
     /* blocks 0 to 7 and 16 to 23 are next to 8-15 but outside it */
@@ -9482,7 +9486,9 @@ void femu_test_fsched_match(void *obj, void *data, QGuestAllocator *alloc)
     /* past the namespace: the view check fails, so no line counts it */
     g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, nsze, 1, false, buf), !=,
                     0);
-    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, 0, 8, false, buf), ==, 0);
+    /* the 2nd Read: read-unc ends it */
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, 0, 8, false, buf), ==,
+                    NVME_UNRECOVERED_READ);
     g_assert_cmphex(femu_fs_io(&c, NVME_CMD_FLUSH, 0, 1, false, buf), ==, 0);
     sel = femu_fault_sel(qts, "ev");
     g_assert_cmpstr(sel, ==, "2:6:1:1:0:0 3:2:1:1:0:0 4:2:2:2:0:0 "
@@ -9582,7 +9588,9 @@ void femu_test_fsched_ppm(void *obj, void *data, QGuestAllocator *alloc)
 
     femu_enable(&c, pdev, &qs->alloc);
     femu_create_io_queues(&c);
-    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 1, false, buf), ==, 0);
+    /* line 2 selects: write-fail ends the Write */
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 1, false, buf), ==,
+                    NVME_WRITE_FAULT);
     sel = femu_fault_sel(qts, "ev");
     g_assert_cmpstr(sel, ==, "1:1:0:0:0:0 2:1:1:1:0:0 3:1:0:0:0:0 "
                     "4:1:1:1:0:0 5:0:0:0:0:0 6:0:0:0:0:0");
@@ -9635,7 +9643,9 @@ void femu_test_fsched_mdts(void *obj, void *data, QGuestAllocator *alloc)
     sel = femu_fault_sel(qs->qts, "ev");
     g_assert_cmpstr(sel, ==, "1:0:0:0:0:0");
     g_free(sel);
-    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, 0, 7, false, buf), ==, 0);
+    /* the control runs, counts, and read-unc ends it */
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, 0, 7, false, buf), ==,
+                    NVME_UNRECOVERED_READ);
     sel = femu_fault_sel(qs->qts, "ev");
     g_assert_cmpstr(sel, ==, "1:1:1:1:0:0");
 
@@ -9782,10 +9792,17 @@ void femu_test_fsched_groups(void *obj, void *data, QGuestAllocator *alloc)
     buf = guest_alloc(&qs->alloc, 4096);
     femu_enable(&c, pdev, &qs->alloc);
     femu_create_io_queues(&c);
-    /* one one-block Write per scenario; those at 24 and 40 have FUA */
+    /*
+     * one one-block Write per scenario; those at 24 and 40 have FUA. An
+     * applied write-fail (at 0, 56 and 72) ends its Write with Write
+     * Fault; a superseded one (at 8) does not.
+     */
     for (uint64_t slba = 0; slba < 80; slba += 8) {
+        bool wf = slba == 0 || slba == 56 || slba == 72;
+
         g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, slba, 1,
-                                   slba == 24 || slba == 40, buf), ==, 0);
+                                   slba == 24 || slba == 40, buf), ==,
+                        wf ? NVME_WRITE_FAULT : 0);
     }
     sel = femu_fault_sel(qs->qts, "ev");
     g_test_message("x-fault-sel %s", sel);
@@ -9950,27 +9967,30 @@ void femu_test_fsched_records(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(femu_fault_ctr(qts, "ev", "last-id"), ==, 0);
 
     cid[0] = c.cid;
-    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, 0, 1, false, buf), ==, 0);
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, 0, 1, false, buf), ==,
+                    NVME_UNRECOVERED_READ);
     cid[1] = c.cid;
-    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 1, false, buf), ==, 0);
+    g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 0, 1, false, buf), ==,
+                    NVME_WRITE_FAULT);
     cid[2] = c.cid;
     g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 40, 1, true, buf), ==, 0);
     cid[3] = c.cid;
     g_assert_cmphex(femu_fs_io(&c, NVME_CMD_WRITE, 80, 1, false, buf), ==, 0);
 
     {
+        /* read-unc and write-fail each write an apply record: 2 and 5 */
         g_autofree char *w1 = femu_fault_want(1, 4, 1, "read-unc", "selected",
                                               2, cid[0], 2, false, 0);
-        g_autofree char *w2 = femu_fault_want(2, 1, 2, "write-fail",
+        g_autofree char *w2 = femu_fault_want(3, 1, 2, "write-fail",
                                               "selected", 3, cid[1], 1, false,
                                               0);
-        g_autofree char *w3 = femu_fault_want(3, 2, 2, "wb-fail",
+        g_autofree char *w3 = femu_fault_want(4, 2, 2, "wb-fail",
                                               "superseded", 3, cid[1], 1,
                                               false, 0);
-        g_autofree char *w4 = femu_fault_want(4, 3, 1, "wb-fail",
+        g_autofree char *w4 = femu_fault_want(6, 3, 1, "wb-fail",
                                               "no-effect/fua", 4, cid[2], 1,
                                               true, 40);
-        g_autofree char *w5 = femu_fault_want(5, 5, 1, "wb-fail", "selected",
+        g_autofree char *w5 = femu_fault_want(7, 5, 1, "wb-fail", "selected",
                                               5, cid[3], 1, false, 80);
 
         g_string_printf(want, "%s; %s; %s; %s; %s", w1, w2, w3, w4, w5);
@@ -9981,8 +10001,8 @@ void femu_test_fsched_records(void *obj, void *data, QGuestAllocator *alloc)
     g_free(got);
     r = femu_events_q(qts, "ev", &rsp);
     g_assert_cmpint(qdict_get_int(r, "step"), ==, 5);
-    /* the selected wb-fail marked its one buffered page: record 6 */
-    g_assert_cmpint(qdict_get_int(r, "last-id"), ==, 6);
+    /* the selected wb-fail marked its one buffered page: record 8 */
+    g_assert_cmpint(qdict_get_int(r, "last-id"), ==, 8);
     {
         QList *fl = qdict_get_qlist(r, "faults");
         QDict *a = NULL;
@@ -9991,9 +10011,9 @@ void femu_test_fsched_records(void *obj, void *data, QGuestAllocator *alloc)
         QLIST_FOREACH_ENTRY(fl, e) {
             a = qobject_to(QDict, qlist_entry_obj(e));
         }
-        g_assert_cmpuint(qlist_size(fl), ==, 6);
-        g_assert_cmpint(qdict_get_int(a, "id"), ==, 6);
-        g_assert_cmpint(qdict_get_int(a, "cause"), ==, 5);
+        g_assert_cmpuint(qlist_size(fl), ==, 8);
+        g_assert_cmpint(qdict_get_int(a, "id"), ==, 8);
+        g_assert_cmpint(qdict_get_int(a, "cause"), ==, 7);
         g_assert_cmpstr(qdict_get_str(a, "phase"), ==, "apply");
         g_assert_cmpstr(qdict_get_str(a, "outcome"), ==, "marked");
         g_assert_cmpint(qdict_get_int(a, "pages"), ==, 1);
@@ -10605,8 +10625,9 @@ static char *femu_fault_replay_run(const char *dir, int run, uint32_t seed,
                         0);
         wstep[i] = ++step;
         if (i % 4 == 3) {
+            /* the 3rd Read, after Write 12, is the one read-unc ends */
             g_assert_cmphex(femu_fs_io(&c, NVME_CMD_READ, i, 1, false, buf),
-                            ==, 0);
+                            ==, i == 11 ? NVME_UNRECOVERED_READ : 0);
             step++;
         }
     }
@@ -35508,6 +35529,181 @@ void femu_test_fsched_delay_link(void *obj, void *data,
         g_test_skip("the control pair took 2 s: the host is too slow");
     } else {
         g_assert_cmpint(us[1], <, FEMU_CMD_D);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * The newest Error Information entry names queue 1, command @cid, status
+ * @sc, block @lba and namespace @nsid.
+ */
+static void femu_cmd_elog_is(FemuCtrlState *c, uint64_t lbuf, uint16_t cid,
+                             uint16_t sc, uint64_t lba, uint32_t nsid)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    femu_wbf_elog(c, lbuf);
+    g_assert_cmpuint(qtest_readw(qts, lbuf + 8), ==, 1);
+    g_assert_cmpuint(qtest_readw(qts, lbuf + 10), ==, cid);
+    g_assert_cmphex((qtest_readw(qts, lbuf + 12) >> 1) & 0x7ff, ==, sc);
+    g_assert_cmpuint(qtest_readq(qts, lbuf + 16), ==, lba);
+    g_assert_cmpuint(qtest_readl(qts, lbuf + 24), ==, nsid);
+}
+
+/*
+ * write-fail on Write 2 and read-unc on Read 1 of device fe end them with
+ * Write Fault, and with Unrecovered Read Error and DNR. Each adds one
+ * SMART media error and one Error Information entry with the queue, the
+ * command, the first block and the namespace, as the ppm faults do. The
+ * data the Write moved stays. Write 3 fails its data transfer:
+ * no-effect, reason cmd-failed. write-fail also ends a Write Zeroes and
+ * a FUA Write. Device fc, the control, has its lines on command 9: the
+ * same commands succeed and add no error.
+ *
+ * Planted defects and the check that fails:
+ *   post keeps the FTL status            fe Write 2 is 0
+ *   read-unc gives Write Fault           fe Read 1 is 280h
+ *   no DNR on read-unc                   the DNR check
+ *   no error entry or media count        the SMART counts
+ *   the entry takes req->slba            the Write Zeroes entry block
+ *   write-fail drops the data            page 1 or 3 does not read a5h
+ *   a failed command takes the fault     Write 3 is 280h
+ */
+void femu_test_fsched_media_fault(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cmd-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "fc", 5, FEMU_LIE_PL ",oncs=415",
+          "@write#9 write-fail\n@read#9 read-unc\n@wzero#9 write-fail\n"
+          "@fua#9 write-fail\n" },
+        { "fe", 6, FEMU_LIE_PL ",oncs=415",
+          "@write#2 write-fail\n@read#1 read-unc\n@write#3 write-fail\n"
+          "@wzero#1 write-fail\n@fua#2 write-fail\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    uint64_t log = guest_alloc(&qs->alloc, 512);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool on = i == 1;
+        uint16_t wf = on ? NVME_WRITE_FAULT : NVME_SUCCESS;
+        uint16_t cid;
+        uint64_t me0;
+        uint64_t el0;
+        uint64_t me;
+        uint64_t el;
+
+        femu_err_smart(c, log, &me0, &el0);
+        qtest_memset(qts, buf, 0xa5, 4096);
+        g_assert_cmphex(femu_fs_io(c, NVME_CMD_WRITE, 0, 8, false, buf), ==,
+                        NVME_SUCCESS);
+        cid = c->cid;
+        g_assert_cmphex(femu_fs_io(c, NVME_CMD_WRITE, 8, 8, false, buf), ==,
+                        wf);
+        g_assert_cmphex(femu_io_status & NVME_DNR, ==, 0);
+        if (on) {
+            femu_cmd_elog_is(c, log, cid, NVME_WRITE_FAULT, 8, 1);
+        }
+        cid = c->cid;
+        g_assert_cmphex(femu_fs_io(c, NVME_CMD_READ, 8, 8, false, buf), ==,
+                        on ? NVME_UNRECOVERED_READ : NVME_SUCCESS);
+        g_assert_cmphex(femu_io_status & NVME_DNR, ==, on ? NVME_DNR : 0);
+        if (on) {
+            femu_cmd_elog_is(c, log, cid, NVME_UNRECOVERED_READ, 8, 1);
+        }
+        femu_err_smart(c, log, &me, &el);
+        g_assert_cmpuint(me - me0, ==, on ? 2 : 0);
+        g_assert_cmpuint(el - el0, ==, on ? 2 : 0);
+        g_assert_cmphex(femu_cmd_bad_write(c, 2), ==, NVME_DATA_TRAS_ERROR);
+        femu_err_smart(c, log, &me0, &el0);
+        g_assert_cmpuint(me0, ==, me);
+
+        /* Write Zeroes, then a FUA Write of page 3 */
+        cid = c->cid;
+        g_assert_cmphex(femu_fs_io(c, NVME_CMD_WRITE_ZEROES, 48, 8, false,
+                                   buf), ==, wf);
+        if (on) {
+            femu_cmd_elog_is(c, log, cid, NVME_WRITE_FAULT, 48, 1);
+        }
+        qtest_memset(qts, buf, 0xa5, 4096);
+        cid = c->cid;
+        g_assert_cmphex(femu_fs_io(c, NVME_CMD_WRITE, 24, 8, true, buf), ==,
+                        wf);
+        if (on) {
+            femu_cmd_elog_is(c, log, cid, NVME_WRITE_FAULT, 24, 1);
+        }
+        femu_err_smart(c, log, &me, &el);
+        g_assert_cmpuint(me - me0, ==, on ? 2 : 0);
+        femu_lie_page_is(c, buf, 1, 0xa5);
+        femu_lie_page_is(c, buf, 3, 0xa5);
+    }
+    femu_cmd_want(qts, "fc", "");
+    femu_cmd_want(qts, "fe",
+                  "1<0 l1 m2 sched-cmd write-fail select selected 8+8; "
+                  "2<1 l1 m2 sched-cmd write-fail apply done 8+8 x=280; "
+                  "3<0 l2 m1 sched-cmd read-unc select selected 8+8; "
+                  "4<3 l2 m1 sched-cmd read-unc apply done 8+8 x=4281; "
+                  "5<0 l3 m3 sched-cmd write-fail select selected 16+8; "
+                  "6<5 l3 m3 sched-cmd write-fail apply "
+                  "no-effect/cmd-failed 16+8; "
+                  "7<0 l4 m1 sched-cmd write-fail select selected 48+8; "
+                  "8<7 l4 m1 sched-cmd write-fail apply done 48+8 x=280; "
+                  "9<0 l5 m2 sched-cmd write-fail select selected 24+8; "
+                  "10<9 l5 m2 sched-cmd write-fail apply done 24+8 x=280");
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * A Write Zeroes that write-fail ends also drains a page that wb-fail
+ * marked. It keeps its Write Fault and its one Error Information entry
+ * (block 48), and the failed write-back stays pending: the next Flush
+ * reports it. On device wc, the control, the Write Zeroes reports the
+ * failure itself, so the Flush succeeds. Both use report=once: a sticky
+ * failure fails each Flush until a reset.
+ *
+ * Planted defects and the check that fails:
+ *   the Write Zeroes reports the failure too   wa Flush succeeds
+ *   write-fail adds no entry                   wa entry count
+ */
+void femu_test_fsched_fail_wbf(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cmd-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "wc", 5, FEMU_LIE_PL ",oncs=415",
+          FEMU_WBF_SEL " report=once\n@wzero#9 write-fail\n" },
+        { "wa", 6, FEMU_LIE_PL ",oncs=415",
+          FEMU_WBF_SEL " report=once\n@wzero#1 write-fail\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    uint64_t lbuf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool on = i == 1;
+        uint64_t nerr;
+        uint16_t cid;
+
+        femu_wbf_seed(c, buf);
+        nerr = femu_wbf_elog(c, lbuf);
+        g_assert_cmphex(femu_wbf_drain(c, buf, FEMU_WBF_WZERO, 0, &cid), ==,
+                        FEMU_WBF_WF);
+        /*
+         * one entry at the write-back, then one from write-fail on wa,
+         * or one of the Write Zeroes that reports the failure on wc
+         */
+        g_assert_cmpint(femu_wbf_elog(c, lbuf), ==, nerr + 2);
+        if (on) {
+            femu_cmd_elog_is(c, lbuf, cid, NVME_WRITE_FAULT, 48, 1);
+        } else {
+            femu_wbf_elog_is(c, lbuf, 1, cid, FEMU_WBF_WF, 8,
+                             NVME_CMD_WRITE_ZEROES);
+        }
+        g_assert_cmphex(femu_fs_io(c, NVME_CMD_FLUSH, 0, 1, false, buf), ==,
+                        on ? NVME_WRITE_FAULT : NVME_SUCCESS);
     }
     femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
 }
