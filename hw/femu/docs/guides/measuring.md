@@ -371,8 +371,9 @@ can mix time lines and command lines. Command lines work on bbssd only.
 - With no command line, the FTL thread has no schedule to check: one
   pointer test per command, and no decode, count or draw.
 - Only `flush-lie`, `fua-lie` (see [lies](#lies)), `wb-fail` (see
-  [write-back failures](#write-back-failures)) and `hang` (see
-  [hang](#hang)) have an effect so far.
+  [write-back failures](#write-back-failures)), `hang` and `cfs` (see
+  [hang and controller fatal status](#hang-and-controller-fatal-status))
+  have an effect so far.
   For the other actions a selection moves the counters of its line and
   writes its record only. With no `wb-fail` line, none of its hooks
   runs: the data path tests one pointer or one counter. The qtest property `x-fault-sel` reports, per
@@ -512,15 +513,19 @@ A later completion tells the host.
 | `report` | `reported` | `slot`, `found`: `self` or `pending`, `status`; the reporting command |
 | `supersede` | `superseded` | `slot`; the Write that cleared the mark |
 
-### Hang
+### Hang and controller fatal status
 
-`hang` lets its command run, then holds its CQE. A reclaim gives each
+`hang` lets its command run, then holds its CQE. `cfs` holds its
+command before it runs and stops the controller. A reclaim gives each
 held command back to its queue, with no CQE.
 
 ```text
  hang:  FTL step (the command runs) --> poller: no CQE, held
           apply record (done, status = the withheld status)
           x-fault-hung + 1
+ cfs:   FTL step: the command parks, unrun; the FTL takes no more
+          --> main loop: pause the dataplane, CSTS.CFS = 1
+          apply record (done)
  reclaim: Delete SQ (its commands), Controller Reset, shutdown,
           power cut, unplug (all) --> reclaim record, no CQE
 ```
@@ -538,10 +543,21 @@ held command back to its queue, with no CQE.
 - The qtest property `x-fault-hung` counts the held commands. A
   Controller Reset takes it back to 0, and the hang line can select
   again.
+- After `cfs` the controller fetches no I/O or Admin command, posts no
+  CQE and sends no AER. A shutdown does no work: SHST stays 00b and CFS
+  stays 1, so a host that waits for it times out (Linux reports a
+  shutdown timeout). A Controller Reset clears CFS and gives the parked
+  command back; a power cut does too. The parked command never ran, so
+  its blocks keep their old data.
+- `cfs` needs `power_loss=on`. A time line cannot name `cfs`.
+- A reset, a queue deletion or a cut that comes between the park and
+  the main loop step ends the park. That step then does nothing. The
+  qtest property `x-fault-bh-hold` keeps that step back, and
+  `x-fault-parked` reads 1 while a command is parked.
 
 | Phase | Outcome | Fields |
 | --- | --- | --- |
-| `apply` | `done` | `status`: the status its CQE would carry |
+| `apply` | `done` | `status` for `hang`: the status its CQE would carry |
 | `reclaim` | `reclaimed` | `reason`: `sq-deleted`, `reset`, `shutdown`, `power-cut` or `unplug` |
 
 ### Fault records
@@ -568,7 +584,7 @@ Realize allocates the ring only for a file with a command line.
 | `id` | from 1; each record takes one, stored or dropped |
 | `origin` | `sched-cmd`: a command line |
 | `line`, `match` | the line, and its matches so far, this one too |
-| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a lie, a `wb-fail` or a `hang`; `fail`, `report` and `supersede` for a `wb-fail` mark; `reclaim` for a held command that went back |
+| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a lie, a `wb-fail`, a `hang` or a `cfs`; `fail`, `report` and `supersede` for a `wb-fail` mark; `reclaim` for a held command that went back |
 | `step` | commands the FTL thread took so far, this one too |
 | `nsid`, `sqid`, `cid`, `opc`, `fua`, `slba`, `nlb` | the command as the host sent it; `slba` and `nlb` are 0 for a Flush |
 | `outcome` | `selected`, `superseded` or `no-effect`; `done` for an `apply` record; `marked`, `unc`, `old` and `reported` for `wb-fail`; `reclaimed` for a `reclaim` record |
@@ -624,7 +640,7 @@ The ring has two overflow rules. Neither is silent.
   fails after the writer started also stops it. Exit waits for the
   writer, so a file that stalls also stalls the exit.
 - The FTL thread, the pollers (`hang`) and the main loop (`wb-fail`,
-  a reclaim) write records under one lock. The query takes no
+  `cfs`, a reclaim) write records under one lock. The query takes no
   lock. A record moves as 64-bit atomic words between two reads of
   the slot's sequence word, so a read skips a record that the producer
   replaces during the copy.

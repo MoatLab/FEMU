@@ -3326,12 +3326,17 @@ typedef struct FemuCtrl {
     struct FemuWbf  *wbf;
     bool            wbf_drained;
     /*
-     * events_file hang (femu-events.c): per poller, the requests a hang
-     * holds with no CQE; NULL with no command line. The main loop takes
-     * them back with the dataplane paused.
+     * events_file hang and cfs (femu-events.c). fs_hung: per poller, the
+     * requests a hang holds with no CQE; NULL with no command line.
+     * fs_parked: the command a cfs holds before it runs. fs_cfs: a cfs
+     * stopped the controller, until a reset. The main loop changes them
+     * with the dataplane paused.
      */
     union cq_req_list *fs_hung;
+    NvmeRequest     *fs_parked;
+    bool            fs_cfs;
     uint64_t        fault_hung;         /* requests a hang holds now */
+    uint32_t        test_fs_bh_hold;    /* qtest x-fault-bh-hold */
     char            *events_log;        /* fault records, one JSON line each */
     char            *evlog_path;        /* events_log, resolved while open */
     uint32_t        events_max_faults;  /* slots of the fault record ring */
@@ -4155,7 +4160,13 @@ bool femu_events_init(FemuCtrl *n, Error **errp);
 void femu_events_start(FemuCtrl *n);
 void femu_events_cancel(FemuCtrl *n);
 void femu_events_free(FemuCtrl *n);
-bool femu_fsched_step(FemuCtrl *n, NvmeRequest *req);
+/* what the FTL thread does with a command after femu_fsched_step() */
+enum {
+    FEMU_FS_STEP_RUN,       /* run it */
+    FEMU_FS_STEP_POST,      /* run it, then call femu_fsched_post() */
+    FEMU_FS_STEP_PARK,      /* a cfs holds it: run nothing more */
+};
+int femu_fsched_step(FemuCtrl *n, NvmeRequest *req);
 void femu_fsched_post(FemuCtrl *n, NvmeRequest *req, bool report);
 void femu_fsched_hang(FemuCtrl *n, int poller, NvmeRequest *req);
 void femu_fsched_reclaim(FemuCtrl *n, NvmeSQueue *sq, uint8_t why);

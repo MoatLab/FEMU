@@ -914,7 +914,7 @@ static void nvme_reset_features(FemuCtrl *n)
 
 /*
  * @why names the path for the records of the commands that an
- * events_file hang holds: a FEMU_FS_WHY_* reclaim reason.
+ * events_file hang or cfs holds: a FEMU_FS_WHY_* reclaim reason.
  */
 static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown, uint8_t why)
 {
@@ -988,7 +988,7 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown, uint8_t why)
         nvme_clear_virq(n);
     }
 
-    /* before the queues go: a hung command is in none of them */
+    /* before the queues go: a hung or parked command is in none of them */
     if (unlikely(n->fsched)) {
         femu_fsched_reclaim(n, NULL, why);
     }
@@ -1281,6 +1281,15 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
         bool shutdown = NVME_CC_SHN(data) && !NVME_CC_SHN(cc) &&
                         (start || n->shut == FEMU_SHUT_NONE);
         uint16_t fail = 0;
+
+        /*
+         * A controller that an events_file cfs stopped does no shutdown
+         * work: SHST stays 00b until a reset, and a host that waits for
+         * it times out. A FEMU policy for a fatal condition.
+         */
+        if (unlikely(n->fs_cfs) && !reset) {
+            shutdown = false;
+        }
 
         /*
          * A completed shutdown, normal or abrupt, leaves nothing the host
@@ -3801,6 +3810,15 @@ static void *femu_ftl_thread(void *arg)
             }
 
             /*
+             * events_file cfs: a parked command ends the FTL work, so no
+             * later command changes the media after it.
+             */
+            if (unlikely(n->fsched) && qatomic_load_acquire(&n->fs_parked)) {
+                n->ftl_in_sweep = false;
+                break;
+            }
+
+            /*
              * Take a request only when the ring to the poller has room,
              * so this thread never holds one across a pause. A ring that
              * is full leaves the request on to_ftl[i], where the queue
@@ -3828,7 +3846,14 @@ static void *femu_ftl_thread(void *arg)
              */
             post = false;
             if (unlikely(n->fsched)) {
-                post = femu_fsched_step(n, req);
+                int st = femu_fsched_step(n, req);
+
+                /* a cfs holds it, unrun, until a reclaim */
+                if (unlikely(st == FEMU_FS_STEP_PARK)) {
+                    n->ftl_in_sweep = false;
+                    break;
+                }
+                post = st == FEMU_FS_STEP_POST;
             }
             if (nvme_ns_shared(n)) {
                 qemu_mutex_lock(&n->subsys->ns_lock);

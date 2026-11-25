@@ -148,7 +148,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "times count from the first enable and survive resets; see "
       "query-femu-events; bbssd: lines '@<op>[,ns=N][,lba=A-B]#N <action>' "
       "or '@...%PPM~SEED <action>' select commands; of the actions only "
-      "flush-lie, fua-lie, wb-fail and hang have an effect yet; "
+      "flush-lie, fua-lie, wb-fail, hang and cfs have an effect yet; "
       "not with csd_pause; unset (default) is off" },
     { "events_log",
       "with command lines in events_file: host file that gets one JSON "

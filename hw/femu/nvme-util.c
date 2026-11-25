@@ -1040,6 +1040,7 @@ void nvme_free_sq(NvmeSQueue *sq, FemuCtrl *n)
         nvme_req_release_ranges(&sq->io_req[i]);
         /* a write dropped before the FTL ran it programs nothing */
         nvme_eol_release(&sq->io_req[i]);
+        g_clear_pointer(&sq->io_req[i].write_data, g_free);
         if (sq->io_req[i].csd_use) {
             femu_csd_req_done(n, &sq->io_req[i]);
         }

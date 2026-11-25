@@ -31454,7 +31454,7 @@ void femu_test_gc_spare_hotcold(void *obj, void *data, QGuestAllocator *alloc)
  */
 typedef struct FemuLieDev {
     const char *id;
-    int addr;
+    int addr;                   /* PCI slot; -device reads addr= as hex */
     const char *props;
     const char *lines;
     FemuCtrlState c;
@@ -31474,7 +31474,7 @@ static QOSState *femu_lie_boot(const char *dir, FemuLieDev *d, int nr)
         g_autofree char *path = g_build_filename(dir, name, NULL);
 
         g_assert_true(g_file_set_contents(path, d[i].lines, -1, NULL));
-        g_string_append_printf(cmd, " -device femu,id=%s,addr=%d,"
+        g_string_append_printf(cmd, " -device femu,id=%s,addr=0x%x,"
                                "devsz_mb=16,%s,events_file=%s", d[i].id,
                                d[i].addr, d[i].props, path);
     }
@@ -32910,8 +32910,9 @@ void femu_test_fsched_wbf_slots(void *obj, void *data,
 }
 
 /*
- * hang. A hang lets its command run, then holds its CQE until a
- * reclaim. x-fault-hung counts the hung commands.
+ * hang and cfs. A hang lets its command run, then holds its CQE until a
+ * reclaim. A cfs holds its command before it runs and sets CSTS.CFS.
+ * x-fault-hung counts the hung commands, x-fault-parked tells a cfs park.
  */
 
 /* the integer, or the bool as 0 or 1, of property @prop of device @id */
@@ -33345,6 +33346,300 @@ void femu_test_fsched_hang_report(void *obj, void *data,
         g_assert_cmpstr(last, ==, hang ? "done" : "marked S1");
         femu_hang_none(c, &c->io);
         femu_queue_free(c, &q2);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/* CSTS of @c */
+static uint32_t femu_cfs_csts(FemuCtrlState *c)
+{
+    return qpci_io_readl(c->pdev, c->bar, 0x1c);
+}
+
+/* wait until CSTS.CFS of @c reads 1 */
+static void femu_cfs_wait(FemuCtrlState *c)
+{
+    for (int ms = 0; ms < FEMU_POLL_LIMIT_MS &&
+         !(femu_cfs_csts(c) & FEMU_CSTS_CFS); ms++) {
+        g_usleep(1000);
+    }
+    g_assert_cmphex(femu_cfs_csts(c) & FEMU_CSTS_CFS, ==, FEMU_CSTS_CFS);
+}
+
+/*
+ * cfs on Write 2 of page 0. Page 0 holds 0xa0, made durable by a Flush.
+ *   cf: the Write parks before it runs, and CSTS.CFS comes up. A Read on
+ *       queue 1 and a Get Features on the Admin queue get no CQE. A
+ *       normal shutdown leaves SHST 00b and CFS 1. A Controller Reset
+ *       clears CFS and gives the Write back: page 0 still reads 0xa0,
+ *       and new I/O works.
+ *   cb: x-fault-bh-hold keeps the BH back. A reset comes between the
+ *       park and the BH, so the BH that runs after the release sets no
+ *       CFS, and the controller works.
+ *   cn: the control: the line never selects. The Write lands, the Read
+ *       and the Get Features complete, and the shutdown ends with SHST
+ *       10b.
+ *
+ * Planted defects and the check that fails:
+ *   the FTL runs the parked command      page 0 of cf
+ *   the dataplane runs after CFS         the Read of cf
+ *   the Admin queue runs after CFS       the Get Features of cf
+ *   a shutdown after CFS does its work   SHST of cf
+ *   the reset keeps CFS or the park      CSTS and x-fault-parked of cf
+ *   the BH does not check its park       CSTS of cb
+ */
+void femu_test_fsched_cfs(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cfs-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "cf", 5, FEMU_LIE_PL, "@write#2 cfs\n" },
+        { "cb", 6, FEMU_LIE_PL, "@write#2 cfs\n" },
+        { "cn", 7, FEMU_LIE_PL, "@write#9 cfs\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool cfs = i == 0;
+        bool held = i == 1;
+        NvmeCmd gf = { .opcode = NVME_ADM_CMD_GET_FEATURES,
+                       .cdw10 = cpu_to_le32(0x06) };
+        g_autofree char *want = NULL;
+        uint16_t a;
+        int ms;
+
+        femu_lie_page(c, buf, 0, 0xa0, false);
+        femu_power_flush(c, 1);
+        if (held) {
+            femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 1);
+        }
+        qtest_memset(qts, buf, 0xb0, 4096);
+        a = femu_hang_submit(c, &c->io, NVME_CMD_WRITE, 0, buf);
+        if (i == 2) {
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)),
+                            ==, 0);
+        } else {
+            femu_hang_wait(qts, d[i].id, "x-fault-parked", 1);
+        }
+        for (ms = 0; ms < FEMU_POLL_LIMIT_MS && cfs &&
+             !(femu_cfs_csts(c) & FEMU_CSTS_CFS); ms++) {
+            g_usleep(1000);
+        }
+        g_assert_cmphex(femu_cfs_csts(c) & FEMU_CSTS_CFS, ==,
+                        cfs ? FEMU_CSTS_CFS : 0);
+
+        if (held) {
+            femu_hang_none(c, &c->io);
+            femu_wbf_ctrl_reset(&d[i]);
+            g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-parked"),
+                            ==, 0);
+            femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 0);
+            femu_lie_page_is(c, buf, 0, 0xa0);
+            g_assert_cmphex(femu_cfs_csts(c) & (FEMU_CSTS_CFS | 1), ==, 1);
+            want = g_strdup_printf("1<0 l1 m2 cfs select selected c%u o1 f0 "
+                                   "0+8; 2<1 l1 m2 cfs reclaim "
+                                   "reclaimed/reset c%u o1 f0 0+8", a, a);
+            femu_lie_want(qts, d[i].id, want);
+            continue;
+        }
+
+        /* later commands: a Read on queue 1, Get Features on Admin */
+        femu_hang_submit(c, &c->io, NVME_CMD_READ, 0, buf);
+        femu_submit(c, &c->admin, &gf);
+        if (cfs) {
+            femu_hang_none(c, &c->io);
+            femu_hang_none(c, &c->admin);
+        } else {
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)),
+                            ==, 0);
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->admin, NULL,
+                                                  NULL)), ==, 0);
+        }
+        /* a shutdown: none after CFS, so SHST stays 00b */
+        qpci_io_writel(c->pdev, c->bar, 0x14,
+                       FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
+        g_assert_cmpint(FEMU_CSTS_SHST(femu_cfs_csts(c)), ==, cfs ? 0 : 2);
+        g_assert_cmphex(femu_cfs_csts(c) & FEMU_CSTS_CFS, ==,
+                        cfs ? FEMU_CSTS_CFS : 0);
+
+        femu_wbf_ctrl_reset(&d[i]);
+        g_assert_cmphex(femu_cfs_csts(c) & (FEMU_CSTS_CFS | 1), ==, 1);
+        g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-parked"), ==, 0);
+        femu_lie_page_is(c, buf, 0, cfs ? 0xa0 : 0xb0);
+        femu_lie_page(c, buf, 1, 0xc1, false);
+        femu_lie_page_is(c, buf, 1, 0xc1);
+        want = cfs ? femu_hang_recs("cfs", 2, a, NVME_CMD_WRITE, 0, "reset")
+                   : g_strdup("");
+        femu_lie_want(qts, d[i].id, want);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * cfs with the other paths, each on Write 2 of page 0 unless named.
+ *   pd: x-fault-bh-hold keeps the BH back, and a Delete SQ of queue 1
+ *       reclaims the park. The BH after the release sets no CFS, the
+ *       FTL runs again, and a Write on a new queue 2 completes.
+ *   ps: the same with a normal shutdown in place of the Delete SQ. The
+ *       shutdown does its work (SHST 10b), and the BH sets no CFS.
+ *   pc: CFS, then a power cut. The cut clears CFS and reclaims the
+ *       park; page 0 keeps 0xa0, and new I/O works.
+ *   pa: aer=on wb-fail, then cfs on Read 1. The Flush queues an Error
+ *       AER while no AER command waits. After CFS the AER command gets
+ *       no CQE. The control pn has a cfs line that never selects: its
+ *       AER command gets the event.
+ *   pw: wb-fail and cfs on Write 2 of page 1. cfs wins: the wb-fail
+ *       line has no effect, reason pre. After the reset a Flush finds
+ *       no mark, and page 1 keeps 0xa1.
+ *
+ * Planted defects and the check that fails:
+ *   the BH does not check its park       CSTS of pd and ps
+ *   a reclaim leaves the FTL parked      the Write on queue 2 of pd
+ *   a power cut keeps CFS or the park    CSTS and x-fault-parked of pc
+ *   the Admin queue runs after CFS       the AER command of pa
+ *   wb-fail applies beside a cfs         the record and Flush of pw
+ */
+void femu_test_fsched_cfs_paths(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cfs-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "pd", 5, FEMU_LIE_PL, "@write#2 cfs\n" },
+        { "ps", 6, FEMU_LIE_PL, "@write#2 cfs\n" },
+        { "pc", 7, FEMU_LIE_PL, "@write#2 cfs\n" },
+        { "pa", 8, FEMU_LIE_PL, FEMU_WBF_SEL " report=once aer=on\n"
+                                "@read#1 cfs\n" },
+        { "pn", 9, FEMU_LIE_PL, FEMU_WBF_SEL " report=once aer=on\n"
+                                "@read#9 cfs\n" },
+        { "pw", 10, FEMU_LIE_PL, FEMU_WBF_SEL "\n@write,lba=8-15#2 cfs\n" },
+    };
+    static const char *const why[] = { "sq-deleted", "shutdown" };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    /* pd, ps: a reclaim between the park and the BH */
+    for (int i = 0; i < 2; i++) {
+        FemuCtrlState *c = &d[i].c;
+        g_autofree char *want = NULL;
+        uint16_t a;
+
+        femu_lie_page(c, buf, 0, 0xa0, false);
+        femu_power_flush(c, 1);
+        femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 1);
+        qtest_memset(qts, buf, 0xb0, 4096);
+        a = femu_hang_submit(c, &c->io, NVME_CMD_WRITE, 0, buf);
+        femu_hang_wait(qts, d[i].id, "x-fault-parked", 1);
+        if (i == 0) {
+            g_assert_cmphex(FEMU_SC(femu_delete_sq(c, 1)), ==, 0);
+        } else {
+            qpci_io_writel(c->pdev, c->bar, 0x14,
+                           FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
+            g_assert_cmpint(FEMU_CSTS_SHST(femu_cfs_csts(c)), ==, 2);
+        }
+        g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-parked"), ==,
+                        0);
+        femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 0);
+        g_assert_cmphex(femu_cfs_csts(c) & FEMU_CSTS_CFS, ==, 0);
+        if (i == 0) {
+            FemuQueue q2 = { 0 };
+            NvmeRwCmd rw = { 0 };
+
+            femu_zap_create_queue(c, &q2, 2);
+            rw.opcode = NVME_CMD_WRITE;
+            rw.nsid = cpu_to_le32(1);
+            rw.dptr.prp1 = cpu_to_le64(buf);
+            rw.slba = cpu_to_le64(8);
+            rw.nlb = cpu_to_le16(7);
+            femu_zap_queue(c, &q2, (NvmeCmd *)&rw);
+            femu_zap_ring(c, &q2);
+            g_assert_cmphex(femu_zap_complete(c, &q2, NULL), ==, 0);
+            femu_queue_free(c, &q2);
+        } else {
+            femu_wbf_ctrl_reset(&d[i]);
+            femu_lie_page_is(c, buf, 0, 0xa0);
+        }
+        g_assert_cmphex(femu_cfs_csts(c) & FEMU_CSTS_CFS, ==, 0);
+        want = g_strdup_printf("1<0 l1 m2 cfs select selected c%u o1 f0 "
+                               "0+8; 2<1 l1 m2 cfs reclaim reclaimed/%s "
+                               "c%u o1 f0 0+8", a, why[i], a);
+        femu_lie_want(qts, d[i].id, want);
+    }
+
+    /* pc: CFS, then a power cut */
+    {
+        FemuCtrlState *c = &d[2].c;
+        g_autofree char *want = NULL;
+        uint16_t a;
+
+        femu_lie_page(c, buf, 0, 0xa0, false);
+        femu_power_flush(c, 1);
+        qtest_memset(qts, buf, 0xb0, 4096);
+        a = femu_hang_submit(c, &c->io, NVME_CMD_WRITE, 0, buf);
+        femu_cfs_wait(c);
+        femu_lie_cut(&d[2]);
+        g_assert_cmphex(femu_cfs_csts(c) & (FEMU_CSTS_CFS | 1), ==, 1);
+        g_assert_cmpint(femu_hang_prop(qts, "pc", "x-fault-parked"), ==, 0);
+        femu_lie_page_is(c, buf, 0, 0xa0);
+        femu_lie_page(c, buf, 1, 0xc1, false);
+        femu_lie_page_is(c, buf, 1, 0xc1);
+        want = femu_hang_recs("cfs", 2, a, NVME_CMD_WRITE, 0, "power-cut");
+        femu_lie_want(qts, "pc", want);
+    }
+
+    /* pa, pn: an AER queued before CFS */
+    for (int i = 3; i < 5; i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool cfs = i == 3;
+        uint16_t cid;
+        uint32_t res = 0;
+
+        femu_wbf_seed(c, buf);
+        g_assert_cmphex(femu_wbf_drain(c, buf, FEMU_WBF_FLUSH, 0, &cid), ==,
+                        FEMU_WBF_WF);
+        g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-wbf-aer"), ==,
+                        1);
+        femu_hang_submit(c, &c->io, NVME_CMD_READ, 0, buf);
+        if (cfs) {
+            femu_cfs_wait(c);
+        } else {
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)),
+                            ==, 0);
+        }
+        femu_aer(c);
+        if (cfs) {
+            femu_hang_none(c, &c->admin);
+        } else {
+            g_assert_cmphex(femu_complete(c, &c->admin, NULL, &res), ==, 0);
+            g_assert_cmphex(res, ==, 0x010400);
+        }
+    }
+
+    /* pw: wb-fail and cfs on one Write */
+    {
+        FemuCtrlState *c = &d[5].c;
+        g_autofree char *want = NULL;
+        uint16_t cid;
+        uint16_t a;
+
+        femu_lie_page(c, buf, 1, 0xa1, false);
+        femu_power_flush(c, 1);
+        qtest_memset(qts, buf, 0xb1, 4096);
+        a = femu_hang_submit(c, &c->io, NVME_CMD_WRITE, 1, buf);
+        femu_cfs_wait(c);
+        femu_wbf_ctrl_reset(&d[5]);
+        g_assert_cmphex(femu_wbf_drain(c, buf, FEMU_WBF_FLUSH, 0, &cid), ==,
+                        0);
+        femu_lie_page_is(c, buf, 1, 0xa1);
+        want = g_strdup_printf(
+            "1<0 l1 m2 wb-fail select no-effect/pre c%u o1 f0 8+8; "
+            "2<0 l2 m2 cfs select selected c%u o1 f0 8+8; "
+            "3<2 l2 m2 cfs apply done c%u o1 f0 8+8; "
+            "4<2 l2 m2 cfs reclaim reclaimed/reset c%u o1 f0 8+8",
+            a, a, a, a);
+        femu_lie_want(qts, "pw", want);
     }
     femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
 }

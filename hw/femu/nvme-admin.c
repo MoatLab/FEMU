@@ -443,7 +443,7 @@ static uint16_t nvme_del_sq(FemuCtrl *n, NvmeCmd *cmd)
         }
     }
 
-    /* a hung command of the queue is in no ring */
+    /* a hung or parked command of the queue is in no ring */
     if (unlikely(n->fsched)) {
         femu_fsched_reclaim(n, sq, FEMU_FS_WHY_SQ_DELETED);
     }
@@ -6742,6 +6742,10 @@ void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
  */
 void nvme_process_aers(FemuCtrl *n)
 {
+    /* an events_file cfs stopped the controller: no AER until a reset */
+    if (unlikely(n->fs_cfs)) {
+        return;
+    }
     for (;;) {
         NvmeAsyncEvent *event = NULL, *cand, *next;
 
@@ -6932,6 +6936,10 @@ static void nvme_run_sq_admin(void *opaque)
     if (n->starting) {
         return;
     }
+    /* so after an events_file cfs too, until a Controller Reset */
+    if (unlikely(n->fs_cfs)) {
+        return;
+    }
     /* a held cache disable completes before any later admin command runs */
     if (n->vwc_held && !femu_vwc_post(n)) {
         return;
@@ -7039,6 +7047,10 @@ static bool femu_vwc_post(FemuCtrl *n)
 
     if (!n->vwc_held) {
         return true;
+    }
+    /* after an events_file cfs no CQE posts; a reset drops the hold */
+    if (unlikely(n->fs_cfs)) {
+        return false;
     }
     if (femu_dev_now(n) < n->vwc_end) {
         /* early: the timer stays the one that completes it */
