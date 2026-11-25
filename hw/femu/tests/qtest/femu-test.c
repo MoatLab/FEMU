@@ -36,7 +36,7 @@ static void *femu_create(void *pci_bus, QGuestAllocator *alloc, void *addr)
 }
 
 #define FTL_TRACE_MP_OFF \
-    "764 3450000000 10306 10306 12181 11112 12821 22487 5556 " \
+    "764 4120000000 10306 10306 12181 11112 12821 22487 5556 " \
     "15238286681531891579"
 #define FTL_TRACE_MP_OFF_SEQ_NS 17920000
 static const FtlTraceMp ftl_trace_mp_off = {
@@ -44,12 +44,12 @@ static const FtlTraceMp ftl_trace_mp_off = {
     .seq_ns = FTL_TRACE_MP_OFF_SEQ_NS,
 };
 static const FtlTraceMp ftl_trace_mp_fdp = {
-    .want = "764 2020000000 10306 10306 4593 7320 5233 14899 3660 "
+    .want = "764 2270000000 10306 10306 4593 7320 5233 14899 3660 "
             "683895796762672279",
     .seq_ns = 17920000,
 };
 static const FtlTraceMp ftl_trace_mp_on = {
-    .want = "764 3240000000 10306 10306 12181 11112 12619 18495 5556 "
+    .want = "764 3900000000 10306 10306 12181 11112 12619 18495 5556 "
             "15238286681531891579",
     .base = FTL_TRACE_MP_OFF,
     .seq_ns = 10040000,
@@ -58,21 +58,21 @@ static const FtlTraceMp ftl_trace_mp_on = {
 
 /* two handles, so the per-handle heaps compare their tops */
 static const FtlTraceVar ftl_trace_fdp_noisy = {
-    .want = "732 2054843255 10306 10306 4892 3732 5020 15198 3732 "
+    .want = "732 2340000000 10306 10306 4892 3732 5020 15198 3732 "
             "18370040710023928802",
     .pids = { 0, 1 },
     .npids = 2,
 };
 /* handle 3 is initially isolated and has no heap of its own */
 static const FtlTraceVar ftl_trace_fdp_noisy_ii = {
-    .want = "732 1954207306 10306 10306 4077 3528 4205 14383 3528 "
+    .want = "732 2170000000 10306 10306 4077 3528 4205 14383 3528 "
             "4801098223349791737",
     .pids = { 0, 3 },
     .npids = 2,
 };
 /* a whole-device reset while both kinds of heap hold victims */
 static const FtlTraceVar ftl_trace_fdp_trim = {
-    .want = "1333 4066723313 20356 20356 9148 7332 9276 29504 7332 "
+    .want = "1333 4650000000 20356 20356 9148 7332 9276 29504 7332 "
             "6162714646788561405",
     .pids = { 0, 1 },
     .npids = 2,
@@ -85,12 +85,12 @@ static const FtlTraceVar ftl_trace_fdp_trim = {
  * that order to change what later collections relocate.
  */
 static const FtlTraceVar ftl_trace_fdp_reread = {
-    .want = "1332 2670000000 10306 10306 9360 4852 10088 19666 4852 "
+    .want = "1332 3210000000 10306 10306 9360 4852 10088 19666 4852 "
             "6214949802370350338",
     .reread = true,
 };
 static const FtlTraceVar ftl_trace_read_reclaim = {
-    .want = "1332 1609160254 10306 10306 1399 2836 2127 11705 2836 "
+    .want = "1332 1750000000 10306 10306 1399 2836 2127 11705 2836 "
             "9709285251358799837",
     .reread = true,
     .read_reclaims = 83,
@@ -4020,7 +4020,7 @@ static void femu_register_nodes(void)
                  &(QOSGraphTestOptions) { .arg = (void *)"'gc_pace':true" });
     qos_add_test("ftl-trace-bbssd", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+        .arg = (void *)"732 3890000000 10306 10306 11408 5364 11536 21714 5364 "
                        "1758358858069010501",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4029,7 +4029,7 @@ static void femu_register_nodes(void)
     /* gc_frontier given as off: the same trace as the plain device */
     qos_add_test("ftl-trace-gc-frontier-off", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+        .arg = (void *)"732 3890000000 10306 10306 11408 5364 11536 21714 5364 "
                        "1758358858069010501",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4042,7 +4042,7 @@ static void femu_register_nodes(void)
      */
     qos_add_test("ftl-trace-gc-frontier", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 2400000000 10306 10306 6849 4224 6977 17155 4224 "
+        .arg = (void *)"732 2790000000 10306 10306 6849 4224 6977 17155 4224 "
                        "4430748168361763090",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4052,7 +4052,7 @@ static void femu_register_nodes(void)
     /* rber_ppb given as 0: the same trace as the plain device */
     qos_add_test("ftl-trace-rber-off", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+        .arg = (void *)"732 3890000000 10306 10306 11408 5364 11536 21714 5364 "
                        "1758358858069010501",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4062,7 +4062,7 @@ static void femu_register_nodes(void)
     /* gc_idle_ms given as 0: the same trace as the plain device */
     qos_add_test("ftl-trace-gc-idle-off", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+        .arg = (void *)"732 3910000000 10306 10306 11408 5364 11536 21714 5364 "
                        "1758358858069010501",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4072,7 +4072,7 @@ static void femu_register_nodes(void)
     qos_add_test("ftl-trace-hot-cold", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
         .arg = (void *)
-            "732 9800000000 10306 10306 44095 13536 44223 54401 13536 "
+            "732 11900000000 10306 10306 44095 13536 44223 54401 13536 "
             "15350679178168073678",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4081,7 +4081,7 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ftl-trace-fdp", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 1990000000 10306 10306 4416 3616 4544 14722 3616 "
+        .arg = (void *)"732 2190000000 10306 10306 4416 3616 4544 14722 3616 "
                        "5667387085002007720",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4094,7 +4094,7 @@ static void femu_register_nodes(void)
      */
     qos_add_test("ftl-trace-gc-fw", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+        .arg = (void *)"732 3990000000 10306 10306 11408 5364 11536 21714 5364 "
                        "1758358858069010501",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4103,7 +4103,7 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ftl-trace-fdp-gc-fw", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 1990000000 10306 10306 4416 3616 4544 14722 3616 "
+        .arg = (void *)"732 2260000000 10306 10306 4416 3616 4544 14722 3616 "
                        "5667387085002007720",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4119,7 +4119,7 @@ static void femu_register_nodes(void)
      */
     qos_add_test("ftl-trace-random", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 6331851448 10306 10306 26577 9156 26705 36883 9156 "
+        .arg = (void *)"732 7680000000 10306 10306 26577 9156 26705 36883 9156 "
                        "2001030099875195277",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4128,7 +4128,7 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ftl-trace-d-choice", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 4152925024 10306 10306 15855 6476 15983 26161 6476 "
+        .arg = (void *)"732 5010000000 10306 10306 15855 6476 15983 26161 6476 "
                        "15202952108705383366",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4137,7 +4137,7 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ftl-trace-fifo", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 6408371473 10306 10306 26366 9104 26494 36672 9104 "
+        .arg = (void *)"732 7730000000 10306 10306 26366 9104 26494 36672 9104 "
                        "15363890515473485230",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4146,7 +4146,7 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ftl-trace-fdp-random", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 3765000000 10306 10306 12910 5740 13038 23216 5740 "
+        .arg = (void *)"732 4390000000 10306 10306 12910 5740 13038 23216 5740 "
                        "9224531952056629341",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4161,7 +4161,7 @@ static void femu_register_nodes(void)
      */
     qos_add_test("ftl-trace-fdp-policy-random", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 3765000000 10306 10306 12910 5740 13038 23216 5740 "
+        .arg = (void *)"732 4420000000 10306 10306 12910 5740 13038 23216 5740 "
                        "9224531952056629341",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4170,7 +4170,7 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ftl-trace-fdp-fifo", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 2785793018 10306 10306 8495 4636 8623 18801 4636 "
+        .arg = (void *)"732 3210000000 10306 10306 8495 4636 8623 18801 4636 "
                        "8979856547963124758",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4179,7 +4179,7 @@ static void femu_register_nodes(void)
     });
     qos_add_test("ftl-trace-fdp-d-choice", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 2222208636 10306 10306 5487 3884 5615 15793 3884 "
+        .arg = (void *)"732 2500000000 10306 10306 5487 3884 5615 15793 3884 "
                        "5908913319105439259",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4189,7 +4189,7 @@ static void femu_register_nodes(void)
     /* every new FDP knob named at its default: the trace of ftl-trace-fdp */
     qos_add_test("ftl-trace-fdp-knobs-off", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 1990000000 10306 10306 4416 3616 4544 14722 3616 "
+        .arg = (void *)"732 2220000000 10306 10306 4416 3616 4544 14722 3616 "
                        "5667387085002007720",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
@@ -4544,7 +4544,7 @@ static void femu_register_nodes(void)
     /* one plane: multi-plane commands have nothing to combine */
     qos_add_test("ftl-trace-mp-one-plane", "femu", femu_test_ftl_trace,
                  &(QOSGraphTestOptions) {
-        .arg = (void *)"732 3300000000 10306 10306 11408 5364 11536 21714 5364 "
+        .arg = (void *)"732 3910000000 10306 10306 11408 5364 11536 21714 5364 "
                        "1758358858069010501",
         .edge.extra_device_opts =
             "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
