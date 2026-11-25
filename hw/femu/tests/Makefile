@@ -56,9 +56,11 @@ test-femu-kv-lsm: unit/test-kv-lsm.c ../kvssd/kv-lsm.c ../kvssd/kv-lsm.h
 test-femu-kv-pack: unit/test-kv-pack.c ../kvssd/kv-pack.c ../kvssd/kv-pack.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ unit/test-kv-pack.c
 
-# the test includes femu-fsched.c itself: the parser and matcher need no QEMU
-test-femu-fsched: unit/test-fsched.c ../femu-fsched.c ../femu-fsched.h
-	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ unit/test-fsched.c
+# the test includes femu-fsched.c and femu-frec.c itself: the parser, the
+# matcher and the record ring need no QEMU
+test-femu-fsched: unit/test-fsched.c ../femu-fsched.c ../femu-fsched.h \
+                  ../femu-frec.c ../femu-frec.h
+	$(CC) $(CFLAGS_TEST) $(INCLUDES) -pthread -o $@ unit/test-fsched.c
 
 test-femu-hybrid-oracle: unit/test-hybrid-oracle.c unit/hybrid-oracle.h
 	$(CC) $(CFLAGS_TEST) $(INCLUDES) -o $@ $<

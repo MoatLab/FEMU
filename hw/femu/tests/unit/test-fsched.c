@@ -2,7 +2,8 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  * Unit test for the command lines of events_file (femu-fsched.c): the
- * grammar and its refusals, the view checks, and the matcher. Each
+ * grammar and its refusals, the view checks, the matcher, and the fault
+ * record ring (femu-frec.c) with a producer thread against a reader. Each
  * refusal has an accepted twin that differs in one value, so a check that
  * refuses everything fails here too. The seeds come from a search for
  * first draws of 0 and 999999, the two ends of the odds comparison.
@@ -10,12 +11,16 @@
 #include "qemu/osdep.h"
 #include <inttypes.h>
 #include <stdarg.h>
+#include <pthread.h>
+#include <sched.h>
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #endif
 
 #include "hw/femu/femu-fsched.c"
+#define FEMU_FR_TEST_HOOKS
+#include "hw/femu/femu-frec.c"
 
 /* TAP output, as meson runs this test with the TAP protocol */
 static int ntests;
@@ -648,6 +653,362 @@ static void test_why(void)
     CHECK(!strcmp(femu_fs_act_name(FEMU_FS_ACT_ANA), "ana"));
     CHECK(!strcmp(femu_fs_act_name(FEMU_FS_ACT_SLOW), "slow"));
     CHECK(!strcmp(femu_fs_act_name(FEMU_FS_ACT_DELAY), "delay"));
+    CHECK(!strcmp(femu_fr_name_why(FEMU_FS_WHY_FUA), "fua"));
+    CHECK(!strcmp(femu_fr_name_why(FEMU_FS_WHY_PRE), "pre"));
+    CHECK(!strcmp(femu_fr_name_why(FEMU_FS_WHY_HANG), "hang"));
+}
+
+/* a record whose fields all follow from @k, so a reader can check it */
+static FemuFrRec rec_of(uint64_t k)
+{
+    return (FemuFrRec) {
+        .step = k * 3, .match = k + 7, .slba = k << 20, .nlb = k + 1,
+        .nsid = 1, .line = k & 0xffff, .sqid = 1, .cid = k & 0xffff,
+        .origin = FEMU_FR_ORIGIN_SCHED_CMD, .phase = FEMU_FR_PHASE_SELECT,
+        .act = FEMU_FS_ACT_HANG, .outcome = FEMU_FR_OUT_SELECTED,
+        .opc = FEMU_FS_OPC_WRITE,
+    };
+}
+
+/* @r matches rec_of(@k) in every field, with id @id */
+static bool rec_is(const FemuFrRec *r, uint64_t k, uint64_t id)
+{
+    FemuFrRec w = rec_of(k);
+
+    w.id = id;
+    return !memcmp(r, &w, sizeof(w));
+}
+
+/* with no consumer the ring keeps the newest records and counts the rest */
+static void test_ring_window(void)
+{
+    FemuFrSlot slot[4] = { 0 };
+    FemuFrRec out[8];
+    FemuFrRing r;
+    uint32_t n;
+
+    femu_fr_init(&r, slot, 4, true);
+    CHECK(femu_fr_read(&r, out, 8) == 0);
+    for (uint64_t k = 1; k <= 3; k++) {
+        FemuFrRec x = rec_of(k);
+
+        CHECK(femu_fr_put(&r, &x) == k && x.id == k);
+    }
+    n = femu_fr_read(&r, out, 8);
+    CHECK(n == 3 && rec_is(&out[0], 1, 1) && rec_is(&out[2], 3, 3));
+    CHECK(r.overwritten == 0);
+    for (uint64_t k = 4; k <= 10; k++) {
+        FemuFrRec x = rec_of(k);
+
+        femu_fr_put(&r, &x);
+    }
+    /* the last 4 of 10, oldest first; 6 pushed out, none dropped */
+    n = femu_fr_read(&r, out, 8);
+    CHECK(n == 4);
+    for (uint32_t i = 0; i < n; i++) {
+        CHECK(rec_is(&out[i], 7 + i, 7 + i));
+    }
+    CHECK(r.overwritten == 6 && r.dropped == 0 && r.next_id == 10);
+    /* a short read keeps the newest */
+    n = femu_fr_read(&r, out, 2);
+    CHECK(n == 2 && out[0].id == 9 && out[1].id == 10);
+    /* a slot caught mid-write is left out, never returned torn */
+    slot[(9 - 1) % 4].seq |= 1;
+    n = femu_fr_read(&r, out, 8);
+    CHECK(n == 3 && out[0].id == 7 && out[1].id == 8 && out[2].id == 10);
+}
+
+/* with a consumer a full ring drops the new record and notes its id */
+static void test_ring_drop(void)
+{
+    FemuFrSlot slot[4] = { 0 };
+    FemuFrIdRange d[FEMU_FR_DROP_RANGES];
+    FemuFrRec out[8];
+    FemuFrRec x;
+    FemuFrRing r;
+    uint32_t n;
+
+    femu_fr_init(&r, slot, 4, false);
+    CHECK(!femu_fr_pop(&r, &x));
+    for (uint64_t k = 1; k <= 10; k++) {
+        x = rec_of(k);
+        /* ids keep counting for the dropped records */
+        CHECK(femu_fr_put(&r, &x) == k);
+    }
+    CHECK(r.dropped == 6 && r.overwritten == 0 && r.next_id == 10);
+    n = femu_fr_read(&r, out, 8);
+    CHECK(n == 4 && rec_is(&out[0], 1, 1) && rec_is(&out[3], 4, 4));
+    CHECK(femu_fr_dropped_ids(&r, d) == 1 && d[0].lo == 5 && d[0].hi == 10);
+
+    /* the consumer frees two: ids 11 and 12 fit, 13 does not */
+    CHECK(femu_fr_pop(&r, &x) && rec_is(&x, 1, 1));
+    CHECK(femu_fr_pop(&r, &x) && rec_is(&x, 2, 2));
+    for (uint64_t k = 11; k <= 13; k++) {
+        x = rec_of(k);
+        femu_fr_put(&r, &x);
+    }
+    n = femu_fr_read(&r, out, 8);
+    CHECK(n == 4 && out[0].id == 3 && out[1].id == 4 &&
+          rec_is(&out[2], 11, 11) && rec_is(&out[3], 12, 12));
+    CHECK(femu_fr_dropped_ids(&r, d) == 2 && d[1].lo == 13 && d[1].hi == 13);
+    CHECK(r.dropped == 7);
+    /* the consumer takes them in id order, then finds the ring empty */
+    for (uint64_t id = 3; id <= 12; id++) {
+        if (id == 5) {
+            id = 11;
+        }
+        CHECK(femu_fr_pop(&r, &x) && x.id == id);
+    }
+    CHECK(!femu_fr_pop(&r, &x));
+    CHECK(femu_fr_read(&r, out, 8) == 0);
+}
+
+/* only the first FEMU_FR_DROP_RANGES ranges are kept; the count goes on */
+static void test_ring_drop_ranges(void)
+{
+    FemuFrSlot slot[1] = { 0 };
+    FemuFrIdRange d[FEMU_FR_DROP_RANGES];
+    FemuFrRec x;
+    FemuFrRing r;
+    uint32_t n;
+
+    femu_fr_init(&r, slot, 1, false);
+    x = rec_of(0);
+    femu_fr_put(&r, &x);
+    /* each round: one dropped, then one stored after a pop */
+    for (int i = 0; i < 20; i++) {
+        x = rec_of(0);
+        femu_fr_put(&r, &x);
+        CHECK(femu_fr_pop(&r, &x));
+        x = rec_of(0);
+        femu_fr_put(&r, &x);
+    }
+    n = femu_fr_dropped_ids(&r, d);
+    CHECK(n == FEMU_FR_DROP_RANGES && r.dropped == 20);
+    for (uint32_t i = 0; i < n; i++) {
+        CHECK(d[i].lo == 2 + 2 * i && d[i].hi == d[i].lo);
+    }
+}
+
+static void test_ring_json(void)
+{
+    FemuFrRec x = rec_of(5);
+    char buf[FEMU_FR_JSON_MAX];
+    int n;
+
+    x.id = 9;
+    n = femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(n == (int)strlen(buf));
+    CHECK(!strcmp(buf, "{\"id\":9,\"origin\":\"sched-cmd\",\"line\":5,"
+                  "\"match\":12,\"action\":\"hang\",\"phase\":\"select\","
+                  "\"step\":15,\"nsid\":1,\"sqid\":1,\"cid\":5,\"opc\":1,"
+                  "\"fua\":false,\"slba\":5242880,\"nlb\":6,"
+                  "\"outcome\":\"selected\"}\n"));
+    x.outcome = FEMU_FR_OUT_NO_EFFECT;
+    x.why = FEMU_FS_WHY_FUA;
+    x.fua = 1;
+    x.cause = 3;
+    x.status = 0x280;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "{\"id\":9,\"cause\":3,\"origin\"") == buf);
+    CHECK(strstr(buf, "\"fua\":true,"));
+    CHECK(strstr(buf, "\"outcome\":\"no-effect\",\"reason\":\"fua\","
+                  "\"status\":640}\n"));
+    x.outcome = FEMU_FR_OUT_SUPERSEDED;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"outcome\":\"superseded\",\"status\""));
+}
+
+/*
+ * A reuse between the words of a copy and its second look at the
+ * sequence word: the copy holds record 1, the slot now holds record 2.
+ * The read must leave record 1 out, though its first look passed.
+ */
+static FemuFrRing *mid_ring;
+
+static void mid_put(void)
+{
+    FemuFrRec x = rec_of(2);
+
+    fr_test_mid_copy = NULL;
+    femu_fr_put(mid_ring, &x);
+}
+
+static void test_ring_mid_copy(void)
+{
+    FemuFrSlot slot[1] = { 0 };
+    FemuFrRec out[2];
+    FemuFrRec x = rec_of(1);
+    FemuFrRing r;
+
+    femu_fr_init(&r, slot, 1, true);
+    femu_fr_put(&r, &x);
+    mid_ring = &r;
+    fr_test_mid_copy = mid_put;
+    CHECK(femu_fr_read(&r, out, 2) == 0);
+    CHECK(!fr_test_mid_copy);
+    /* control: with no reuse in the copy, the next read keeps record 2 */
+    CHECK(femu_fr_read(&r, out, 2) == 1 && rec_is(&out[0], 2, 2));
+}
+
+/*
+ * A consumer frees slots while the reader copies them: the pending count
+ * follows, and a read sees only what the consumer has not taken.
+ */
+static void test_ring_pending(void)
+{
+    FemuFrSlot slot[4] = { 0 };
+    FemuFrRec out[4];
+    FemuFrRec x;
+    FemuFrRing r;
+
+    femu_fr_init(&r, slot, 4, false);
+    CHECK(femu_fr_pending(&r) == 0);
+    for (uint64_t k = 1; k <= 3; k++) {
+        x = rec_of(k);
+        femu_fr_put(&r, &x);
+    }
+    CHECK(femu_fr_pending(&r) == 3);
+    CHECK(femu_fr_pop(&r, &x) && rec_is(&x, 1, 1));
+    CHECK(femu_fr_pending(&r) == 2);
+    CHECK(femu_fr_read(&r, out, 4) == 2 && out[0].id == 2);
+    /* a peek keeps the slot until the release */
+    CHECK(femu_fr_peek(&r, &x) && rec_is(&x, 2, 2));
+    CHECK(femu_fr_pending(&r) == 2 && femu_fr_peek(&r, &x) && x.id == 2);
+    femu_fr_release(&r);
+    CHECK(femu_fr_pending(&r) == 1 && femu_fr_peek(&r, &x) && x.id == 3);
+}
+
+/*
+ * The consumer frees records between the tail load and the head load of
+ * a read and of femu_fr_pending(): it takes the 3 records, the producer
+ * adds 2, and it takes those too. With the head loaded first, the tail
+ * passes it and head - tail wraps: the read returns nothing and the
+ * count is huge. Tail first gives a read of ids 2 to 5, whose slots still
+ * hold them, and a count that is old but at most the ring size.
+ */
+static FemuFrRing *ends_ring;
+
+static void ends_consume(const FemuFrRing *r)
+{
+    FemuFrRec x;
+
+    CHECK(r == ends_ring);
+    fr_test_mid_ends = NULL;
+    while (femu_fr_pop(ends_ring, &x)) {
+        /* free them */
+    }
+    for (uint64_t k = 4; k <= 5; k++) {
+        x = rec_of(k);
+        femu_fr_put(ends_ring, &x);
+    }
+    while (femu_fr_pop(ends_ring, &x)) {
+        /* free them */
+    }
+}
+
+static void test_ring_ends(void)
+{
+    FemuFrSlot slot[4] = { 0 };
+    FemuFrRec out[8];
+    FemuFrRec x;
+    FemuFrRing r;
+    uint32_t n;
+
+    femu_fr_init(&r, slot, 4, false);
+    ends_ring = &r;
+    for (uint64_t k = 1; k <= 3; k++) {
+        x = rec_of(k);
+        femu_fr_put(&r, &x);
+    }
+    fr_test_mid_ends = ends_consume;
+    n = femu_fr_read(&r, out, 8);
+    CHECK(fr_test_mid_ends == NULL);
+    CHECK(n == 4 && out[0].id == 2 && out[3].id == 5);
+
+    /* the control: nothing moves between the loads */
+    CHECK(femu_fr_read(&r, out, 8) == 0);
+    CHECK(femu_fr_pending(&r) == 0);
+
+    x = rec_of(6);
+    femu_fr_put(&r, &x);
+    CHECK(femu_fr_pending(&r) == 1);
+    /* tail 5 seen, then 3 more taken and 2 added: a stale count, no wrap */
+    fr_test_mid_ends = ends_consume;
+    CHECK(femu_fr_pending(&r) == 3);
+    CHECK(fr_test_mid_ends == NULL);
+}
+
+/*
+ * A producer thread fills a small window while the main thread reads it.
+ * Each read must be in id order, with no torn record. The producer starts
+ * only once the reader is in its loop, and the reader reads once more
+ * after the producer ends, so the test never depends on the scheduler.
+ * On x86 a load is never moved before an earlier load, and a store never
+ * before an earlier store, so this test cannot catch a missing fence
+ * there; the forced copy of test_ring_mid_copy() covers the sequence
+ * checks.
+ */
+#define STRESS_PUTS     2000000
+
+static int stress_go;
+
+static void *stress_put(void *arg)
+{
+    FemuFrRing *r = arg;
+
+    while (!__atomic_load_n(&stress_go, __ATOMIC_ACQUIRE)) {
+        sched_yield();
+    }
+    for (uint64_t k = 1; k <= STRESS_PUTS; k++) {
+        FemuFrRec x = rec_of(k);
+
+        femu_fr_put(r, &x);
+    }
+    return NULL;
+}
+
+static void test_ring_threads(void)
+{
+    static FemuFrSlot slot[16];
+    FemuFrRec out[16];
+    FemuFrRing r;
+    pthread_t th;
+    uint64_t reads = 0;
+    uint64_t seen = 0;
+    bool ok = true;
+
+    bool more;
+
+    femu_fr_init(&r, slot, 16, true);
+    __atomic_store_n(&stress_go, 0, __ATOMIC_RELEASE);
+    if (pthread_create(&th, NULL, stress_put, &r)) {
+        CHECK(0);
+        return;
+    }
+    __atomic_store_n(&stress_go, 1, __ATOMIC_RELEASE);
+    do {
+        uint32_t n;
+        uint64_t last = 0;
+
+        /* the last pass reads after the producer is done */
+        more = __atomic_load_n(&r.head, __ATOMIC_ACQUIRE) < STRESS_PUTS;
+        n = femu_fr_read(&r, out, 16);
+
+        for (uint32_t i = 0; i < n; i++) {
+            /* the producer gives record k the id k */
+            ok = ok && out[i].id > last && rec_is(&out[i], out[i].id,
+                                                  out[i].id);
+            last = out[i].id;
+        }
+        reads++;
+        seen += n;
+    } while (more);
+    CHECK(pthread_join(th, NULL) == 0);
+    printf("# %" PRIu64 " reads, %" PRIu64 " records\n", reads, seen);
+    /* the final read holds the last 16, after the producer ended */
+    CHECK(ok && seen >= 16 && out[15].id == STRESS_PUTS);
+    CHECK(r.overwritten == STRESS_PUTS - 16);
 }
 
 int main(void)
@@ -662,6 +1023,14 @@ int main(void)
     test_overlap();
     test_groups();
     test_why();
+    test_ring_window();
+    test_ring_drop();
+    test_ring_drop_ranges();
+    test_ring_json();
+    test_ring_mid_copy();
+    test_ring_pending();
+    test_ring_ends();
+    test_ring_threads();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }
