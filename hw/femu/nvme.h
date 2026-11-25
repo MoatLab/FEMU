@@ -2884,6 +2884,8 @@ typedef struct FemuPollerCtr {
     int64_t nr_model_ns;
     /* completions held back because the host's completion queue was full */
     int64_t nr_cq_full;
+    /* events_file command lines: I/O CQEs posted, for a cut record */
+    int64_t nr_fs_cqes;
 } QEMU_ALIGNED(64) FemuPollerCtr;
 
 /* defaults and ranges of the kv_index=lsm knobs; KV_LSM_MAX_LEVELS is 24 */
@@ -3327,15 +3329,20 @@ typedef struct FemuCtrl {
     struct FemuWbf  *wbf;
     bool            wbf_drained;
     /*
-     * events_file hang and cfs (femu-events.c). fs_hung: per poller, the
-     * requests a hang holds with no CQE; NULL with no command line.
-     * fs_parked: the command a cfs holds before it runs. fs_cfs: a cfs
-     * stopped the controller, until a reset. The main loop changes them
-     * with the dataplane paused.
+     * events_file hang, cfs and power-loss (femu-events.c). fs_hung: per
+     * poller, the requests a hang holds with no CQE; NULL with no command
+     * line.
+     * fs_parked: the command a cfs or power-loss holds before it runs.
+     * fs_cfs: a cfs stopped the controller, until a reset. The main loop
+     * changes them with the dataplane paused. fs_fence: the gen of the
+     * park, 0 for none; while it is set a poller posts no I/O CQE, and
+     * fs_fence_ack[p] tells that poller p saw it.
      */
     union cq_req_list *fs_hung;
     NvmeRequest     *fs_parked;
     bool            fs_cfs;
+    uint32_t        fs_fence;
+    uint32_t        *fs_fence_ack;
     uint64_t        fault_hung;         /* requests a hang holds now */
     uint32_t        test_fs_bh_hold;    /* qtest x-fault-bh-hold */
     char            *events_log;        /* fault records, one JSON line each */
@@ -3756,6 +3763,8 @@ typedef struct FemuCtrl {
     /*
      * qtest only (x-cpl-hold): 1, the pollers leave the requests the FTL
      * returned in their ring; 2, they leave them in pq. Backlogs post.
+     * 3: the last poller skips the fence check at the start of its pass,
+     * as if the fence came just after it; it never acks the fence.
      */
     uint32_t        test_cpl_hold;
     /* qtest only: slots of each request ring before the first enable */
@@ -4167,12 +4176,15 @@ void femu_events_free(FemuCtrl *n);
 enum {
     FEMU_FS_STEP_RUN,       /* run it */
     FEMU_FS_STEP_POST,      /* run it, then call femu_fsched_post() */
-    FEMU_FS_STEP_PARK,      /* a cfs holds it: run nothing more */
+    FEMU_FS_STEP_PARK,      /* cfs or power-loss holds it: run nothing more */
 };
 int femu_fsched_step(FemuCtrl *n, NvmeRequest *req);
 void femu_fsched_post(FemuCtrl *n, NvmeRequest *req, bool report);
 void femu_fsched_hang(FemuCtrl *n, int poller, NvmeRequest *req);
 void femu_fsched_reclaim(FemuCtrl *n, NvmeSQueue *sq, uint8_t why);
+struct FemuFsCut;
+struct FemuFsCut *femu_fsched_cut_begin(FemuCtrl *n, bool at_cmd);
+void femu_fsched_cut_end(FemuCtrl *n, struct FemuFsCut *cut);
 void femu_wbf_mark(FemuCtrl *n, uint16_t fslot, bool marked);
 uint8_t femu_wbf_mode(FemuCtrl *n, uint16_t fslot);
 void femu_wbf_unmark(FemuCtrl *n, uint16_t fslot, NvmeRequest *req,
@@ -4407,6 +4419,7 @@ void femu_sdc_add_props(Object *obj);
 void femu_plp_enable(FemuCtrl *n);
 void femu_plp_restart(FemuCtrl *n);
 void femu_plp_cut(FemuCtrl *n);
+void femu_power_cut(FemuCtrl *n, bool at_cmd);
 void femu_cancel_fetched(FemuCtrl *n, NvmeRequest *req, int poller);
 void femu_cancel_drop_sq(FemuCtrl *n, NvmeSQueue *sq);
 void femu_cancel_retire_ns(FemuCtrl *n, NvmeNamespace *ns, uint16_t status);
@@ -4616,7 +4629,7 @@ static inline void nvme_note_user_write(FemuCtrl *n)
 }
 void bbssd_deallocate_all(NvmeNamespace *ns);
 void bbssd_deallocate_lbas(NvmeNamespace *ns, uint64_t slba, uint64_t nlb);
-bool bbssd_power_loss(NvmeNamespace *ns);
+bool bbssd_power_loss(NvmeNamespace *ns, struct FemuFsCut *cut);
 bool bbssd_flush_lie(NvmeNamespace *ns);
 bool bbssd_wbf_facts(NvmeNamespace *ns, NvmeRequest *req, uint64_t slba,
                      uint32_t nlb, bool *atomic);

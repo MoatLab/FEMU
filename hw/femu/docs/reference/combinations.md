@@ -265,7 +265,7 @@ own description allows. A message keeps its format directives (`%s`,
 - the events_file schedule runs already
 - the femu device has no events_file
 - x-events-now needs an events_file
-- x-fault-bh-hold needs a cfs line in events_file
+- x-fault-bh-hold needs a cfs or power-loss line in events_file
 - x-fault-sel needs a command line in events_file
 
 ## `events_log`

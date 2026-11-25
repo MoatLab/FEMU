@@ -698,6 +698,7 @@ static void nvme_init_poller(FemuCtrl *n)
     /* events_file hang: per poller, the requests it holds with no CQE */
     if (n->fsched) {
         n->fs_hung = g_new0(union cq_req_list, n->nr_pollers + 1);
+        n->fs_fence_ack = g_new0(uint32_t, n->nr_pollers + 1);
         for (i = 1; i <= n->nr_pollers; i++) {
             QTAILQ_INIT(&n->fs_hung[i]);
         }

@@ -313,6 +313,10 @@ static inline bool *nvme_should_isr(FemuCtrl *n, int index_poller)
  * Post a completion unless its queue is full, and report whether it was
  * posted. A full queue takes nothing until the host frees a slot (Base 2.3,
  * 3.3.1.2.1); writing anyway overwrites entries it has not read yet.
+ *
+ * events_file: a slot that the host freed after a fence takes nothing.
+ * The check before the lock can read the fence before it is set, and a
+ * poller that stops there can then post into that slot.
  */
 static bool nvme_try_post_cqe(FemuCtrl *n, NvmeCQueue *cq, NvmeRequest *req)
 {
@@ -320,6 +324,11 @@ static bool nvme_try_post_cqe(FemuCtrl *n, NvmeCQueue *cq, NvmeRequest *req)
 
     nvme_cq_lock(n, cq);
     full = nvme_cq_full(cq);
+    if (!full && unlikely(n->fsched)) {
+        /* the head read above is before the fence read */
+        smp_rmb();
+        full = qatomic_read(&n->fs_fence) != 0;
+    }
     if (!full) {
         nvme_post_cqe(cq, req);
     }
@@ -338,8 +347,15 @@ static int nvme_post_backlog(FemuCtrl *n, int index_poller, bool *should_isr)
     QTAILQ_FOREACH_SAFE(req, backlog, entry, next) {
         NvmeCQueue *cq = n->cq[req->sq->cqid];
 
+        /* events_file: a fence set during this pass posts nothing more */
+        if (unlikely(n->fsched) && qatomic_read(&n->fs_fence)) {
+            break;
+        }
         if (!nvme_try_post_cqe(n, cq, req)) {
             continue;
+        }
+        if (unlikely(n->fsched)) {
+            n->poller_ctr[index_poller].nr_fs_cqes++;
         }
         QTAILQ_REMOVE(backlog, req, entry);
         if (n->stage_sets) {
@@ -1341,6 +1357,7 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     pqueue_t *pq = n->pq[index_poller];
     bool *should_isr = nvme_should_isr(n, index_poller);
     uint32_t hold = qatomic_read(&n->test_cpl_hold);
+    bool fs = unlikely(n->fsched != NULL);
     uint64_t now;
     int processed = 0;
     int rc;
@@ -1348,6 +1365,28 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
 
     if (n->use_ftl_thread) {
         rp = n->to_poller[index_poller];
+    }
+
+    /*
+     * events_file: a cfs or power-loss holds a command before it runs.
+     * From the fence on, this poller posts no I/O CQE: the ack tells the
+     * BH that no CQE after the parked command can reach the host.
+     * x-cpl-hold 3 makes the last poller skip this check. Read the hook
+     * after the fence: a pass that read it before the hook was set must
+     * not ack a fence that came after the hook.
+     */
+    if (fs) {
+        uint32_t fence = qatomic_load_acquire(&n->fs_fence);
+
+        if (fence && !(index_poller == n->nr_pollers &&
+                       unlikely(qatomic_read(&n->test_cpl_hold) == 3))) {
+            qatomic_store_release(&n->fs_fence_ack[index_poller], fence);
+            return;
+        }
+    }
+    /* x-cpl-hold 3 holds nothing more: the checks in the pass decide */
+    if (unlikely(hold == 3)) {
+        hold = 0;
     }
 
     while (hold != 1 && femu_ring_count(rp)) {
@@ -1447,6 +1486,10 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
     }
 
     while (!hold && (req = pqueue_peek(pq))) {
+        /* a fence set during this pass: at most the CQE in hand posted */
+        if (fs && qatomic_read(&n->fs_fence)) {
+            break;
+        }
         now = femu_io_now(n);
         if (now < req->expire_time) {
             break;
@@ -1493,6 +1536,9 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
         if (n->stage_sets) {
             /* the time the entry was written, as the host sees it */
             nvme_stages_note(n, index_poller, req, req->t_cqe);
+        }
+        if (fs) {
+            n->poller_ctr[index_poller].nr_fs_cqes++;
         }
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
         processed++;

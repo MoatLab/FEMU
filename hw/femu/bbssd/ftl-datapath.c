@@ -598,11 +598,144 @@ uint16_t bbssd_flush_all(FemuCtrl *n)
     return status;
 }
 
+/* events_file power-loss: one buffered page at a cut, in buffer order */
+typedef struct CutPage {
+    uint64_t lpn;
+    NvmeNamespace *ns;
+    uint8_t *keep;              /* one byte a block, 1 to write it back */
+    uint32_t kept;              /* blocks kept by the draws */
+    bool lie;
+    bool marked;                /* wb-fail: its write-back fails */
+} CutPage;
+
+/* roll back the blocks of @entry that @keep does not keep */
+static void cut_restore_blocks(struct ssd *ssd, NvmeNamespace *ns,
+                               const struct buffer_entry *entry,
+                               const uint8_t *keep)
+{
+    uint32_t page_size = ssd_page_size(ssd);
+    uint8_t shift = ns->lbaf.lbads;
+    uint64_t offset = entry->lpn * page_size - ns->backend_offset;
+    uint64_t slba = offset >> shift;
+    uint8_t *base = (uint8_t *)ssd->n->mbe->logical_space + ns->backend_offset;
+    const uint8_t *state = entry->lba_state;
+    uint64_t added = 0;
+    uint64_t gone = 0;
+
+    backend_lock_range(ssd->n->mbe, ns->backend_offset + offset, page_size);
+    for (uint32_t i = 0; i < page_size >> shift; i++) {
+        if (keep[i]) {
+            continue;
+        }
+        memcpy(base + offset + ((uint64_t)i << shift),
+               entry->undo + ((uint64_t)i << shift), 1u << shift);
+        if (state[i] & 1) {
+            set_bit(slba + i, ns->util);
+        } else {
+            clear_bit(slba + i, ns->util);
+        }
+        femu_lsi_restore(ns, slba + i, state[i] & 2, &added, &gone);
+        if (ns->sdc && (state[i] & 4)) {
+            set_bit(slba + i, ns->sdc);
+        } else if (ns->sdc) {
+            clear_bit(slba + i, ns->sdc);
+        }
+    }
+    femu_lsi_changed(ns, added, gone);
+    backend_unlock_range(ssd->n->mbe, ns->backend_offset + offset, page_size);
+    rcache_invalidate(ssd, entry->lpn);
+}
+
+/*
+ * events_file power-loss keep=: before the rollback, write back the
+ * pages and blocks the draws keep. The draws run in buffer order. A page
+ * with a block kept goes to the head of the buffer, its other blocks
+ * rolled back first, and one write-back takes the kept pages in order:
+ *
+ *   buffer   p0 K   p1 R   p2 K        write-back   p0 p2   (head)
+ *   then     the rollback below meets p1 and what found no room
+ *
+ * A marked kept page fails its write-back as at a PLP destage, and a page
+ * that finds no room stays for the rollback: both count as rolled back.
+ * Returns true when a page lost a block here.
+ */
+static bool bbssd_cut_keep(struct ssd *ssd, struct FemuFsCut *cut)
+{
+    g_autofree CutPage *pg = NULL;
+    g_autofree struct buffer_entry **kept = NULL;
+    struct buffer_entry *entry;
+    uint32_t nr = 0;
+    uint32_t nk = 0;
+    bool lost = false;
+
+    QTAILQ_FOREACH(entry, &ssd->write_buffer, b_entry) {
+        nr += entry->undo != NULL;
+    }
+    pg = g_new0(CutPage, nr);
+    kept = g_new0(struct buffer_entry *, nr);
+    nr = 0;
+    QTAILQ_FOREACH(entry, &ssd->write_buffer, b_entry) {
+        CutPage *p;
+        uint32_t lbas;
+
+        /* a page with no undo image loses nothing at a cut */
+        if (!entry->undo) {
+            continue;
+        }
+        p = &pg[nr++];
+        p->lpn = entry->lpn;
+        p->ns = ssd_lpn_ns(ssd, entry->lpn);
+        p->lie = entry->lie;
+        p->marked = entry->wbf != 0;
+        lbas = ssd_page_size(ssd) >> p->ns->lbaf.lbads;
+        p->keep = g_malloc(lbas);
+        p->kept = femu_fs_cut_draw(cut, p->keep, lbas);
+        if (!p->kept) {
+            continue;
+        }
+        if (p->kept < lbas) {
+            cut_restore_blocks(ssd, p->ns, entry, p->keep);
+        }
+        kept[nk++] = entry;
+    }
+    for (uint32_t i = nk; i-- > 0;) {
+        QTAILQ_REMOVE(&ssd->write_buffer, kept[i], b_entry);
+        QTAILQ_INSERT_HEAD(&ssd->write_buffer, kept[i], b_entry);
+    }
+    if (nk) {
+        ssd_buffer_destage(ssd, nk, femu_dev_now(ssd->n));
+    }
+    /* a kept page has left the buffer, unless its write-back failed */
+    for (uint32_t i = 0; i < nr; i++) {
+        CutPage *p = &pg[i];
+        uint32_t lbas = ssd_page_size(ssd) >> p->ns->lbaf.lbads;
+        bool done = p->kept && !p->marked &&
+                    !ssd_buffer_lookup(ssd, p->lpn);
+
+        /*
+         * A torn page lost blocks of an acknowledged version. A page that
+         * did not leave is rolled back below, and a failed one was: each
+         * of those counts its own lie.
+         */
+        if (done && p->kept < lbas && p->lie) {
+            ssd->n->fault_lie_lost++;
+        }
+        lost |= !done || p->kept < lbas;
+        femu_fs_cut_page(cut, p->ns->id,
+                         buffer_page_slba(ssd, p->ns, p->lpn),
+                         done ? p->keep : NULL, lbas, p->lie);
+        g_free(p->keep);
+    }
+    return lost;
+}
+
 /*
  * Called with the controller stopped; old mappings still name durable pages.
+ * With @cut, its keep= writes back part of the buffer first, and @cut
+ * gets the evidence.
  * Returns true when the cut dropped a buffered page.
  */
-bool bbssd_power_loss(NvmeNamespace *ns)
+bool bbssd_power_loss(NvmeNamespace *ns, struct FemuFsCut *cut)
 {
     bool lost = false;
     struct ssd *ssd = ns->ssd;
@@ -614,6 +747,10 @@ bool bbssd_power_loss(NvmeNamespace *ns)
 
     /* OCP SMART-21 resets on a power cycle */
     qatomic_set(&ssd->unaligned_writes, 0);
+    /* the buffer is the ssd's: the first namespace that has it takes all */
+    if (unlikely(cut) && ssd->write_buffer_cnt) {
+        lost |= bbssd_cut_keep(ssd, cut);
+    }
     QTAILQ_FOREACH(entry, &ssd->write_buffer, b_entry) {
         uint64_t offset = entry->lpn * page_size - ns->backend_offset;
         uint64_t slba = offset >> shift;
@@ -647,8 +784,13 @@ bool bbssd_power_loss(NvmeNamespace *ns)
         rcache_invalidate(ssd, entry->lpn);
     }
     /* durable_at_done: programs that had not ended give their pages back */
-    if (ssd_durable_on(ssd) && ssd->ns == ns) {
-        lost |= ssd_durable_cut(ssd, ssd->n->durable_cut);
+    if (ssd_durable_on(ssd) && ssd->ns == ns &&
+        ssd_durable_cut(ssd, ssd->n->durable_cut)) {
+        lost = true;
+        /* the evidence names buffered pages only: it is not whole */
+        if (cut) {
+            cut->partial = true;
+        }
     }
     while ((entry = QTAILQ_FIRST(&ssd->write_buffer))) {
         ssd_buffer_discard(ssd, entry->lpn);

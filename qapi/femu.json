@@ -1850,6 +1850,23 @@
             '*error': 'str' } }
 
 ##
+# @FemuCutRange:
+#
+# Blocks of one namespace that a power-loss cut wrote back or rolled
+# back.
+#
+# @nsid: the namespace
+#
+# @slba: the first block
+#
+# @nlb: the blocks, from 1
+#
+# Since: 10.1
+##
+{ 'struct': 'FemuCutRange',
+  'data': { 'nsid': 'uint32', 'slba': 'uint64', 'nlb': 'uint32' } }
+
+##
 # @FemuFaultRecord:
 #
 # One record of the fault record ring of an events_file with command
@@ -1860,9 +1877,11 @@
 # @cause: the id of the parent record, which can be a dropped id;
 #     absent for none
 #
-# @origin: who made it: "sched-cmd" for a command line
+# @origin: who made it: "sched-cmd" for a command line,
+#     "sched-time" for the power cut of a time line, "qmp" for
+#     simulate-power-loss
 #
-# @line: the command line, in the file
+# @line: the command line or the time line, in the file; 0 for "qmp"
 #
 # @match: the matches of that line so far, this one too
 #
@@ -1870,7 +1889,10 @@
 #
 # @phase: the step of the fault: "select" when a line selects a
 #     command, "apply" when the FTL has run a command that a lie or a
-#     wb-fail selected, or when a hang or a cfs holds its command,
+#     wb-fail selected, when a hang or a cfs holds its command, or
+#     when a power-loss cut the power before its command ran, or
+#     when a time line or simulate-power-loss cut the power,
+#     "evidence" for one chunk of the ranges of that cut,
 #     "fail" when a write-back meets a wb-fail mark, "report" when a
 #     completion carries that failure, "supersede" when a write of the
 #     whole page clears a mark before a write-back, "reclaim" when a
@@ -1896,12 +1918,12 @@
 #
 # @outcome: "selected": the line won its group, "superseded": an
 #     earlier line of its group won, or a full write cleared a mark,
-#     "no-effect": the line won with no effect, "done": the lie, hang
-#     or cfs of an "apply" record took place, "marked": wb-fail marked
-#     buffered pages, "unc" or "old": the lost blocks of a failed
-#     write-back read as Unrecovered Read Error or as their old data,
-#     "reported": a completion carries the failure, "reclaimed": a
-#     held command went back
+#     "no-effect": the line won with no effect, "done": the lie, hang,
+#     cfs or cut of an "apply" record, or an "evidence" record, took
+#     place, "marked": wb-fail marked buffered pages, "unc" or "old":
+#     the lost blocks of a failed write-back read as Unrecovered Read
+#     Error or as their old data, "reported": a completion carries the
+#     failure, "reclaimed": a held command went back
 #
 # @reason: why a "no-effect" line has none: "fua" (the original
 #     command has FUA), "pre" (a cut or cfs runs before the command),
@@ -1937,6 +1959,39 @@
 #     completion's drain met the failure, "pending" when an earlier
 #     drain did
 #
+# @at: power-loss "apply" of a command line: where the cut came,
+#     "pre": before its command ran; absent for "sched-time" and "qmp"
+#
+# @rolled-back-pages: power-loss "apply": the buffered pages with a
+#     block the cut rolled back
+#
+# @rolled-back-lie-pages: power-loss "apply": of those, the pages a
+#     lie had called durable
+#
+# @kept-pages: power-loss "apply": the buffered pages that keep= wrote
+#     back, whole or in part
+#
+# @ranges: power-loss "apply": the ranges of the evidence after
+#     ranges that touch or overlap merged, plus the dropped ones
+#
+# @chunks: power-loss "apply" and "evidence": the chunk records of
+#     the cut
+#
+# @truncated: power-loss "apply": a range was dropped, or the chunks
+#     do not hold every range
+#
+# @cqe-publish-boundary: power-loss "apply": the I/O completions the
+#     controller posted since realize, up to the cut; whether the host
+#     read them is not known
+#
+# @chunk: power-loss "evidence": the index of this chunk, from 0
+#
+# @kind: power-loss "evidence": "rolled_back" or "kept", for each
+#     range of the chunk
+#
+# @r: power-loss "evidence": the ranges of the chunk, sorted by
+#     nsid and slba, not in buffer order
+#
 # Since: 10.1
 ##
 { 'struct': 'FemuFaultRecord',
@@ -1948,7 +2003,13 @@
             'outcome': 'str', '*reason': 'str', '*status': 'uint16',
             '*buffered-at-flush-lie': 'uint32', '*lie-pages': 'uint32',
             '*slot': 'uint16', '*pages': 'uint32', '*lba-mask': 'uint64',
-            '*lost': 'uint16', '*found': 'str' } }
+            '*lost': 'uint16', '*found': 'str', '*at': 'str',
+            '*rolled-back-pages': 'uint32',
+            '*rolled-back-lie-pages': 'uint32',
+            '*kept-pages': 'uint32', '*ranges': 'uint64',
+            '*chunks': 'uint8', '*truncated': 'bool',
+            '*cqe-publish-boundary': 'uint64', '*chunk': 'uint8',
+            '*kind': 'str', '*r': [ 'FemuCutRange' ] } }
 
 ##
 # @FemuIdRange:
@@ -1978,9 +2039,9 @@
 #
 # @step: the commands the FTL thread took
 #
-# @faults: the records the ring holds, in id order.  With events_log,
-#     the records not yet written out; with no events_log, the last
-#     events_max_faults records
+# @faults: the records the ring holds, in id order, at most the
+#     newest 4096.  With events_log, the records not yet written out;
+#     with no events_log, the last events_max_faults records
 #
 # @last-id: the last record id given; ids from 1 to it were made
 #

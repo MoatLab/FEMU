@@ -31463,7 +31463,10 @@ typedef struct FemuLieDev {
 
 #define FEMU_LIE_PL     "femu_mode=1,buffer_size=16,vwc=1,power_loss=on"
 
-/* boot one QEMU with the devices of @d, each enabled with an I/O queue */
+/*
+ * Boot one QEMU with the devices of @d, each enabled with an I/O queue.
+ * A device with no lines has no events_file.
+ */
 static QOSState *femu_lie_boot(const char *dir, FemuLieDev *d, int nr)
 {
     GString *cmd = g_string_new("-machine pc -nodefaults");
@@ -31473,10 +31476,13 @@ static QOSState *femu_lie_boot(const char *dir, FemuLieDev *d, int nr)
         g_autofree char *name = g_strdup_printf("%s.txt", d[i].id);
         g_autofree char *path = g_build_filename(dir, name, NULL);
 
-        g_assert_true(g_file_set_contents(path, d[i].lines, -1, NULL));
         g_string_append_printf(cmd, " -device femu,id=%s,addr=0x%x,"
-                               "devsz_mb=16,%s,events_file=%s", d[i].id,
-                               d[i].addr, d[i].props, path);
+                               "devsz_mb=16,%s", d[i].id, d[i].addr,
+                               d[i].props);
+        if (d[i].lines) {
+            g_assert_true(g_file_set_contents(path, d[i].lines, -1, NULL));
+            g_string_append_printf(cmd, ",events_file=%s", path);
+        }
     }
     qs = qtest_pc_boot("%s", cmd->str);
     g_string_free(cmd, true);
@@ -31500,7 +31506,9 @@ static void femu_lie_end(QOSState *qs, const char *dir, FemuLieDev *d,
         femu_queue_free(&d[i].c, &d[i].c.io);
         femu_disable(&d[i].c);
         g_free(d[i].pdev);
-        unlink(path);
+        if (d[i].lines) {
+            unlink(path);
+        }
     }
     qtest_pc_shutdown(qs);
     rmdir(dir);
@@ -31523,7 +31531,8 @@ static void femu_lie_cut(FemuLieDev *d)
  * buffered-at-flush-lie, L for lie-pages. A wb-fail record adds its
  * slot (S), and when it has them its pages (P), lost blocks (M, hex
  * mask; N, count), found (F) and status (x, hex). Each is of queue 1
- * and namespace 1.
+ * and namespace 1, except a record of a time line or QMP cut: it names
+ * no command and ends in " @sched-time" or " @qmp".
  */
 static char *femu_lie_recs(QTestState *qts, const char *id)
 {
@@ -31572,8 +31581,14 @@ static char *femu_lie_recs(QTestState *qts, const char *id)
             pages = g_strdup_printf(" L%" PRId64,
                                     qdict_get_int(r, "lie-pages"));
         }
-        g_assert_cmpint(qdict_get_int(r, "sqid"), ==, 1);
-        g_assert_cmpint(qdict_get_int(r, "nsid"), ==, 1);
+        if (!strcmp(qdict_get_str(r, "origin"), "sched-cmd")) {
+            g_assert_cmpint(qdict_get_int(r, "sqid"), ==, 1);
+            g_assert_cmpint(qdict_get_int(r, "nsid"), ==, 1);
+        } else {
+            g_assert_cmpint(qdict_get_int(r, "sqid"), ==, 0);
+            g_assert_cmpint(qdict_get_int(r, "nsid"), ==, 0);
+            g_string_append_printf(wb, " @%s", qdict_get_str(r, "origin"));
+        }
         g_string_append_printf(
             g, "%s%" PRId64 "<%" PRId64 " l%" PRId64 " m%" PRId64
             " %s %s %s%s%s c%" PRId64 " o%" PRId64 " f%d %" PRId64 "+%"
@@ -31694,10 +31709,12 @@ void femu_test_fsched_flush_lie(void *obj, void *data,
             g_autofree char *want = g_strdup_printf(
                 "1<0 l1 m2 flush-lie select selected c%u o0 f0 0+0; "
                 "2<1 l1 m2 flush-lie apply done c%u o0 f0 0+0 B3; "
-                "3<0 l2 m3 flush-lie select selected c%u o0 f0 0+0; "
-                "4<3 l2 m3 flush-lie apply done c%u o0 f0 0+0 B1; "
-                "5<0 l3 m5 flush-lie select selected c%u o0 f0 0+0; "
-                "6<5 l3 m5 flush-lie apply no-effect/durable c%u o0 f0 0+0",
+                "3<0 l0 m0 power-loss apply done c0 o0 f0 0+0 @qmp; "
+                "4<3 l0 m0 power-loss evidence done c0 o0 f0 0+0 @qmp; "
+                "5<0 l2 m3 flush-lie select selected c%u o0 f0 0+0; "
+                "6<5 l2 m3 flush-lie apply done c%u o0 f0 0+0 B1; "
+                "7<0 l3 m5 flush-lie select selected c%u o0 f0 0+0; "
+                "8<7 l3 m5 flush-lie apply no-effect/durable c%u o0 f0 0+0",
                 cid[0], cid[0], cid[1], cid[1], cid[2], cid[2]);
 
             femu_lie_want(qts, d[i].id, want);
@@ -31829,10 +31846,11 @@ void femu_test_fsched_lie_reasons(void *obj, void *data,
         cid[1] = c->cid;
         femu_power_flush(c, 1);
         want = g_strdup_printf(
-            "1<0 l1 m1 fua-lie select selected c%u o1 f1 0+8; "
-            "2<1 l1 m1 fua-lie apply no-effect/plp c%u o1 f1 0+8; "
-            "3<0 l2 m1 flush-lie select selected c%u o0 f0 0+0; "
-            "4<3 l2 m1 flush-lie apply no-effect/plp c%u o0 f0 0+0",
+            "1<0 l0 m0 power-loss apply done c0 o0 f0 0+0 @qmp; "
+            "2<0 l1 m1 fua-lie select selected c%u o1 f1 0+8; "
+            "3<2 l1 m1 fua-lie apply no-effect/plp c%u o1 f1 0+8; "
+            "4<0 l2 m1 flush-lie select selected c%u o0 f0 0+0; "
+            "5<4 l2 m1 flush-lie apply no-effect/plp c%u o0 f0 0+0",
             cid[0], cid[0], cid[1], cid[1]);
         femu_lie_want(qts, d[i].id, want);
         if (i == 1) {
@@ -32447,13 +32465,16 @@ void femu_test_fsched_wbf_bg(void *obj, void *data, QGuestAllocator *alloc)
                         ==, want1);
         femu_wbf_pages(c, buf, mark ? FEMU_WBF_UNC : FEMU_WBF_KEEP);
         if (!mark) {
-            femu_lie_want(qts, d[i].id, "");
+            femu_lie_want(qts, d[i].id, cut ? "1<0 l0 m0 power-loss apply "
+                          "done c0 o0 f0 0+0 @qmp" : "");
         } else if (cut) {
             g_autofree char *w = g_strdup_printf(
                 "1<0 l1 m2 wb-fail select selected c%u o1 f0 8+8; "
                 "2<1 l1 m2 wb-fail apply marked c%u o1 f0 8+8 S1 P1; "
                 "3<1 l1 m2 wb-fail fail unc c%u o1 f0 8+8 S1 Mff N8 "
-                "Fbackground x280", cid[0], cid[0], cid[0]);
+                "Fbackground x280; "
+                "4<0 l0 m0 power-loss apply done c0 o0 f0 0+0 @qmp",
+                cid[0], cid[0], cid[0]);
 
             femu_lie_want(qts, d[i].id, w);
         } else {
@@ -32931,6 +32952,12 @@ static int64_t femu_hang_prop(QTestState *qts, const char *id,
     return v;
 }
 
+/*
+ * Time for each poller to ack the fence of a park. A reclaim before the
+ * acks lifts the fence, and the BH then never acts, stale or not.
+ */
+#define FEMU_FENCE_ACK_MS   20
+
 /* wait until property @prop of device @id reads @want */
 static void femu_hang_wait(QTestState *qts, const char *id, const char *prop,
                            int64_t want)
@@ -33113,6 +33140,7 @@ void femu_test_fsched_hang_reclaim(void *obj, void *data,
     for (int i = 0; i < ARRAY_SIZE(d); i++) {
         FemuCtrlState *c = &d[i].c;
         g_autofree char *want = NULL;
+        g_autofree char *h = NULL;
         uint16_t a;
 
         femu_lie_page(c, buf, 0, 0xa0, false);
@@ -33137,7 +33165,10 @@ void femu_test_fsched_hang_reclaim(void *obj, void *data,
             break;
         }
         g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-hung"), ==, 0);
-        want = femu_hang_recs("hang", 2, a, NVME_CMD_WRITE, 1, why[i]);
+        h = femu_hang_recs("hang", 2, a, NVME_CMD_WRITE, 1, why[i]);
+        /* only the cut of rp writes a record of its own */
+        want = g_strconcat(h, i == 1 ? "; 4<0 l0 m0 power-loss apply done "
+                           "c0 o0 f0 0+0 @qmp" : "", NULL);
         femu_lie_want(qts, d[i].id, want);
         femu_lie_page_is(c, buf, 1, 0xb1);
         for (int p = 3; p < 6; p++) {
@@ -33238,11 +33269,16 @@ void femu_test_fsched_hang_mix(void *obj, void *data, QGuestAllocator *alloc)
                 "2<0 l2 m2 hang select selected c%u o0 f0 0+0; "
                 "3<1 l1 m2 flush-lie apply done c%u o0 f0 0+0 B1; "
                 "4<2 l2 m2 hang apply done c%u o0 f0 0+0; "
-                "5<2 l2 m2 hang reclaim reclaimed/power-cut c%u o0 f0 0+0",
+                "5<2 l2 m2 hang reclaim reclaimed/power-cut c%u o0 f0 0+0; "
+                "6<0 l0 m0 power-loss apply done c0 o0 f0 0+0 @qmp; "
+                "7<6 l0 m0 power-loss evidence done c0 o0 f0 0+0 @qmp",
                 a, a, a, a, a);
         } else {
-            want = femu_hang_recs("hang", 2, a, NVME_CMD_FLUSH, 0,
-                                  "power-cut");
+            g_autofree char *h = femu_hang_recs("hang", 2, a, NVME_CMD_FLUSH,
+                                                0, "power-cut");
+
+            want = g_strconcat(h, "; 4<0 l0 m0 power-loss apply done c0 o0 "
+                               "f0 0+0 @qmp", NULL);
         }
         femu_lie_want(qts, d[i].id, want);
     }
@@ -33532,6 +33568,8 @@ void femu_test_fsched_cfs_paths(void *obj, void *data,
         qtest_memset(qts, buf, 0xb0, 4096);
         a = femu_hang_submit(c, &c->io, NVME_CMD_WRITE, 0, buf);
         femu_hang_wait(qts, d[i].id, "x-fault-parked", 1);
+        /* each poller acks the fence, so a stale BH would act */
+        g_usleep(FEMU_FENCE_ACK_MS * 1000);
         if (i == 0) {
             g_assert_cmphex(FEMU_SC(femu_delete_sq(c, 1)), ==, 0);
         } else {
@@ -33572,6 +33610,7 @@ void femu_test_fsched_cfs_paths(void *obj, void *data,
     {
         FemuCtrlState *c = &d[2].c;
         g_autofree char *want = NULL;
+        g_autofree char *h = NULL;
         uint16_t a;
 
         femu_lie_page(c, buf, 0, 0xa0, false);
@@ -33585,7 +33624,9 @@ void femu_test_fsched_cfs_paths(void *obj, void *data,
         femu_lie_page_is(c, buf, 0, 0xa0);
         femu_lie_page(c, buf, 1, 0xc1, false);
         femu_lie_page_is(c, buf, 1, 0xc1);
-        want = femu_hang_recs("cfs", 2, a, NVME_CMD_WRITE, 0, "power-cut");
+        h = femu_hang_recs("cfs", 2, a, NVME_CMD_WRITE, 0, "power-cut");
+        want = g_strconcat(h, "; 4<0 l0 m0 power-loss apply done c0 o0 f0 "
+                           "0+0 @qmp", NULL);
         femu_lie_want(qts, "pc", want);
     }
 
@@ -33931,4 +33972,1280 @@ void femu_test_fsched_start_early(void *obj, void *data,
     qtest_pc_shutdown(qs);
     unlink(path);
     rmdir(dir);
+}
+
+/*
+ * power-loss at a command. The cut Write goes to page 125 (blocks 1000
+ * to 1007); the lines name it with lba=, so the Writes before it do not
+ * count. Pages 0 to 7 hold 0xa0 + page on the media, then 0xb0 + page in
+ * the buffer, in that order.
+ */
+#define FEMU_CUT_PAGE   125
+#define FEMU_CUT_LINE   "@write,lba=1000-1007#1 power-loss"
+/* the I/O CQEs of femu_cut_fill() over @nr pages: 2 Writes a page, a Flush */
+#define FEMU_CUT_FILL_CQES(nr)  (2 * (nr) + 1)
+
+/* the last cut summary and its evidence of device @id */
+typedef struct FemuCutSum {
+    int64_t id;                 /* -1: no cut summary */
+    int cuts;                   /* the cut summaries */
+    char origin[16];            /* of the last one */
+    int64_t line;
+    int64_t rolled;
+    int64_t lie;
+    int64_t kept;
+    int64_t ranges;
+    int64_t chunks;
+    int64_t boundary;
+    bool trunc;
+    int64_t stored;             /* ranges in the chunk records */
+    /* "R 0+8 16+16|K 8+8": chunk by chunk; "n2:0+8" for namespace 2 */
+    char *ev;
+} FemuCutSum;
+
+static void femu_cut_sum(QTestState *qts, const char *id, FemuCutSum *s)
+{
+    QDict *rsp;
+    QDict *q = femu_events_q(qts, id, &rsp);
+    GString *g = g_string_new(NULL);
+    QListEntry *e;
+    int64_t next = 0;
+
+    memset(s, 0, sizeof(*s));
+    s->id = -1;
+    QLIST_FOREACH_ENTRY(qdict_get_qlist(q, "faults"), e) {
+        QDict *r = qobject_to(QDict, qlist_entry_obj(e));
+        const char *ph = qdict_get_str(r, "phase");
+        QListEntry *x;
+        QList *rl;
+
+        if (strcmp(qdict_get_str(r, "action"), "power-loss")) {
+            continue;
+        }
+        if (!strcmp(ph, "apply")) {
+            /* a later cut starts the evidence again */
+            s->cuts++;
+            s->stored = 0;
+            next = 0;
+            g_string_truncate(g, 0);
+            s->id = qdict_get_int(r, "id");
+            g_strlcpy(s->origin, qdict_get_str(r, "origin"),
+                      sizeof(s->origin));
+            s->line = qdict_get_int(r, "line");
+            /* only a command line cuts at a point of its command */
+            if (!strcmp(s->origin, "sched-cmd")) {
+                g_assert_cmpstr(qdict_get_str(r, "at"), ==, "pre");
+            } else {
+                g_assert_false(qdict_haskey(r, "at"));
+            }
+            g_assert_cmpstr(qdict_get_str(r, "outcome"), ==, "done");
+            s->rolled = qdict_get_int(r, "rolled-back-pages");
+            s->lie = qdict_get_int(r, "rolled-back-lie-pages");
+            s->kept = qdict_get_int(r, "kept-pages");
+            s->ranges = qdict_get_int(r, "ranges");
+            s->chunks = qdict_get_int(r, "chunks");
+            s->boundary = qdict_get_int(r, "cqe-publish-boundary");
+            s->trunc = qdict_get_bool(r, "truncated");
+            continue;
+        }
+        if (strcmp(ph, "evidence")) {
+            continue;
+        }
+        g_assert_cmpint(qdict_get_int(r, "cause"), ==, s->id);
+        g_assert_cmpint(qdict_get_int(r, "chunk"), ==, next);
+        g_assert_cmpint(qdict_get_int(r, "chunks"), ==, s->chunks);
+        next++;
+        g_string_append_printf(g, "%s%c", g->len ? "|" : "",
+                               strcmp(qdict_get_str(r, "kind"), "kept") ?
+                               'R' : 'K');
+        /* an evidence record with no ranges fails here, not in the walk */
+        rl = qdict_get_qlist(r, "r");
+        g_assert_nonnull(rl);
+        QLIST_FOREACH_ENTRY(rl, x) {
+            QDict *rg = qobject_to(QDict, qlist_entry_obj(x));
+            int64_t nsid = qdict_get_int(rg, "nsid");
+
+            g_assert_cmpint(nsid, >=, 1);
+            if (nsid != 1) {
+                g_string_append_printf(g, " n%" PRId64 ":", nsid);
+            } else {
+                g_string_append_c(g, ' ');
+            }
+            g_string_append_printf(g, "%" PRId64 "+%" PRId64,
+                                   qdict_get_int(rg, "slba"),
+                                   qdict_get_int(rg, "nlb"));
+            s->stored++;
+        }
+    }
+    g_assert_cmpint(next, ==, s->chunks);
+    s->ev = g_string_free(g, false);
+    qobject_unref(rsp);
+}
+
+/* the cut of @d came: CSTS is 0; enable it again with an I/O queue */
+static void femu_cut_back(FemuLieDev *d)
+{
+    int ms;
+
+    for (ms = 0; ms < FEMU_POLL_LIMIT_MS && (femu_cfs_csts(&d->c) & 1);
+         ms++) {
+        g_usleep(1000);
+    }
+    g_assert_cmphex(femu_cfs_csts(&d->c) & 1, ==, 0);
+    femu_wbf_ctrl_reset(d);
+}
+
+/*
+ * pages 0 to @nr - 1: 0xa0 + page durable, then 0xb0 + page buffered.
+ * It writes no block of page 125, which the cut lines match.
+ */
+static void femu_cut_fill(FemuCtrlState *c, uint64_t buf, int nr)
+{
+    for (int p = 0; p < nr; p++) {
+        femu_lie_page(c, buf, p, 0xa0 + (p & 0xf), false);
+    }
+    femu_power_flush(c, 1);
+    for (int p = 0; p < nr; p++) {
+        femu_lie_page(c, buf, p, 0xb0 + (p & 0xf), false);
+    }
+}
+
+/*
+ * keep= at a cut, on the 8 buffered pages. Each cut device submits the
+ * Write of page 125 (0xbf); it parks, the power goes, and it gets no
+ * CQE. Page 125 then reads 0, as no Write reached it: the cut came
+ * before the Write ran.
+ *   k0: keep=0 rolls every page back: one range 0+64.
+ *   k1: keep=1000000 writes every page back.
+ *   k4, k5: keep=500000 seed=4, two devices: pages 1, 4, 5 and 6 kept
+ *       (0x72), the same pages on both.
+ *   k3: seed=3 keeps 0, 1, 3 and 6 (0x4b): the seed decides.
+ *   kn: the control, a line that never selects: the Write runs and
+ *       completes, and the pages keep 0xb0 + page with no cut.
+ * The cqe-publish-boundary is the count of I/O CQEs the fill took, 17:
+ * the CQE of the cut Write is not in it.
+ *
+ * Planted defects and the check that fails:
+ *   the parked Write runs before the cut     page 125 of k0
+ *   keep= compares with <= or > at an end    the pages of k0 or k1
+ *   the draws run in reverse buffer order    the pages of k4 (0x4e)
+ *   the draw state is not the line's seed    k4 against k3
+ *   ranges of one kind do not merge          the evidence of k4
+ *   the boundary counts the cut Write         the boundary of k0
+ */
+void femu_test_fsched_cut_keep(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "k0", 5, FEMU_LIE_PL, FEMU_CUT_LINE " keep=0\n" },
+        { "k1", 6, FEMU_LIE_PL, FEMU_CUT_LINE " keep=1000000\n" },
+        { "k4", 7, FEMU_LIE_PL, FEMU_CUT_LINE " keep=500000 seed=4\n" },
+        { "k5", 8, FEMU_LIE_PL, FEMU_CUT_LINE " keep=500000 seed=4\n" },
+        { "k3", 9, FEMU_LIE_PL, FEMU_CUT_LINE " keep=500000 seed=3\n" },
+        { "kn", 10, FEMU_LIE_PL,
+          "@write,lba=2000-2007#1 power-loss keep=500000 seed=4\n" },
+    };
+    static const struct {
+        uint32_t mask;          /* bit p: page p kept */
+        const char *ev;
+    } want[] = {
+        { 0x00, "R 0+64" },
+        { 0xff, "K 0+64" },
+        { 0x72, "R 0+8 16+16 56+8|K 8+8 32+24" },
+        { 0x72, "R 0+8 16+16 56+8|K 8+8 32+24" },
+        { 0x4b, "R 16+8 32+16 56+8|K 0+16 24+8 48+8" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool cut = i < ARRAY_SIZE(want);
+        FemuCutSum s;
+
+        femu_cut_fill(c, buf, 8);
+        qtest_memset(qts, buf, 0xbf, 4096);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        if (cut) {
+            femu_cut_back(&d[i]);
+        } else {
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)),
+                            ==, 0);
+        }
+        femu_lie_page_is(c, buf, FEMU_CUT_PAGE, cut ? 0 : 0xbf);
+        for (int p = 0; p < 8; p++) {
+            bool kept = !cut || (want[i].mask >> p & 1);
+
+            femu_lie_page_is(c, buf, p, (kept ? 0xb0 : 0xa0) + p);
+        }
+        femu_cut_sum(qts, d[i].id, &s);
+        if (!cut) {
+            g_assert_cmpint(s.id, ==, -1);
+            g_free(s.ev);
+            continue;
+        }
+        g_test_message("%s: %s", d[i].id, s.ev);
+        g_assert_cmpint(s.kept, ==, __builtin_popcount(want[i].mask));
+        g_assert_cmpint(s.rolled, ==, 8 - s.kept);
+        g_assert_cmpint(s.lie, ==, 0);
+        g_assert_cmpint(s.boundary, ==, FEMU_CUT_FILL_CQES(8));
+        g_assert_false(s.trunc);
+        g_assert_cmpint(s.ranges, ==, s.stored);
+        g_assert_cmpstr(s.ev, ==, want[i].ev);
+        g_free(s.ev);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * grain= on one buffered page, seed 4, keep=500000. With grain=lba the
+ * draws go block by block: blocks 1, 4, 5 and 6 keep 0xb0, the others
+ * read 0xa0, and the page counts as kept and as rolled back. With
+ * grain=page the page takes the first draw alone, which rolls it back.
+ *
+ * Planted defects and the check that fails:
+ *   grain=lba draws once a page               the blocks of gl
+ *   grain=page draws once a block             the blocks of gp
+ *   a torn page restores no block             block 0 of gl
+ */
+void femu_test_fsched_cut_grain(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "gl", 5, FEMU_LIE_PL, FEMU_CUT_LINE " keep=500000 grain=lba "
+                                "seed=4\n" },
+        { "gp", 6, FEMU_LIE_PL, FEMU_CUT_LINE " keep=500000 grain=page "
+                                "seed=4\n" },
+    };
+    static const char *const ev[] = {
+        "R 0+1 2+2 7+1|K 1+1 4+3", "R 0+8",
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool lba = i == 0;
+        FemuCutSum s;
+
+        femu_cut_fill(c, buf, 1);
+        qtest_memset(qts, buf, 0xbf, 4096);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        femu_cut_back(&d[i]);
+        for (int b = 0; b < 8; b++) {
+            bool kept = lba && (0x72 >> b & 1);
+
+            femu_power_read(c, buf, 1, b, kept ? 0xb0 : 0xa0);
+        }
+        femu_cut_sum(qts, d[i].id, &s);
+        g_test_message("%s: %s", d[i].id, s.ev);
+        g_assert_cmpstr(s.ev, ==, ev[i]);
+        g_assert_cmpint(s.kept, ==, lba);
+        g_assert_cmpint(s.rolled, ==, 1);
+        g_free(s.ev);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * Evidence past its chunks. 40 buffered pages of a 64-page buffer, with
+ * grain=lba and keep=500000, give 77 ranges of each kind: the cut
+ * stores the 8 chunks of rolled-back ranges that come first, sets
+ * truncated and counts all 154. The
+ * control tc, keep=0 grain=page, merges the 40 pages into one range.
+ *
+ * Planted defects and the check that fails:
+ *   no truncated flag past the chunks         truncated of tt
+ *   ranges counts only the stored ones        ranges of tt
+ *   a ninth chunk record                      chunks of tt
+ */
+void femu_test_fsched_cut_truncate(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "tt", 5, "femu_mode=1,buffer_size=64,vwc=1,power_loss=on",
+          FEMU_CUT_LINE " keep=500000 grain=lba seed=4\n" },
+        { "tc", 6, "femu_mode=1,buffer_size=64,vwc=1,power_loss=on",
+          FEMU_CUT_LINE "\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        FemuCutSum s;
+
+        femu_cut_fill(c, buf, 40);
+        qtest_memset(qts, buf, 0xbf, 4096);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        femu_cut_back(&d[i]);
+        femu_cut_sum(qts, d[i].id, &s);
+        g_test_message("%s: %" PRId64 " ranges, %" PRId64 " stored",
+                       d[i].id, s.ranges, s.stored);
+        if (i) {
+            g_assert_cmpstr(s.ev, ==, "R 0+320");
+            g_assert_false(s.trunc);
+            g_assert_cmpint(s.ranges, ==, 1);
+            for (int p = 0; p < 40; p++) {
+                femu_lie_page_is(c, buf, p, 0xa0 + (p & 0xf));
+            }
+        } else {
+            /* seed 4 over 320 blocks: 77 runs of each kind */
+            g_assert_true(s.trunc);
+            g_assert_cmpint(s.chunks, ==, 8);
+            g_assert_cmpint(s.stored, ==, 64);
+            g_assert_cmpint(s.ranges, ==, 154);
+            g_assert_cmpint(s.kept, ==, 40);
+            g_assert_cmpint(s.rolled, ==, 40);
+            g_assert_true(g_str_has_prefix(s.ev, "R 0+1 2+2 7+3 12+2 "));
+        }
+        g_assert_cmpint(s.boundary, ==, FEMU_CUT_FILL_CQES(40));
+        g_free(s.ev);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * One Write that a power-loss line and a hang line both select. On pp
+ * the power-loss line is first: the cut comes, the hang line is
+ * superseded and writes no apply record, and x-fault-hung stays 0. On
+ * the control ph the hang line is first: the Write runs and is held, an
+ * apply record tells of it, and no cut comes (CSTS.RDY stays 1).
+ *
+ * Planted defects and the check that fails:
+ *   the terminal group ignores file order     the records of pp
+ *   the hang applies beside the cut           x-fault-hung of pp
+ */
+void femu_test_fsched_cut_hang(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "pp", 5, FEMU_LIE_PL,
+          FEMU_CUT_LINE "\n@write,lba=1000-1007#1 hang\n" },
+        { "ph", 6, FEMU_LIE_PL,
+          "@write,lba=1000-1007#1 hang\n" FEMU_CUT_LINE "\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        g_autofree char *want = NULL;
+        g_autofree char *got = NULL;
+        FemuCutSum s;
+        uint16_t a;
+
+        femu_cut_fill(c, buf, 1);
+        qtest_memset(qts, buf, 0xbf, 4096);
+        a = femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        if (i == 0) {
+            femu_cut_back(&d[i]);
+            femu_lie_page_is(c, buf, 0, 0xa0);
+            want = g_strdup_printf(
+                "1<0 l1 m1 power-loss select selected c%u o1 f0 1000+8; "
+                "2<0 l2 m1 hang select superseded c%u o1 f0 1000+8; "
+                "3<1 l1 m1 power-loss apply done c%u o1 f0 1000+8; "
+                "4<3 l1 m1 power-loss evidence done c%u o1 f0 1000+8",
+                a, a, a, a);
+        } else {
+            femu_hang_wait(qts, d[i].id, "x-fault-hung", 1);
+            femu_hang_none(c, &c->io);
+            g_assert_cmphex(femu_cfs_csts(c) & 1, ==, 1);
+            femu_lie_page_is(c, buf, 0, 0xb0);
+            want = g_strdup_printf(
+                "1<0 l1 m1 hang select selected c%u o1 f0 1000+8; "
+                "2<0 l2 m1 power-loss select superseded c%u o1 f0 1000+8; "
+                "3<1 l1 m1 hang apply done c%u o1 f0 1000+8", a, a, a);
+        }
+        got = femu_lie_recs(qts, d[i].id);
+        g_test_message("%s records: %s", d[i].id, got);
+        g_assert_cmpstr(got, ==, want);
+        femu_cut_sum(qts, d[i].id, &s);
+        g_assert_cmpint(s.id, ==, i ? -1 : 3);
+        g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-hung"), ==,
+                        i ? 1 : 0);
+        g_free(s.ev);
+        if (i) {
+            femu_wbf_ctrl_reset(&d[i]);
+        }
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * power_loss=off refuses each power-loss command line, also one with
+ * keep=, while the same lines realize with power_loss=on. Lines that
+ * need no power_loss (hang) realize either way.
+ *
+ * Planted defects and the check that fails:
+ *   the power_loss check is dropped           the device_add with off
+ */
+void femu_test_fsched_cut_refused(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "ev.txt", NULL);
+    static const struct {
+        const char *line;
+        bool pl;
+        const char *msg;
+    } k[] = {
+        { "@write#1 power-loss\n", false, "power-loss needs power_loss=on" },
+        { "@write#1 power-loss\n", true, NULL },
+        { "@any#2 power-loss keep=300000 grain=lba seed=9\n", false,
+          "power-loss needs power_loss=on" },
+        { "@any#2 power-loss keep=300000 grain=lba seed=9\n", true, NULL },
+        { "@write#1 hang\n", false, NULL },
+    };
+    QTestState *qts = qtest_init("-machine pc -nodefaults");
+
+    for (int i = 0; i < ARRAY_SIZE(k); i++) {
+        g_autofree char *args = g_strdup_printf(
+            "{'driver':'femu','id':'pl%d','addr':'%d','devsz_mb':16,"
+            "'femu_mode':1,'buffer_size':16,'vwc':1,'power_loss':%s,"
+            "'events_file':'%s'}",
+            i, 5 + i, k[i].pl ? "true" : "false", path);
+        QDict *rsp;
+
+        g_assert_true(g_file_set_contents(path, k[i].line, -1, NULL));
+        rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                        qobject_from_json(args, &error_abort));
+        if (k[i].msg) {
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("%s", desc);
+            g_assert_nonnull(strstr(desc, k[i].msg));
+        } else {
+            g_assert_true(qdict_haskey(rsp, "return"));
+        }
+        qobject_unref(rsp);
+    }
+    qtest_quit(qts);
+    qos_invalidate_command_line();
+    unlink(path);
+    rmdir(dir);
+}
+
+/*
+ * A cut beside a lie and a wb-fail mark (17.5). Pages 0 to 3 are
+ * buffered as 0xb0 + page, page 1 by the Write that the wb-fail line
+ * marks (mode=old), and the 2nd Flush lies, so all four carry the lie.
+ * keep=1000000 writes all four back before the rollback: pages 0, 2 and
+ * 3 keep their version, and page 1 fails its write-back and reads 0xa1.
+ * One lie page is lost. On the control lk, keep=0 rolls all four back.
+ *
+ * Planted defects and the check that fails:
+ *   a marked page is written back             page 1 of lw
+ *   a kept lie page counts as lost            x-fault-lie-lost of lw
+ *   the cut skips the lie count                rolled-back-lie-pages
+ */
+void femu_test_fsched_cut_lie(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "lw", 5, FEMU_LIE_PL, FEMU_WBF_SEL " mode=old\n@flush#2 flush-lie\n"
+                                FEMU_CUT_LINE " keep=1000000\n" },
+        { "lk", 6, FEMU_LIE_PL, FEMU_WBF_SEL " mode=old\n@flush#2 flush-lie\n"
+                                FEMU_CUT_LINE " keep=0\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool keep = i == 0;
+        FemuCutSum s;
+
+        femu_cut_fill(c, buf, 4);
+        femu_power_flush(c, 1);
+        qtest_memset(qts, buf, 0xbf, 4096);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        femu_cut_back(&d[i]);
+        for (int p = 0; p < 4; p++) {
+            bool kept = keep && p != 1;
+
+            femu_lie_page_is(c, buf, p, (kept ? 0xb0 : 0xa0) + p);
+        }
+        femu_cut_sum(qts, d[i].id, &s);
+        g_test_message("%s: %s", d[i].id, s.ev);
+        g_assert_cmpint(s.kept, ==, keep ? 3 : 0);
+        g_assert_cmpint(s.rolled, ==, keep ? 1 : 4);
+        g_assert_cmpint(s.lie, ==, keep ? 1 : 4);
+        g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-lie-lost"),
+                        ==, keep ? 1 : 4);
+        g_assert_cmpstr(s.ev, ==, keep ? "R 8+8|K 0+8 16+16" : "R 0+32");
+        g_free(s.ev);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * The fence and the park. Page 0 is buffered as 0xb0 over 0xa0. With
+ * x-cpl-hold on, a Read of page 0 comes back from the FTL and waits;
+ * then the Write of page 125 parks, its BH held back.
+ *   fq: x-cpl-hold off: the Read gets no CQE, since the poller acks the
+ *       fence first. The BH then cuts: no CQE still, page 0 reads 0xa0,
+ *       and the boundary counts the 3 CQEs before the Read.
+ *   fr: a Controller Reset before the BH ends the park: no cut, page 0
+ *       keeps 0xb0, and the Write has a reclaim record.
+ *   fc: the control, a line that never selects: the Read and the Write
+ *       complete once x-cpl-hold is off.
+ *
+ * Planted defects and the check that fails:
+ *   the poller does not check the fence       the Read CQE of fq
+ *   the BH does not check its gen             page 0 of fr
+ *   the reclaim leaves the fence set          new I/O on fr
+ */
+void femu_test_fsched_cut_fence(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "fq", 5, FEMU_LIE_PL, FEMU_CUT_LINE "\n" },
+        { "fr", 6, FEMU_LIE_PL, FEMU_CUT_LINE "\n" },
+        { "fc", 7, FEMU_LIE_PL, "@write,lba=2000-2007#1 power-loss\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        g_autofree char *want = NULL;
+        FemuCutSum s;
+        uint16_t w;
+
+        femu_lie_page(c, buf, 0, 0xa0, false);
+        femu_power_flush(c, 1);
+        femu_lie_page(c, buf, 0, 0xb0, false);
+        femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 1);
+        femu_cancel_hook(qts, d[i].id, "x-cpl-hold", 1);
+        femu_hang_submit(c, &c->io, NVME_CMD_READ, 0, buf);
+        w = femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        if (i < 2) {
+            femu_hang_wait(qts, d[i].id, "x-fault-parked", 1);
+            femu_cancel_wait_cpl(qts, d[i].id, 1);
+        } else {
+            femu_cancel_wait_cpl(qts, d[i].id, 2);
+        }
+        femu_cancel_hook(qts, d[i].id, "x-cpl-hold", 0);
+        if (i == 2) {
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)),
+                            ==, 0);
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)),
+                            ==, 0);
+            femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 0);
+            femu_lie_page_is(c, buf, 0, 0xb0);
+            continue;
+        }
+        femu_hang_none(c, &c->io);
+        if (i == 1) {
+            femu_wbf_ctrl_reset(&d[i]);
+            femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 0);
+            g_assert_cmphex(femu_cfs_csts(c) & 1, ==, 1);
+            femu_lie_page_is(c, buf, 0, 0xb0);
+            femu_cut_sum(qts, d[i].id, &s);
+            g_assert_cmpint(s.id, ==, -1);
+            g_free(s.ev);
+            want = g_strdup_printf(
+                "1<0 l1 m1 power-loss select selected c%u o1 f0 1000+8; "
+                "2<1 l1 m1 power-loss reclaim reclaimed/reset c%u o1 f0 "
+                "1000+8", w, w);
+            femu_lie_want(qts, d[i].id, want);
+            continue;
+        }
+        femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 0);
+        femu_hang_none(c, &c->io);
+        femu_cut_back(&d[i]);
+        femu_lie_page_is(c, buf, 0, 0xa0);
+        femu_cut_sum(qts, d[i].id, &s);
+        /* 2 Writes and a Flush; not the held Read, not the cut Write */
+        g_assert_cmpint(s.boundary, ==, 3);
+        g_assert_cmpint(s.rolled, ==, 1);
+        g_assert_cmpstr(s.ev, ==, "R 0+8");
+        g_free(s.ev);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/* x-durable-check of device @id: its generations, and the ended ones */
+static void femu_cut_gens(QTestState *qts, const char *id, uint64_t *gens,
+                          uint64_t *ended)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-durable-check'}}", path);
+    uint64_t lpns;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64, &lpns, gens,
+                           ended), ==, 3);
+    qobject_unref(rsp);
+}
+
+/*
+ * Idle FTL work and the park. A power-loss line refuses each property
+ * that gives the FTL idle work, so a cfs line takes the same park here.
+ * With durable_at_done the idle FTL retires the generations of ended
+ * programs, and 1 s programs keep them pending for a while. Pages 0 to 7
+ * are written (0xa0 + page), and a Flush that the test does not wait for
+ * books their programs. Pages 8 to 15 are then written (0xb0 + page) and
+ * stay in the buffer.
+ *   ib: the Write of page 125 parks with its BH held. In 2.5 s the
+ *       programs end, but the idle FTL retires no generation. Then CFS
+ *       comes, and a QMP cut rolls back pages 8 to 15. Its boundary is
+ *       the 16 Writes: the Flush CQE comes after the fence.
+ *   ic: the control, a line that never selects. The idle FTL retires
+ *       every generation, and a QMP cut rolls back pages 8 to 15.
+ *
+ * Planted defects and the check that fails:
+ *   the idle block runs while parked        the generations of ib
+ *   the cut sees a changed buffer           rolled-back-pages of ib
+ */
+#define FEMU_CUT_IDLE   "femu_mode=1,buffer_size=16,vwc=1,power_loss=on," \
+                        "durable_at_done=on,pg_wr_lat=1000000000"
+
+void femu_test_fsched_cut_idle(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "ib", 5, FEMU_CUT_IDLE, "@write,lba=1000-1007#1 cfs\n" },
+        { "ic", 6, FEMU_CUT_IDLE, "@write,lba=2000-2007#1 cfs\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        FemuCutSum s;
+        uint64_t before;
+        uint64_t gens;
+        uint64_t ended;
+        int ms;
+
+        for (int p = 0; p < 8; p++) {
+            femu_lie_page(c, buf, p, 0xa0 + p, false);
+        }
+        femu_hang_submit(c, &c->io, NVME_CMD_FLUSH, 0, buf);
+        for (int p = 8; p < 16; p++) {
+            femu_lie_page(c, buf, p, 0xb0 + p, false);
+        }
+        if (i == 1) {
+            for (ms = 0; ms < 10000; ms += 50) {
+                femu_cut_gens(qts, d[i].id, &gens, &ended);
+                if (!gens) {
+                    break;
+                }
+                g_usleep(50 * 1000);
+            }
+            g_assert_cmpuint(gens, ==, 0);
+            g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, NULL, NULL)),
+                            ==, 0);
+            femu_lie_cut(&d[i]);
+            femu_cut_sum(qts, d[i].id, &s);
+            g_assert_cmpstr(s.origin, ==, "qmp");
+            g_assert_cmpint(s.rolled, ==, 8);
+            g_assert_cmpint(s.boundary, ==, 17);
+            g_free(s.ev);
+            continue;
+        }
+        femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 1);
+        qtest_memset(qts, buf, 0xbf, 4096);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        femu_hang_wait(qts, d[i].id, "x-fault-parked", 1);
+        femu_cut_gens(qts, d[i].id, &before, &ended);
+        g_test_message("ib: %" PRIu64 " generations, %" PRIu64 " ended, at "
+                       "the park", before, ended);
+        g_assert_cmpuint(before, >, ended);
+        g_usleep(2500 * 1000);
+        femu_cut_gens(qts, d[i].id, &gens, &ended);
+        g_assert_cmpuint(gens, ==, before);
+        g_assert_cmpuint(ended, ==, gens);
+        femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 0);
+        femu_cfs_wait(c);
+        femu_lie_cut(&d[i]);
+        femu_cut_sum(qts, d[i].id, &s);
+        g_assert_cmpstr(s.origin, ==, "qmp");
+        g_assert_cmpint(s.rolled, ==, 8);
+        g_assert_cmpint(s.boundary, ==, 16);
+        g_free(s.ev);
+        for (int p = 0; p < 8; p++) {
+            femu_lie_page_is(c, buf, p, 0xa0 + p);
+        }
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/* page 0: 0xa0 on the media, then 0xb0 in the buffer; 3 I/O CQEs */
+static void femu_cut_one(FemuCtrlState *c, uint64_t buf)
+{
+    femu_lie_page(c, buf, 0, 0xa0, false);
+    femu_power_flush(c, 1);
+    femu_lie_page(c, buf, 0, 0xb0, false);
+}
+
+/*
+ * The paths that end a power-loss park, each with its BH held, on the cut
+ * Write of page 125 over page 0 buffered (0xb0 over 0xa0).
+ *   qd: a Delete SQ of the parked queue reclaims it. The BH after the
+ *       release cuts nothing: CSTS.RDY stays 1, page 0 keeps 0xb0.
+ *   qs: the same with a normal shutdown (SHST 10b).
+ *   qt: a time line cuts first. The park goes back with a power-cut
+ *       reclaim record; the cut writes its summary (sched-time, line 2)
+ *       and evidence. The BH after the release cuts no second time.
+ *   qq: the same with QMP simulate-power-loss (qmp, line 0).
+ *   qp: femu-events-stop while parked. The selection stands: the BH
+ *       after the release cuts, and the state stays stopped. A start
+ *       gives done; in done a stop and a start work too.
+ *
+ * Planted defects and the check that fails:
+ *   no gen_next in the reclaim of one queue  CSTS and page 0 of qd
+ *   a cut ends the park with no gen_next     the cut count of qt and qq
+ *   a time or QMP cut writes no records      the records of qt and qq
+ *   a stop drops the park                    CSTS of qp
+ *   a stop is refused in done                the last stop of qp
+ */
+void femu_test_fsched_cut_paths(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "qd", 5, FEMU_LIE_PL, FEMU_CUT_LINE "\n" },
+        { "qs", 6, FEMU_LIE_PL, FEMU_CUT_LINE "\n" },
+        { "qt", 7, FEMU_LIE_PL, FEMU_CUT_LINE "\n600000 power-loss\n" },
+        { "qq", 8, FEMU_LIE_PL, FEMU_CUT_LINE "\n" },
+        { "qp", 9, FEMU_LIE_PL, FEMU_CUT_LINE "\n" },
+    };
+    static const char *const why[] = { "sq-deleted", "shutdown" };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        g_autofree char *want = NULL;
+        FemuCutSum s;
+        uint16_t w;
+
+        femu_cut_one(c, buf);
+        femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 1);
+        qtest_memset(qts, buf, 0xbf, 4096);
+        w = femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        femu_hang_wait(qts, d[i].id, "x-fault-parked", 1);
+
+        if (i < 2) {
+            /* each poller acks the fence, so a stale BH would cut */
+            g_usleep(FEMU_FENCE_ACK_MS * 1000);
+            if (i == 0) {
+                g_assert_cmphex(FEMU_SC(femu_delete_sq(c, 1)), ==, 0);
+            } else {
+                qpci_io_writel(c->pdev, c->bar, 0x14,
+                               FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
+                g_assert_cmpint(FEMU_CSTS_SHST(femu_cfs_csts(c)), ==, 2);
+            }
+            g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-parked"),
+                            ==, 0);
+            femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 0);
+            g_usleep(100 * 1000);
+            /* a cut would clear CSTS: RDY and SHST stay */
+            if (i == 0) {
+                g_assert_cmphex(femu_cfs_csts(c) & 1, ==, 1);
+            } else {
+                g_assert_cmpint(FEMU_CSTS_SHST(femu_cfs_csts(c)), ==, 2);
+            }
+            femu_wbf_ctrl_reset(&d[i]);
+            femu_lie_page_is(c, buf, 0, 0xb0);
+            femu_cut_sum(qts, d[i].id, &s);
+            g_assert_cmpint(s.id, ==, -1);
+            g_free(s.ev);
+            want = g_strdup_printf(
+                "1<0 l1 m1 power-loss select selected c%u o1 f0 1000+8; "
+                "2<1 l1 m1 power-loss reclaim reclaimed/%s c%u o1 f0 "
+                "1000+8", w, why[i], w);
+            femu_lie_want(qts, d[i].id, want);
+            continue;
+        }
+
+        if (i < 4) {
+            const char *org = i == 2 ? "sched-time" : "qmp";
+            int line = i == 2 ? 2 : 0;
+
+            if (i == 2) {
+                femu_cancel_hook(qts, d[i].id, "x-events-now", 600000);
+            } else {
+                femu_cut_power(qts, d[i].id);
+            }
+            g_assert_cmpint(femu_hang_prop(qts, d[i].id, "x-fault-parked"),
+                            ==, 0);
+            femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 0);
+            femu_cut_back(&d[i]);
+            femu_lie_page_is(c, buf, 0, 0xa0);
+            femu_cut_sum(qts, d[i].id, &s);
+            g_assert_cmpint(s.cuts, ==, 1);
+            g_assert_cmpstr(s.origin, ==, org);
+            g_assert_cmpint(s.line, ==, line);
+            g_assert_cmpint(s.rolled, ==, 1);
+            g_assert_cmpint(s.boundary, ==, 3);
+            g_assert_cmpstr(s.ev, ==, "R 0+8");
+            g_free(s.ev);
+            want = g_strdup_printf(
+                "1<0 l1 m1 power-loss select selected c%u o1 f0 1000+8; "
+                "2<1 l1 m1 power-loss reclaim reclaimed/power-cut c%u o1 "
+                "f0 1000+8; "
+                "3<0 l%d m0 power-loss apply done c0 o0 f0 0+0 @%s; "
+                "4<3 l%d m0 power-loss evidence done c0 o0 f0 0+0 @%s",
+                w, w, line, org, line, org);
+            femu_lie_want(qts, d[i].id, want);
+            continue;
+        }
+
+        /* qp: a stop while parked, then a start, then both in done */
+        femu_ev_ok(qts, "qp", "stop");
+        femu_ev_state(qts, "qp", "stopped");
+        femu_cancel_hook(qts, "qp", "x-fault-bh-hold", 0);
+        femu_cut_back(&d[i]);
+        femu_lie_page_is(c, buf, 0, 0xa0);
+        femu_cut_sum(qts, "qp", &s);
+        g_assert_cmpstr(s.origin, ==, "sched-cmd");
+        g_assert_cmpstr(s.ev, ==, "R 0+8");
+        g_free(s.ev);
+        femu_ev_state(qts, "qp", "stopped");
+        femu_ev_ok(qts, "qp", "start");
+        femu_ev_state(qts, "qp", "done");
+        femu_ev_ok(qts, "qp", "stop");
+        femu_ev_state(qts, "qp", "stopped");
+        femu_ev_fails(qts, "qp", "stop", "stopped already");
+        femu_ev_ok(qts, "qp", "start");
+        femu_ev_state(qts, "qp", "done");
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/* slot @i of the I/O completion queue of @c holds an entry of phase @ph */
+static bool femu_cut_cqe_is(FemuCtrlState *c, int i, int ph)
+{
+    NvmeCqe cqe;
+
+    qtest_memread(c->pdev->bus->qts, c->io.cq_addr + i * sizeof(cqe), &cqe,
+                  sizeof(cqe));
+    return (le16_to_cpu(cqe.status) & 1) == ph;
+}
+
+/*
+ * The fence checks inside a pass. x-cpl-hold=3 makes the last poller
+ * skip the check at the start of its pass, as if the fence came just
+ * after it; that poller then never acks.
+ *   mi: a Read waits in the ring (x-cpl-hold=1) when the cut Write parks.
+ *       With x-cpl-hold=3 the poller takes it, but the check before each
+ *       CQE stops it: no CQE in 100 ms.
+ *   mp: two pollers (queues=2). With x-cpl-hold=3 poller 2 never acks,
+ *       so the BH cuts nothing for 100 ms, while poller 1 has acked.
+ *       With x-cpl-hold=0 the cut comes.
+ *   mb: 15 Reads fill the 15 slots of the CQ, and a 16th waits in the
+ *       backlog. After the park the host frees the slots, with
+ *       x-cpl-hold=3: the backlog check posts nothing. The boundary
+ *       counts the 15 CQEs and the 3 before them, not the 16th.
+ *   mc: the control of mb, a line that never selects: the 16th CQE
+ *       posts once the slots are free.
+ *
+ * Planted defects and the check that fails:
+ *   no fence check before a pq CQE           the Read CQE of mi
+ *   femu_fsched_fenced always true           CSTS of mp
+ *   femu_fsched_fenced reads poller 1 only   CSTS of mp
+ *   no fence check before a backlog CQE      slot 15 of mb
+ */
+void femu_test_fsched_cut_miss(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "mi", 5, FEMU_LIE_PL, FEMU_CUT_LINE "\n" },
+        { "mp", 6, FEMU_LIE_PL ",queues=2,multipoller_enabled=1,"
+                   "poller_ratio=1", FEMU_CUT_LINE "\n" },
+        { "mb", 7, FEMU_LIE_PL, FEMU_CUT_LINE "\n" },
+        { "mc", 8, FEMU_LIE_PL, "@write,lba=2000-2007#1 power-loss\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    FemuCutSum s;
+
+    /* mi: the check before each pq CQE */
+    {
+        FemuCtrlState *c = &d[0].c;
+
+        femu_cut_one(c, buf);
+        femu_cancel_hook(qts, "mi", "x-fault-bh-hold", 1);
+        femu_cancel_hook(qts, "mi", "x-cpl-hold", 1);
+        femu_hang_submit(c, &c->io, NVME_CMD_READ, 0, buf);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        femu_hang_wait(qts, "mi", "x-fault-parked", 1);
+        femu_cancel_wait_cpl(qts, "mi", 1);
+        femu_cancel_hook(qts, "mi", "x-cpl-hold", 3);
+        femu_cancel_wait_cpl(qts, "mi", 1);
+        femu_hang_none(c, &c->io);
+        femu_cancel_hook(qts, "mi", "x-cpl-hold", 0);
+        femu_cancel_hook(qts, "mi", "x-fault-bh-hold", 0);
+        femu_hang_none(c, &c->io);
+        femu_cut_back(&d[0]);
+        femu_lie_page_is(c, buf, 0, 0xa0);
+        femu_cut_sum(qts, "mi", &s);
+        g_assert_cmpint(s.boundary, ==, 3);
+        g_free(s.ev);
+    }
+
+    /* mp: the BH waits for each poller */
+    {
+        FemuCtrlState *c = &d[1].c;
+
+        femu_cut_one(c, buf);
+        femu_cancel_hook(qts, "mp", "x-cpl-hold", 3);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        femu_hang_wait(qts, "mp", "x-fault-parked", 1);
+        for (int ms = 0; ms < 100; ms++) {
+            g_assert_cmphex(femu_cfs_csts(c) & 1, ==, 1);
+            g_usleep(1000);
+        }
+        g_assert_cmpint(femu_hang_prop(qts, "mp", "x-fault-parked"), ==, 1);
+        femu_cut_sum(qts, "mp", &s);
+        g_assert_cmpint(s.id, ==, -1);
+        g_free(s.ev);
+        femu_cancel_hook(qts, "mp", "x-cpl-hold", 0);
+        femu_cut_back(&d[1]);
+        femu_lie_page_is(c, buf, 0, 0xa0);
+        femu_cut_sum(qts, "mp", &s);
+        g_assert_cmpint(s.cuts, ==, 1);
+        g_assert_cmpint(s.boundary, ==, 3);
+        g_free(s.ev);
+    }
+
+    /* mb, mc: a backlog CQE at the fence */
+    for (int i = 2; i < 4; i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool cut = i == 2;
+        int ms;
+
+        femu_cut_one(c, buf);
+        /* new queues: the 15 CQEs below take slots 0 to 14 */
+        femu_wbf_ctrl_reset(&d[i]);
+        for (int r = 0; r < FEMU_QSIZE - 1; r++) {
+            femu_hang_submit(c, &c->io, NVME_CMD_READ, 0, buf);
+        }
+        for (ms = 0; ms < FEMU_POLL_LIMIT_MS &&
+             !femu_cut_cqe_is(c, FEMU_QSIZE - 2, c->io.phase); ms++) {
+            g_usleep(1000);
+        }
+        g_assert_true(femu_cut_cqe_is(c, FEMU_QSIZE - 2, c->io.phase));
+        /*
+         * The 16th Read finds the CQ full: it waits in the backlog, so
+         * none waits in a ring or in pq when the cut Write parks.
+         */
+        femu_hang_submit(c, &c->io, NVME_CMD_READ, 0, buf);
+        g_usleep(50 * 1000);
+        femu_cancel_wait_cpl(qts, d[i].id, 0);
+        femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 1);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        if (cut) {
+            femu_hang_wait(qts, d[i].id, "x-fault-parked", 1);
+        }
+        femu_cancel_hook(qts, d[i].id, "x-cpl-hold", 3);
+        qpci_io_writel(c->pdev, c->bar, femu_cq_doorbell(c, c->io.qid),
+                       FEMU_QSIZE - 1);
+        if (cut) {
+            for (ms = 0; ms < 100; ms++) {
+                g_assert_false(femu_cut_cqe_is(c, FEMU_QSIZE - 1,
+                                               c->io.phase));
+                g_usleep(1000);
+            }
+            femu_cancel_hook(qts, d[i].id, "x-cpl-hold", 0);
+            femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 0);
+            femu_cut_back(&d[i]);
+            femu_lie_page_is(c, buf, 0, 0xa0);
+            femu_cut_sum(qts, d[i].id, &s);
+            g_assert_cmpint(s.boundary, ==, 3 + FEMU_QSIZE - 1);
+            g_free(s.ev);
+            continue;
+        }
+        for (ms = 0; ms < FEMU_POLL_LIMIT_MS &&
+             !femu_cut_cqe_is(c, FEMU_QSIZE - 1, c->io.phase); ms++) {
+            g_usleep(1000);
+        }
+        g_assert_true(femu_cut_cqe_is(c, FEMU_QSIZE - 1, c->io.phase));
+        femu_cancel_hook(qts, d[i].id, "x-cpl-hold", 0);
+        femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 0);
+        femu_wbf_ctrl_reset(&d[i]);
+        femu_lie_page_is(c, buf, 0, 0xb0);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * The media at a cut, with keep=. Page 1 holds 0xa1 on the media.
+ *   mn: pages 0 and 1 buffered (0xb0, 0xb1), keep=1000000. After the
+ *       park, x-place-skip=1 and x-place-fail=1: page 0 is written back,
+ *       page 1 finds no free line and rolls back. mk, the control, has
+ *       no hook: both pages are kept.
+ *   mt: page 1 buffered (0xb1) by the Write that a wb-fail line marks
+ *       (mode=old). grain=lba seed=4 keeps blocks 1, 4, 5 and 6 (0x72),
+ *       a torn page; its write-back fails, so every block reads 0xa1. mu,
+ *       the control, has a wb-fail line that never selects: the kept
+ *       blocks read 0xb1, and the page counts as kept and rolled back.
+ *
+ * Planted defects and the check that fails:
+ *   a page with no free line counts as kept   kept-pages of mn
+ *   a marked torn page keeps its kept blocks  blocks 1 and 4 of mt
+ *   a marked torn page counts as kept         kept-pages of mt
+ */
+void femu_test_fsched_cut_media(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "mn", 5, FEMU_LIE_PL, FEMU_CUT_LINE " keep=1000000\n" },
+        { "mk", 6, FEMU_LIE_PL, FEMU_CUT_LINE " keep=1000000\n" },
+        { "mt", 7, FEMU_LIE_PL, FEMU_WBF_SEL " mode=old\n"
+                                FEMU_CUT_LINE " keep=500000 grain=lba "
+                                "seed=4\n" },
+        { "mu", 8, FEMU_LIE_PL, "@write,lba=8-15#9 wb-fail mode=old\n"
+                                FEMU_CUT_LINE " keep=500000 grain=lba "
+                                "seed=4\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool hook = i == 0 || i == 2;
+        FemuCutSum s;
+
+        if (i < 2) {
+            femu_cut_fill(c, buf, 2);
+        } else {
+            femu_lie_page(c, buf, 1, 0xa1, false);
+            femu_power_flush(c, 1);
+            femu_lie_page(c, buf, 1, 0xb1, false);
+        }
+        femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 1);
+        qtest_memset(qts, buf, 0xbf, 4096);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        femu_hang_wait(qts, d[i].id, "x-fault-parked", 1);
+        if (i == 0) {
+            femu_cancel_hook(qts, "mn", "x-place-skip", 1);
+            femu_place_fail_id(qts, "mn", 1);
+        }
+        femu_cancel_hook(qts, d[i].id, "x-fault-bh-hold", 0);
+        femu_cut_back(&d[i]);
+        femu_cut_sum(qts, d[i].id, &s);
+        g_test_message("%s: %s", d[i].id, s.ev);
+        g_assert_cmpint(s.lie, ==, 0);
+        if (i < 2) {
+            femu_lie_page_is(c, buf, 0, 0xb0);
+            femu_lie_page_is(c, buf, 1, hook ? 0xa1 : 0xb1);
+            g_assert_cmpint(s.kept, ==, hook ? 1 : 2);
+            g_assert_cmpint(s.rolled, ==, hook ? 1 : 0);
+            g_assert_cmpstr(s.ev, ==, hook ? "R 8+8|K 0+8" : "K 0+16");
+            g_assert_cmpint(s.boundary, ==, FEMU_CUT_FILL_CQES(2));
+        } else {
+            for (int b = 0; b < 8; b++) {
+                bool kept = !hook && (0x72 >> b & 1);
+
+                femu_power_read(c, buf, 1, 8 + b, kept ? 0xb1 : 0xa1);
+            }
+            g_assert_cmpint(s.kept, ==, hook ? 0 : 1);
+            g_assert_cmpint(s.rolled, ==, 1);
+            g_assert_cmpstr(s.ev, ==, hook ? "R 8+8" :
+                            "R 8+1 10+2 15+1|K 9+1 12+3");
+            g_assert_cmpint(s.boundary, ==, 3);
+        }
+        g_free(s.ev);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * Two namespaces, each with its own FTL and buffer. Page 0 of namespace
+ * 1 holds 0xa0 then 0xb0; page 0 of namespace 2 holds 0xc0 then 0xd0.
+ * The cut rolls back both, and the ranges name each namespace: two
+ * ranges at block 0 that do not merge.
+ *
+ * Planted defects and the check that fails:
+ *   every range names namespace 1            the evidence
+ *   the cut rolls back one namespace only     page 0 of namespace 2
+ */
+#define FEMU_CUT_NS     FEMU_LIE_PL ",namespaces=2,secsz=512,secs_per_pg=8," \
+                        "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1," \
+                        "luns_per_ch=4,nchs=4"
+
+void femu_test_fsched_cut_ns(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "n2", 5, FEMU_CUT_NS, FEMU_CUT_LINE "\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    FemuCtrlState *c = &d[0].c;
+    FemuCutSum s;
+
+    femu_power_write(c, buf, 1, 0, 8, 0xa0, false);
+    femu_power_write(c, buf, 2, 0, 8, 0xc0, false);
+    femu_power_flush(c, 1);
+    femu_power_flush(c, 2);
+    femu_power_write(c, buf, 1, 0, 8, 0xb0, false);
+    femu_power_write(c, buf, 2, 0, 8, 0xd0, false);
+    qtest_memset(qts, buf, 0xbf, 4096);
+    femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+    femu_cut_back(&d[0]);
+    femu_power_read(c, buf, 1, 0, 0xa0);
+    femu_power_read(c, buf, 1, 7, 0xa0);
+    femu_power_read(c, buf, 2, 0, 0xc0);
+    femu_power_read(c, buf, 2, 7, 0xc0);
+    femu_cut_sum(qts, "n2", &s);
+    g_test_message("n2: %s", s.ev);
+    g_assert_cmpint(s.rolled, ==, 2);
+    g_assert_cmpint(s.ranges, ==, 2);
+    g_assert_cmpstr(s.ev, ==, "R 0+8 n2:0+8");
+    g_assert_cmpint(s.boundary, ==, 6);
+    g_free(s.ev);
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * One line cuts twice. A %1000000 line selects each Write of page 125,
+ * keep=500000 seed=4 over 8 buffered pages each time.
+ *   ra: the first cut keeps pages 1, 4, 5 and 6 (0x72), with draws 0 to
+ *       7 of seed 4. The second goes on with draws 8 to 15: pages 2, 3
+ *       and 6 (0x4c).
+ *   rb: the control, a new device with the same line: its first cut is
+ *       0x72 again.
+ *
+ * Planted defects and the check that fails:
+ *   the draw state starts again at each cut  the second cut of ra
+ */
+void femu_test_fsched_cut_again(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    static const char *line =
+        "@write,lba=1000-1007%1000000~1 power-loss keep=500000 seed=4\n";
+    FemuLieDev d[] = {
+        { "ra", 5, FEMU_LIE_PL, line },
+        { "rb", 6, FEMU_LIE_PL, line },
+    };
+    static const struct {
+        uint32_t mask;
+        const char *ev;
+    } want[] = {
+        { 0x72, "R 0+8 16+16 56+8|K 8+8 32+24" },
+        { 0x4c, "R 0+16 32+16 56+8|K 16+16 48+8" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < 3; i++) {
+        FemuLieDev *x = &d[i == 2];
+        FemuCtrlState *c = &x->c;
+        int k = i == 1;
+        FemuCutSum s;
+
+        femu_cut_fill(c, buf, 8);
+        qtest_memset(qts, buf, 0xbf, 4096);
+        femu_hang_submit(c, &c->io, NVME_CMD_WRITE, FEMU_CUT_PAGE, buf);
+        femu_cut_back(x);
+        for (int p = 0; p < 8; p++) {
+            bool kept = want[k].mask >> p & 1;
+
+            femu_lie_page_is(c, buf, p, (kept ? 0xb0 : 0xa0) + p);
+        }
+        femu_cut_sum(qts, x->id, &s);
+        g_test_message("%s cut %d: %s", x->id, s.cuts, s.ev);
+        g_assert_cmpint(s.cuts, ==, i == 1 ? 2 : 1);
+        g_assert_cmpint(s.kept, ==, __builtin_popcount(want[k].mask));
+        g_assert_cmpstr(s.ev, ==, want[k].ev);
+        g_free(s.ev);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * A power cut with no command line behind it. Page 0 is buffered (0xb0
+ * over 0xa0) on each device.
+ *   ot: a time line at 600000 ms, run with x-events-now, cuts. A command
+ *       line that never selects makes the ring: the cut writes a summary
+ *       (sched-time, line 2, no "at") and its evidence, "R 0+8".
+ *   oq: QMP simulate-power-loss: the same records, qmp and line 0.
+ *   ox: only the time line, no command line: no ring, so no records.
+ *   on: no events_file: the cut works, and query-femu-events fails.
+ *
+ * Planted defects and the check that fails:
+ *   a time or QMP cut writes no records      the records of ot and oq
+ *   the records name the wrong origin        the records of ot and oq
+ *   a cut with no ring writes records        the crash on ox or on
+ */
+void femu_test_fsched_cut_origin(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cut-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "ot", 5, FEMU_LIE_PL, "@write#999 hang\n600000 power-loss\n" },
+        { "oq", 6, FEMU_LIE_PL, "@write#999 hang\n" },
+        { "ox", 7, FEMU_LIE_PL, "600000 power-loss\n" },
+        { "on", 8, FEMU_LIE_PL, NULL },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        bool timed = i == 0 || i == 2;
+        QDict *rsp;
+
+        femu_cut_one(c, buf);
+        if (timed) {
+            femu_cancel_hook(qts, d[i].id, "x-events-now", 600000);
+            femu_cut_back(&d[i]);
+        } else {
+            femu_lie_cut(&d[i]);
+        }
+        femu_lie_page_is(c, buf, 0, 0xa0);
+        if (i < 2) {
+            const char *org = timed ? "sched-time" : "qmp";
+            int line = timed ? 2 : 0;
+            g_autofree char *want = g_strdup_printf(
+                "1<0 l%d m0 power-loss apply done c0 o0 f0 0+0 @%s; "
+                "2<1 l%d m0 power-loss evidence done c0 o0 f0 0+0 @%s",
+                line, org, line, org);
+            FemuCutSum s;
+
+            femu_lie_want(qts, d[i].id, want);
+            femu_cut_sum(qts, d[i].id, &s);
+            g_assert_cmpint(s.rolled, ==, 1);
+            g_assert_cmpint(s.kept, ==, 0);
+            g_assert_cmpint(s.boundary, ==, 3);
+            g_assert_false(s.trunc);
+            g_assert_cmpstr(s.ev, ==, "R 0+8");
+            g_free(s.ev);
+            continue;
+        }
+        if (i == 2) {
+            g_assert_false(qdict_haskey(femu_events_q(qts, "ox", &rsp),
+                                        "faults"));
+            qobject_unref(rsp);
+            continue;
+        }
+        rsp = qtest_qmp(qts, "{'execute':'query-femu-events','arguments':{"
+                        "'path':'/machine/peripheral/on'}}");
+        g_assert_true(qdict_haskey(rsp, "error"));
+        qobject_unref(rsp);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
 }

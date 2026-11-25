@@ -26,9 +26,12 @@
 #ifndef FEMU_FREC_H
 #define FEMU_FREC_H
 
+#include "femu-fsched.h"
+
 #define FEMU_FR_SLOTS_MIN       1u
 #define FEMU_FR_SLOTS_MAX       65536u
 #define FEMU_FR_SLOTS_DEF       4096u
+#define FEMU_FR_INFO_MAX        4096u   /* records one query gives */
 #define FEMU_FR_DROP_RANGES     16      /* dropped id ranges kept */
 #define FEMU_FR_REC_MAX         256     /* bytes of one record, at most */
 #define FEMU_FR_JSON_MAX        1024    /* bytes of one events_log line */
@@ -36,6 +39,8 @@
 /* who made a record */
 enum {
     FEMU_FR_ORIGIN_SCHED_CMD = 1,       /* a command line of events_file */
+    FEMU_FR_ORIGIN_SCHED_TIME,          /* a time line: a power cut */
+    FEMU_FR_ORIGIN_QMP,                 /* simulate-power-loss */
 };
 
 /* the step of a fault a record tells of */
@@ -45,7 +50,8 @@ enum {
     FEMU_FR_PHASE_FAIL,                 /* wb-fail: a write-back met a mark */
     FEMU_FR_PHASE_REPORT,               /* wb-fail: a completion reports it */
     FEMU_FR_PHASE_SUPERSEDE,            /* wb-fail: a full rewrite cleared it */
-    FEMU_FR_PHASE_RECLAIM,              /* hang, cfs: the command went back */
+    FEMU_FR_PHASE_RECLAIM,              /* a held command went back */
+    FEMU_FR_PHASE_EVIDENCE,             /* power-loss: one chunk of ranges */
 };
 
 /* what came of the selection */
@@ -103,11 +109,31 @@ typedef struct FemuFrRec {
     uint32_t pages;
     uint16_t fslot;             /* wb-fail: the fault slot, from 1 */
     uint16_t lost;              /* wb-fail fail: the blocks it lost */
-    /*
-     * wb-fail fail: bit i for block slba + i that the failure lost. It
-     * holds the first 64 blocks of the page; lost counts them all.
-     */
-    uint64_t lba_mask;
+    union {
+        /*
+         * wb-fail fail: bit i for block slba + i that the failure lost.
+         * It holds the first 64 blocks of the page; lost counts them all.
+         */
+        uint64_t lba_mask;
+        /* power-loss apply: the cut summary */
+        struct {
+            uint64_t cqe_boundary;      /* I/O CQEs posted at the fence */
+            uint64_t ranges;
+            uint32_t kept_pages;
+            uint32_t rolled_back_pages;
+            uint32_t rolled_back_lie_pages;
+            uint8_t chunks;
+            bool truncated;
+        } cut;
+        /* power-loss evidence: one chunk, its cause the summary */
+        struct {
+            uint8_t idx;                /* from 0 */
+            uint8_t total;              /* the chunks of the cut */
+            uint8_t kind;               /* FEMU_FS_KIND_* */
+            uint8_t nr;                 /* ranges in @r */
+            FemuFsRange r[FEMU_FS_CUT_RANGES];
+        } chunk;
+    };
 } FemuFrRec;
 
 _Static_assert(sizeof(FemuFrRec) <= FEMU_FR_REC_MAX,
@@ -117,7 +143,7 @@ _Static_assert(sizeof(FemuFrRec) % sizeof(uint64_t) == 0,
 
 #define FEMU_FR_WORDS   (sizeof(FemuFrRec) / sizeof(uint64_t))
 
-/* 88 bytes: the record as atomic words, and its sequence word */
+/* 216 bytes: the record as atomic words, and its sequence word */
 typedef struct FemuFrSlot {
     uint64_t seq;               /* 2k+1 while record k is written, then 2k+2 */
     uint64_t w[FEMU_FR_WORDS];
@@ -254,6 +280,12 @@ const char *femu_fr_name_found(uint8_t v);
  * @v: the value, not FEMU_FS_WHY_NONE
  */
 const char *femu_fr_name_why(uint8_t v);
+
+/**
+ * femu_fr_name_kind - the name of a FEMU_FS_KIND_* value of cut evidence
+ * @v: the value
+ */
+const char *femu_fr_name_kind(uint8_t v);
 
 /**
  * femu_fr_json - one record as a JSON line for events_log

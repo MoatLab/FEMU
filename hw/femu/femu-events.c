@@ -21,11 +21,12 @@
  * The FTL thread matches each command against those lines after the first
  * enable. A selection moves the counters of its line, which x-fault-sel
  * reports, and writes one record per line it concerns to the fault record
- * ring (femu-frec.c). flush-lie, fua-lie, wb-fail, hang and cfs have an
- * effect so far: after the FTL runs their command, an apply record tells
- * what came of it. A wb-fail mark fails at a later write-back, and a
- * later completion reports it (see "wb-fail" below). A hang or a cfs
- * holds its command with no CQE (see "hang and cfs" below).
+ * ring (femu-frec.c). flush-lie, fua-lie, wb-fail, hang, cfs and
+ * power-loss have an effect so far: an apply record tells what came of
+ * each. A wb-fail mark fails at a later write-back, and a later
+ * completion reports it (see "wb-fail" below). A hang, a cfs or a
+ * power-loss holds its command with no CQE (see "hang, cfs and
+ * power-loss" below). Every power cut writes a cut summary.
  *
  *   FTL thread: step++, match --> femu_fr_put() per line --> FTL call
  *               --> post: lie or wb-fail apply, wb-fail report
@@ -57,6 +58,8 @@
 #define FEMU_EVENTS_MAX_LINES   1024    /* lines of the file, and events */
 #define FEMU_EVENTS_MAX_LINE    256
 #define FEMU_EVENTS_MAX_FILE    (64 * KiB)
+/* park_bh runs of one park, about seconds of main loop time, at most */
+#define FEMU_FS_BH_TRIES        1000000u
 /* times below 2^62 ns, so epoch plus a time stays signed */
 #define FEMU_EVENTS_MAX_MS      (INT64_MAX / SCALE_MS / 2)
 
@@ -123,17 +126,23 @@ struct FemuFsched {
     QemuSpin put_lock;
 
     /*
-     * cfs. The FTL thread parks the command and schedules cfs_bh; the
-     * main loop does the rest. gen counts what ends a park: a reclaim of
-     * the parked command and every controller clear. cfs_gen is the gen
+     * cfs and power-loss. The FTL thread parks the command, sets the
+     * fence and schedules park_bh; the main loop does the rest once each
+     * poller acks the fence. gen counts what ends a park: a reclaim of
+     * the parked command and every controller clear. park_gen is the gen
      * of the park the BH serves, 0 for none. The park_* fields keep the
      * command as the line saw it, for its records.
      */
-    bool cfs_sel;               /* FTL thread: a cfs won in this step */
-    QEMUBH *cfs_bh;
+    uint8_t park_sel;           /* FTL thread: the act that won, or _NR */
+    QEMUBH *park_bh;
     uint32_t gen;               /* main loop writes, FTL thread reads */
-    uint32_t cfs_gen;
+    uint32_t park_gen;
     bool bh_held;               /* x-fault-bh-hold kept the BH from running */
+    bool cutting;               /* main loop: the cut of the park runs */
+    uint32_t bh_tries;          /* main loop: park_bh runs for this park */
+    uint8_t cut_origin;         /* main loop: FEMU_FR_ORIGIN_* of the cut */
+    int time_line;              /* main loop: the time line that runs */
+    uint8_t park_act;           /* FEMU_FS_ACT_CFS or _POWER_LOSS */
     int park_line;              /* index into @l */
     uint64_t park_match;
     uint64_t park_cause;        /* id of its select record */
@@ -181,7 +190,7 @@ static __thread uint64_t femu_wbf_cur;
 
 /*
  * Main loop: end the park a cfs BH may still serve. gen is never 0, so
- * a cfs_gen of 0 matches no gen.
+ * a park_gen of 0 matches no gen.
  */
 static void femu_fsched_gen_next(struct FemuFsched *f)
 {
@@ -657,7 +666,7 @@ static void femu_wbf_free(FemuCtrl *n)
     }
 }
 
-static void femu_fsched_cfs_bh(void *opaque);
+static void femu_fsched_park_bh(void *opaque);
 
 static void femu_fsched_free(struct FemuFsched *f)
 {
@@ -669,8 +678,8 @@ static void femu_fsched_free(struct FemuFsched *f)
         if (f->log_fd >= 0) {
             close(f->log_fd);
         }
-        if (f->cfs_bh) {
-            qemu_bh_delete(f->cfs_bh);
+        if (f->park_bh) {
+            qemu_bh_delete(f->park_bh);
         }
         g_free(f->log_error);
         g_free(f->slots);
@@ -835,14 +844,17 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
     femu_fr_init(&f->ring, f->slots, n->events_max_faults, f->log_fd < 0);
     qemu_spin_init(&f->put_lock);
     f->gen = 1;
-    /* no wb-fail line: none of its hooks runs; no cfs line: no BH */
+    /* FEMU_FS_ACT_POWER_LOSS is 0, so 0 cannot mean "no park" */
+    f->park_sel = FEMU_FS_ACT_NR;
+    /* no wb-fail line: none of its hooks runs; no park line: no BH */
     for (int i = 0; i < f->nr; i++) {
         if (f->l[i].act == FEMU_FS_ACT_WB_FAIL && !n->wbf) {
             n->wbf = g_new0(struct FemuWbf, 1);
             qemu_spin_init(&n->wbf->lock);
         }
-        if (f->l[i].act == FEMU_FS_ACT_CFS && !f->cfs_bh) {
-            f->cfs_bh = qemu_bh_new(femu_fsched_cfs_bh, n);
+        if ((f->l[i].act == FEMU_FS_ACT_CFS ||
+             f->l[i].act == FEMU_FS_ACT_POWER_LOSS) && !f->park_bh) {
+            f->park_bh = qemu_bh_new(femu_fsched_park_bh, n);
         }
     }
     n->fsched = f;
@@ -890,7 +902,14 @@ static void femu_events_one(FemuCtrl *n, FemuEvent *ev, int64_t now)
         break;
     }
     case FEMU_EVENT_POWER_LOSS:
+        /* the cut records name this line, not QMP */
+        if (n->fsched) {
+            n->fsched->time_line = ev->line;
+        }
         object_property_set_bool(obj, "simulate-power-loss", true, &err);
+        if (n->fsched) {
+            n->fsched->time_line = 0;
+        }
         break;
     default:
         g_assert_not_reached();
@@ -1064,7 +1083,7 @@ void femu_events_cancel(FemuCtrl *n)
 
     if (n->fsched) {
         qatomic_set(&n->fsched->running, false);
-        /* a cfs BH that is still due finds its park gone */
+        /* a park BH that is still due finds its park gone */
         femu_fsched_gen_next(n->fsched);
     }
     if (s && s->timer) {
@@ -1655,7 +1674,8 @@ void femu_wbf_cut(FemuCtrl *n, bool start)
 
 /*
  * The effect of line @i, which won its group on @req, seen as @v; @id
- * is its select record. The lies, wb-fail, hang and cfs are modelled:
+ * is its select record. The lies, wb-fail, hang, cfs and power-loss are
+ * modelled:
  * each other case names what it will do, and its selection moves the
  * counters alone. Returns true when the FTL step must call
  * femu_fsched_post().
@@ -1689,13 +1709,13 @@ static bool femu_fsched_act(FemuCtrl *n, NvmeRequest *req, int i,
         req->fs_cause = id;
         return false;
     case FEMU_FS_ACT_CFS:
+    case FEMU_FS_ACT_POWER_LOSS:
         /* the request is reused after a reclaim: keep what the line saw */
         f->park_line = i;
         f->park_match = l->matched;
         f->park_cause = id;
         f->park_view = *v;
         return false;
-    case FEMU_FS_ACT_POWER_LOSS:    /* not modelled yet: a cut at pre */
     case FEMU_FS_ACT_WRITE_FAIL:    /* not modelled yet: Write Fault */
     case FEMU_FS_ACT_READ_UNC:      /* not modelled yet: Unrecovered Read */
     case FEMU_FS_ACT_SDC:           /* not modelled yet: sdc override */
@@ -1842,6 +1862,7 @@ static bool femu_fsched_match(FemuCtrl *n, NvmeRequest *req)
     uint32_t xfer_ms = 0;
     uint32_t hold;
     bool lie = false;
+    uint8_t term;
 
     qatomic_set(&f->step, f->step + 1);
     if (!qatomic_read(&f->running)) {
@@ -1910,33 +1931,40 @@ static bool femu_fsched_match(FemuCtrl *n, NvmeRequest *req)
     }
     /*
      * A hang lets the command run, and its poller then holds it. A cfs
-     * parks it before it runs. A power-loss is not modelled yet.
+     * or a power-loss parks it before it runs.
      */
-    switch (femu_fs_terminal(f->l, f->nr, f->out)) {
+    term = femu_fs_terminal(f->l, f->nr, f->out);
+    switch (term) {
     case FEMU_FS_ACT_HANG:
         req->fs_hang = 1;
         break;
     case FEMU_FS_ACT_CFS:
-        f->cfs_sel = true;
+    case FEMU_FS_ACT_POWER_LOSS:
+        f->park_sel = term;
         break;
     }
     return lie;
 }
 
 /*
- * FTL thread: a cfs holds @req before it runs. With power_loss the
- * poller applied no data, so the command changes nothing. The FTL takes
- * no request while one is parked; the BH stops the controller.
+ * FTL thread: a cfs or a power-loss holds @req before it runs. With
+ * power_loss the poller applied no data, so the command changes nothing.
+ * The FTL takes no request while one is parked. The fence stops the CQEs
+ * of the commands before it; the BH stops the controller or cuts power.
  */
-static void femu_fsched_park(FemuCtrl *n, NvmeRequest *req)
+static void femu_fsched_park(FemuCtrl *n, NvmeRequest *req, uint8_t act)
 {
     struct FemuFsched *f = n->fsched;
+    uint32_t g = qatomic_read(&f->gen);
 
     f->park_sqid = req->sq ? req->sq->sqid : 0;
     f->park_cid = le16_to_cpu(req->cmd.cid);
-    qatomic_set(&f->cfs_gen, qatomic_read(&f->gen));
+    f->park_act = act;
+    f->bh_tries = 0;
+    qatomic_set(&f->park_gen, g);
+    qatomic_store_release(&n->fs_fence, g);
     qatomic_store_release(&n->fs_parked, req);
-    qemu_bh_schedule(f->cfs_bh);
+    qemu_bh_schedule(f->park_bh);
 }
 
 /**
@@ -1947,8 +1975,8 @@ static void femu_fsched_park(FemuCtrl *n, NvmeRequest *req)
  * Runs on the FTL thread only. With a wb-fail line every command is a
  * possible drain, so each step gets a stamp and a femu_fsched_post().
  *
- * Returns FEMU_FS_STEP_PARK when a cfs holds @req: the caller runs
- * nothing, and takes no request until the park ends. Returns
+ * Returns FEMU_FS_STEP_PARK when a cfs or a power-loss holds @req: the
+ * caller runs nothing, and takes no request until the park ends. Returns
  * FEMU_FS_STEP_POST when the caller must run femu_fsched_post() right
  * after the FTL call, else FEMU_FS_STEP_RUN.
  */
@@ -1957,10 +1985,12 @@ int femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
     struct FemuFsched *f = n->fsched;
     bool post = femu_fsched_match(n, req);
 
-    if (unlikely(f->cfs_sel)) {
-        f->cfs_sel = false;
+    if (unlikely(f->park_sel != FEMU_FS_ACT_NR)) {
+        uint8_t act = f->park_sel;
+
+        f->park_sel = FEMU_FS_ACT_NR;
         femu_wbf_cur = 0;
-        femu_fsched_park(n, req);
+        femu_fsched_park(n, req, act);
         return FEMU_FS_STEP_PARK;
     }
     if (unlikely(n->wbf)) {
@@ -1972,13 +2002,17 @@ int femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
 }
 
 /*
- * hang and cfs. A hang lets its command run in the FTL, then the poller
- * keeps it on a list of its own in place of the pqueue: no CQE. A cfs
- * parks its command before it runs, and a BH sets CSTS.CFS and leaves
- * the dataplane stopped. Each command goes back on a reclaim.
+ * hang, cfs and power-loss. A hang lets its command run in the FTL, then
+ * the poller keeps it on a list of its own in place of the pqueue: no
+ * CQE. A cfs or a power-loss parks its command before it runs; a BH
+ * then sets CSTS.CFS and leaves the dataplane stopped, or cuts the
+ * power. Each command goes back on a reclaim.
  *
  *   hang: FTL step --> poller: fs_hung[p], apply record, x-fault-hung++
- *   cfs:  FTL step --> fs_parked, cfs_bh --> pause, CSTS.CFS, apply record
+ *   cfs:  FTL step --> fs_parked, fence --> acks --> park_bh --> pause,
+ *         CSTS.CFS, apply record
+ *   power-loss: as cfs to park_bh --> femu_power_cut(): keep=, rollback,
+ *         cut summary and evidence records
  *   reclaim: Delete SQ (its commands), Controller Reset, shutdown, power
  *            cut, unplug (all) --> SQ request list, reclaim record
  *
@@ -2048,7 +2082,7 @@ static FemuFrRec femu_fsched_park_rec(FemuCtrl *n, uint8_t phase,
         .cid = f->park_cid,
         .origin = FEMU_FR_ORIGIN_SCHED_CMD,
         .phase = phase,
-        .act = FEMU_FS_ACT_CFS,
+        .act = f->park_act,
         .outcome = outcome,
         .opc = f->park_view.opc,
         .fua = f->park_view.fua,
@@ -2102,12 +2136,138 @@ static void femu_fsched_hang_ring(FemuCtrl *n, int p, NvmeSQueue *sq)
     }
 }
 
-/* main loop: CSTS.CFS for the parked command, unless its park ended */
-static void femu_fsched_cfs_bh(void *opaque)
+/*
+ * Whether each poller saw fence @g: it acked it, or it is out of its
+ * sweep with the dataplane stopped, so it posts nothing.
+ */
+static bool femu_fsched_fenced(FemuCtrl *n, uint32_t g)
+{
+    for (uint32_t p = 1; n->fs_fence_ack && p <= n->nr_pollers; p++) {
+        if (qatomic_load_acquire(&n->fs_fence_ack[p]) == g) {
+            continue;
+        }
+        if (!qatomic_read(&n->dataplane_started) &&
+            !n->poller_in_sweep[p]) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+/* the I/O CQEs the pollers posted, all of them acked or stopped */
+static uint64_t femu_fsched_cqes(FemuCtrl *n)
+{
+    uint64_t sum = 0;
+
+    for (uint32_t p = 1; n->poller_ctr && p <= n->nr_pollers; p++) {
+        sum += n->poller_ctr[p].nr_fs_cqes;
+    }
+    return sum;
+}
+
+/**
+ * femu_fsched_cut_begin - the evidence of a power cut, if records exist
+ * @n: the controller
+ * @at_cmd: the cut of the parked power-loss command line
+ *
+ * A cut by a power-loss command line takes its keep=, grain= and seed=.
+ * A time line or simulate-power-loss rolls back the whole buffer. The cut
+ * of the park gives the command back with the rest, so that reclaim
+ * writes no record.
+ *
+ * Returns the cut for femu_fsched_cut_end(), or NULL with no command line.
+ */
+struct FemuFsCut *femu_fsched_cut_begin(FemuCtrl *n, bool at_cmd)
+{
+    struct FemuFsched *f = n->fsched;
+    FemuFsCut *cut;
+
+    if (!f) {
+        return NULL;
+    }
+    cut = g_new0(FemuFsCut, 1);
+    if (at_cmd) {
+        FemuFsLine *l = &f->l[f->park_line];
+
+        cut->keep = l->keep;
+        cut->grain = l->grain;
+        cut->rng = &l->keep_rng;
+        f->cutting = true;
+        f->cut_origin = FEMU_FR_ORIGIN_SCHED_CMD;
+    } else {
+        f->cut_origin = f->time_line ? FEMU_FR_ORIGIN_SCHED_TIME :
+                                       FEMU_FR_ORIGIN_QMP;
+    }
+    return cut;
+}
+
+/**
+ * femu_fsched_cut_end - write the records of a cut
+ * @n: the controller, its pollers stopped by the cut
+ * @cut: from femu_fsched_cut_begin(); NULL does nothing
+ *
+ * The apply record is the cut summary; the chunk records that follow
+ * name it as their cause. Each origin writes the same fields.
+ */
+void femu_fsched_cut_end(FemuCtrl *n, struct FemuFsCut *cut)
+{
+    struct FemuFsched *f = n->fsched;
+    FemuFrRec rec;
+    uint64_t id;
+    uint32_t nch;
+    bool trunc;
+
+    if (!cut) {
+        return;
+    }
+    if (f->cut_origin == FEMU_FR_ORIGIN_SCHED_CMD) {
+        rec = femu_fsched_park_rec(n, FEMU_FR_PHASE_APPLY, FEMU_FR_OUT_DONE);
+    } else {
+        rec = (FemuFrRec) {
+            .step = qatomic_read(&f->step),
+            .line = f->time_line,
+            .origin = f->cut_origin,
+            .phase = FEMU_FR_PHASE_APPLY,
+            .act = FEMU_FS_ACT_POWER_LOSS,
+            .outcome = FEMU_FR_OUT_DONE,
+        };
+    }
+    f->cutting = false;
+    /* the pollers stay stopped until the next enable: the count is exact */
+    rec.cut.cqe_boundary = femu_fsched_cqes(n);
+    nch = femu_fs_cut_end(cut, &trunc);
+    rec.cut.ranges = cut->ranges;
+    rec.cut.kept_pages = cut->kept_pages;
+    rec.cut.rolled_back_pages = cut->rolled_back_pages;
+    rec.cut.rolled_back_lie_pages = cut->rolled_back_lie_pages;
+    rec.cut.chunks = nch;
+    rec.cut.truncated = trunc;
+    id = femu_fsched_put(n, &rec);
+    for (uint32_t i = 0; i < nch; i++) {
+        FemuFrRec c = rec;
+
+        memset(&c.chunk, 0, sizeof(c.chunk));
+        c.cause = id;
+        c.phase = FEMU_FR_PHASE_EVIDENCE;
+        c.chunk.idx = i;
+        c.chunk.total = nch;
+        c.chunk.nr = femu_fs_cut_chunk(cut, i, c.chunk.r);
+        c.chunk.kind = c.chunk.r[0].kind;
+        femu_fsched_put(n, &c);
+    }
+}
+
+/*
+ * main loop: the effect of the parked command, unless its park ended.
+ * It waits for each poller to ack the fence, so no CQE after the park
+ * reaches the host; then a cfs sets CSTS.CFS, a power-loss cuts power.
+ */
+static void femu_fsched_park_bh(void *opaque)
 {
     FemuCtrl *n = opaque;
     struct FemuFsched *f = n->fsched;
-    uint32_t g = qatomic_read(&f->cfs_gen);
+    uint32_t g = qatomic_read(&f->park_gen);
     FemuFrRec rec;
 
     if (qatomic_read(&n->test_fs_bh_hold)) {
@@ -2118,7 +2278,26 @@ static void femu_fsched_cfs_bh(void *opaque)
     if (!g || g != qatomic_read(&f->gen)) {
         return;
     }
-    qatomic_set(&f->cfs_gen, 0);
+    /*
+     * A poller in its pass acks within the pass: never wait under the
+     * BQL. A poller that never acks ends the tries; the park then waits
+     * for a reclaim, such as the host's Controller Reset.
+     */
+    if (!femu_fsched_fenced(n, g)) {
+        if (++f->bh_tries < FEMU_FS_BH_TRIES) {
+            qemu_bh_schedule(f->park_bh);
+        } else {
+            warn_report("femu: events_file line %d: a poller did not see "
+                        "the fence; the park waits for a reset",
+                        f->l[f->park_line].line);
+        }
+        return;
+    }
+    qatomic_set(&f->park_gen, 0);
+    if (f->park_act == FEMU_FS_ACT_POWER_LOSS) {
+        femu_power_cut(n, true);
+        return;
+    }
     /*
      * The controller stops here, and nothing resumes it: a Controller
      * Reset clears the state, and the next enable starts the dataplane.
@@ -2135,14 +2314,17 @@ static void femu_fsched_cfs_bh(void *opaque)
 }
 
 /**
- * femu_fsched_reclaim - give back the commands a hang or a cfs holds
+ * femu_fsched_reclaim - give back the commands a hang, cfs or power-loss
+ * holds
  * @n: the controller, with its dataplane paused or its threads stopped
  * @sq: only the commands of this queue; NULL for all, a controller clear
  * @why: the path, a FEMU_FS_WHY_* reclaim reason
  *
  * Each command goes back to its SQ request list with no CQE and writes a
  * reclaim record. A controller clear also ends the CSTS.CFS of a cfs,
- * and with a reclaimed park it makes a pending cfs BH a no-op.
+ * and with a reclaimed park it makes a pending park BH a no-op. Both
+ * lift the fence. The cut of a power-loss gives its own park back with
+ * no record: the cut summary tells of it.
  */
 void femu_fsched_reclaim(FemuCtrl *n, NvmeSQueue *sq, uint8_t why)
 {
@@ -2159,15 +2341,19 @@ void femu_fsched_reclaim(FemuCtrl *n, NvmeSQueue *sq, uint8_t why)
         nvme_eol_release(req);
         g_clear_pointer(&req->write_data, g_free);
         QTAILQ_INSERT_TAIL(&req->sq->req_list, req, entry);
-        rec = femu_fsched_park_rec(n, FEMU_FR_PHASE_RECLAIM,
-                                   FEMU_FR_OUT_RECLAIMED);
-        rec.why = why;
-        femu_fsched_put(n, &rec);
+        if (!f->cutting) {
+            rec = femu_fsched_park_rec(n, FEMU_FR_PHASE_RECLAIM,
+                                       FEMU_FR_OUT_RECLAIMED);
+            rec.why = why;
+            femu_fsched_put(n, &rec);
+        }
         femu_fsched_gen_next(f);
+        qatomic_store_release(&n->fs_fence, 0);
     }
     if (!sq) {
         n->fs_cfs = false;
         femu_fsched_gen_next(f);
+        qatomic_store_release(&n->fs_fence, 0);
     }
     for (int p = 1; n->fs_hung && p <= (int)n->nr_pollers; p++) {
         femu_fsched_hang_ring(n, p, sq);
@@ -2304,7 +2490,7 @@ static void femu_fsched_test_log_hold_set(Object *obj, Visitor *v,
 }
 
 /*
- * x-fault-bh-hold (qtest): while set, a cfs BH that runs does nothing
+ * x-fault-bh-hold (qtest): while set, a park BH that runs does nothing
  * but note it. Clearing it schedules the BH again, so a test can put a
  * reset or a queue deletion between the park and the BH.
  */
@@ -2328,18 +2514,19 @@ static void femu_fsched_test_bh_hold_set(Object *obj, Visitor *v,
     if (!visit_type_uint32(v, name, &hold, errp)) {
         return;
     }
-    if (!f || !f->cfs_bh) {
-        error_setg(errp, "x-fault-bh-hold needs a cfs line in events_file");
+    if (!f || !f->park_bh) {
+        error_setg(errp, "x-fault-bh-hold needs a cfs or power-loss line "
+                   "in events_file");
         return;
     }
     qatomic_set(&n->test_fs_bh_hold, hold);
     if (!hold && f->bh_held) {
         f->bh_held = false;
-        qemu_bh_schedule(f->cfs_bh);
+        qemu_bh_schedule(f->park_bh);
     }
 }
 
-/* x-fault-parked (qtest): true while a cfs holds a command */
+/* x-fault-parked (qtest): true while a cfs or a power-loss holds one */
 static bool femu_fsched_test_parked(Object *obj, Error **errp)
 {
     return qatomic_read(&FEMU(obj)->fs_parked) != NULL;
@@ -2380,15 +2567,65 @@ void femu_events_add_test_props(Object *obj)
                         femu_fsched_test_bh_hold_set, NULL, NULL);
 }
 
-/* the fault records and their counters, for query-femu-events */
+/* the fields of a power-loss record: a cut summary or one chunk */
+static void femu_fsched_info_cut(const FemuFrRec *r, FemuFaultRecord *e)
+{
+    FemuCutRangeList **tail = &e->r;
+
+    if (r->phase == FEMU_FR_PHASE_APPLY && r->outcome == FEMU_FR_OUT_DONE) {
+        if (r->origin == FEMU_FR_ORIGIN_SCHED_CMD) {
+            e->at = g_strdup("pre");
+        }
+        e->has_rolled_back_pages = true;
+        e->rolled_back_pages = r->cut.rolled_back_pages;
+        e->has_rolled_back_lie_pages = true;
+        e->rolled_back_lie_pages = r->cut.rolled_back_lie_pages;
+        e->has_kept_pages = true;
+        e->kept_pages = r->cut.kept_pages;
+        e->has_ranges = true;
+        e->ranges = r->cut.ranges;
+        e->has_chunks = true;
+        e->chunks = r->cut.chunks;
+        e->has_truncated = true;
+        e->truncated = r->cut.truncated;
+        e->has_cqe_publish_boundary = true;
+        e->cqe_publish_boundary = r->cut.cqe_boundary;
+        return;
+    }
+    if (r->phase != FEMU_FR_PHASE_EVIDENCE) {
+        return;
+    }
+    e->has_chunk = true;
+    e->chunk = r->chunk.idx;
+    e->has_chunks = true;
+    e->chunks = r->chunk.total;
+    e->kind = g_strdup(femu_fr_name_kind(r->chunk.kind));
+    /* the generated visitor writes an optional list only with has_r */
+    e->has_r = true;
+    for (uint32_t i = 0; i < r->chunk.nr && i < FEMU_FS_CUT_RANGES; i++) {
+        FemuCutRange *c = g_new0(FemuCutRange, 1);
+
+        c->nsid = r->chunk.r[i].nsid;
+        c->slba = r->chunk.r[i].slba;
+        c->nlb = r->chunk.r[i].nlb;
+        QAPI_LIST_APPEND(tail, c);
+    }
+}
+
+/*
+ * The fault records and their counters, for query-femu-events. A query
+ * copies at most the newest FEMU_FR_INFO_MAX records, so one query costs
+ * at most 832 KiB however large the ring is.
+ */
 static void femu_fsched_info(FemuCtrl *n, FemuEvents *info)
 {
     struct FemuFsched *f = n->fsched;
-    g_autofree FemuFrRec *rec = g_new(FemuFrRec, f->ring.size);
+    uint32_t max = MIN(f->ring.size, FEMU_FR_INFO_MAX);
+    g_autofree FemuFrRec *rec = g_new(FemuFrRec, max);
     FemuFrIdRange drop[FEMU_FR_DROP_RANGES];
     FemuFaultRecordList **tail = &info->faults;
     FemuIdRangeList **dtail = &info->dropped_ids;
-    uint32_t nr = femu_fr_read(&f->ring, rec, f->ring.size);
+    uint32_t nr = femu_fr_read(&f->ring, rec, max);
     uint32_t nd = femu_fr_dropped_ids(&f->ring, drop);
 
     info->has_step = true;
@@ -2456,6 +2693,9 @@ static void femu_fsched_info(FemuCtrl *n, FemuEvents *info)
             if (r->found) {
                 e->found = g_strdup(femu_fr_name_found(r->found));
             }
+        }
+        if (r->act == FEMU_FS_ACT_POWER_LOSS) {
+            femu_fsched_info_cut(r, e);
         }
         QAPI_LIST_APPEND(tail, e);
     }

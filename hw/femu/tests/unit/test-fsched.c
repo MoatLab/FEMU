@@ -287,6 +287,12 @@ static void test_device(void)
     x = d;
     x.fdp = true;
     refused(&x, "@write#1 wb-fail", "not supported with FDP");
+    /* the FDP destage could program a page the draw rolled back */
+    refused(&x, "@any#1 power-loss keep=1", "keep= is not supported with FDP");
+    accepted(&x, "@any#1 power-loss keep=0 seed=3");
+    accepted(&x, "@any#1 power-loss");
+    x.fdp = false;
+    accepted(&x, "@any#1 power-loss keep=1");
 
     x = d;
     x.awupf_lbas = 2;
@@ -1304,7 +1310,7 @@ static void test_wb_json(void)
     FemuFrRec x = rec_of(5);
     char buf[FEMU_FR_JSON_MAX];
 
-    CHECK(sizeof(FemuFrRec) == 80 && sizeof(FemuFrSlot) == 88);
+    CHECK(sizeof(FemuFrRec) == 208 && sizeof(FemuFrSlot) == 216);
     x.act = FEMU_FS_ACT_WB_FAIL;
     x.phase = FEMU_FR_PHASE_APPLY;
     x.outcome = FEMU_FR_OUT_MARKED;
@@ -1509,6 +1515,355 @@ static void test_run(void)
     CHECK(r.epoch == 930);
 }
 
+/* the keep mask of 8 pages (grain=page) or 8 blocks (grain=lba) */
+static uint32_t cut_mask(uint8_t grain, uint32_t keep, uint64_t seed)
+{
+    uint64_t rng = seed;
+    FemuFsCut c = { .keep = keep, .grain = grain, .rng = &rng };
+    uint8_t k[8];
+    uint32_t mask = 0;
+
+    if (grain == FEMU_FS_GRAIN_LBA) {
+        CHECK(femu_fs_cut_draw(&c, k, 8) == (uint32_t)__builtin_popcount(
+                  cut_mask(FEMU_FS_GRAIN_PAGE, keep, seed)));
+        for (int i = 0; i < 8; i++) {
+            mask |= (uint32_t)k[i] << i;
+        }
+        return mask;
+    }
+    for (int i = 0; i < 8; i++) {
+        femu_fs_cut_draw(&c, k, 1);
+        mask |= (uint32_t)k[0] << i;
+    }
+    return mask;
+}
+
+/*
+ * keep=PPM draws. Seed 4 with keep=500000 keeps pages 1, 4, 5 and 6 of
+ * 8: 0x72, whose reverse is 0x4e, so a reversed draw order fails. Seed 3
+ * gives 0x4b. grain=lba gives the same mask over the blocks of one page,
+ * and grain=page gives one draw for each page, the same for its blocks.
+ * The ends use the seeds whose first draw is 0 and 999999.
+ */
+static void test_cut_draw(void)
+{
+    uint64_t rng;
+    FemuFsCut c = { .rng = &rng };
+    uint8_t k[8];
+
+    CHECK(cut_mask(FEMU_FS_GRAIN_PAGE, 500000, 4) == 0x72);
+    CHECK(cut_mask(FEMU_FS_GRAIN_PAGE, 500000, 4) == 0x72);
+    CHECK(cut_mask(FEMU_FS_GRAIN_PAGE, 500000, 3) == 0x4b);
+    CHECK(cut_mask(FEMU_FS_GRAIN_LBA, 500000, 4) == 0x72);
+    CHECK(cut_mask(FEMU_FS_GRAIN_PAGE, 0, 4) == 0);
+    CHECK(cut_mask(FEMU_FS_GRAIN_PAGE, FEMU_FS_PPM_ONE, 4) == 0xff);
+
+    /* grain=page: one draw, its fate for every block */
+    rng = 4;
+    c.keep = 500000;
+    c.grain = FEMU_FS_GRAIN_PAGE;
+    CHECK(femu_fs_cut_draw(&c, k, 8) == 0);
+    CHECK(femu_fs_cut_draw(&c, k, 8) == 8);
+    CHECK(k[0] && k[7]);
+    /* the state moves on by one draw a page */
+    rng = 4;
+    femu_fs_cut_draw(&c, k, 8);
+    femu_fs_cut_draw(&c, k, 8);
+    CHECK(femu_fs_cut_draw(&c, k, 4) == 0);
+
+    /* the ends: draw 0 and 999999 */
+    c.grain = FEMU_FS_GRAIN_PAGE;
+    rng = SEED_ZERO;
+    c.keep = 1;
+    CHECK(femu_fs_cut_draw(&c, k, 1) == 1);
+    rng = SEED_ZERO;
+    c.keep = 0;
+    CHECK(femu_fs_cut_draw(&c, k, 1) == 0);
+    rng = SEED_TOP;
+    c.keep = 999999;
+    CHECK(femu_fs_cut_draw(&c, k, 1) == 0);
+    rng = SEED_TOP;
+    c.keep = FEMU_FS_PPM_ONE;
+    CHECK(femu_fs_cut_draw(&c, k, 1) == 1);
+
+    /* a time line or QMP cut: no draw state, nothing kept at any keep */
+    c.rng = NULL;
+    c.grain = FEMU_FS_GRAIN_LBA;
+    memset(k, 1, sizeof(k));
+    CHECK(femu_fs_cut_draw(&c, k, 8) == 0);
+    CHECK(!k[0] && !k[7]);
+}
+
+/* range @i of chunk @ch is @nsid, @slba, @nlb */
+static bool cut_is(const FemuFsCut *c, uint32_t ch, uint32_t i, uint16_t nsid,
+                   uint64_t slba, uint32_t nlb, uint8_t kind)
+{
+    FemuFsRange r[FEMU_FS_CUT_RANGES];
+    uint32_t nr = femu_fs_cut_chunk(c, ch, r);
+
+    return i < nr && r[i].nsid == nsid && r[i].slba == slba &&
+           r[i].nlb == nlb && r[i].kind == kind;
+}
+
+/*
+ * The evidence of a cut. Pages of 8 blocks in buffer order:
+ *   0 K, 8 R, 16 K, 24 R, 32 K: kept 0+8, 16+8, 32+8; rolled 8+8, 24+8
+ *   40 K, 48 K in a row: one kept range 40+16
+ *   ns 2 page 56 K, a lie: no merge with ns 1, and no lie lost
+ *   page 64 with blocks 11001000b kept, lie: kept 64+2, 67+1 ... as runs
+ * Rolled-back chunks come first, each chunk one kind, and the ranges of
+ * a kind go by (nsid, slba).
+ */
+static void test_cut_ranges(void)
+{
+    static const uint8_t mixed[8] = { 1, 1, 0, 0, 1, 0, 0, 0 };
+    static const uint8_t all[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+    FemuFsCut *c = calloc(1, sizeof(*c));
+    FemuFsRange r[FEMU_FS_CUT_RANGES];
+    bool trunc = true;
+
+    for (int p = 0; p < 7; p++) {
+        bool kept = !(p & 1) || p > 4;
+
+        femu_fs_cut_page(c, 1, p * 8, kept ? all : NULL, 8, p == 3);
+    }
+    /* a lie page kept whole is no lie page rolled back */
+    femu_fs_cut_page(c, 2, 56, all, 8, true);
+    femu_fs_cut_page(c, 1, 64, mixed, 8, true);
+    CHECK(femu_fs_cut_end(c, &trunc) == 2);
+    CHECK(!trunc);
+    CHECK(c->kept_pages == 7 && c->rolled_back_pages == 3);
+    CHECK(c->rolled_back_lie_pages == 2);
+    /* rolled back: 8+8, 24+8, 66+2, 69+3 */
+    CHECK(c->ranges == 4 + 6);
+    CHECK(femu_fs_cut_chunk(c, 0, r) == 4);
+    CHECK(cut_is(c, 0, 0, 1, 8, 8, FEMU_FS_KIND_ROLLED_BACK));
+    CHECK(cut_is(c, 0, 1, 1, 24, 8, FEMU_FS_KIND_ROLLED_BACK));
+    CHECK(cut_is(c, 0, 2, 1, 66, 2, FEMU_FS_KIND_ROLLED_BACK));
+    CHECK(cut_is(c, 0, 3, 1, 69, 3, FEMU_FS_KIND_ROLLED_BACK));
+    /* kept: 0+8, 16+8, 32+24 (32, 40, 48), 64+2, 68+1, then ns 2 56+8 */
+    CHECK(femu_fs_cut_chunk(c, 1, r) == 6);
+    CHECK(cut_is(c, 1, 0, 1, 0, 8, FEMU_FS_KIND_KEPT));
+    CHECK(cut_is(c, 1, 1, 1, 16, 8, FEMU_FS_KIND_KEPT));
+    CHECK(cut_is(c, 1, 2, 1, 32, 24, FEMU_FS_KIND_KEPT));
+    CHECK(cut_is(c, 1, 3, 1, 64, 2, FEMU_FS_KIND_KEPT));
+    CHECK(cut_is(c, 1, 4, 1, 68, 1, FEMU_FS_KIND_KEPT));
+    CHECK(cut_is(c, 1, 5, 2, 56, 8, FEMU_FS_KIND_KEPT));
+    CHECK(femu_fs_cut_chunk(c, 2, r) == 0);
+    free(c);
+}
+
+/*
+ * Truncation. 64 ranges of one kind fill 8 chunks; a 65th sets
+ * truncated and is counted, not stored. 1 rolled-back range and 57 kept
+ * ones want 9 chunks: the last kept ones are cut off.
+ */
+static void test_cut_truncate(void)
+{
+    FemuFsCut *c = calloc(1, sizeof(*c));
+    FemuFsRange r[FEMU_FS_CUT_RANGES];
+    bool trunc;
+
+    for (int i = 0; i < FEMU_FS_CUT_MAX; i++) {
+        femu_fs_cut_page(c, 1, i * 16, NULL, 8, false);
+    }
+    CHECK(femu_fs_cut_end(c, &trunc) == FEMU_FS_CUT_CHUNKS);
+    CHECK(!trunc && c->ranges == FEMU_FS_CUT_MAX);
+    CHECK(femu_fs_cut_chunk(c, 7, r) == FEMU_FS_CUT_RANGES);
+    CHECK(r[7].slba == 63 * 16);
+
+    memset(c, 0, sizeof(*c));
+    for (int i = 0; i <= FEMU_FS_CUT_MAX; i++) {
+        femu_fs_cut_page(c, 1, i * 16, NULL, 8, false);
+    }
+    CHECK(femu_fs_cut_end(c, &trunc) == FEMU_FS_CUT_CHUNKS);
+    CHECK(trunc && c->ranges == FEMU_FS_CUT_MAX + 1 && c->dropped == 1);
+    CHECK(c->nr[FEMU_FS_KIND_ROLLED_BACK] == FEMU_FS_CUT_MAX);
+    CHECK(c->nr[FEMU_FS_KIND_KEPT] == 0);
+    CHECK(c->rolled_back_pages == FEMU_FS_CUT_MAX + 1);
+    CHECK(femu_fs_cut_chunk(c, 7, r) == FEMU_FS_CUT_RANGES);
+    CHECK(r[7].slba == 63 * 16);
+
+    memset(c, 0, sizeof(*c));
+    femu_fs_cut_page(c, 1, 0, NULL, 8, false);
+    for (int i = 1; i <= 57; i++) {
+        static const uint8_t all[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+
+        femu_fs_cut_page(c, 1, i * 16, all, 8, false);
+    }
+    CHECK(femu_fs_cut_end(c, &trunc) == FEMU_FS_CUT_CHUNKS);
+    CHECK(trunc && c->ranges == 58);
+    CHECK(femu_fs_cut_chunk(c, 0, r) == 1 &&
+          r[0].kind == FEMU_FS_KIND_ROLLED_BACK);
+    CHECK(femu_fs_cut_chunk(c, 7, r) == FEMU_FS_CUT_RANGES &&
+          r[0].kind == FEMU_FS_KIND_KEPT && r[0].slba == 49 * 16);
+
+    /* durable_at_done gave back pages the ranges miss: not whole */
+    memset(c, 0, sizeof(*c));
+    femu_fs_cut_page(c, 1, 0, NULL, 8, false);
+    CHECK(femu_fs_cut_end(c, &trunc) == 1 && !trunc);
+    memset(c, 0, sizeof(*c));
+    femu_fs_cut_page(c, 1, 0, NULL, 8, false);
+    c->partial = true;
+    CHECK(femu_fs_cut_end(c, &trunc) == 1 && trunc);
+    free(c);
+}
+
+/*
+ * Merges at the cut. Pages leave the buffer interleaved, so touching
+ * pages of one extent arrive apart, as in a QMP cut of two files:
+ *   1000+8, 100000+32, 1008+8, 100032+32, ...   40 of each, 80 ranges
+ * The store fills at 64, merges to 2, and keeps the rest: 2 ranges.
+ */
+static void test_cut_merge(void)
+{
+    static const uint8_t all[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
+    FemuFsCut *c = calloc(1, sizeof(*c));
+    bool trunc;
+
+    for (int i = 0; i < 40; i++) {
+        femu_fs_cut_page(c, 1, 1000 + i * 8, NULL, 8, true);
+        femu_fs_cut_page(c, 1, 100000 + i * 32, NULL, 32, true);
+    }
+    CHECK(c->nr[FEMU_FS_KIND_ROLLED_BACK] < FEMU_FS_CUT_MAX);
+    CHECK(femu_fs_cut_end(c, &trunc) == 1 && !trunc);
+    CHECK(c->ranges == 2 && !c->dropped);
+    CHECK(c->rolled_back_lie_pages == 80);
+    CHECK(cut_is(c, 0, 0, 1, 1000, 320, FEMU_FS_KIND_ROLLED_BACK));
+    CHECK(cut_is(c, 0, 1, 1, 100000, 1280, FEMU_FS_KIND_ROLLED_BACK));
+
+    /* overlap and a range inside another: one range, the union */
+    memset(c, 0, sizeof(*c));
+    femu_fs_cut_page(c, 1, 0, NULL, 8, false);
+    femu_fs_cut_page(c, 1, 4, NULL, 8, false);
+    femu_fs_cut_page(c, 1, 2, NULL, 2, false);
+    CHECK(femu_fs_cut_end(c, &trunc) == 1 && !trunc && c->ranges == 1);
+    CHECK(cut_is(c, 0, 0, 1, 0, 12, FEMU_FS_KIND_ROLLED_BACK));
+
+    /* ns 1 0+8 touches ns 2 8+8 by block, never by namespace */
+    memset(c, 0, sizeof(*c));
+    femu_fs_cut_page(c, 2, 8, NULL, 8, false);
+    femu_fs_cut_page(c, 1, 0, NULL, 8, false);
+    femu_fs_cut_page(c, 2, 0, NULL, 8, false);
+    CHECK(femu_fs_cut_end(c, &trunc) == 1 && c->ranges == 2);
+    CHECK(cut_is(c, 0, 0, 1, 0, 8, FEMU_FS_KIND_ROLLED_BACK));
+    CHECK(cut_is(c, 0, 1, 2, 0, 16, FEMU_FS_KIND_ROLLED_BACK));
+
+    /* a kept page between two rolled-back ones: no merge across kinds */
+    memset(c, 0, sizeof(*c));
+    femu_fs_cut_page(c, 1, 16, NULL, 8, false);
+    femu_fs_cut_page(c, 1, 8, all, 8, false);
+    femu_fs_cut_page(c, 1, 0, NULL, 8, false);
+    CHECK(femu_fs_cut_end(c, &trunc) == 2 && !trunc && c->ranges == 3);
+    CHECK(cut_is(c, 0, 0, 1, 0, 8, FEMU_FS_KIND_ROLLED_BACK));
+    CHECK(cut_is(c, 0, 1, 1, 16, 8, FEMU_FS_KIND_ROLLED_BACK));
+    CHECK(cut_is(c, 1, 0, 1, 8, 8, FEMU_FS_KIND_KEPT));
+
+    /*
+     * A full store of 64 fragments of two extents: the 65th range, apart
+     * from both, would drop without the merge. It stays, nothing drops.
+     */
+    memset(c, 0, sizeof(*c));
+    for (int i = 0; i < FEMU_FS_CUT_MAX; i++) {
+        femu_fs_cut_page(c, 1, (i & 1 ? 1000 : 0) + (i / 2) * 8, all, 8,
+                         false);
+    }
+    femu_fs_cut_page(c, 1, 5000, all, 8, false);
+    CHECK(femu_fs_cut_end(c, &trunc) == 1 && !trunc && !c->dropped);
+    CHECK(c->ranges == 3);
+    CHECK(cut_is(c, 0, 0, 1, 0, 256, FEMU_FS_KIND_KEPT));
+    CHECK(cut_is(c, 0, 1, 1, 1000, 256, FEMU_FS_KIND_KEPT));
+    CHECK(cut_is(c, 0, 2, 1, 5000, 8, FEMU_FS_KIND_KEPT));
+
+    /*
+     * 64 ranges apart fill the store and no merge frees room: the 65th
+     * drops, though it touches a stored range, and truncated stays.
+     */
+    memset(c, 0, sizeof(*c));
+    for (int i = 0; i < FEMU_FS_CUT_MAX; i++) {
+        femu_fs_cut_page(c, 1, i * 16, NULL, 8, false);
+    }
+    femu_fs_cut_page(c, 1, 8 + 16 * 10, NULL, 4, false);
+    CHECK(femu_fs_cut_end(c, &trunc) == FEMU_FS_CUT_CHUNKS && trunc);
+    CHECK(c->dropped == 1 && c->ranges == FEMU_FS_CUT_MAX + 1);
+    free(c);
+}
+
+/* the JSON of the cut summary and of a chunk */
+static void test_cut_json(void)
+{
+    FemuFrRec x = rec_of(12);
+    char buf[FEMU_FR_JSON_MAX];
+
+    x.act = FEMU_FS_ACT_POWER_LOSS;
+    x.phase = FEMU_FR_PHASE_APPLY;
+    x.outcome = FEMU_FR_OUT_DONE;
+    x.cut.rolled_back_pages = 5;
+    x.cut.rolled_back_lie_pages = 2;
+    x.cut.kept_pages = 1;
+    x.cut.ranges = 11;
+    x.cut.chunks = 2;
+    x.cut.cqe_boundary = 118;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, ",\"at\":\"pre\",\"rolled_back_pages\":5,"
+                 "\"rolled_back_lie_pages\":2,\"kept_pages\":1,"
+                 "\"ranges\":11,\"chunks\":2,\"truncated\":false,"
+                 "\"cqe_publish_boundary\":118}\n"));
+    x.cut.truncated = true;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"truncated\":true"));
+    /* a time line or QMP cut: the same fields, no point of a command */
+    x.origin = FEMU_FR_ORIGIN_SCHED_TIME;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"origin\":\"sched-time\","));
+    CHECK(strstr(buf, "\"outcome\":\"done\",\"rolled_back_pages\":5,"));
+    CHECK(!strstr(buf, "\"at\""));
+    x.origin = FEMU_FR_ORIGIN_QMP;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"origin\":\"qmp\","));
+    CHECK(strstr(buf, "\"cqe_publish_boundary\":118}\n"));
+    CHECK(!strstr(buf, "\"at\""));
+    x.origin = FEMU_FR_ORIGIN_SCHED_CMD;
+
+    memset(&x.chunk, 0, sizeof(x.chunk));
+    x.phase = FEMU_FR_PHASE_EVIDENCE;
+    x.cause = 12;
+    x.chunk.idx = 1;
+    x.chunk.total = 2;
+    x.chunk.kind = FEMU_FS_KIND_KEPT;
+    x.chunk.nr = 2;
+    x.chunk.r[0] = (FemuFsRange) { .nsid = 1, .slba = 4096, .nlb = 8 };
+    x.chunk.r[1] = (FemuFsRange) { .nsid = 2, .slba = 8192, .nlb = 16 };
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"cause\":12,"));
+    CHECK(strstr(buf, "\"phase\":\"evidence\","));
+    CHECK(strstr(buf, ",\"chunk\":1,\"chunks\":2,\"kind\":\"kept\","
+                 "\"r\":[[1,4096,8],[2,8192,16]]}\n"));
+    CHECK(!strstr(buf, "rolled_back_pages"));
+    /* a full chunk of the largest values fits one line */
+    x.chunk.nr = FEMU_FS_CUT_RANGES;
+    x.chunk.kind = FEMU_FS_KIND_ROLLED_BACK;
+    for (int i = 0; i < FEMU_FS_CUT_RANGES; i++) {
+        x.chunk.r[i] = (FemuFsRange) { .nsid = UINT16_MAX,
+                                       .slba = UINT64_MAX,
+                                       .nlb = UINT32_MAX };
+    }
+    x.id = UINT64_MAX;
+    x.step = UINT64_MAX;
+    x.match = UINT64_MAX;
+    x.chunk.idx = UINT8_MAX;
+    x.chunk.total = UINT8_MAX;
+    CHECK(femu_fr_json(&x, buf, sizeof(buf)) < FEMU_FR_JSON_MAX);
+    CHECK(strstr(buf, "\"kind\":\"rolled_back\""));
+    /* all 8 ranges, the last one whole */
+    CHECK(strstr(buf, "[65535,18446744073709551615,4294967295]]}\n"));
+    CHECK(strstr(buf, "\"chunk\":255,\"chunks\":255,"));
+    /* control: another action names no cut field */
+    x.act = FEMU_FS_ACT_CFS;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(!strstr(buf, "\"chunk\""));
+}
+
 int main(void)
 {
     test_grammar();
@@ -1538,6 +1893,11 @@ int main(void)
     test_terminal();
     test_reclaim_json();
     test_run();
+    test_cut_draw();
+    test_cut_ranges();
+    test_cut_truncate();
+    test_cut_merge();
+    test_cut_json();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

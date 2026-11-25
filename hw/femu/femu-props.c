@@ -148,8 +148,8 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "times count from the first enable and survive resets; see "
       "query-femu-events; bbssd: lines '@<op>[,ns=N][,lba=A-B]#N <action>' "
       "or '@...%PPM~SEED <action>' select commands; of the actions only "
-      "flush-lie, fua-lie, wb-fail, hang and cfs have an effect yet; "
-      "not with csd_pause; unset (default) is off" },
+      "flush-lie, fua-lie, wb-fail, hang, cfs and power-loss have an "
+      "effect yet; not with csd_pause; unset (default) is off" },
     { "events_start",
       "with events_file: when the schedule starts, enable (default) at "
       "the first enable or qmp at the QMP command femu-events-start; "
@@ -167,7 +167,7 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "events_max_faults records for query-femu-events" },
     { "events_max_faults",
       "slots of the fault record ring of events_file command lines, 1 to "
-      "65536 entries of 88 bytes; allocated only with a command line; "
+      "65536 entries of 216 bytes; allocated only with a command line; "
       "4096 (default)" },
     { "die_slow",
       "bbssd, CSD: on makes the array time of each LUN settable at run "

@@ -1194,6 +1194,24 @@ void femu_test_fsched_cfs_paths(void *obj, void *data,
 void femu_test_fsched_start(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_fsched_start_early(void *obj, void *data,
                                   QGuestAllocator *alloc);
+void femu_test_fsched_cut_keep(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_cut_grain(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_cut_truncate(void *obj, void *data,
+                                   QGuestAllocator *alloc);
+void femu_test_fsched_cut_hang(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_cut_refused(void *obj, void *data,
+                                  QGuestAllocator *alloc);
+void femu_test_fsched_cut_lie(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_cut_fence(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_cut_idle(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_cut_paths(void *obj, void *data,
+                                QGuestAllocator *alloc);
+void femu_test_fsched_cut_miss(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_cut_media(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_cut_ns(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_cut_again(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_cut_origin(void *obj, void *data,
+                                 QGuestAllocator *alloc);
 void femu_test_ready_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_recovery_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ready_sysreset(void *obj, void *data, QGuestAllocator *alloc);

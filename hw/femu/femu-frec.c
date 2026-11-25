@@ -216,7 +216,15 @@ uint32_t femu_fr_dropped_ids(const FemuFrRing *r, FemuFrIdRange *out)
 
 const char *femu_fr_name_origin(uint8_t v)
 {
-    return v == FEMU_FR_ORIGIN_SCHED_CMD ? "sched-cmd" : "?";
+    switch (v) {
+    case FEMU_FR_ORIGIN_SCHED_CMD:
+        return "sched-cmd";
+    case FEMU_FR_ORIGIN_SCHED_TIME:
+        return "sched-time";
+    case FEMU_FR_ORIGIN_QMP:
+        return "qmp";
+    }
+    return "?";
 }
 
 const char *femu_fr_name_phase(uint8_t v)
@@ -234,6 +242,8 @@ const char *femu_fr_name_phase(uint8_t v)
         return "supersede";
     case FEMU_FR_PHASE_RECLAIM:
         return "reclaim";
+    case FEMU_FR_PHASE_EVIDENCE:
+        return "evidence";
     }
     return "?";
 }
@@ -315,6 +325,54 @@ const char *femu_fr_name_why(uint8_t v)
     return "?";
 }
 
+const char *femu_fr_name_kind(uint8_t v)
+{
+    return v == FEMU_FS_KIND_KEPT ? "kept" : "rolled_back";
+}
+
+/*
+ * The fields of a power-loss record: the counts of the cut summary, or
+ * the ranges of one chunk as [nsid, slba, nlb].
+ */
+static void fr_json_cut(const FemuFrRec *rec, char *buf, size_t len)
+{
+    size_t at;
+
+    if (rec->phase == FEMU_FR_PHASE_APPLY &&
+        rec->outcome == FEMU_FR_OUT_DONE) {
+        /* a time line or QMP cuts at no command, so it has no point */
+        const char *pt = rec->origin == FEMU_FR_ORIGIN_SCHED_CMD ?
+                         ",\"at\":\"pre\"" : "";
+
+        snprintf(buf, len, "%s,\"rolled_back_pages\":%u,"
+                 "\"rolled_back_lie_pages\":%u,\"kept_pages\":%u,"
+                 "\"ranges\":%" PRIu64 ",\"chunks\":%u,\"truncated\":%s,"
+                 "\"cqe_publish_boundary\":%" PRIu64,
+                 pt, rec->cut.rolled_back_pages,
+                 rec->cut.rolled_back_lie_pages, rec->cut.kept_pages,
+                 rec->cut.ranges, rec->cut.chunks,
+                 rec->cut.truncated ? "true" : "false",
+                 rec->cut.cqe_boundary);
+        return;
+    }
+    if (rec->phase != FEMU_FR_PHASE_EVIDENCE) {
+        return;
+    }
+    at = snprintf(buf, len, ",\"chunk\":%u,\"chunks\":%u,\"kind\":\"%s\","
+                  "\"r\":[", rec->chunk.idx, rec->chunk.total,
+                  femu_fr_name_kind(rec->chunk.kind));
+    for (uint32_t i = 0; i < rec->chunk.nr &&
+         i < FEMU_FS_CUT_RANGES && at < len; i++) {
+        const FemuFsRange *r = &rec->chunk.r[i];
+
+        at += snprintf(buf + at, len - at, "%s[%u,%" PRIu64 ",%u]",
+                       i ? "," : "", r->nsid, r->slba, r->nlb);
+    }
+    if (at < len) {
+        snprintf(buf + at, len - at, "]");
+    }
+}
+
 int femu_fr_json(const FemuFrRec *rec, char *buf, size_t len)
 {
     char cause[32] = "";
@@ -322,6 +380,8 @@ int femu_fr_json(const FemuFrRec *rec, char *buf, size_t len)
     char why[32] = "";
     char pages[40] = "";
     char wb[96] = "";
+    /* 8 ranges of at most 41 bytes, and the chunk fields */
+    char cut[512] = "";
     int n;
 
     if (rec->cause) {
@@ -367,17 +427,21 @@ int femu_fr_json(const FemuFrRec *rec, char *buf, size_t len)
             break;
         }
     }
+    /* power-loss: the cut summary and its evidence */
+    if (rec->act == FEMU_FS_ACT_POWER_LOSS) {
+        fr_json_cut(rec, cut, sizeof(cut));
+    }
     n = snprintf(buf, len,
                  "{\"id\":%" PRIu64 "%s,\"origin\":\"%s\",\"line\":%u,"
                  "\"match\":%" PRIu64 ",\"action\":\"%s\",\"phase\":\"%s\","
                  "\"step\":%" PRIu64 ",\"nsid\":%u,\"sqid\":%u,\"cid\":%u,"
                  "\"opc\":%u,\"fua\":%s,\"slba\":%" PRIu64 ",\"nlb\":%u,"
-                 "\"outcome\":\"%s\"%s%s%s%s}\n",
+                 "\"outcome\":\"%s\"%s%s%s%s%s}\n",
                  rec->id, cause, femu_fr_name_origin(rec->origin), rec->line,
                  rec->match, femu_fs_act_name(rec->act),
                  femu_fr_name_phase(rec->phase), rec->step, rec->nsid,
                  rec->sqid, rec->cid, rec->opc, rec->fua ? "true" : "false",
                  rec->slba, rec->nlb, femu_fr_name_outcome(rec->outcome), why,
-                 pages, wb, status);
+                 pages, wb, status, cut);
     return n;
 }

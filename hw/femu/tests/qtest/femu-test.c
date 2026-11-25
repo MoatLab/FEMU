@@ -3124,6 +3124,23 @@ static void femu_register_nodes(void)
     qos_add_test("fsched-start", "femu", femu_test_fsched_start, NULL);
     qos_add_test("fsched-start-early", "femu", femu_test_fsched_start_early,
                  NULL);
+    qos_add_test("fsched-cut-keep", "femu", femu_test_fsched_cut_keep, NULL);
+    qos_add_test("fsched-cut-grain", "femu", femu_test_fsched_cut_grain, NULL);
+    qos_add_test("fsched-cut-truncate", "femu", femu_test_fsched_cut_truncate,
+                 NULL);
+    qos_add_test("fsched-cut-hang", "femu", femu_test_fsched_cut_hang, NULL);
+    qos_add_test("fsched-cut-refused", "femu", femu_test_fsched_cut_refused,
+                 NULL);
+    qos_add_test("fsched-cut-lie", "femu", femu_test_fsched_cut_lie, NULL);
+    qos_add_test("fsched-cut-fence", "femu", femu_test_fsched_cut_fence, NULL);
+    qos_add_test("fsched-cut-idle", "femu", femu_test_fsched_cut_idle, NULL);
+    qos_add_test("fsched-cut-paths", "femu", femu_test_fsched_cut_paths, NULL);
+    qos_add_test("fsched-cut-miss", "femu", femu_test_fsched_cut_miss, NULL);
+    qos_add_test("fsched-cut-media", "femu", femu_test_fsched_cut_media, NULL);
+    qos_add_test("fsched-cut-ns", "femu", femu_test_fsched_cut_ns, NULL);
+    qos_add_test("fsched-cut-again", "femu", femu_test_fsched_cut_again, NULL);
+    qos_add_test("fsched-cut-origin", "femu", femu_test_fsched_cut_origin,
+                 NULL);
     qos_add_test("io-trace", "femu", femu_test_io_trace, NULL);
     qos_add_test("io-trace-append", "femu", femu_test_io_trace_append, NULL);
     qos_add_test("mode-names", "femu", femu_test_mode_names,

@@ -403,6 +403,13 @@ static bool fs_needs(const FemuFsDev *dev, const FsAction *a,
         return fs_fail(err, errlen, "action wb-fail is not supported with %s",
                        dev->buffer_low ? "buffer_low_pcent" : "FDP");
     }
+    /*
+     * The FDP destage skips a blocked page and programs later ones, so
+     * a page the draw rolled back could still become durable.
+     */
+    if (l->keep && dev->fdp) {
+        return fs_fail(err, errlen, "keep= is not supported with FDP");
+    }
     /* a short atomic write in one page buffers, so a block tear breaks it */
     if (l->grain == FEMU_FS_GRAIN_LBA && dev->awupf_lbas > 1) {
         return fs_fail(err, errlen, "grain=lba needs awupf_lbas of 0 or 1");
@@ -507,7 +514,12 @@ bool femu_fs_parse(const FemuFsDev *dev, const char *s, int lineno,
         return fs_fail(err, errlen, "action %s needs %s=", a->name,
                        a->need & FS_OPT_MS ? "ms" : "kind");
     }
-    return fs_needs(dev, a, l, err, errlen);
+    if (!fs_needs(dev, a, l, err, errlen)) {
+        return false;
+    }
+    /* keep= draws from their own stream, which each cut moves on */
+    l->keep_rng = l->keep_seed;
+    return true;
 }
 
 uint32_t femu_fs_xfer_ms(uint16_t ms, bool extended, uint8_t pi_type,
@@ -714,6 +726,175 @@ bool femu_fs_done(const FemuFsLine *l, int nr)
         }
     }
     return true;
+}
+
+uint32_t femu_fs_cut_draw(FemuFsCut *c, uint8_t *keep, uint32_t lbas)
+{
+    uint32_t kept = 0;
+
+    /* a time line or QMP cut keeps nothing and draws nothing */
+    if (!c->rng) {
+        memset(keep, 0, lbas);
+        return 0;
+    }
+    for (uint32_t i = 0; i < lbas; i++) {
+        /* grain=page: the first draw decides each block */
+        if (i && c->grain == FEMU_FS_GRAIN_PAGE) {
+            keep[i] = keep[0];
+        } else {
+            keep[i] = femu_fs_draw(c->rng) < c->keep;
+        }
+        kept += keep[i];
+    }
+    return kept;
+}
+
+static int fs_range_cmp(const void *a, const void *b)
+{
+    const FemuFsRange *x = a;
+    const FemuFsRange *y = b;
+
+    if (x->nsid != y->nsid) {
+        return x->nsid < y->nsid ? -1 : 1;
+    }
+    if (x->slba != y->slba) {
+        return x->slba < y->slba ? -1 : 1;
+    }
+    return 0;
+}
+
+/*
+ * Sort the stored ranges of @kind by namespace and block, and merge the
+ * ones that touch or overlap. Pages leave the buffer interleaved, so a
+ * merge with the previous range alone keeps neighbours apart and fills
+ * the store with fragments of one extent.
+ */
+static void fs_cut_compact(FemuFsCut *c, uint8_t kind)
+{
+    FemuFsRange *r = c->r[kind];
+    uint32_t nr = c->nr[kind];
+    uint32_t out = 0;
+
+    if (nr < 2) {
+        return;
+    }
+    qsort(r, nr, sizeof(*r), fs_range_cmp);
+    for (uint32_t i = 1; i < nr; i++) {
+        FemuFsRange *p = &r[out];
+        uint64_t end = p->slba + p->nlb;
+        uint64_t rend = r[i].slba + r[i].nlb;
+
+        if (r[i].nsid == p->nsid && r[i].slba <= end &&
+            (rend <= end || rend - p->slba <= UINT32_MAX)) {
+            if (rend > end) {
+                p->nlb = rend - p->slba;
+            }
+            continue;
+        }
+        r[++out] = r[i];
+    }
+    c->nr[kind] = out + 1;
+}
+
+/* store the open range of @kind; a full store compacts before a drop */
+static void fs_cut_close(FemuFsCut *c, uint8_t kind)
+{
+    if (!c->open[kind]) {
+        return;
+    }
+    c->open[kind] = false;
+    if (c->nr[kind] == FEMU_FS_CUT_MAX) {
+        fs_cut_compact(c, kind);
+    }
+    if (c->nr[kind] < FEMU_FS_CUT_MAX) {
+        c->r[kind][c->nr[kind]++] = c->cur[kind];
+    } else {
+        c->dropped++;
+    }
+}
+
+/* add blocks @slba to @slba + @nlb - 1 to the ranges of @kind */
+static void fs_cut_range(FemuFsCut *c, uint8_t kind, uint16_t nsid,
+                         uint64_t slba, uint32_t nlb)
+{
+    FemuFsRange *cur = &c->cur[kind];
+
+    if (c->open[kind] && cur->nsid == nsid && cur->slba + cur->nlb == slba &&
+        cur->nlb <= UINT32_MAX - nlb) {
+        cur->nlb += nlb;
+        return;
+    }
+    fs_cut_close(c, kind);
+    *cur = (FemuFsRange) {
+        .slba = slba, .nlb = nlb, .nsid = nsid, .kind = kind,
+    };
+    c->open[kind] = true;
+}
+
+void femu_fs_cut_page(FemuFsCut *c, uint16_t nsid, uint64_t slba,
+                      const uint8_t *keep, uint32_t lbas, bool lie)
+{
+    bool kept = false;
+    bool rolled = false;
+    uint32_t i = 0;
+
+    while (i < lbas) {
+        uint8_t k = keep && keep[i];
+        uint32_t j = i + 1;
+
+        while (j < lbas && (keep && keep[j]) == k) {
+            j++;
+        }
+        fs_cut_range(c, k ? FEMU_FS_KIND_KEPT : FEMU_FS_KIND_ROLLED_BACK,
+                     nsid, slba + i, j - i);
+        kept |= k;
+        rolled |= !k;
+        i = j;
+    }
+    c->kept_pages += kept;
+    c->rolled_back_pages += rolled;
+    c->rolled_back_lie_pages += rolled && lie;
+}
+
+/* the chunks the stored ranges of @kind take */
+static uint32_t fs_cut_kind_chunks(const FemuFsCut *c, uint8_t kind)
+{
+    return (c->nr[kind] + FEMU_FS_CUT_RANGES - 1) / FEMU_FS_CUT_RANGES;
+}
+
+uint32_t femu_fs_cut_end(FemuFsCut *c, bool *truncated)
+{
+    uint32_t want;
+
+    for (uint8_t k = 0; k < FEMU_FS_KINDS; k++) {
+        fs_cut_close(c, k);
+        fs_cut_compact(c, k);
+    }
+    want = fs_cut_kind_chunks(c, FEMU_FS_KIND_ROLLED_BACK) +
+           fs_cut_kind_chunks(c, FEMU_FS_KIND_KEPT);
+    /* a dropped range might have merged: the count is an upper bound */
+    c->ranges = c->nr[FEMU_FS_KIND_ROLLED_BACK] + c->nr[FEMU_FS_KIND_KEPT] +
+                c->dropped;
+    *truncated = want > FEMU_FS_CUT_CHUNKS || c->dropped || c->partial;
+    return want < FEMU_FS_CUT_CHUNKS ? want : FEMU_FS_CUT_CHUNKS;
+}
+
+uint32_t femu_fs_cut_chunk(const FemuFsCut *c, uint32_t i, FemuFsRange *out)
+{
+    uint32_t rb = fs_cut_kind_chunks(c, FEMU_FS_KIND_ROLLED_BACK);
+    uint8_t kind = i < rb ? FEMU_FS_KIND_ROLLED_BACK : FEMU_FS_KIND_KEPT;
+    uint32_t first = (i < rb ? i : i - rb) * FEMU_FS_CUT_RANGES;
+    uint32_t nr;
+
+    if (first >= c->nr[kind]) {
+        return 0;
+    }
+    nr = c->nr[kind] - first;
+    if (nr > FEMU_FS_CUT_RANGES) {
+        nr = FEMU_FS_CUT_RANGES;
+    }
+    memcpy(out, &c->r[kind][first], nr * sizeof(*out));
+    return nr;
 }
 
 int femu_fs_run_start(FemuFsRun *r, int64_t now)

@@ -369,7 +369,7 @@ can mix time lines and command lines. Command lines work on bbssd only.
 
 | Action | Options | Op | Group | Needs |
 | --- | --- | --- | --- | --- |
-| `power-loss` | `at=pre`, `keep=PPM`, `grain=page\|lba`, `seed=S` | any | terminal | `power_loss=on`; no `durable_at_done`; `grain=lba` needs `awupf_lbas` 0 |
+| `power-loss` | `at=pre`, `keep=PPM`, `grain=page\|lba`, `seed=S` | any | terminal | `power_loss=on`; no `durable_at_done`; `grain=lba` needs `awupf_lbas` 0 or 1; `keep=` above 0 not with FDP |
 | `cfs` | `at=pre` | any | terminal | `power_loss=on` |
 | `hang` | none | any | terminal | |
 | `write-fail` | none | `write`, `fua`, `wzero` | data | |
@@ -406,7 +406,8 @@ can mix time lines and command lines. Command lines work on bbssd only.
 - Only `flush-lie`, `fua-lie` (see [lies](#lies)), `wb-fail` (see
   [write-back failures](#write-back-failures)), `hang` and `cfs` (see
   [hang and controller fatal status](#hang-and-controller-fatal-status))
-  have an effect so far.
+  and `power-loss` (see [a cut at a command](#a-cut-at-a-command)) have
+  an effect so far.
   For the other actions a selection moves the counters of its line and
   writes its record only. With no `wb-fail` line, none of its hooks
   runs: the data path tests one pointer or one counter. The qtest property `x-fault-sel` reports, per
@@ -593,13 +594,112 @@ held command back to its queue, with no CQE.
 | `apply` | `done` | `status` for `hang`: the status its CQE would carry |
 | `reclaim` | `reclaimed` | `reason`: `sq-deleted`, `reset`, `shutdown`, `power-cut` or `unplug` |
 
+### A cut at a command
+
+A `power-loss` command line cuts the power before its command runs
+(`at=pre`, the only point). The command parks, unrun, as for `cfs`, and
+a fence stops the I/O CQEs. Once each poller has seen the fence, the
+main loop cuts the power as `simulate-power-loss` does.
+
+```text
+ FTL step: the command parks; fence = gen; the FTL takes no more
+   pollers: fence set --> ack, post no I/O CQE
+   main loop: every poller acked? no --> run again later
+              yes --> keep= write-back, rollback, CSTS = 0
+                      apply record (the cut summary), chunk records
+ a reset, a queue deletion or a cut first --> the park ends, no cut
+```
+
+- The fence is a device boundary. After a poller acks, it posts no I/O
+  CQE until the park ends, and a CQE that waits at the ack is dropped by
+  the cut. A pass that is posting stops before its next CQE. Admin
+  commands still run until the cut. `cfs` uses the same fence.
+- While a command is parked, the FTL thread does no idle work: no idle
+  write-back, idle GC or pSLC fold changes the buffer before the cut.
+- A poller that does not ack for about a million main loop passes ends
+  the wait with one warning. The park then waits for a reset, a queue
+  deletion or a cut.
+- The parked command gets no CQE and writes no `reclaim` record: the
+  cut summary tells of it. Hung commands are reclaimed as at any cut.
+- `keep=PPM` (0 to 1000000, default 0) writes back each buffered page
+  with odds PPM before the rollback. `grain=page` (the default) draws
+  once a page, `grain=lba` once a block, so a page can tear; realize
+  refuses `grain=lba` when `awupf_lbas` is over 1. Realize refuses a
+  `keep=` above 0 with FDP: its write-back skips a blocked page and
+  programs later ones, so a page the draw rolled back could stay. The
+  draws run in buffer order, from a splitmix64 state of the line that
+  starts at `seed=S` (default 0) and goes on from cut to cut. The same
+  file and the same buffer give the same pages.
+- A kept page with a `wb-fail` mark fails its write-back, as at a PLP
+  write-back. A kept page that finds no free line stays volatile. Both
+  count as rolled back. With working `plp` the buffer is empty at the
+  rollback, so `keep=` changes nothing.
+- A lie page that loses a block counts in `x-fault-lie-lost` and in
+  `rolled_back_lie_pages`.
+- A `power-loss` line needs `power_loss=on`; realize refuses it, and
+  `keep=`, `grain=` and `seed=`, without it. A time line `power-loss`
+  takes no option and keeps the full rollback.
+- `power-loss` and `hang` on the same command: the earlier line in the
+  file wins. A cut first leaves the `hang` line `superseded`, with no
+  `apply` record.
+- A time line `power-loss` or `simulate-power-loss` also writes a cut
+  summary and its evidence when the file has a command line. Their
+  `origin` is `sched-time` (with the time line in `line`) or `qmp`
+  (`line` 0). They name no command and have no `at`. Such a cut before
+  the BH of a park gives the parked command back with a `reclaim`
+  record, reason `power-cut`; the BH then does nothing.
+- With `durable_at_done`, the evidence names only buffered pages, so a
+  cut that also gave back programs sets `truncated`.
+
+```text
+ buffer at the cut:  p0  p1  p2  p3  p4      keep=400000
+ draws:              K   .   K   .   .
+ result:             p0, p2 written back; p1, p3, p4 rolled back
+ chunk 0  rolled_back  [[1,8,8],[1,24,16]]    (p1; p3 and p4 merged)
+ chunk 1  kept         [[1,0,8],[1,16,8]]
+```
+
+The `apply` record is the cut summary. The evidence follows in up to 8
+`evidence` records, each with up to 8 ranges `[nsid, slba, nlb]` of one
+kind; `rolled_back` chunks come first. The ranges of one kind are
+sorted by `nsid` and `slba`, and ranges that touch or overlap merge.
+So the ranges are not in buffer order: pages leave the buffer
+interleaved, and one file extent still gives one range. A full store
+of one kind merges before it drops a range. A cut that drops a range,
+or has more ranges than the chunks hold, sets `truncated`. The test
+must then call the evidence incomplete.
+
+| Field | Record | Meaning |
+| --- | --- | --- |
+| `at` | summary | `pre` |
+| `rolled_back_pages` | summary | buffered pages with a block rolled back |
+| `rolled_back_lie_pages` | summary | of those, the pages a lie called durable |
+| `kept_pages` | summary | pages written back, whole or in part; a torn page counts here and above |
+| `ranges` | summary | the ranges of both kinds after merges, plus those dropped |
+| `chunks` | both | the chunk records of the cut |
+| `truncated` | summary | a range was dropped, or the chunks do not hold every range |
+| `cqe_publish_boundary` | summary | I/O CQEs the controller posted since realize, up to the cut; whether the host read them is not known |
+| `chunk` | chunk | its index, from 0; `cause` names the summary |
+| `kind` | chunk | `rolled_back` or `kept` |
+| `r` | chunk | the ranges; QMP gives each as `nsid`, `slba` and `nlb` |
+
+```text
+ {"id":12,"cause":11,"origin":"sched-cmd","line":2,"match":1,
+  "action":"power-loss","phase":"apply",...,"outcome":"done",
+  "at":"pre","rolled_back_pages":3,"rolled_back_lie_pages":0,
+  "kept_pages":2,"ranges":4,"chunks":2,"truncated":false,
+  "cqe_publish_boundary":118}
+ {"id":13,"cause":12,...,"phase":"evidence",...,"chunk":0,"chunks":2,
+  "kind":"rolled_back","r":[[1,8,8],[1,24,16]]}
+```
+
 ### Fault records
 
 Each command that a command line selects writes one record per line
 that selected it, in file order. A record tells what the line did with
 the command. It is an observation, never an instruction to replay. The
 records go to a ring of `events_max_faults` slots (1 to 65536, default
-4096). A record has 80 bytes and a slot 88, with its sequence word.
+4096). A record has 208 bytes and a slot 216, with its sequence word.
 Realize allocates the ring only for a file with a command line.
 
 ```text
@@ -615,9 +715,9 @@ Realize allocates the ring only for a file with a command line.
 | Field | Meaning |
 | --- | --- |
 | `id` | from 1; each record takes one, stored or dropped |
-| `origin` | `sched-cmd`: a command line |
+| `origin` | `sched-cmd`: a command line; `sched-time` or `qmp`: a cut summary and its evidence |
 | `line`, `match` | the line, and its matches so far, this one too |
-| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a lie, a `wb-fail`, a `hang` or a `cfs`; `fail`, `report` and `supersede` for a `wb-fail` mark; `reclaim` for a held command that went back |
+| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a lie, a `wb-fail`, a `hang`, a `cfs` or a `power-loss`; `fail`, `report` and `supersede` for a `wb-fail` mark; `reclaim` for a held command that went back; `evidence` for a chunk of a cut |
 | `step` | commands the FTL thread took so far, this one too |
 | `nsid`, `sqid`, `cid`, `opc`, `fua`, `slba`, `nlb` | the command as the host sent it; `slba` and `nlb` are 0 for a Flush |
 | `outcome` | `selected`, `superseded` or `no-effect`; `done` for an `apply` record; `marked`, `unc`, `old` and `reported` for `wb-fail`; `reclaimed` for a `reclaim` record |
@@ -643,7 +743,8 @@ The ring has two overflow rules. Neither is silent.
 - `query-femu-events` adds `step`, `faults`, `last-id`, `dropped`,
   `dropped-ids`, `overwritten` and `log-error` for a file with a command
   line. A file of time lines only has none of them, and the FTL thread
-  counts no step for it.
+  counts no step for it. `faults` gives at most the newest 4096 records;
+  `events_log` keeps them all.
 - Ids come from their own counter. A dropped record leaves a gap that
   `dropped-ids` names, and a later child record can still name it.
 - `events_log` needs a command line in `events_file`. Realize opens the

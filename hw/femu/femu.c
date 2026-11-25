@@ -914,7 +914,7 @@ static void nvme_reset_features(FemuCtrl *n)
 
 /*
  * @why names the path for the records of the commands that an
- * events_file hang or cfs holds: a FEMU_FS_WHY_* reclaim reason.
+ * events_file hang, cfs or power-loss holds: a FEMU_FS_WHY_* reason.
  */
 static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown, uint8_t why)
 {
@@ -3810,8 +3810,8 @@ static void *femu_ftl_thread(void *arg)
             }
 
             /*
-             * events_file cfs: a parked command ends the FTL work, so no
-             * later command changes the media after it.
+             * events_file cfs or power-loss: a parked command ends the
+             * FTL work, so no later command changes the media after it.
              */
             if (unlikely(n->fsched) && qatomic_load_acquire(&n->fs_parked)) {
                 n->ftl_in_sweep = false;
@@ -3848,7 +3848,7 @@ static void *femu_ftl_thread(void *arg)
             if (unlikely(n->fsched)) {
                 int st = femu_fsched_step(n, req);
 
-                /* a cfs holds it, unrun, until a reclaim */
+                /* a cfs or power-loss holds it, unrun, until a reclaim */
                 if (unlikely(st == FEMU_FS_STEP_PARK)) {
                     n->ftl_in_sweep = false;
                     break;
@@ -3937,6 +3937,11 @@ static void *femu_ftl_thread(void *arg)
         idle = unlikely(n->tier_idle || n->gc_idle || n->buffer_bg ||
                         n->tier_upkeep || n->durable_at_done || n->plm) &&
                !busy;
+        /* a parked cfs or power-loss command freezes the media too */
+        if (unlikely(idle && n->fsched) &&
+            qatomic_load_acquire(&n->fs_parked)) {
+            idle = false;
+        }
         if (idle) {
             if (n->tier_upkeep) {
                 bb_tier_upkeep(n);
@@ -6048,6 +6053,7 @@ static void nvme_destroy_poller(FemuCtrl *n)
     g_free(n->cpl_backlog);
     /* unplug gave back every hung request in femu_events_free() */
     g_clear_pointer(&n->fs_hung, g_free);
+    g_clear_pointer(&n->fs_fence_ack, g_free);
     g_free((void *)n->poller_in_sweep);
     n->poller_in_sweep = NULL;
     g_clear_pointer(&n->adm_freeze_ack, g_free);
@@ -7621,21 +7627,21 @@ static char *femu_test_oc12_trace(Object *obj, Error **errp)
     return g_string_free(out, false);
 }
 
-/* A cut resets command state; the caller must enable the controller again. */
-static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
+/**
+ * femu_power_cut - cut the power of a power_loss controller
+ * @n: the controller, realized, with power_loss on
+ * @at_cmd: the cut of a parked power-loss command line
+ *
+ * Everything the media has not programmed is lost. With @at_cmd, the
+ * line's keep= writes back part of the buffer first. With command lines,
+ * every cut writes a summary record and its evidence.
+ */
+void femu_power_cut(FemuCtrl *n, bool at_cmd)
 {
-    FemuCtrl *n = FEMU(obj);
+    g_autofree struct FemuFsCut *cut = femu_fsched_cut_begin(n, at_cmd);
     bool lost = false;
     bool clean;
 
-    if (!n->power_loss || !DEVICE(obj)->realized) {
-        error_setg(errp, "simulated power loss requires a realized "
-                   "power_loss device");
-        return;
-    }
-    if (!value) {
-        return;
-    }
     clean = n->shut == FEMU_SHUT_DONE;
     nvme_clear_ctrl(n, false, FEMU_FS_WHY_POWER_CUT);
     /*
@@ -7654,7 +7660,7 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
     femu_plp_cut(n);
     for (uint32_t i = 0; i < n->namespace_limit; i++) {
         if (n->namespaces[i].allocated) {
-            lost |= bbssd_power_loss(&n->namespaces[i]);
+            lost |= bbssd_power_loss(&n->namespaces[i], cut);
         }
     }
     /* no host is left to report to: free every slot and report */
@@ -7686,6 +7692,22 @@ static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
         femu_ocp_lat_power_cycle(n);
         /* ERRI-8: a power cycle ends an injected event */
         nvme_ocp_inj_clear(n);
+    }
+    femu_fsched_cut_end(n, cut);
+}
+
+/* A cut resets command state; the caller must enable the controller again. */
+static void femu_simulate_power_loss(Object *obj, bool value, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+
+    if (!n->power_loss || !DEVICE(obj)->realized) {
+        error_setg(errp, "simulated power loss requires a realized "
+                   "power_loss device");
+        return;
+    }
+    if (value) {
+        femu_power_cut(n, false);
     }
 }
 

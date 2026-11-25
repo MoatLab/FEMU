@@ -160,6 +160,110 @@ enum { FEMU_FS_WB_UNC, FEMU_FS_WB_OLD };
 enum { FEMU_FS_REPORT_STICKY, FEMU_FS_REPORT_ONCE };
 enum { FEMU_FS_SDC_FLIP = 1, FEMU_FS_SDC_LOST, FEMU_FS_SDC_MISDIRECT };
 
+/*
+ * A power-loss command line at its cut. keep=PPM writes back each
+ * buffered page (grain=page) or block (grain=lba) with odds PPM before
+ * the rest rolls back; the draws run in buffer order from the line's
+ * own splitmix64 stream. The evidence is the blocks each fate took, as
+ * ranges, packed into chunk records of one kind each, rolled back
+ * first. The ranges of a kind are sorted by (nsid, slba), and ranges
+ * that touch or overlap merge, so the order is not buffer order:
+ *
+ *   buffer:   p0 K   p2 R   p1 R   p3 K      (K kept, R rolled back)
+ *   ranges:   rolled back [p1..p2]   kept [p0] [p3]
+ *   chunks:   0: rolled_back, 1 range   1: kept, 2 ranges
+ *
+ * At most FEMU_FS_CUT_CHUNKS chunks of FEMU_FS_CUT_RANGES ranges are
+ * kept. A full store of one kind merges before it drops a range. A cut
+ * that drops a range sets @truncated.
+ */
+#define FEMU_FS_CUT_RANGES  8
+#define FEMU_FS_CUT_CHUNKS  8
+#define FEMU_FS_CUT_MAX     (FEMU_FS_CUT_RANGES * FEMU_FS_CUT_CHUNKS)
+
+enum { FEMU_FS_KIND_ROLLED_BACK, FEMU_FS_KIND_KEPT, FEMU_FS_KINDS };
+
+/* 16 bytes: one range of the cut evidence */
+typedef struct FemuFsRange {
+    uint64_t slba;
+    uint32_t nlb;
+    uint16_t nsid;
+    uint8_t kind;               /* FEMU_FS_KIND_* */
+    uint8_t pad;
+} FemuFsRange;
+
+_Static_assert(sizeof(FemuFsRange) == 16, "a cut range is 16 bytes");
+
+typedef struct FemuFsCut {
+    uint32_t keep;              /* PPM of the line */
+    uint8_t grain;              /* FEMU_FS_GRAIN_* */
+    uint64_t *rng;              /* the line's draw state, which moves on */
+
+    uint32_t kept_pages;        /* pages written back, whole or in part */
+    uint32_t rolled_back_pages; /* pages with a block rolled back */
+    uint32_t rolled_back_lie_pages; /* of those, pages a lie called durable */
+    uint64_t ranges;            /* merged ranges plus dropped ones */
+    uint64_t dropped;           /* ranges with no room after a merge */
+    bool partial;               /* durable_at_done gave back pages too */
+    uint32_t nr[FEMU_FS_KINDS]; /* the ranges stored in @r */
+    bool open[FEMU_FS_KINDS];   /* @cur holds a range that can still grow */
+    FemuFsRange cur[FEMU_FS_KINDS];
+    FemuFsRange r[FEMU_FS_KINDS][FEMU_FS_CUT_MAX];
+} FemuFsCut;
+
+/**
+ * femu_fs_cut_draw - draw the fate of each block of one buffered page
+ * @c: the cut; with no @rng it keeps no block and draws nothing
+ * @keep: out: one byte per block, 1 when it is written back
+ * @lbas: the blocks of the page
+ *
+ * grain=page takes one draw for the page, grain=lba one for each block.
+ *
+ * Returns the blocks kept.
+ */
+uint32_t femu_fs_cut_draw(FemuFsCut *c, uint8_t *keep, uint32_t lbas);
+
+/**
+ * femu_fs_cut_page - note what became of one buffered page
+ * @c: the cut
+ * @nsid: its namespace
+ * @slba: its first block
+ * @keep: the draws of femu_fs_cut_draw(), or NULL when all rolled back
+ * @lbas: its blocks
+ * @lie: a lie called the page durable
+ *
+ * Call it in buffer order, after the write-back. A page whose write-back
+ * failed passes NULL: none of its blocks was kept. A full store of one
+ * kind sorts and merges its ranges before it drops one.
+ */
+void femu_fs_cut_page(FemuFsCut *c, uint16_t nsid, uint64_t slba,
+                      const uint8_t *keep, uint32_t lbas, bool lie);
+
+/**
+ * femu_fs_cut_end - close the last ranges once every page is noted
+ * @c: the cut
+ *
+ * Sorts the ranges of each kind by (nsid, slba) and merges the ones that
+ * touch or overlap, then sets @ranges to the merged count plus the
+ * dropped ones.
+ *
+ * Returns the chunks to write, and sets *@truncated when the ranges do
+ * not fit them, when a range was dropped, or when @partial says the
+ * ranges miss some pages.
+ */
+uint32_t femu_fs_cut_end(FemuFsCut *c, bool *truncated);
+
+/**
+ * femu_fs_cut_chunk - the ranges of one chunk
+ * @c: the cut, after femu_fs_cut_end()
+ * @i: the chunk, from 0
+ * @out: room for FEMU_FS_CUT_RANGES ranges
+ *
+ * Returns the ranges in @out, all of the same kind, in (nsid, slba)
+ * order. They are not in buffer order.
+ */
+uint32_t femu_fs_cut_chunk(const FemuFsCut *c, uint32_t i, FemuFsRange *out);
+
 /* the device facts that decide which lines realize accepts */
 typedef struct FemuFsDev {
     bool bbssd;
@@ -209,6 +313,7 @@ typedef struct FemuFsLine {
     uint32_t keep;
     uint8_t grain;
     uint64_t keep_seed;
+    uint64_t keep_rng;          /* main loop: the keep= draw state */
     uint8_t wb_mode;
     uint8_t wb_report;
     bool wb_aer;
