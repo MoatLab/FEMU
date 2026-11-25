@@ -8983,6 +8983,69 @@ void femu_test_events(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /* realize refuses a file it cannot run, and names the line */
+/* device_add of femu @id at @addr with events_file @path */
+static QDict *femu_events_add(QTestState *qts, const char *id, int addr,
+                              const char *path)
+{
+    g_autofree char *add = g_strdup_printf(
+        "{'execute':'device_add','arguments':{'driver':'femu','id':'%s',"
+        "'addr':'%d','devsz_mb':16,'femu_mode':1,'ana':true,"
+        "'events_file':'%s'}}", id, addr, path);
+
+    return qtest_qmp(qts, "%p", qobject_from_json(add, NULL));
+}
+
+/*
+ * A file that cannot be read is refused, not taken as empty: a directory
+ * opens, then its read fails. The line limit counts physical lines: 1025
+ * comment lines with no final newline are refused, and 1024 are not,
+ * with a final newline or without. An empty file is accepted.
+ */
+static void femu_events_lines(QTestState *qts, const char *dir)
+{
+    static const struct {
+        int nr;
+        bool newline;
+        bool ok;
+    } k[] = {
+        { 1025, false, false }, { 1024, false, true }, { 1024, true, true },
+        { 0, false, true },
+    };
+    QDict *rsp;
+
+    rsp = femu_events_add(qts, "evbad", 6, dir);
+    g_assert_true(qdict_haskey(rsp, "error"));
+    g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                          "desc"), ": read failed"));
+    qobject_unref(rsp);
+    for (size_t i = 0; i < ARRAY_SIZE(k); i++) {
+        GString *g = g_string_new(NULL);
+        g_autofree char *path = NULL;
+        g_autofree char *id = g_strdup_printf("evok%zu", i);
+
+        for (int j = 0; j < k[i].nr; j++) {
+            g_string_append(g, j ? "\n# c" : "# c");
+        }
+        if (k[i].newline) {
+            g_string_append_c(g, '\n');
+        }
+        path = femu_events_file(dir, g->str);
+        g_string_free(g, true);
+        rsp = femu_events_add(qts, k[i].ok ? id : "evbad",
+                              k[i].ok ? 7 + (int)i : 6, path);
+        if (k[i].ok) {
+            g_assert_true(qdict_haskey(rsp, "return"));
+        } else {
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                                                                  "error"),
+                                                  "desc"),
+                                    "more than 1024 lines"));
+        }
+        qobject_unref(rsp);
+        unlink(path);
+    }
+}
+
 void femu_test_events_bad(void *obj, void *data, QGuestAllocator *alloc)
 {
     g_autofree char *dir = g_dir_make_tmp("femu-events-XXXXXX", NULL);
@@ -9016,6 +9079,7 @@ void femu_test_events_bad(void *obj, void *data, QGuestAllocator *alloc)
         qobject_unref(rsp);
         unlink(path);
     }
+    femu_events_lines(qs->qts, dir);
     qtest_pc_shutdown(qs);
     rmdir(dir);
 }
@@ -9240,6 +9304,11 @@ void femu_test_fsched_bad(void *obj, void *data, QGuestAllocator *alloc)
         qobject_unref(rsp);
         unlink(path);
     }
+    /*
+     * 1025 command lines and no final newline: the line limit refuses
+     * it. Each event takes a line, so no file passes the line limit and
+     * then fails the event limit; that check is only a guard.
+     */
     g_string_truncate(g, 0);
     for (int i = 0; i < 1025; i++) {
         g_string_append(g, i ? "\n@write#1 hang" : "@write#1 hang");
@@ -9250,7 +9319,7 @@ void femu_test_fsched_bad(void *obj, void *data, QGuestAllocator *alloc)
         rsp = femu_fs_add(qts, "fsbad", 6, FEMU_FS_BB, path);
         g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp, "error"),
                                               "desc"),
-                                "more than 1024 events"));
+                                "more than 1024 lines"));
         qobject_unref(rsp);
         unlink(path);
     }

@@ -296,6 +296,7 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
     struct FemuEventSched *s;
     struct FemuFsched *f;
     FemuFsDev dev;
+    guint nr_lines;
     size_t len;
     FILE *f_in;
 
@@ -314,6 +315,15 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
     /* read at most one byte past the limit, so a large file costs nothing */
     text = g_malloc(FEMU_EVENTS_MAX_FILE + 2);
     len = fread(text, 1, FEMU_EVENTS_MAX_FILE + 1, f_in);
+    /* a read that fails part way (a directory, an I/O error) is no file */
+    if (ferror(f_in)) {
+        int err = errno;
+
+        fclose(f_in);
+        error_setg_errno(errp, err, "events_file %s: read failed",
+                         n->events_file);
+        return false;
+    }
     fclose(f_in);
     text[len] = '\0';
     if (len > FEMU_EVENTS_MAX_FILE || memchr(text, '\0', len)) {
@@ -322,7 +332,12 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
         return false;
     }
     lines = g_strsplit(text, "\n", -1);
-    if (g_strv_length(lines) > FEMU_EVENTS_MAX_LINES + 1) {
+    nr_lines = g_strv_length(lines);
+    /* a final newline leaves one empty piece, which is no line */
+    if (nr_lines && !*lines[nr_lines - 1]) {
+        nr_lines--;
+    }
+    if (nr_lines > FEMU_EVENTS_MAX_LINES) {
         error_setg(errp, "events_file: more than %d lines",
                    FEMU_EVENTS_MAX_LINES);
         return false;
