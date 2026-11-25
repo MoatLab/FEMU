@@ -1455,8 +1455,8 @@ static void fdp_file_back(struct ssd *ssd, FemuReclaimUnit *ru)
  * die. Returns -1, with the unit filed back and the moves kept, when there is
  * no room.
  */
-static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
-                          FemuRuHandle *dest_ruh, bool copyback)
+static int fdp_collect_ru_pass(struct ssd *ssd, FemuReclaimUnit *victim_ru,
+                               FemuRuHandle *dest_ruh, bool copyback)
 {
     struct ssdparams *spp = &ssd->sp;
     FemuRuHandle *victim_ruh = victim_ru->ruh;
@@ -1577,6 +1577,17 @@ static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
      */
     mark_ru_free(ssd, victim_ru->rgidx, victim_ru);
     return 0;
+}
+
+/* fdp_collect_ru_pass() on the pass clock (ssd_gc_pass_begin()) */
+static int fdp_collect_ru(struct ssd *ssd, FemuReclaimUnit *victim_ru,
+                          FemuRuHandle *dest_ruh, bool copyback)
+{
+    bool opened = ssd_gc_pass_begin(ssd);
+    int ret = fdp_collect_ru_pass(ssd, victim_ru, dest_ruh, copyback);
+
+    ssd_gc_pass_end(ssd, opened);
+    return ret;
 }
 
 /*
@@ -1812,6 +1823,8 @@ static void fdp_gc_until_clear(struct ssd *ssd, uint16_t rgid, uint16_t ruhid)
     uint64_t fg_gc_iters = 0;
     uint64_t max_fg_gc = (uint64_t)ssd->nrg * ssd->rg[0].ru_mgmt->tt_rus +
                          ssd->nrg;
+    /* one clock for the loop: host time between victims adds nothing */
+    bool opened = ssd_gc_pass_begin(ssd);
 
     while (fdp_rg_short(ssd, rgid) && fg_gc_iters < max_fg_gc) {
         if (do_gc_fdp_style(ssd, rgid, ruhid, true) == -1) {
@@ -1820,6 +1833,7 @@ static void fdp_gc_until_clear(struct ssd *ssd, uint16_t rgid, uint16_t ruhid)
         fg_gc_iters++;
         ssd->gc_stall_passes++;
     }
+    ssd_gc_pass_end(ssd, opened);
 }
 
 /*

@@ -761,8 +761,9 @@ namespaces (their FTL comes from another device), and `namespace_modes`.
 
 ### How GC time is charged
 
-A GC read starts at the current host time. Each GC operation moves its
-LUN's next-available time forward. GC time therefore reaches the host only
+A GC read starts at the host time of its pass (see below). Each GC
+operation moves its LUN's next-available time forward. GC time therefore
+reaches the host only
 through the LUN timelines: a later host read or program on a LUN that GC is
 using starts when GC is done with it.
 
@@ -778,6 +779,11 @@ GC keeps the order of a real SSD (`gc_erase_order=on`, the default):
   later read cannot move the copy past the erase.
 - A read of a failed or offline die reads the other dies of its stripe,
   so GC seals every die before such a read.
+- A collection pass reads the host clock once, at its start. All its
+  reads, programs and erases take that time as "now". The LUN timelines
+  still put them in order, so the host CPU time of the pass does not
+  stretch the modelled work. A pass is one victim line, FDP reclaim unit
+  or merge, or one forced loop of a host command over several victims.
 
 ```text
   LUN 0  |--GC R--|                    |--erase of the victim block--|

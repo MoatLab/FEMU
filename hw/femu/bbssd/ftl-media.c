@@ -540,7 +540,7 @@ void ssd_rain_close(struct ssd *ssd, struct write_pointer *wp)
                                 pl, wp->pg);
         }
         if (n > 0 && n < s - 1) {
-            ssd_rain_book(ssd, wp->blk, epoch, pl, wp->pg, ssd_now(ssd));
+            ssd_rain_book(ssd, wp->blk, epoch, pl, wp->pg, gc_clock(ssd));
         }
     }
 }
@@ -897,8 +897,7 @@ bool ssd_copyback_ok(struct ssd *ssd, struct ppa *src, struct ppa *dst)
     if (ssd->sp.onfi_cb_parity && ((src->g.pg ^ dst->g.pg) & 1)) {
         return false;
     }
-    loc = bb_decode_loc(ssd, src, ssd_now(ssd),
-                        true);
+    loc = bb_decode_loc(ssd, src, gc_clock(ssd), true);
     return nand_media_read_ecc_ns(&ssd->media, &loc) == 0;
 }
 

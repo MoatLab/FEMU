@@ -952,6 +952,11 @@ struct ssd {
     uint64_t gc_fw_pages;
     uint64_t gc_fw_ns;
     /*
+     * gc_erase_order: the device time at the start of the open collection
+     * pass, 0 when no pass is open (ssd_gc_pass_begin(), gc_clock()).
+     */
+    uint64_t gc_pass_ns;
+    /*
      * Lines that forced collection freed with GC delay on, and when the NAND
      * work of the last of them ends on every LUN. A front end that blocks
      * writes until collection is done waits until then.
@@ -1136,6 +1141,17 @@ static inline uint64_t ssd_now(struct ssd *ssd)
 static inline uint64_t ssd_now_us(struct ssd *ssd)
 {
     return femu_dev_now(ssd->n) / SCALE_US;
+}
+
+/*
+ * The clock of collection bookings: the start of the open pass, else now.
+ * A pass reads the device clock once, so the host CPU time the pass takes
+ * does not move its NAND work. The busy-until time of each LUN still puts
+ * the work of the pass in order.
+ */
+static inline uint64_t gc_clock(struct ssd *ssd)
+{
+    return ssd->gc_pass_ns ? ssd->gc_pass_ns : ssd_now(ssd);
 }
 
 /* now on the clock of line close and open times, which data ages use */

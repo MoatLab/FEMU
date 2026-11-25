@@ -24,7 +24,7 @@
 
 static inline uint64_t tp_now(struct ssd *ssd, uint64_t stime)
 {
-    return stime ? stime : ssd_now(ssd);
+    return stime ? stime : gc_clock(ssd);
 }
 
 bool tp_init(struct ssd *ssd)
@@ -419,7 +419,7 @@ bool tp_move(struct ssd *ssd, struct ppa *old_ppa)
         ssd->gc_order_src_seals++;
     }
     /* the copy reaches DRAM before the program can start */
-    rd = tp_read(ssd, tp, 0, timed);
+    rd = tp_read(ssd, tp, ssd->gc_pass_ns, timed);
     /* fw_gc_page_ns: then the firmware slot of the move, taken on success */
     if (timed && ssd->sp.fw_gc_page_ns) {
         fw = ssd_gc_fw_slot(ssd, rd);

@@ -1709,7 +1709,11 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
      * victim keeps its own until it is done, so each TP goes out once.
      */
     if (ssd->tp_on && ssd->tp_fifo_cnt && !ssd->pace_line) {
+        /* one clock for the batch, as for a collection pass */
+        bool opened = ssd_gc_pass_begin(ssd);
+
         tp_publish(ssd, 0, ssd->sp.enable_gc_delay);
+        ssd_gc_pass_end(ssd, opened);
     }
 
     /*

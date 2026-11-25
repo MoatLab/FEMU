@@ -163,7 +163,11 @@ static bool femu_map_fast_needs_reclaim(struct ssd *ssd)
 
 static uint64_t fast_charge(struct ssd *ssd, struct ppa *ppa, int cmd)
 {
-    struct nand_cmd c = { .type = GC_IO, .cmd = cmd, .stime = 0 };
+    /* in a merge, the pass start (0 outside a pass: now) */
+    struct nand_cmd c = {
+        .type = GC_IO, .cmd = cmd, .stime = ssd->gc_pass_ns,
+    };
+
     return ssd_advance_status(ssd, ppa, &c);
 }
 

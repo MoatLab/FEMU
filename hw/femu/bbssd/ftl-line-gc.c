@@ -1250,6 +1250,44 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa)
                 PPA_ARG(ppa), blk->erase_cnt);
 }
 
+/**
+ * ssd_gc_pass_begin - open a collection pass on one device time
+ * @ssd: the device
+ *
+ * With gc_erase_order, a pass reads the device clock here, once, and its
+ * bookings take that time (gc_clock()). Each LUN's busy-until time still
+ * puts them in order, so the NAND work of the pass follows from its start
+ * and the media state alone: host CPU time the pass takes adds nothing.
+ * Passes nest, and the outermost one sets the time. Without
+ * gc_erase_order no pass opens, so each booking reads the clock as before.
+ *
+ *   host thread  |-pass start--[page 1]--[page 2]--...--[page n]--|
+ *   LUN s           [rd 1][rd 2] ...           all from the pass start
+ *   LUN d                 [prog 1][prog 2] ... [erase after the fence]
+ *
+ * Returns true when this call opened the pass; hand it to ssd_gc_pass_end().
+ */
+bool ssd_gc_pass_begin(struct ssd *ssd)
+{
+    if (!ssd->sp.gc_erase_order || ssd->gc_pass_ns) {
+        return false;
+    }
+    ssd->gc_pass_ns = ssd_now(ssd);
+    return ssd->gc_pass_ns != 0;
+}
+
+/**
+ * ssd_gc_pass_end - close the pass ssd_gc_pass_begin() opened
+ * @ssd: the device
+ * @opened: what ssd_gc_pass_begin() returned
+ */
+void ssd_gc_pass_end(struct ssd *ssd, bool opened)
+{
+    if (opened) {
+        ssd->gc_pass_ns = 0;
+    }
+}
+
 /*
  * Book one collection operation on @ppa. With gc_erase_order it starts at
  * @stime; without it the wrapper samples the clock, as before, so the off
@@ -1285,7 +1323,7 @@ uint64_t gc_read_page(struct ssd *ssd, struct ppa *ppa)
         if (ssd->sp.gc_erase_order && ssd_media_seal_read(ssd, ppa)) {
             ssd->gc_order_src_seals++;
         }
-        return gc_book(ssd, ppa, NAND_READ, ssd_now(ssd), &lat);
+        return gc_book(ssd, ppa, NAND_READ, gc_clock(ssd), &lat);
     }
     /* the page is still read from the media, only not timed */
     qatomic_set(&ssd->gc_untimed_reads, ssd->gc_untimed_reads + 1);
@@ -1304,7 +1342,7 @@ uint64_t gc_read_page(struct ssd *ssd, struct ppa *ppa)
  */
 uint64_t ssd_gc_fw_slot(struct ssd *ssd, uint64_t ready)
 {
-    return gc_fw_slot_end(ready, ssd_now(ssd), ssd->gc_fw_free,
+    return gc_fw_slot_end(ready, gc_clock(ssd), ssd->gc_fw_free,
                           ssd->sp.fw_gc_page_ns);
 }
 
@@ -1355,7 +1393,8 @@ void ssd_gc_fence(struct ssd *ssd, struct ppa *src, struct ppa *dst,
  * With gc_erase_order, the erases start when the latest copy of the line
  * ends, as on a real SSD: the old block holds the only durable copy until
  * then. Without it they start now, as before. Returns the start to book
- * (0: now) and clears the fence of the line.
+ * (0: now) and clears the fence of the line. In an open pass, "now" is the
+ * pass start (gc_clock()).
  */
 uint64_t ssd_gc_erase_start(struct ssd *ssd, struct line *victim,
                             uint64_t *fence)
@@ -1365,12 +1404,12 @@ uint64_t ssd_gc_erase_start(struct ssd *ssd, struct line *victim,
     *fence = victim->gc_fence;
     victim->gc_fence = 0;
     if (!*fence) {
-        return 0;
+        return ssd->gc_pass_ns;
     }
-    now = ssd_now(ssd);
+    now = gc_clock(ssd);
     ssd->gc_order_victims++;
     if (*fence <= now) {
-        return 0;
+        return ssd->gc_pass_ns;
     }
     if (ssd->sp.gc_erase_order) {
         return *fence;
@@ -1438,7 +1477,7 @@ void ssd_gc_charge_move(struct ssd *ssd, struct ppa *old_ppa,
     struct nand_lun *lun = get_lun(ssd, new_ppa);
 
     if (ssd->sp.enable_gc_delay) {
-        uint64_t start = MAX(ready, ssd_now(ssd));
+        uint64_t start = MAX(ready, gc_clock(ssd));
         uint64_t lat;
 
         if (ssd->sp.fw_gc_page_ns) {
@@ -1474,8 +1513,8 @@ uint64_t ssd_merge_copy(struct ssd *ssd, struct ppa *old_ppa,
     if (ssd->sp.gc_erase_order && ssd_media_seal_read(ssd, old_ppa)) {
         ssd->gc_order_src_seals++;
     }
-    ready = gc_book(ssd, old_ppa, NAND_READ, ssd_now(ssd), &rlat);
-    done = gc_book(ssd, new_ppa, NAND_WRITE, MAX(ready, ssd_now(ssd)), &plat);
+    ready = gc_book(ssd, old_ppa, NAND_READ, gc_clock(ssd), &rlat);
+    done = gc_book(ssd, new_ppa, NAND_WRITE, MAX(ready, gc_clock(ssd)), &plat);
     ssd_gc_fence(ssd, old_ppa, new_ppa, done);
     return rlat + plat;
 }
@@ -1497,7 +1536,7 @@ void ssd_gc_charge_copyback(struct ssd *ssd, struct ppa *old_ppa,
     struct nand_lun *lun = get_lun(ssd, new_ppa);
 
     if (ssd->sp.enable_gc_delay) {
-        uint64_t stime = 0;
+        uint64_t stime = ssd->gc_pass_ns;
 
         if (ssd->sp.fw_gc_page_ns) {
             stime = ssd_gc_fw_slot(ssd, 0);
@@ -2318,11 +2357,13 @@ static bool reclaim_line_moves(struct ssd *ssd, struct line *victim_line,
 static bool reclaim_line(struct ssd *ssd, struct line *victim_line,
                          bool copyback)
 {
+    bool opened = ssd_gc_pass_begin(ssd);
     bool ok = reclaim_line_moves(ssd, victim_line, copyback);
 
     if (ssd->tp_on) {
-        tp_publish(ssd, 0, ssd->sp.enable_gc_delay);
+        tp_publish(ssd, ssd->gc_pass_ns, ssd->sp.enable_gc_delay);
     }
+    ssd_gc_pass_end(ssd, opened);
     return ok;
 }
 
@@ -2532,7 +2573,7 @@ static struct line *ssd_rain_fit_victim(struct ssd *ssd, struct line *victim)
     return best;
 }
 
-int do_gc(struct ssd *ssd, bool force)
+static int do_gc_pass(struct ssd *ssd, bool force)
 {
     int free_lines = ssd->lm.free_line_cnt;
     struct line *victim_line;
@@ -2582,6 +2623,16 @@ int do_gc(struct ssd *ssd, bool force)
         return -1;
     }
     return 0;
+}
+
+/* one pass, which may finish the paced line first, on the pass clock */
+int do_gc(struct ssd *ssd, bool force)
+{
+    bool opened = ssd_gc_pass_begin(ssd);
+    int ret = do_gc_pass(ssd, force);
+
+    ssd_gc_pass_end(ssd, opened);
+    return ret;
 }
 
 /*
@@ -3089,7 +3140,7 @@ static void pace_done(struct ssd *ssd)
 {
     reclaim_line_tail(ssd, pace_release(ssd));
     if (ssd->tp_on) {
-        tp_publish(ssd, 0, ssd->sp.enable_gc_delay);
+        tp_publish(ssd, ssd->gc_pass_ns, ssd->sp.enable_gc_delay);
     }
 }
 
@@ -3210,22 +3261,26 @@ static void pace_settle(struct ssd *ssd)
  */
 void ssd_pace_program(struct ssd *ssd)
 {
+    bool opened;
     uint64_t r;
 
     if (!ssd->pace_line || pace_blocked(ssd) || ssd->media_ro) {
         return;
     }
+    opened = ssd_gc_pass_begin(ssd);
     r = ssd_line_data_pgs(ssd, ssd->pace_line) - ssd->pace_v0;
     ssd->pace_acc += ssd->pace_v0;
     while (ssd->pace_line->vpc && ssd->pace_acc >= r) {
         if (!pace_copy_one(ssd)) {
             pace_fail(ssd);
+            ssd_gc_pass_end(ssd, opened);
             return;
         }
         ssd->pace_acc -= r;
         ssd->pace_copies++;
     }
     pace_settle(ssd);
+    ssd_gc_pass_end(ssd, opened);
 }
 
 /**
@@ -3239,6 +3294,7 @@ void ssd_pace_program(struct ssd *ssd)
 void ssd_pace_tick(struct ssd *ssd)
 {
     struct line *victim;
+    bool opened;
 
     /* a paced line stays as it is: its valid pages keep their mappings */
     if (ssd->media_ro) {
@@ -3262,7 +3318,9 @@ void ssd_pace_tick(struct ssd *ssd)
         ssd->pace_v0 = victim->vpc;
         ssd->pace_acc = 0;
     }
+    opened = ssd_gc_pass_begin(ssd);
     pace_settle(ssd);
+    ssd_gc_pass_end(ssd, opened);
 }
 
 void ssd_free_lines(struct ssd *ssd)

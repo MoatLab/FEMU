@@ -704,6 +704,7 @@ static bool ftl_tier_fold_page(struct ssd *ssd, struct ppa *src, uint64_t now,
     struct ppa dst;
     uint64_t ahead;
     uint64_t sealed;
+    bool opened;
     uint64_t ready;
     uint64_t lat;
 
@@ -723,11 +724,14 @@ static bool ftl_tier_fold_page(struct ssd *ssd, struct ppa *src, uint64_t now,
     if (idle && should_gc_high(ssd)) {
         return false;
     }
+    /* one clock for the loop: host time between victims adds nothing */
+    opened = ssd_gc_pass_begin(ssd);
     while (should_gc_high(ssd)) {
         if (do_gc(ssd, true) == -1) {
             break;
         }
     }
+    ssd_gc_pass_end(ssd, opened);
     if (ssd_out_of_lines(ssd)) {
         return false;
     }

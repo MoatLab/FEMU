@@ -736,6 +736,16 @@ static uint64_t ssd_map_and_program(struct ssd *ssd, uint64_t lpn,
                                     uint64_t stime, int stream, bool *placed);
 static uint64_t ssd_gc_until_clear(struct ssd *ssd);
 
+/* one merge of a log-block mapping, as one collection pass */
+static uint64_t ssd_map_reclaim(struct ssd *ssd)
+{
+    bool opened = ssd_gc_pass_begin(ssd);
+    uint64_t lat = ssd->mapping->reclaim(ssd, 1);
+
+    ssd_gc_pass_end(ssd, opened);
+    return lat;
+}
+
 /*
  * An indirection unit of iu_pages pages (QLC drives map 16 KiB or more):
  * a write that covers only part of a unit reads the unit's other mapped
@@ -930,7 +940,7 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
 
         /* the merge reads pages this command may still hold */
         lat = MAX(lat, ssd_mp_flush(ssd, NAND_WRITE));
-        merge_lat = ssd->mapping->reclaim(ssd, 1);
+        merge_lat = ssd_map_reclaim(ssd);
         lat = MAX(lat, merge_lat);
     }
     /* paced collection copies its share after the host page has its slot */
@@ -948,16 +958,20 @@ static uint64_t ssd_program_lpn(struct ssd *ssd, uint64_t lpn, uint64_t stime,
 static uint64_t ssd_gc_until_clear(struct ssd *ssd)
 {
     uint64_t lat = 0;
+    bool opened;
 
     if (should_gc_high(ssd)) {
         lat = ssd_mp_flush(ssd, NAND_WRITE);
     }
+    /* one clock for the loop: host time between victims adds nothing */
+    opened = ssd_gc_pass_begin(ssd);
     while (should_gc_high(ssd)) {
         if (do_gc(ssd, true) == -1) {
             break;
         }
         ssd->gc_stall_passes++;
     }
+    ssd_gc_pass_end(ssd, opened);
     return lat;
 }
 
@@ -1084,7 +1098,7 @@ static uint64_t buffer_destage(struct ssd *ssd, int budget, uint64_t stime,
     if (done && !ssd->mapping->reclaim_per_page &&
         ssd->mapping->needs_reclaim && ssd->mapping->reclaim &&
         ssd->mapping->needs_reclaim(ssd)) {
-        curlat = ssd->mapping->reclaim(ssd, 1);
+        curlat = ssd_map_reclaim(ssd);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 
@@ -1377,6 +1391,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
                  nvme_streams_open(req->ns, &req->cmd) : -1;
     int r;
     bool wl_done;
+    bool opened;
     uint64_t passes = ssd->gc_stall_passes;
     uint8_t *snap = NULL;
     uint8_t *snap_state = NULL;
@@ -1412,6 +1427,8 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
         return 0;
     }
 
+    /* one clock for the loop: host time between victims adds nothing */
+    opened = ssd_gc_pass_begin(ssd);
     while (should_gc_high(ssd)) {
         /* perform GC here until !should_gc(ssd) */
         r = do_gc(ssd, true);
@@ -1419,6 +1436,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
             break;
         ssd->gc_stall_passes++;
     }
+    ssd_gc_pass_end(ssd, opened);
 
     /* refresh at most one read-stressed line per write */
     do_read_reclaim(ssd);
@@ -1643,7 +1661,7 @@ uint64_t ssd_write(struct ssd *ssd, NvmeRequest *req)
     if (!ssd->mapping->reclaim_per_page &&
         ssd->mapping->needs_reclaim && ssd->mapping->reclaim &&
         ssd->mapping->needs_reclaim(ssd)) {
-        curlat = ssd->mapping->reclaim(ssd, 1);
+        curlat = ssd_map_reclaim(ssd);
         maxlat = (curlat > maxlat) ? curlat : maxlat;
     }
 
@@ -1747,6 +1765,7 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
         uint64_t lpn, curlat, maxlat = 0;
         uint64_t passes = ssd->gc_stall_passes;
         bool wl_done;
+        bool opened;
         bool placed;
 
         /* durable_at_done staged the zeros: they are a write's payload */
@@ -1768,12 +1787,14 @@ uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req)
             return 0;
         }
 
+        opened = ssd_gc_pass_begin(ssd);
         while (should_gc_high(ssd)) {
             if (do_gc(ssd, true) == -1) {
                 break;
             }
             ssd->gc_stall_passes++;
         }
+        ssd_gc_pass_end(ssd, opened);
         wl_done = do_wear_level(ssd) == 0;
 
         ssd_host_pages(ssd, start_lpn, end_lpn - start_lpn + 1);

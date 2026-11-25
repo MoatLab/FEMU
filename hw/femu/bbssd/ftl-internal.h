@@ -538,6 +538,8 @@ void ssd_gc_fence(struct ssd *ssd, struct ppa *src, struct ppa *dst,
                   uint64_t end);
 uint64_t ssd_gc_erase_start(struct ssd *ssd, struct line *victim,
                             uint64_t *fence);
+bool ssd_gc_pass_begin(struct ssd *ssd);
+void ssd_gc_pass_end(struct ssd *ssd, bool opened);
 uint64_t ssd_gc_fw_slot(struct ssd *ssd, uint64_t ready);
 void ssd_gc_fw_take(struct ssd *ssd, uint64_t end);
 /* how a mode marks pages when collection moves one (ssd_gc_move_page) */
