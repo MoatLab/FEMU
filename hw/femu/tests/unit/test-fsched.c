@@ -369,7 +369,7 @@ static void run(FemuFsLine *l, int nr, FemuFsView v, uint8_t *out)
 {
     FemuFsView eff;
 
-    femu_fs_match(l, nr, &v, out, &eff);
+    femu_fs_match(l, nr, &v, out, NULL, &eff);
 }
 
 static void test_nth(void)
@@ -529,7 +529,7 @@ static void outcomes(const char *const *t, int nr, FemuFsView v,
     FemuFsView e;
 
     lines(l, t, nr);
-    femu_fs_match(l, nr, &v, out, &e);
+    femu_fs_match(l, nr, &v, out, NULL, &e);
     for (int i = 0; i < nr; i++) {
         if (out[i] != want[i]) {
             printf("# '%s': outcome %d, want %d\n", t[i], out[i], want[i]);
@@ -612,6 +612,44 @@ static void test_groups(void)
     CHECK(!eff.fua);
 }
 
+/* why a winner has no effect: the original FUA, a cut at pre, a hang */
+static void test_why(void)
+{
+    static const char *const t[] = {
+        "@write#1 wb-fail", "@write#1 write-fail", "@write#1 delay ms=1",
+        "@write#1 hang",
+    };
+    static const char *const cut[] = {
+        "@write#1 power-loss", "@write#1 write-fail", "@write#1 hang",
+    };
+    FemuFsLine l[4];
+    uint8_t out[4];
+    uint8_t why[4];
+    FemuFsView v = view(FEMU_FS_OPC_WRITE, 0, 8, true);
+    FemuFsView eff;
+
+    /* FUA Write: wb-fail wins its group with no effect, as it needs a page */
+    lines(l, t, 4);
+    memset(why, 0xff, sizeof(why));
+    femu_fs_match(l, 4, &v, out, why, &eff);
+    CHECK(out[0] == X && why[0] == FEMU_FS_WHY_FUA);
+    CHECK(out[1] == S && why[1] == FEMU_FS_WHY_NONE);
+    CHECK(out[2] == X && why[2] == FEMU_FS_WHY_HANG);
+    CHECK(out[3] == A && why[3] == FEMU_FS_WHY_NONE);
+
+    v.fua = false;
+    lines(l, cut, 3);
+    femu_fs_match(l, 3, &v, out, why, &eff);
+    CHECK(out[0] == A && why[0] == FEMU_FS_WHY_NONE);
+    CHECK(out[1] == X && why[1] == FEMU_FS_WHY_PRE);
+    CHECK(out[2] == S && why[2] == FEMU_FS_WHY_NONE);
+
+    CHECK(!strcmp(femu_fs_act_name(FEMU_FS_ACT_WB_FAIL), "wb-fail"));
+    CHECK(!strcmp(femu_fs_act_name(FEMU_FS_ACT_ANA), "ana"));
+    CHECK(!strcmp(femu_fs_act_name(FEMU_FS_ACT_SLOW), "slow"));
+    CHECK(!strcmp(femu_fs_act_name(FEMU_FS_ACT_DELAY), "delay"));
+}
+
 int main(void)
 {
     test_grammar();
@@ -623,6 +661,7 @@ int main(void)
     test_ppm();
     test_overlap();
     test_groups();
+    test_why();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

@@ -663,7 +663,7 @@ void femu_fsched_step(FemuCtrl *n, NvmeRequest *req)
         g_usleep((gulong)hold * 1000);
         qatomic_set(&n->test_fs_held, 2);
     }
-    femu_fs_match(f->l, f->nr, &v, f->out, &eff);
+    femu_fs_match(f->l, f->nr, &v, f->out, NULL, &eff);
     for (int i = 0; i < f->nr; i++) {
         if (f->out[i] == FEMU_FS_OUT_APPLIED) {
             femu_fsched_act(n, req, &f->l[i], &eff);

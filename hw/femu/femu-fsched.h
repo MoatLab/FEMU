@@ -67,6 +67,14 @@ enum {
     FEMU_FS_OUT_NO_EFFECT,      /* won, but the command does not allow it */
 };
 
+/* why a winner has no effect, for its record */
+enum {
+    FEMU_FS_WHY_NONE,
+    FEMU_FS_WHY_FUA,            /* the original command has FUA */
+    FEMU_FS_WHY_PRE,            /* a cut or cfs at pre: no command runs */
+    FEMU_FS_WHY_HANG,           /* a hang won: no CQE comes to delay */
+};
+
 enum { FEMU_FS_GRAIN_PAGE, FEMU_FS_GRAIN_LBA };
 enum { FEMU_FS_WB_UNC, FEMU_FS_WB_OLD };
 enum { FEMU_FS_REPORT_STICKY, FEMU_FS_REPORT_ONCE };
@@ -209,11 +217,18 @@ bool femu_fs_view_ok(const FemuFsView *v, uint64_t nsze, unsigned lbads,
                      uint32_t xfer_ms, unsigned mdts_shift);
 
 /**
+ * femu_fs_act_name - the name of an action, as a line gives it
+ * @act: a FEMU_FS_ACT_*
+ */
+const char *femu_fs_act_name(uint8_t act);
+
+/**
  * femu_fs_match - run one checked command through every line
  * @l: the lines, in file order
  * @nr: their number
  * @v: the view of the command, which no action changes
  * @out: one FEMU_FS_OUT_* per line
+ * @why: one FEMU_FS_WHY_* per line, set for FEMU_FS_OUT_NO_EFFECT; or NULL
  * @eff: the command as the winning actions leave it
  *
  * Each matching line counts the match and draws, in file order. In each
@@ -223,7 +238,7 @@ bool femu_fs_view_ok(const FemuFsView *v, uint64_t nsze, unsigned lbads,
  * winner does that to a delay.
  */
 void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
-                   uint8_t *out, FemuFsView *eff);
+                   uint8_t *out, uint8_t *why, FemuFsView *eff);
 
 /**
  * femu_fs_done - whether no line can select again

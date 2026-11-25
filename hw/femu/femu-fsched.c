@@ -90,6 +90,22 @@ uint64_t femu_fs_splitmix64(uint64_t *x)
     return z ^ (z >> 31);
 }
 
+const char *femu_fs_act_name(uint8_t act)
+{
+    if (act == FEMU_FS_ACT_ANA) {
+        return "ana";
+    }
+    if (act == FEMU_FS_ACT_SLOW) {
+        return "slow";
+    }
+    for (size_t i = 0; i < ARRAY_SIZE(fs_actions); i++) {
+        if (fs_actions[i].act == act) {
+            return fs_actions[i].name;
+        }
+    }
+    return "?";
+}
+
 uint32_t femu_fs_draw(uint64_t *rng)
 {
     return femu_fs_splitmix64(rng) % FEMU_FS_PPM_ONE;
@@ -566,7 +582,7 @@ static bool fs_allowed(const FemuFsLine *l, const FemuFsView *v)
 }
 
 void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
-                   uint8_t *out, FemuFsView *eff)
+                   uint8_t *out, uint8_t *why, FemuFsView *eff)
 {
     int win[FEMU_FS_GRP_NR];
     bool pre = false;
@@ -582,6 +598,9 @@ void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
         bool sel;
 
         out[i] = FEMU_FS_OUT_NONE;
+        if (why) {
+            why[i] = FEMU_FS_WHY_NONE;
+        }
         if (!fs_line_matches(x, v)) {
             continue;
         }
@@ -606,7 +625,14 @@ void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
             }
             win[x->grp] = i;
         }
-        out[i] = fs_allowed(x, v) ? FEMU_FS_OUT_APPLIED : FEMU_FS_OUT_NO_EFFECT;
+        if (fs_allowed(x, v)) {
+            out[i] = FEMU_FS_OUT_APPLIED;
+        } else {
+            out[i] = FEMU_FS_OUT_NO_EFFECT;
+            if (why) {
+                why[i] = FEMU_FS_WHY_FUA;
+            }
+        }
     }
 
     t = win[FEMU_FS_GRP_TERMINAL];
@@ -622,6 +648,9 @@ void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
         if (out[i] == FEMU_FS_OUT_APPLIED && i != t &&
             (pre || (hang && x->grp == FEMU_FS_GRP_TIMING))) {
             out[i] = FEMU_FS_OUT_NO_EFFECT;
+            if (why) {
+                why[i] = pre ? FEMU_FS_WHY_PRE : FEMU_FS_WHY_HANG;
+            }
         }
         switch (out[i]) {
         case FEMU_FS_OUT_APPLIED:
