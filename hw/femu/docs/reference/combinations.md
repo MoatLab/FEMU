@@ -561,6 +561,7 @@ own description allows. A message keeps its format directives (`%s`,
 ## `mdts`
 
 - femu: %s needs mdts 1 to %d
+- precon_fill_pct: a one-page Write on namespace %u has metadata or exceeds mdts
 
 ## `mem_limit`
 
@@ -907,6 +908,7 @@ own description allows. A message keeps its format directives (`%s`,
 - persist_load_only needs an existing persist_file; '%s' does not exist
 - persist_load_only needs persist_file
 - power_limit is not supported with persist_file
+- precon_fill_pct: persist_file '%s' holds data but no FTL state
 
 ## `persist_ftl`
 
@@ -1003,6 +1005,30 @@ own description allows. A message keeps its format directives (`%s`,
 - power_states does not work with ocp yet (OCP C7h maps DSSD power states to PS0)
 - power_states needs 100 <= throttle_light_pct <= throttle_heavy_pct <= 1000
 - power_states works with bbssd or CSD namespaces only
+
+## `precon_fill_pct`
+
+- precon_fill_pct is not supported with %s
+- precon_fill_pct must be 0 to 100
+- precon_fill_pct: %u%% of namespace %u is less than one flash page
+- precon_fill_pct: a multi-plane batch is still open after a request
+- precon_fill_pct: a one-page Write on namespace %u has metadata or exceeds mdts
+- precon_fill_pct: namespace %u: the final Flush failed with status 0x%x
+- precon_fill_pct: namespace %u: the write of page %
+- precon_fill_pct: no namespace has a bbssd FTL
+- precon_fill_pct: persist_file '%s' holds data but no FTL state
+- precon_fill_pct: the LBAs of namespace %u do not tile its flash pages
+- precon_overwrite_pct and precon_pattern need precon_fill_pct
+
+## `precon_overwrite_pct`
+
+- precon_overwrite_pct and precon_pattern need precon_fill_pct
+- precon_overwrite_pct must be 0 to %u
+
+## `precon_pattern`
+
+- precon_overwrite_pct and precon_pattern need precon_fill_pct
+- precon_pattern must be rand or seq
 
 ## `prog_pass2_lag`
 
