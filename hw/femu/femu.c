@@ -1275,7 +1275,7 @@ static void nvme_write_bar(FemuCtrl *n, hwaddr offset, uint64_t data, unsigned s
 
         /*
          * A completed shutdown, normal or abrupt, leaves nothing the host
-         * acknowledged in the write buffer (NVM Command Set 2.1.4.2.2).
+         * acknowledged in the write buffer (NVM Command Set 2.1.4.3.2).
          */
         /*
          * The pollers stay paused from the flush to the teardown below, so
