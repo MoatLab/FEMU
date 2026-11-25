@@ -311,6 +311,8 @@ const char *femu_fr_name_why(uint8_t v)
         return "slots-full";
     case FEMU_FS_WHY_MARKED:
         return "marked";
+    case FEMU_FS_WHY_NOT_MODELLED:
+        return "not-modelled";
     case FEMU_FS_WHY_SQ_DELETED:
         return "sq-deleted";
     case FEMU_FS_WHY_RESET:
@@ -380,6 +382,7 @@ int femu_fr_json(const FemuFrRec *rec, char *buf, size_t len)
     char why[32] = "";
     char pages[40] = "";
     char wb[96] = "";
+    char extra[64] = "";
     /* 8 ranges of at most 41 bytes, and the chunk fields */
     char cut[512] = "";
     int n;
@@ -431,17 +434,20 @@ int femu_fr_json(const FemuFrRec *rec, char *buf, size_t len)
     if (rec->act == FEMU_FS_ACT_POWER_LOSS) {
         fr_json_cut(rec, cut, sizeof(cut));
     }
+    if (rec->act == FEMU_FS_ACT_DELAY && rec->phase == FEMU_FR_PHASE_APPLY) {
+        snprintf(extra, sizeof(extra), ",\"ms\":%u", rec->delay_ms);
+    }
     n = snprintf(buf, len,
                  "{\"id\":%" PRIu64 "%s,\"origin\":\"%s\",\"line\":%u,"
                  "\"match\":%" PRIu64 ",\"action\":\"%s\",\"phase\":\"%s\","
                  "\"step\":%" PRIu64 ",\"nsid\":%u,\"sqid\":%u,\"cid\":%u,"
                  "\"opc\":%u,\"fua\":%s,\"slba\":%" PRIu64 ",\"nlb\":%u,"
-                 "\"outcome\":\"%s\"%s%s%s%s%s}\n",
+                 "\"outcome\":\"%s\"%s%s%s%s%s%s}\n",
                  rec->id, cause, femu_fr_name_origin(rec->origin), rec->line,
                  rec->match, femu_fs_act_name(rec->act),
                  femu_fr_name_phase(rec->phase), rec->step, rec->nsid,
                  rec->sqid, rec->cid, rec->opc, rec->fua ? "true" : "false",
                  rec->slba, rec->nlb, femu_fr_name_outcome(rec->outcome), why,
-                 pages, wb, status, cut);
+                 pages, wb, extra, status, cut);
     return n;
 }

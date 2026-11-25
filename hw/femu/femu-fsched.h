@@ -80,6 +80,7 @@ enum {
     FEMU_FS_WHY_DURABLE,        /* no buffered page is left volatile */
     FEMU_FS_WHY_SLOTS_FULL,     /* wb-fail: every fault slot is taken */
     FEMU_FS_WHY_MARKED,         /* wb-fail: its pages carry an older mark */
+    FEMU_FS_WHY_NOT_MODELLED,   /* ana= and slow= act on time lines only */
     /* reclaim: what gave back a command that a hang or a cfs holds */
     FEMU_FS_WHY_SQ_DELETED,     /* Delete I/O Submission Queue */
     FEMU_FS_WHY_RESET,          /* Controller Reset (CC.EN to 0) */

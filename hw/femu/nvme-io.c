@@ -605,6 +605,7 @@ static inline void nvme_req_start(FemuCtrl *n, NvmeRequest *req,
     req->fs_lie = 0;
     req->fs_hang = 0;
     req->fs_wbf = 0;
+    req->fs_delay_ms = 0;
     /* every path that frees a request slot released this first */
     assert(!req->csd_use);
     assert(!req->eol_held);
@@ -1463,6 +1464,17 @@ static void nvme_process_cq_cpl(void *arg, int index_poller)
                 req->expire_time = (int64_t)*core;
                 pthread_spin_unlock(&n->fw_cpu_lock);
             }
+        }
+
+        /*
+         * events_file delay: after the shared bookings above, so only this
+         * CQE moves. nr_model_ns counts it, as the host waits for it.
+         */
+        if (unlikely(req->fs_delay_ms)) {
+            int64_t d = (int64_t)req->fs_delay_ms * SCALE_MS;
+
+            req->expire_time += d;
+            req->reqlat += d;
         }
 
         /* a Cancel found it before its FTL step: a deferred abort */

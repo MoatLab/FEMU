@@ -595,10 +595,13 @@ static void test_groups(void)
     outcomes((const char *const[]) { "@write#1 hang", "@write#1 write-fail",
                                      "@write#1 delay ms=1" },
              3, wr, (const uint8_t[]) { A, A, X }, NULL);
-    /* lines with no group each apply */
+    /*
+     * Lines with no group each select. ana= and slow= act on time lines
+     * only, so on a command line each has no effect.
+     */
     outcomes((const char *const[]) { "@any#1 slow=0:0:200",
                                      "@any#1 slow=0:1:200" },
-             2, wr, (const uint8_t[]) { A, A }, NULL);
+             2, wr, (const uint8_t[]) { X, X }, NULL);
     /* a line that matches but is not selected takes no group */
     outcomes((const char *const[]) { "@write#2 write-fail",
                                      "@write#1 wb-fail" },
@@ -1864,6 +1867,60 @@ static void test_cut_json(void)
     CHECK(!strstr(buf, "\"chunk\""));
 }
 
+/*
+ * ana= and slow= on a command line: selected with no effect, reason
+ * not-modelled, also beside a terminal. The control is a delay line in
+ * the same file, which applies.
+ */
+static void test_not_modelled(void)
+{
+    static const char *const t[] = {
+        "@any#1 ana=1:2", "@write#1 slow=0:0:200", "@write#1 delay ms=5",
+    };
+    FemuFsView v = view(FEMU_FS_OPC_WRITE, 0, 8, false);
+    FemuFsLine l[3];
+    uint8_t out[3];
+    uint8_t why[3];
+    FemuFsView eff;
+
+    lines(l, t, 3);
+    femu_fs_match(l, 3, &v, out, why, &eff);
+    CHECK(out[0] == X && why[0] == FEMU_FS_WHY_NOT_MODELLED);
+    CHECK(out[1] == X && why[1] == FEMU_FS_WHY_NOT_MODELLED);
+    CHECK(out[2] == A && why[2] == FEMU_FS_WHY_NONE);
+    CHECK(l[0].no_effect == 1 && l[0].applied == 0);
+    CHECK(l[2].applied == 1 && l[2].delay_ms == 5);
+    CHECK(!strcmp(femu_fr_name_why(FEMU_FS_WHY_NOT_MODELLED),
+                  "not-modelled"));
+}
+
+/* the apply record of a delay names its ms; no other record does */
+static void test_delay_json(void)
+{
+    FemuFrRec x = rec_of(4);
+    char buf[FEMU_FR_JSON_MAX];
+
+    x.act = FEMU_FS_ACT_DELAY;
+    x.phase = FEMU_FR_PHASE_APPLY;
+    x.outcome = FEMU_FR_OUT_DONE;
+    x.delay_ms = 2000;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"action\":\"delay\",\"phase\":\"apply\","));
+    CHECK(strstr(buf, "\"outcome\":\"done\",\"ms\":2000}\n"));
+    x.outcome = FEMU_FR_OUT_NO_EFFECT;
+    x.why = FEMU_FS_WHY_CMD_FAILED;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(strstr(buf, "\"reason\":\"cmd-failed\",\"ms\":2000}\n"));
+    /* control: the select record and another action have no ms */
+    x.phase = FEMU_FR_PHASE_SELECT;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(!strstr(buf, "\"ms\""));
+    x.phase = FEMU_FR_PHASE_APPLY;
+    x.act = FEMU_FS_ACT_HANG;
+    femu_fr_json(&x, buf, sizeof(buf));
+    CHECK(!strstr(buf, "\"ms\""));
+}
+
 int main(void)
 {
     test_grammar();
@@ -1898,6 +1955,8 @@ int main(void)
     test_cut_truncate();
     test_cut_merge();
     test_cut_json();
+    test_not_modelled();
+    test_delay_json();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

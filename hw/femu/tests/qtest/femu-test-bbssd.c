@@ -10059,8 +10059,12 @@ static char *femu_fault_ids(QTestState *qts, const char *id)
 void femu_test_fsched_window(void *obj, void *data, QGuestAllocator *alloc)
 {
     g_autofree char *dir = g_dir_make_tmp("femu-frec-XXXXXX", NULL);
+    /*
+     * An ana= command line has no effect (not-modelled), so each Write
+     * gives one select record and no apply record. It needs ana=on.
+     */
     g_autofree char *path = femu_events_file(dir,
-        "@write%1000000~1 delay ms=1\n");
+        "@write%1000000~1 ana=1:2\n");
     g_autofree char *tpath = g_build_filename(dir, "time", NULL);
     g_autofree char *lpath = g_build_filename(dir, "log", NULL);
     QOSState *qs;
@@ -10078,8 +10082,8 @@ void femu_test_fsched_window(void *obj, void *data, QGuestAllocator *alloc)
         { "'events_max_faults':0", false, false,
           "events_max_faults takes 1 to" },
         { "'events_max_faults':65537", false, false, "takes 1 to 65536" },
-        /* the time line needs ana=on, so the log check is what refuses */
-        { "'ana':true,'events_max_faults':4", true, true,
+        /* each device here has ana=on: the log check is what refuses */
+        { "'events_max_faults':4", true, true,
           "events_log needs a command line in events_file" },
     }, good[] = {
         { "'events_max_faults':1", false, false, NULL },
@@ -10091,9 +10095,9 @@ void femu_test_fsched_window(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_true(g_file_set_contents(tpath, "100 ana=1:2\n", -1, NULL));
     qs = qtest_pc_boot(
         "-machine pc -nodefaults "
-        "-device femu,id=ev,addr=5,devsz_mb=16,femu_mode=1,"
+        "-device femu,id=ev,addr=5,devsz_mb=16,femu_mode=1,ana=on,"
         "events_max_faults=4,events_file=%s "
-        "-device femu,id=ev2,addr=6,devsz_mb=16,femu_mode=1,"
+        "-device femu,id=ev2,addr=6,devsz_mb=16,femu_mode=1,ana=on,"
         "events_max_faults=16,events_file=%s", path, path);
     qts = qs->qts;
     buf = guest_alloc(&qs->alloc, 4096);
@@ -10118,7 +10122,7 @@ void femu_test_fsched_window(void *obj, void *data, QGuestAllocator *alloc)
     /* realize refusals, then their twins */
     for (size_t i = 0; i < ARRAY_SIZE(bad); i++) {
         g_autofree char *all = g_strdup_printf(
-            "'femu_mode':1,%s%s%s%s", bad[i].props,
+            "'femu_mode':1,'ana':true,%s%s%s%s", bad[i].props,
             bad[i].log ? ",'events_log':'" : "", bad[i].log ? lpath : "",
             bad[i].log ? "'" : "");
         const char *desc;
@@ -10140,7 +10144,7 @@ void femu_test_fsched_window(void *obj, void *data, QGuestAllocator *alloc)
     qobject_unref(rsp);
     for (size_t i = 0; i < ARRAY_SIZE(good); i++) {
         g_autofree char *all = g_strdup_printf(
-            "'femu_mode':1,%s%s%s%s", good[i].props,
+            "'femu_mode':1,'ana':true,%s%s%s%s", good[i].props,
             good[i].log ? ",'events_log':'" : "", good[i].log ? lpath : "",
             good[i].log ? "'" : "");
         g_autofree char *id = g_strdup_printf("frok%zu", i);
@@ -10213,8 +10217,12 @@ static char *femu_fault_log_ids(const char *path)
 void femu_test_fsched_overflow(void *obj, void *data, QGuestAllocator *alloc)
 {
     g_autofree char *dir = g_dir_make_tmp("femu-frec-XXXXXX", NULL);
+    /*
+     * An ana= command line has no effect (not-modelled), so each Write
+     * gives one select record and no apply record. It needs ana=on.
+     */
     g_autofree char *path = femu_events_file(dir,
-        "@write%1000000~1 delay ms=1\n");
+        "@write%1000000~1 ana=1:2\n");
     g_autofree char *lpath = g_build_filename(dir, "log", NULL);
     QOSState *qs;
     QTestState *qts;
@@ -10227,9 +10235,9 @@ void femu_test_fsched_overflow(void *obj, void *data, QGuestAllocator *alloc)
 
     qs = qtest_pc_boot(
         "-machine pc -nodefaults "
-        "-device femu,id=ev,addr=5,devsz_mb=16,femu_mode=1,"
+        "-device femu,id=ev,addr=5,devsz_mb=16,femu_mode=1,ana=on,"
         "events_max_faults=4,events_log=%s,events_file=%s "
-        "-device femu,id=ev2,addr=6,devsz_mb=16,femu_mode=1,"
+        "-device femu,id=ev2,addr=6,devsz_mb=16,femu_mode=1,ana=on,"
         "events_log=/dev/full,events_file=%s", lpath, path, path);
     qts = qs->qts;
     buf = guest_alloc(&qs->alloc, 4096);
@@ -10512,8 +10520,9 @@ void femu_test_fsched_log_unplug(void *obj, void *data,
                                  QGuestAllocator *alloc)
 {
     g_autofree char *dir = g_dir_make_tmp("femu-frec-XXXXXX", NULL);
+    /* one select record per Write, with no apply record (ana=on) */
     g_autofree char *ev = femu_events_file(dir,
-                                           "@write%1000000~1 delay ms=1\n");
+                                           "@write%1000000~1 ana=1:2\n");
     g_autofree char *log = g_build_filename(dir, "log", NULL);
     g_autofree char *lock = g_build_filename(dir, "pel.lock", NULL);
     QOSState *qs = qtest_pc_boot("-machine pc -nodefaults");
@@ -10524,12 +10533,13 @@ void femu_test_fsched_log_unplug(void *obj, void *data,
     char *err;
 
     /* realize fails at pel_file, after the writer of r started */
-    err = femu_fault_add(qts, "r", 5, FEMU_FL_LOG ",'pel_file':'%s'", ev,
-                         log, lock);
+    err = femu_fault_add(qts, "r", 5,
+                         FEMU_FL_LOG ",'ana':true,'pel_file':'%s'", ev, log,
+                         lock);
     g_assert_nonnull(strstr(err ?: "", "ends in .lock"));
     g_free(err);
     /* the control: the same log, a good device */
-    err = femu_fault_add(qts, "u", 5, FEMU_FL_LOG, ev, log);
+    err = femu_fault_add(qts, "u", 5, FEMU_FL_LOG ",'ana':true", ev, log);
     g_assert_null(err);
 
     femu_enable(&c, qpci_device_find(qs->pcibus, QPCI_DEVFN(5, 0)),
@@ -31785,10 +31795,12 @@ void femu_test_fsched_fua_lie(void *obj, void *data,
                 "1<0 l1 m1 fua-lie select selected c%u o1 f1 8+8; "
                 "2<0 l2 m2 wb-fail select superseded c%u o1 f1 8+8; "
                 "3<0 l3 m1 delay select selected c%u o1 f1 8+8; "
-                "4<1 l1 m1 fua-lie apply done c%u o1 f1 8+8 L1; "
-                "5<0 l4 m1 fua-lie select selected c%u o1 f1 32+8; "
-                "6<5 l4 m1 fua-lie apply no-effect/cmd-failed c%u o1 f1 "
-                "32+8", cid[0], cid[0], cid[0], cid[0], cid[1], cid[1]);
+                "4<3 l3 m1 delay apply done c%u o1 f1 8+8; "
+                "5<1 l1 m1 fua-lie apply done c%u o1 f1 8+8 L1; "
+                "6<0 l4 m1 fua-lie select selected c%u o1 f1 32+8; "
+                "7<6 l4 m1 fua-lie apply no-effect/cmd-failed c%u o1 f1 "
+                "32+8", cid[0], cid[0], cid[0], cid[0], cid[0], cid[1],
+                cid[1]);
 
             femu_lie_want(qts, d[i].id, want);
         } else {
@@ -31986,7 +31998,9 @@ void femu_test_fsched_fused(void *obj, void *data, QGuestAllocator *alloc)
         femu_fsf_cmd(&cmds[0], NVME_CMD_WRITE, 0, 16, buf);
         g_assert_cmphex(femu_fsf_send(&c, &q, cmds, 1), ==, 0);
         want = g_strdup_printf("1<0 l1 m2 delay select selected c%u o1 f0 "
-                               "%d+8", sel, i == 0 ? 16 : 0);
+                               "%d+8; 2<1 l1 m2 delay apply done c%u o1 f0 "
+                               "%d+8", sel, i == 0 ? 16 : 0, sel,
+                               i == 0 ? 16 : 0);
         femu_lie_want(qts, id[i], want);
         got = femu_fault_sel(qts, id[i]);
         g_assert_cmpstr(got, ==, i == 0 ? "1:2:1:1:0:0" : "1:3:1:1:0:0");
@@ -35246,6 +35260,254 @@ void femu_test_fsched_cut_origin(void *obj, void *data, QGuestAllocator *alloc)
                         "'path':'/machine/peripheral/on'}}");
         g_assert_true(qdict_haskey(rsp, "error"));
         qobject_unref(rsp);
+    }
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * events_file actions that change one command. Each record of device
+ * @id as "id<cause lL mM origin action phase outcome[/reason]
+ * slba+nlb", then
+ * " ms=N" for a delay, " x=S" for a status in hex, and " K@L" for an
+ * sdc fault K on block L.
+ */
+static char *femu_cmd_recs(QTestState *qts, const char *id)
+{
+    QDict *rsp;
+    QDict *q = femu_events_q(qts, id, &rsp);
+    QList *list = qdict_get_qlist(q, "faults");
+    GString *g = g_string_new(NULL);
+    QListEntry *e;
+
+    g_assert_nonnull(list);
+    QLIST_FOREACH_ENTRY(list, e) {
+        QDict *r = qobject_to(QDict, qlist_entry_obj(e));
+
+        g_assert_nonnull(r);
+        g_string_append_printf(
+            g, "%s%" PRId64 "<%" PRId64 " l%" PRId64 " m%" PRId64
+            " %s %s %s %s", g->len ? "; " : "", qdict_get_int(r, "id"),
+            qdict_haskey(r, "cause") ? qdict_get_int(r, "cause") : 0,
+            qdict_get_int(r, "line"), qdict_get_int(r, "match"),
+            qdict_get_str(r, "origin"), qdict_get_str(r, "action"),
+            qdict_get_str(r, "phase"), qdict_get_str(r, "outcome"));
+        if (qdict_haskey(r, "reason")) {
+            g_string_append_printf(g, "/%s", qdict_get_str(r, "reason"));
+        }
+        g_string_append_printf(g, " %" PRId64 "+%" PRId64,
+                               qdict_get_int(r, "slba"),
+                               qdict_get_int(r, "nlb"));
+        if (qdict_haskey(r, "ms")) {
+            g_string_append_printf(g, " ms=%" PRId64,
+                                   qdict_get_int(r, "ms"));
+        }
+        if (qdict_haskey(r, "status")) {
+            g_string_append_printf(g, " x=%" PRIx64,
+                                   (uint64_t)qdict_get_int(r, "status"));
+        }
+        if (qdict_haskey(r, "sdc-kind")) {
+            g_string_append_printf(g, " %s@%" PRId64,
+                                   qdict_get_str(r, "sdc-kind"),
+                                   qdict_get_int(r, "sdc-lba"));
+        }
+    }
+    qobject_unref(rsp);
+    return g_string_free(g, false);
+}
+
+static void femu_cmd_want(QTestState *qts, const char *id, const char *want)
+{
+    g_autofree char *got = femu_cmd_recs(qts, id);
+
+    g_test_message("%s records: %s", id, got);
+    g_assert_cmpstr(got, ==, want);
+}
+
+/* a FUA Write of page @page whose data pointer has no memory behind it */
+static uint16_t femu_cmd_bad_write(FemuCtrlState *c, int page)
+{
+    NvmeRwCmd rw = { .opcode = NVME_CMD_WRITE, .nsid = cpu_to_le32(1),
+                     .slba = cpu_to_le64(page * 8), .nlb = cpu_to_le16(7),
+                     .control = cpu_to_le16(NVME_RW_FUA),
+                     .dptr.prp1 = cpu_to_le64(0xfed00000) };
+
+    return femu_io(c, (NvmeCmd *)&rw);
+}
+
+/* the host time the next command of @c takes, in us; @st gets its status */
+static int64_t femu_cmd_timed(FemuCtrlState *c, uint8_t opc, uint64_t slba,
+                              uint64_t buf, uint16_t *st)
+{
+    int64_t t0 = g_get_monotonic_time();
+
+    *st = femu_fs_io(c, opc, slba, 8, false, buf);
+    return g_get_monotonic_time() - t0;
+}
+
+#define FEMU_CMD_D      (2 * G_USEC_PER_SEC)    /* the delay, in us */
+
+/*
+ * delay ms=2000 holds the CQE of a Write, a Read, a Flush and a Write
+ * Zeroes of device dy for 2 s or more, and less than 3 s. Write 3 fails
+ * its data transfer: no-effect, reason cmd-failed, and it takes no
+ * delay. Device dn, the control, has its lines on command 9: each of its
+ * commands must finish within 2 s, or the host is too slow to tell the
+ * two apart and the test skips.
+ *
+ * Planted defects and the check that fails:
+ *   no time added                       dy Write 2 under 2 s
+ *   ms taken as us                      dy Write 2 under 2 s
+ *   ms taken as 10 ms                   dy Write 2 over 3 s
+ *   a failed command takes the delay    record 4 says done; Write 3 slow
+ *   no apply record                     the record list
+ */
+void femu_test_fsched_delay(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const struct {
+        uint8_t opc;
+        uint64_t slba;
+    } k[] = {
+        { NVME_CMD_WRITE, 0 }, { NVME_CMD_WRITE, 8 }, { NVME_CMD_WRITE, 16 },
+        { NVME_CMD_READ, 8 }, { NVME_CMD_FLUSH, 0 },
+        { NVME_CMD_WRITE_ZEROES, 24 },
+    };
+    g_autofree char *dir = g_dir_make_tmp("femu-cmd-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "dn", 5, FEMU_LIE_PL ",oncs=415",
+          "@write#9 delay ms=2000\n@read#9 delay ms=2000\n"
+          "@flush#9 delay ms=2000\n@wzero#9 delay ms=2000\n" },
+        { "dy", 6, FEMU_LIE_PL ",oncs=415",
+          "@write#2 delay ms=2000\n@write#3 delay ms=2000\n"
+          "@read#1 delay ms=2000\n@flush#1 delay ms=2000\n"
+          "@wzero#1 delay ms=2000\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    int64_t us[2][ARRAY_SIZE(k)];
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+
+        for (int j = 0; j < ARRAY_SIZE(k); j++) {
+            uint16_t st;
+
+            qtest_memset(qts, buf, 0xa5, 4096);
+            if (j == 2) {
+                int64_t t0 = g_get_monotonic_time();
+
+                st = femu_cmd_bad_write(c, 2);
+                us[i][j] = g_get_monotonic_time() - t0;
+                g_assert_cmphex(st, ==, NVME_DATA_TRAS_ERROR);
+                continue;
+            }
+            us[i][j] = femu_cmd_timed(c, k[j].opc, k[j].slba, buf, &st);
+            g_assert_cmphex(st, ==, NVME_SUCCESS);
+        }
+        for (int j = 0; j < ARRAY_SIZE(k); j++) {
+            g_test_message("%s: command %d took %" PRId64 " us", d[i].id, j,
+                           us[i][j]);
+        }
+    }
+    femu_cmd_want(qts, "dn", "");
+    femu_cmd_want(qts, "dy",
+                  "1<0 l1 m2 sched-cmd delay select selected 8+8; "
+                  "2<1 l1 m2 sched-cmd delay apply done 8+8 ms=2000; "
+                  "3<0 l2 m3 sched-cmd delay select selected 16+8; "
+                  "4<3 l2 m3 sched-cmd delay apply no-effect/cmd-failed "
+                  "16+8 ms=2000; "
+                  "5<0 l3 m1 sched-cmd delay select selected 8+8; "
+                  "6<5 l3 m1 sched-cmd delay apply done 8+8 ms=2000; "
+                  "7<0 l4 m1 sched-cmd delay select selected 0+0; "
+                  "8<7 l4 m1 sched-cmd delay apply done 0+0 ms=2000; "
+                  "9<0 l5 m1 sched-cmd delay select selected 24+8; "
+                  "10<9 l5 m1 sched-cmd delay apply done 24+8 ms=2000");
+    for (int j = 0; j < ARRAY_SIZE(k); j++) {
+        bool held = j != 0 && j != 2;
+
+        if (held) {
+            g_assert_cmpint(us[1][j], >=, FEMU_CMD_D);
+            g_assert_cmpint(us[1][j], <, FEMU_CMD_D + G_USEC_PER_SEC);
+        }
+    }
+    for (int j = 0; j < ARRAY_SIZE(k); j++) {
+        if (us[0][j] >= FEMU_CMD_D) {
+            g_test_skip("a control command took 2 s: the host is too slow");
+            femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+            return;
+        }
+    }
+    /* the failed Write 3 took no delay */
+    g_assert_cmpint(us[1][2], <, FEMU_CMD_D);
+    femu_lie_page_is(&d[1].c, buf, 1, 0xa5);
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * A delay holds one CQE only. With the host link model on, Read A of
+ * device la has a delay of 2 s and Read B follows it at once. B must
+ * complete first, within 2 s: the delay must not move the link time that
+ * A booked. Device lc, the control, runs the same pair with its line on
+ * Read 9; if its pair takes 2 s, the test skips.
+ *
+ * Planted defects and the check that fails:
+ *   delay added before the link booking   B completes after A
+ *   delay added in the FTL step           B completes after A
+ */
+void femu_test_fsched_delay_link(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-cmd-XXXXXX", NULL);
+    FemuLieDev d[] = {
+        { "lc", 5, FEMU_LIE_PL ",pcie_bandwidth_mbps=100",
+          "@read#9 delay ms=2000\n" },
+        { "la", 6, FEMU_LIE_PL ",pcie_bandwidth_mbps=100",
+          "@read,lba=0-7#1 delay ms=2000\n" },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    uint64_t buf = guest_alloc(&qs->alloc, 8192);
+    int64_t us[2];
+
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        FemuCtrlState *c = &d[i].c;
+        NvmeRwCmd rw[2] = { 0 };
+        uint16_t cid[2];
+        uint16_t got;
+        int64_t t0;
+
+        femu_lie_page(c, buf, 0, 0xa0, true);
+        femu_lie_page(c, buf, 1, 0xa1, true);
+        for (int r = 0; r < 2; r++) {
+            rw[r].opcode = NVME_CMD_READ;
+            rw[r].nsid = cpu_to_le32(1);
+            rw[r].dptr.prp1 = cpu_to_le64(buf + r * 4096);
+            rw[r].slba = cpu_to_le64(r * 8);
+            rw[r].nlb = cpu_to_le16(7);
+        }
+        t0 = g_get_monotonic_time();
+        for (int r = 0; r < 2; r++) {
+            cid[r] = c->cid;
+            femu_submit(c, &c->io, (NvmeCmd *)&rw[r]);
+        }
+        g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+        us[i] = g_get_monotonic_time() - t0;
+        /* the control may post either first */
+        if (i) {
+            g_assert_cmpint(got, ==, cid[1]);
+        }
+        g_assert_cmphex(FEMU_SC(femu_complete(c, &c->io, &got, NULL)), ==,
+                        NVME_SUCCESS);
+        if (i) {
+            g_assert_cmpint(got, ==, cid[0]);
+            g_assert_cmpint(g_get_monotonic_time() - t0, >=, FEMU_CMD_D);
+        }
+        g_test_message("%s: first CQE after %" PRId64 " us", d[i].id, us[i]);
+    }
+    if (us[0] >= FEMU_CMD_D) {
+        g_test_skip("the control pair took 2 s: the host is too slow");
+    } else {
+        g_assert_cmpint(us[1], <, FEMU_CMD_D);
     }
     femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
 }

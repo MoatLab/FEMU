@@ -115,6 +115,8 @@ typedef struct FemuFrRec {
          * It holds the first 64 blocks of the page; lost counts them all.
          */
         uint64_t lba_mask;
+        /* delay apply: the ms of the line, which a "done" added */
+        uint32_t delay_ms;
         /* power-loss apply: the cut summary */
         struct {
             uint64_t cqe_boundary;      /* I/O CQEs posted at the fence */

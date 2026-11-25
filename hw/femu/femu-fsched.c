@@ -585,12 +585,20 @@ static bool fs_line_matches(const FemuFsLine *l, const FemuFsView *v)
 }
 
 /*
- * Whether the original command allows a winning action. A FUA Write
- * never enters the write buffer, so a write-back failure has no page.
+ * Why the original command gives a winning action no effect, or
+ * FEMU_FS_WHY_NONE. A FUA Write never enters the write buffer, so a
+ * write-back failure has no page. ana= and slow= change the device
+ * from a BH, which a command line does not order against its command.
  */
-static bool fs_allowed(const FemuFsLine *l, const FemuFsView *v)
+static uint8_t fs_why(const FemuFsLine *l, const FemuFsView *v)
 {
-    return !(l->act == FEMU_FS_ACT_WB_FAIL && v->fua);
+    if (l->act == FEMU_FS_ACT_WB_FAIL && v->fua) {
+        return FEMU_FS_WHY_FUA;
+    }
+    if (l->act == FEMU_FS_ACT_ANA || l->act == FEMU_FS_ACT_SLOW) {
+        return FEMU_FS_WHY_NOT_MODELLED;
+    }
+    return FEMU_FS_WHY_NONE;
 }
 
 void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
@@ -607,6 +615,7 @@ void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
     for (int i = 0; i < nr; i++) {
         FemuFsLine *x = &l[i];
         uint64_t m;
+        uint8_t w;
         bool sel;
 
         out[i] = FEMU_FS_OUT_NONE;
@@ -637,13 +646,11 @@ void femu_fs_match(FemuFsLine *l, int nr, const FemuFsView *v,
             }
             win[x->grp] = i;
         }
-        if (fs_allowed(x, v)) {
-            out[i] = FEMU_FS_OUT_APPLIED;
-        } else {
-            out[i] = FEMU_FS_OUT_NO_EFFECT;
-            if (why) {
-                why[i] = FEMU_FS_WHY_FUA;
-            }
+        w = fs_why(x, v);
+        out[i] = w == FEMU_FS_WHY_NONE ? FEMU_FS_OUT_APPLIED :
+                                         FEMU_FS_OUT_NO_EFFECT;
+        if (why) {
+            why[i] = w;
         }
     }
 

@@ -21,15 +21,16 @@
  * The FTL thread matches each command against those lines after the first
  * enable. A selection moves the counters of its line, which x-fault-sel
  * reports, and writes one record per line it concerns to the fault record
- * ring (femu-frec.c). flush-lie, fua-lie, wb-fail, hang, cfs and
- * power-loss have an effect so far: an apply record tells what came of
- * each. A wb-fail mark fails at a later write-back, and a later
- * completion reports it (see "wb-fail" below). A hang, a cfs or a
- * power-loss holds its command with no CQE (see "hang, cfs and
- * power-loss" below). Every power cut writes a cut summary.
+ * ring (femu-frec.c). Each action but read-unc, write-fail and sdc has an
+ * effect, and an apply record tells what came of it, except ana= and
+ * slow=: they act on time lines only, and a command line with them has no
+ * effect, reason not-modelled. A wb-fail mark fails at a later
+ * write-back, and a later completion reports it (see "wb-fail" below). A
+ * hang, a cfs or a power-loss holds its command with no CQE (see "hang,
+ * cfs and power-loss" below). Every power cut writes a cut summary.
  *
  *   FTL thread: step++, match --> femu_fr_put() per line --> FTL call
- *               --> post: lie or wb-fail apply, wb-fail report
+ *               --> post: delay, lie or wb-fail apply, wb-fail report
  *               --> wake writer
  *   writer thread (events_log only): pop, write a JSON line, free
  *   query-femu-events (main loop): femu_fr_read(), no lock taken
@@ -110,6 +111,12 @@ struct FemuFsched {
     int lie_line;               /* index into @l */
     uint64_t lie_cause;         /* id of its select record */
     FemuFsView lie_view;        /* the command as the line saw it */
+
+    /* FTL thread: the delay selected in this step, as for a lie */
+    bool delay_sel;
+    int delay_line;
+    uint64_t delay_cause;
+    FemuFsView delay_view;
 
     /* FTL thread: the wb-fail selected in this step, as for a lie */
     bool wbf_sel;
@@ -1674,10 +1681,7 @@ void femu_wbf_cut(FemuCtrl *n, bool start)
 
 /*
  * The effect of line @i, which won its group on @req, seen as @v; @id
- * is its select record. The lies, wb-fail, hang, cfs and power-loss are
- * modelled:
- * each other case names what it will do, and its selection moves the
- * counters alone. Returns true when the FTL step must call
+ * is its select record. Returns true when the FTL step must call
  * femu_fsched_post().
  */
 static bool femu_fsched_act(FemuCtrl *n, NvmeRequest *req, int i,
@@ -1716,12 +1720,20 @@ static bool femu_fsched_act(FemuCtrl *n, NvmeRequest *req, int i,
         f->park_cause = id;
         f->park_view = *v;
         return false;
+    case FEMU_FS_ACT_DELAY:
+        /* the FTL call decides whether the command fails: post applies it */
+        f->delay_sel = true;
+        f->delay_line = i;
+        f->delay_cause = id;
+        f->delay_view = *v;
+        return true;
     case FEMU_FS_ACT_WRITE_FAIL:    /* not modelled yet: Write Fault */
     case FEMU_FS_ACT_READ_UNC:      /* not modelled yet: Unrecovered Read */
     case FEMU_FS_ACT_SDC:           /* not modelled yet: sdc override */
-    case FEMU_FS_ACT_DELAY:         /* not modelled yet: a later CQE */
-    case FEMU_FS_ACT_SLOW:          /* not modelled yet: die-slow by BH */
-    case FEMU_FS_ACT_ANA:           /* not modelled yet: ana-state by BH */
+        return false;
+    case FEMU_FS_ACT_SLOW:
+    case FEMU_FS_ACT_ANA:
+        /* femu_fs_match() gives them no effect, reason not-modelled */
         return false;
     default:
         g_assert_not_reached();
@@ -1810,6 +1822,47 @@ static void femu_fsched_lie(FemuCtrl *n, NvmeRequest *req)
     femu_fsched_put(n, &rec);
 }
 
+/*
+ * The apply record of a delay, after the FTL ran the command. A command
+ * that succeeded completes the line's ms later: its poller adds them to
+ * the expire time (req->fs_delay_ms). One that failed for its own reason
+ * completes as usual, with "no-effect", reason cmd-failed. @status is
+ * what the FTL returned, before any other line of this step changed it.
+ */
+static void femu_fsched_delay(FemuCtrl *n, NvmeRequest *req, uint16_t status)
+{
+    struct FemuFsched *f = n->fsched;
+    const FemuFsLine *l = &f->l[f->delay_line];
+    const FemuFsView *v = &f->delay_view;
+    bool ok = status == NVME_SUCCESS;
+    FemuFrRec rec;
+
+    f->delay_sel = false;
+    if (ok) {
+        req->fs_delay_ms = l->delay_ms;
+    }
+    rec = (FemuFrRec) {
+        .cause = f->delay_cause,
+        .step = f->step,
+        .match = l->matched,
+        .slba = v->slba,
+        .nlb = v->nlb,
+        .nsid = v->nsid,
+        .line = l->line,
+        .sqid = req->sq ? req->sq->sqid : 0,
+        .cid = le16_to_cpu(req->cmd.cid),
+        .origin = FEMU_FR_ORIGIN_SCHED_CMD,
+        .phase = FEMU_FR_PHASE_APPLY,
+        .act = FEMU_FS_ACT_DELAY,
+        .outcome = ok ? FEMU_FR_OUT_DONE : FEMU_FR_OUT_NO_EFFECT,
+        .why = ok ? FEMU_FS_WHY_NONE : FEMU_FS_WHY_CMD_FAILED,
+        .opc = v->opc,
+        .fua = v->fua,
+        .delay_ms = l->delay_ms,
+    };
+    femu_fsched_put(n, &rec);
+}
+
 /**
  * femu_fsched_post - the FTL ran a command that femu_fsched_step() saw
  * @n: the controller, with command lines
@@ -1817,13 +1870,19 @@ static void femu_fsched_lie(FemuCtrl *n, NvmeRequest *req)
  * @report: a wb-fail failure may fail @req; false for a fused pair
  *
  * Runs on the FTL thread, in the step of @req, after the FTL call and
- * before the CQE. It writes the apply record of a lie or a wb-fail, then
- * lets a draining command report a failed write-back.
+ * before the CQE. It writes the apply record of a delay, a lie or a
+ * wb-fail, then lets a draining command report a failed write-back.
  */
 void femu_fsched_post(FemuCtrl *n, NvmeRequest *req, bool report)
 {
+    struct FemuFsched *f = n->fsched;
     bool lied = req->fs_lie == FEMU_FS_ACT_FLUSH_LIE;
+    /* the FTL status, before a line of this step changes it */
+    uint16_t status = req->status;
 
+    if (f->delay_sel) {
+        femu_fsched_delay(n, req, status);
+    }
     if (req->fs_lie) {
         femu_fsched_lie(n, req);
     }
@@ -2696,6 +2755,10 @@ static void femu_fsched_info(FemuCtrl *n, FemuEvents *info)
         }
         if (r->act == FEMU_FS_ACT_POWER_LOSS) {
             femu_fsched_info_cut(r, e);
+        }
+        if (r->act == FEMU_FS_ACT_DELAY && r->phase == FEMU_FR_PHASE_APPLY) {
+            e->has_ms = true;
+            e->ms = r->delay_ms;
         }
         QAPI_LIST_APPEND(tail, e);
     }

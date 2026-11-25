@@ -1888,10 +1888,11 @@
 # @action: the action of the line
 #
 # @phase: the step of the fault: "select" when a line selects a
-#     command, "apply" when the FTL has run a command that a lie or a
-#     wb-fail selected, when a hang or a cfs holds its command, or
-#     when a power-loss cut the power before its command ran, or
-#     when a time line or simulate-power-loss cut the power,
+#     command, "apply" when the FTL has run a command that a delay,
+#     lie or wb-fail line selected,
+#     when a hang or a cfs holds its command, or when a power-loss
+#     cut the power before its command ran, or when a time line or
+#     simulate-power-loss cut the power,
 #     "evidence" for one chunk of the ranges of that cut,
 #     "fail" when a write-back meets a wb-fail mark, "report" when a
 #     completion carries that failure, "supersede" when a write of the
@@ -1918,12 +1919,13 @@
 #
 # @outcome: "selected": the line won its group, "superseded": an
 #     earlier line of its group won, or a full write cleared a mark,
-#     "no-effect": the line won with no effect, "done": the lie, hang,
-#     cfs or cut of an "apply" record, or an "evidence" record, took
-#     place, "marked": wb-fail marked buffered pages, "unc" or "old":
-#     the lost blocks of a failed write-back read as Unrecovered Read
-#     Error or as their old data, "reported": a completion carries the
-#     failure, "reclaimed": a held command went back
+#     "no-effect": the line won with no effect, "done": the delay,
+#     lie, hang, cfs or cut of an "apply" record, or an "evidence"
+#     record, took place, "marked": wb-fail marked
+#     buffered pages, "unc" or "old": the lost blocks of a failed
+#     write-back read as Unrecovered Read Error or as their old data,
+#     "reported": a completion carries the failure, "reclaimed": a
+#     held command went back
 #
 # @reason: why a "no-effect" line has none: "fua" (the original
 #     command has FUA), "pre" (a cut or cfs runs before the command),
@@ -1932,8 +1934,9 @@
 #     write ran as one awupf transaction), "no-buffer" (the write
 #     buffer takes no write), "cmd-failed" (the command failed),
 #     "durable" (no buffered page is left volatile), "slots-full"
-#     (wb-fail found no free fault slot) or "marked" (each page of the
-#     write keeps an older wb-fail mark); for "reclaimed", the path:
+#     (wb-fail found no free fault slot), "marked" (each page of the
+#     write keeps an older wb-fail mark) or "not-modelled" (ana= and
+#     slow= act on time lines only); for "reclaimed", the path:
 #     "sq-deleted", "reset", "shutdown", "power-cut" or "unplug"
 #
 # @buffered-at-flush-lie: for a "done" flush-lie, the buffered pages
@@ -1944,6 +1947,9 @@
 #
 # @status: the completion status a later record reports, or the
 #     status a hung command holds back; absent for none
+#
+# @ms: delay "apply": the ms of the line.  A "done" record added them
+#     to the completion; a "no-effect" record added none
 #
 # @slot: wb-fail: the fault slot, from 1
 #
@@ -2002,7 +2008,8 @@
             'fua': 'bool', 'slba': 'uint64', 'nlb': 'uint32',
             'outcome': 'str', '*reason': 'str', '*status': 'uint16',
             '*buffered-at-flush-lie': 'uint32', '*lie-pages': 'uint32',
-            '*slot': 'uint16', '*pages': 'uint32', '*lba-mask': 'uint64',
+            '*ms': 'uint32', '*slot': 'uint16', '*pages': 'uint32',
+            '*lba-mask': 'uint64',
             '*lost': 'uint16', '*found': 'str', '*at': 'str',
             '*rolled-back-pages': 'uint32',
             '*rolled-back-lie-pages': 'uint32',

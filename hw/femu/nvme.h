@@ -2256,6 +2256,12 @@ typedef struct NvmeRequest {
      */
     uint16_t        fs_wbf;
     /*
+     * events_file delay: the ms a delay line adds to this completion, or
+     * 0. The FTL step sets it; the poller adds it after the shared link,
+     * engine and firmware bookings, so it moves no other command.
+     */
+    uint32_t        fs_delay_ms;
+    /*
      * The wb-fail report=once failures this completion holds: they are
      * consumed when its CQE posts, and pending again if it never does.
      */

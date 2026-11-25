@@ -147,9 +147,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "slow=<ch>:<lun>:<pct> (needs die_slow=on); "
       "times count from the first enable and survive resets; see "
       "query-femu-events; bbssd: lines '@<op>[,ns=N][,lba=A-B]#N <action>' "
-      "or '@...%PPM~SEED <action>' select commands; of the actions only "
-      "flush-lie, fua-lie, wb-fail, hang, cfs and power-loss have an "
-      "effect yet; not with csd_pause; unset (default) is off" },
+      "or '@...%PPM~SEED <action>' select commands; each action but "
+      "read-unc, write-fail and sdc has an effect, except ana= and slow=, "
+      "which act on time lines only; not with csd_pause; unset (default) "
+      "is off" },
     { "events_start",
       "with events_file: when the schedule starts, enable (default) at "
       "the first enable or qmp at the QMP command femu-events-start; "

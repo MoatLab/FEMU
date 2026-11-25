@@ -403,15 +403,20 @@ can mix time lines and command lines. Command lines work on bbssd only.
   handler does, except a PRACT tuple that the controller inserts.
 - With no command line, the FTL thread has no schedule to check: one
   pointer test per command, and no decode, count or draw.
-- Only `flush-lie`, `fua-lie` (see [lies](#lies)), `wb-fail` (see
+- Each action but `read-unc`, `write-fail` and `sdc` has an effect:
+  `flush-lie`, `fua-lie` (see
+  [lies](#lies)), `wb-fail` (see
   [write-back failures](#write-back-failures)), `hang` and `cfs` (see
-  [hang and controller fatal status](#hang-and-controller-fatal-status))
-  and `power-loss` (see [a cut at a command](#a-cut-at-a-command)) have
-  an effect so far.
-  For the other actions a selection moves the counters of its line and
-  writes its record only. With no `wb-fail` line, none of its hooks
-  runs: the data path tests one pointer or one counter. The qtest property `x-fault-sel` reports, per
-  command line,
+  [hang and controller fatal status](#hang-and-controller-fatal-status)),
+  `power-loss` (see [a cut at a command](#a-cut-at-a-command)), and
+  `delay` (see
+  [one-command faults](#one-command-faults)).
+- `ana=` and `slow=` act on time lines only. On a command line each
+  selection has no effect, reason `not-modelled`: their change runs
+  from the main loop, which a command does not wait for.
+- With no `wb-fail` line, none of its hooks runs: the data path tests
+  one pointer or one counter. The qtest property `x-fault-sel` reports,
+  per command line,
   `<line>:<matched>:<selected>:<applied>:<superseded>:<no-effect>`.
   `x-fault-draw` takes a seed and returns its draws in order.
   `x-fault-hold` parks the FTL thread for that many ms at the next
@@ -693,6 +698,40 @@ must then call the evidence incomplete.
   "kind":"rolled_back","r":[[1,8,8],[1,24,16]]}
 ```
 
+### One-command faults
+
+These actions change one command and nothing after it. Each writes an
+`apply` record once the FTL has run the command; its `cause` is the
+`select` record.
+
+```text
+ FTL step: match --> select record --> FTL call --> FTL status S
+   S is success:   delay       expire time + ms: the CQE posts ms later
+                   apply record "done"
+   S is an error:  the command keeps S; apply record "no-effect",
+                   reason cmd-failed
+```
+
+- `delay ms=D` holds the CQE of its command for D ms more, 1 to 600000.
+  The command runs as usual and other commands complete in the
+  meantime. A winning `hang` gives the `delay` no effect, reason `hang`,
+  as no CQE comes.
+- The poller adds the delay after the link, engine and firmware
+  bookings (`pcie_bandwidth_mbps`, `crypto_mbps`, `fw_cores`), so it
+  moves no other command. `nr_model_ns` counts the delay, and the
+  `io_trace` time `t_cqe_ns` shows it.
+- The failure check uses the status the FTL gave.
+| Action | `apply` outcome | Fields |
+| --- | --- | --- |
+| `delay` | `done`, or `no-effect` | `ms` |
+
+```text
+ {"id":2,"cause":1,"origin":"sched-cmd","line":1,"match":2,
+  "action":"delay","phase":"apply","step":4,"nsid":1,"sqid":1,
+  "cid":3,"opc":1,"fua":false,"slba":8,"nlb":8,"outcome":"done",
+  "ms":2000}
+```
+
 ### Fault records
 
 Each command that a command line selects writes one record per line
@@ -717,14 +756,15 @@ Realize allocates the ring only for a file with a command line.
 | `id` | from 1; each record takes one, stored or dropped |
 | `origin` | `sched-cmd`: a command line; `sched-time` or `qmp`: a cut summary and its evidence |
 | `line`, `match` | the line, and its matches so far, this one too |
-| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a lie, a `wb-fail`, a `hang`, a `cfs` or a `power-loss`; `fail`, `report` and `supersede` for a `wb-fail` mark; `reclaim` for a held command that went back; `evidence` for a chunk of a cut |
+| `action`, `phase` | the action of the line; `select`, or `apply` for what came of a `delay`, lie, `wb-fail`, `hang`, `cfs` or `power-loss`; `fail`, `report` and `supersede` for a `wb-fail` mark; `reclaim` for a held command that went back; `evidence` for a chunk of a cut |
 | `step` | commands the FTL thread took so far, this one too |
 | `nsid`, `sqid`, `cid`, `opc`, `fua`, `slba`, `nlb` | the command as the host sent it; `slba` and `nlb` are 0 for a Flush |
 | `outcome` | `selected`, `superseded` or `no-effect`; `done` for an `apply` record; `marked`, `unc`, `old` and `reported` for `wb-fail`; `reclaimed` for a `reclaim` record |
-| `reason` | for `no-effect`: `fua`, `pre` or `hang`; for a lie also `plp`, `atomic`, `no-buffer`, `cmd-failed` or `durable`; for `wb-fail` also `slots-full` and `marked`; for `reclaimed`: the path |
+| `reason` | for `no-effect`: `fua`, `pre` or `hang`; for a lie also `plp`, `atomic`, `no-buffer`, `cmd-failed` or `durable`; for `wb-fail` also `slots-full` and `marked`; `cmd-failed` for `delay`; `not-modelled` for `ana=` and `slow=`; for `reclaimed`: the path |
 | `buffered_at_flush_lie`, `lie_pages` | for a `done` lie: the pages it left volatile (QMP: `buffered-at-flush-lie`, `lie-pages`) |
 | `cause` | the id of the parent record: an `apply` record names its `select` record |
 | `status` | the status a `fail` or `report` record carries, or the withheld status of a `hang`; absent for none |
+| `ms` | see [one-command faults](#one-command-faults) |
 | `slot`, `pages`, `lba_mask`, `lost`, `found` | `wb-fail` only, see [write-back failures](#write-back-failures) (QMP: `lba-mask`) |
 
 ```text
