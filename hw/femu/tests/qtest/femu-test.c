@@ -1942,7 +1942,7 @@ static void femu_register_nodes(void)
         static const char *const gbi[] = { "0", "50", "100" };
 
         for (size_t i = 0; i < ARRAY_SIZE(gbi); i++) {
-            g_autofree char *name = g_strdup_printf("gc-bg-invalid/%s",
+            g_autofree char *name = g_strdup_printf("gc-bg-invalid-%s",
                                                     gbi[i]);
             g_autofree char *dev_opts = g_strdup_printf(
                 "id=trace,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
@@ -1956,7 +1956,7 @@ static void femu_register_nodes(void)
             });
         }
         for (size_t i = 0; i < 2; i++) {
-            g_autofree char *name = g_strdup_printf("fdp-gc-bg-invalid/%s",
+            g_autofree char *name = g_strdup_printf("fdp-gc-bg-invalid-%s",
                                                     gbi[i]);
             g_autofree char *dev_opts = g_strdup_printf(
                 "id=trace,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
