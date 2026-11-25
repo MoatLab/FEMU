@@ -198,7 +198,7 @@ jobs:
     - name: Boot a Linux guest on each FEMU mode
       run: |
         # A pinned tinyconfig kernel and a busybox initramfs boot NoSSD,
-        # bbssd, ZNS and KV under TCG. The guest drives the real NVMe driver;
+        # bbssd, FDP, ZNS and KV under TCG. The guest drives the real NVMe driver;
         # the host requires every check of each mode, and GC on bbssd.
         # A failed mlock only warns, so the runner needs no memlock limit.
         sudo apt install -y libelf-dev busybox-static cpio bc
@@ -216,9 +216,9 @@ jobs:
           hw/femu/tests/functional/test_x86_64_femu_guest.py \
           > guest-boot.log 2>&1 || rc=$?
         cat guest-boot.log
-        # four tests ran and none skipped, so a missing asset cannot pass
+        # five tests ran and none skipped, so a missing asset cannot pass
         test "$rc" -eq 0
-        test "$(grep -c '^ok ' guest-boot.log)" -eq 4
+        test "$(grep -c '^ok ' guest-boot.log)" -eq 5
         ! grep -q '# SKIP' guest-boot.log
 
     - name: Check the host monitoring tools

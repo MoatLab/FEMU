@@ -127,7 +127,7 @@ jobs:
       id: guest
       if: ${{ !cancelled() && steps.build.outcome == 'success' }}
       run: |
-        # The guest boot test of ci.yml, on the merged tree: four modes
+        # The guest boot test of ci.yml, on the merged tree: five modes
         # under TCG, each must pass, none may skip.
         # keep the guest build and test logs in the artifact
         trap 'mkdir -p "$OUT/guest"; cp "$HOME"/femu-guest/*.log "$OUT/guest/" 2>/dev/null; cp -r "$OUT/src/build-femu/tests/functional" "$OUT/guest/" 2>/dev/null; true' EXIT
@@ -147,7 +147,7 @@ jobs:
           > "$OUT/guest-boot.log" 2>&1 || rc=$?
         cat "$OUT/guest-boot.log"
         test "$rc" -eq 0
-        test "$(grep -c '^ok ' "$OUT/guest-boot.log")" -eq 4
+        test "$(grep -c '^ok ' "$OUT/guest-boot.log")" -eq 5
         ! grep -q '# SKIP' "$OUT/guest-boot.log"
 
     - name: Record the stage results
