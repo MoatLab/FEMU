@@ -3310,6 +3310,7 @@ typedef struct FemuCtrl {
     char            *io_trace;
     /* a timed list of actions on the controller (femu-events.c) */
     char            *events_file;
+    char            *events_start;      /* "enable" (unset) or "qmp" */
     struct FemuEventSched *events;
     /* the command lines of events_file; NULL when it has none */
     struct FemuFsched *fsched;
@@ -4158,6 +4159,8 @@ void femu_iotrace_note(FemuCtrl *n, NvmeRequest *req, int64_t now);
 void femu_iotrace_exit(FemuCtrl *n);
 bool femu_events_init(FemuCtrl *n, Error **errp);
 void femu_events_start(FemuCtrl *n);
+void femu_events_qmp_start(FemuCtrl *n, Error **errp);
+void femu_events_qmp_stop(FemuCtrl *n, Error **errp);
 void femu_events_cancel(FemuCtrl *n);
 void femu_events_free(FemuCtrl *n);
 /* what the FTL thread does with a command after femu_fsched_step() */

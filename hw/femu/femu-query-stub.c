@@ -28,6 +28,16 @@ FemuEvents *qmp_query_femu_events(const char *path, Error **errp)
     return NULL;
 }
 
+void qmp_femu_events_start(const char *path, Error **errp)
+{
+    error_setg(errp, "this QEMU is built without the femu device");
+}
+
+void qmp_femu_events_stop(const char *path, Error **errp)
+{
+    error_setg(errp, "this QEMU is built without the femu device");
+}
+
 void qmp_femu_save_data(const char *path, const char *file,
                         bool has_background, bool background, Error **errp)
 {

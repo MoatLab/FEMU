@@ -150,6 +150,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "or '@...%PPM~SEED <action>' select commands; of the actions only "
       "flush-lie, fua-lie, wb-fail, hang and cfs have an effect yet; "
       "not with csd_pause; unset (default) is off" },
+    { "events_start",
+      "with events_file: when the schedule starts, enable (default) at "
+      "the first enable or qmp at the QMP command femu-events-start; "
+      "femu-events-stop stops the match counts and the times, and "
+      "femu-events-start resumes them; qmp needs events_file; unset "
+      "(default) is enable" },
     { "events_log",
       "with command lines in events_file: host file that gets one JSON "
       "line per fault record, appended by a thread of its own; the ring "

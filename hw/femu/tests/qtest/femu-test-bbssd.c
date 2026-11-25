@@ -33643,3 +33643,292 @@ void femu_test_fsched_cfs_paths(void *obj, void *data,
     }
     femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
 }
+
+/*
+ * femu-events-start and femu-events-stop. events_start=qmp makes the
+ * schedule wait for femu-events-start; femu-events-stop freezes the match
+ * counts and the times until the next start.
+ */
+
+/* run femu-events-@what on device @id; the error text, or NULL */
+static char *femu_ev_cmd(QTestState *qts, const char *id, const char *what)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    g_autofree char *cmd = g_strdup_printf("femu-events-%s", what);
+    QDict *rsp = qtest_qmp(qts, "{'execute':%s,'arguments':{'path':%s}}",
+                           cmd, path);
+    char *err = NULL;
+
+    if (qdict_haskey(rsp, "error")) {
+        err = g_strdup(qdict_get_str(qdict_get_qdict(rsp, "error"), "desc"));
+    } else {
+        g_assert_true(qdict_haskey(rsp, "return"));
+    }
+    qobject_unref(rsp);
+    return err;
+}
+
+/* femu-events-@what on @id succeeds */
+static void femu_ev_ok(QTestState *qts, const char *id, const char *what)
+{
+    g_autofree char *err = femu_ev_cmd(qts, id, what);
+
+    g_assert_null(err);
+}
+
+/* femu-events-@what on @id fails, and the reason holds @msg */
+static void femu_ev_fails(QTestState *qts, const char *id, const char *what,
+                          const char *msg)
+{
+    g_autofree char *err = femu_ev_cmd(qts, id, what);
+
+    g_assert_nonnull(err);
+    g_test_message("femu-events-%s on %s: %s", what, id, err);
+    g_assert_nonnull(strstr(err, msg));
+}
+
+/* the state of the schedule of @id is @want */
+static void femu_ev_state(QTestState *qts, const char *id, const char *want)
+{
+    QDict *rsp;
+
+    g_assert_cmpstr(qdict_get_str(femu_events_q(qts, id, &rsp), "state"),
+                    ==, want);
+    qobject_unref(rsp);
+}
+
+/* the step count of @id */
+static int64_t femu_ev_step(QTestState *qts, const char *id)
+{
+    QDict *rsp;
+    int64_t step = qdict_get_int(femu_events_q(qts, id, &rsp), "step");
+
+    qobject_unref(rsp);
+    return step;
+}
+
+/* @nr Writes of page 0 on @c; their status is not checked */
+static void femu_ev_writes(FemuCtrlState *c, uint64_t buf, int nr)
+{
+    for (int i = 0; i < nr; i++) {
+        femu_fs_io(c, NVME_CMD_WRITE, 0, 8, false, buf);
+    }
+}
+
+/* matched and selected of the command line of @id, which is entry 0 */
+static void femu_ev_sel(QTestState *qts, const char *id, uint64_t matched,
+                        uint64_t selected)
+{
+    g_assert_cmpuint(femu_fault_sel_field(qts, id, 0, 1), ==, matched);
+    g_assert_cmpuint(femu_fault_sel_field(qts, id, 0, 2), ==, selected);
+}
+
+/*
+ * Three devices with "1000 ana=1:3" and "@write#5 write-fail". sq and sr
+ * have events_start=qmp, se the default enable. All three are enabled.
+ *   sq, sr: waiting, so 3 Writes count for no line, and a stop is
+ *       refused. Both start; a second start is refused. 2 Writes count.
+ *   sq stops: 3 Writes count for no line, the step count goes on, and
+ *       a second stop is refused. After 1500 ms its time line still
+ *       waits. It resumes: the 5th match after the start is its 8th
+ *       Write since, and the time line runs 1000 ms after the start,
+ *       not counting the stop.
+ *   sr, the control of the stop: its #5 selects at the 5th Write after
+ *       the start, and its time line has run after the 1500 ms.
+ *   se, the control of the wait: it counts the first 3 Writes too.
+ *
+ * Planted defects and the check that fails:
+ *   qmp starts at the enable too         matched of sq before the start
+ *   the stop leaves the counts on        matched of sq while stopped
+ *   the stop leaves the timer on         result of sq after 1500 ms
+ *   the resume keeps the old epoch       ran-ms of sq
+ */
+void femu_test_fsched_start(void *obj, void *data, QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-start-XXXXXX", NULL);
+    static const char *lines = "1000 ana=1:3\n@write#5 write-fail\n";
+    FemuLieDev d[] = {
+        { "sq", 5, "femu_mode=1,ana=on,events_start=qmp", lines },
+        { "sr", 6, "femu_mode=1,ana=on,events_start=qmp", lines },
+        { "se", 7, "femu_mode=1,ana=on", lines },
+    };
+    QOSState *qs = femu_lie_boot(dir, d, ARRAY_SIZE(d));
+    QTestState *qts = qs->qts;
+    uint64_t buf = guest_alloc(&qs->alloc, 4096);
+    QDict *rsp;
+    int64_t step;
+    int ms;
+
+    femu_ev_state(qts, "sq", "waiting");
+    femu_ev_state(qts, "sr", "waiting");
+    femu_ev_state(qts, "se", "running");
+    femu_ev_fails(qts, "sq", "stop", "has not started");
+    for (int i = 0; i < ARRAY_SIZE(d); i++) {
+        femu_ev_writes(&d[i].c, buf, 3);
+    }
+    femu_ev_sel(qts, "sq", 0, 0);
+    femu_ev_sel(qts, "sr", 0, 0);
+    femu_ev_sel(qts, "se", 3, 0);
+
+    femu_ev_ok(qts, "sq", "start");
+    femu_ev_ok(qts, "sr", "start");
+    femu_ev_fails(qts, "sq", "start", "runs already");
+    femu_ev_state(qts, "sq", "running");
+    femu_ev_writes(&d[0].c, buf, 2);
+    femu_ev_writes(&d[1].c, buf, 2);
+    femu_ev_sel(qts, "sq", 2, 0);
+    femu_ev_sel(qts, "sr", 2, 0);
+
+    femu_ev_ok(qts, "sq", "stop");
+    femu_ev_state(qts, "sq", "stopped");
+    femu_ev_fails(qts, "sq", "stop", "stopped already");
+    step = femu_ev_step(qts, "sq");
+    femu_ev_writes(&d[0].c, buf, 3);
+    femu_ev_writes(&d[1].c, buf, 3);
+    femu_ev_sel(qts, "sq", 2, 0);
+    femu_ev_sel(qts, "sr", 5, 1);
+    g_assert_cmpint(femu_ev_step(qts, "sq"), ==, step + 3);
+
+    g_usleep(1500 * 1000);
+    g_assert_cmpstr(femu_events_field(qts, "sq", 0, "result", &rsp), ==,
+                    "pending");
+    qobject_unref(rsp);
+    g_assert_cmpstr(femu_events_field(qts, "sr", 0, "result", &rsp), ==,
+                    "done");
+    qobject_unref(rsp);
+    g_assert_cmpstr(femu_events_field(qts, "se", 0, "result", &rsp), ==,
+                    "done");
+    qobject_unref(rsp);
+    femu_ev_state(qts, "sq", "stopped");
+
+    femu_ev_ok(qts, "sq", "start");
+    femu_ev_state(qts, "sq", "running");
+    femu_ev_writes(&d[0].c, buf, 2);
+    femu_ev_sel(qts, "sq", 4, 0);
+    femu_ev_writes(&d[0].c, buf, 1);
+    femu_ev_sel(qts, "sq", 5, 1);
+    for (ms = 0; ms < FEMU_POLL_LIMIT_MS; ms += 10) {
+        const char *r = femu_events_field(qts, "sq", 0, "result", &rsp);
+        bool done = !strcmp(r, "done");
+
+        qobject_unref(rsp);
+        if (done) {
+            break;
+        }
+        g_usleep(10 * 1000);
+    }
+    g_assert_cmpint(ms, <, FEMU_POLL_LIMIT_MS);
+    /* the old epoch would put it past the 1500 ms of the stop */
+    g_assert_cmpint(femu_events_ran(qts, "sq", 0), >=, 1000);
+    g_assert_cmpint(femu_events_ran(qts, "sq", 0), <, 1400);
+    /* every #N line selected and the time line ran */
+    femu_ev_state(qts, "sq", "done");
+    femu_lie_end(qs, dir, d, ARRAY_SIZE(d));
+}
+
+/*
+ * A start before the first enable. sb (qmp) and sc (enable) start while
+ * the controllers are off, so both run from then; after the enable 2
+ * Writes select @write#2 on both. The control sd (qmp) is never
+ * started: it stays waiting after the enable and counts nothing. Realize
+ * refuses an unknown events_start and qmp with no events_file; the
+ * twins with enable and with a file realize.
+ *
+ * Planted defects and the check that fails:
+ *   a start before the enable is refused     the start of sb
+ *   the enable starts a qmp schedule         state and matched of sd
+ *   the enable restarts a started schedule   matched of sc
+ */
+void femu_test_fsched_start_early(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    g_autofree char *dir = g_dir_make_tmp("femu-start-XXXXXX", NULL);
+    g_autofree char *path = g_build_filename(dir, "ev.txt", NULL);
+    static const struct {
+        const char *id;
+        int addr;
+        const char *start;
+    } k[] = {
+        { "sb", 5, ",events_start=qmp" },
+        { "sc", 6, "" },
+        { "sd", 7, ",events_start=qmp" },
+    };
+    static const struct {
+        const char *props;
+        bool file;
+        const char *msg;
+    } bad[] = {
+        { "'events_start':'later'", true, "takes enable or qmp" },
+        { "'events_start':'enable'", true, NULL },
+        { "'events_start':'qmp'", false, "qmp needs events_file" },
+        { "'events_start':'enable'", false, NULL },
+    };
+    FemuCtrlState c[ARRAY_SIZE(k)];
+    QPCIDevice *pdev[ARRAY_SIZE(k)];
+    GString *cmd = g_string_new("-machine pc -nodefaults");
+    QOSState *qs;
+    QTestState *qts;
+    uint64_t buf;
+
+    g_assert_true(g_file_set_contents(path, "@write#2 write-fail\n", -1,
+                                      NULL));
+    for (int i = 0; i < ARRAY_SIZE(k); i++) {
+        g_string_append_printf(cmd, " -device femu,id=%s,addr=%d,devsz_mb=16,"
+                               "femu_mode=1,events_file=%s%s", k[i].id,
+                               k[i].addr, path, k[i].start);
+    }
+    qs = qtest_pc_boot("%s", cmd->str);
+    g_string_free(cmd, true);
+    qts = qs->qts;
+    buf = guest_alloc(&qs->alloc, 4096);
+
+    for (int i = 0; i < ARRAY_SIZE(k); i++) {
+        femu_ev_state(qts, k[i].id, "waiting");
+    }
+    femu_ev_ok(qts, "sb", "start");
+    femu_ev_ok(qts, "sc", "start");
+    femu_ev_state(qts, "sb", "running");
+    femu_ev_state(qts, "sc", "running");
+    for (int i = 0; i < ARRAY_SIZE(k); i++) {
+        pdev[i] = qpci_device_find(qs->pcibus, QPCI_DEVFN(k[i].addr, 0));
+        g_assert_nonnull(pdev[i]);
+        memset(&c[i], 0, sizeof(c[i]));
+        femu_enable(&c[i], pdev[i], &qs->alloc);
+        femu_create_io_queues(&c[i]);
+        femu_ev_writes(&c[i], buf, 2);
+    }
+    femu_ev_state(qts, "sb", "done");
+    femu_ev_state(qts, "sc", "done");
+    femu_ev_state(qts, "sd", "waiting");
+    femu_ev_sel(qts, "sb", 2, 1);
+    femu_ev_sel(qts, "sc", 2, 1);
+    femu_ev_sel(qts, "sd", 0, 0);
+
+    for (int i = 0; i < ARRAY_SIZE(bad); i++) {
+        g_autofree char *args = g_strdup_printf(
+            "{'driver':'femu','id':'sx%d','addr':'%d','devsz_mb':16,"
+            "'femu_mode':1,%s%s%s%s}", i, 10 + i, bad[i].props,
+            bad[i].file ? ",'events_file':'" : "", bad[i].file ? path : "",
+            bad[i].file ? "'" : "");
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                               qobject_from_json(args, &error_abort));
+
+        if (bad[i].msg) {
+            g_assert_true(qdict_haskey(rsp, "error"));
+            g_assert_nonnull(strstr(qdict_get_str(qdict_get_qdict(rsp,
+                                                                  "error"),
+                                                  "desc"), bad[i].msg));
+        } else {
+            g_assert_true(qdict_haskey(rsp, "return"));
+        }
+        qobject_unref(rsp);
+    }
+    for (int i = 0; i < ARRAY_SIZE(k); i++) {
+        femu_queue_free(&c[i], &c[i].io);
+        femu_disable(&c[i]);
+        g_free(pdev[i]);
+    }
+    qtest_pc_shutdown(qs);
+    unlink(path);
+    rmdir(dir);
+}

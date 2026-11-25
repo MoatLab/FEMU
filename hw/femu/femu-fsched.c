@@ -716,6 +716,35 @@ bool femu_fs_done(const FemuFsLine *l, int nr)
     return true;
 }
 
+int femu_fs_run_start(FemuFsRun *r, int64_t now)
+{
+    if (!r->started) {
+        r->started = true;
+        r->epoch = now;
+        return FEMU_FS_RUN_OK;
+    }
+    if (!r->stopped) {
+        return FEMU_FS_RUN_RUNNING;
+    }
+    /* the stop takes no time from the schedule */
+    r->epoch += now - r->stop_at;
+    r->stopped = false;
+    return FEMU_FS_RUN_OK;
+}
+
+int femu_fs_run_stop(FemuFsRun *r, int64_t now)
+{
+    if (!r->started) {
+        return FEMU_FS_RUN_WAITING;
+    }
+    if (r->stopped) {
+        return FEMU_FS_RUN_STOPPED;
+    }
+    r->stopped = true;
+    r->stop_at = now;
+    return FEMU_FS_RUN_OK;
+}
+
 int femu_wb_slot_get(FemuWbTab *t)
 {
     for (int s = 0; s < FEMU_WB_SLOTS; s++) {

@@ -1805,10 +1805,14 @@
 #
 # Where the events_file of a controller is.
 #
-# @waiting: the controller has not been enabled yet
+# @waiting: the schedule has not started: the controller has not been
+#     enabled yet, or events_start=qmp waits for femu-events-start
 #
-# @running: times count from the first enable; events are left, or a
-#     command line can still select a command
+# @running: times count from the start; events are left, or a command
+#     line can still select a command
+#
+# @stopped: femu-events-stop stopped the schedule: its times and match
+#     counts do not move until femu-events-start
 #
 # @done: every event ran, or one failed, and no command line can
 #     select again
@@ -1816,7 +1820,7 @@
 # Since: 10.1
 ##
 { 'enum': 'FemuEventsState',
-  'data': [ 'waiting', 'running', 'done' ] }
+  'data': [ 'waiting', 'running', 'stopped', 'done' ] }
 
 ##
 # @FemuEventInfo:
@@ -1827,9 +1831,11 @@
 #
 # @action: its action, as the file gives it
 #
-# @time-ms: its time, in ms after the first enable
+# @time-ms: its time, in ms after the start of the schedule: the
+#     first enable, or femu-events-start with events_start=qmp; the
+#     time of a stop does not count
 #
-# @ran-ms: when it ran, in ms after the first enable; absent while
+# @ran-ms: when it ran, on the same clock as @time-ms; absent while
 #     pending
 #
 # @result: what happened to it
@@ -2025,6 +2031,59 @@
 { 'command': 'query-femu-events',
   'data': { '*path': 'str' },
   'returns': 'FemuEvents' }
+
+##
+# @femu-events-start:
+#
+# Start the events_file schedule of a FEMU controller, or resume it
+# after femu-events-stop.  With events_start=qmp the schedule waits
+# for this command; with events_start=enable it also starts at the
+# first enable, and a start before that enable is the start.  The
+# times of the time lines count from the start, without the time of
+# a stop.  Command lines count matches from the start.
+#
+# @path: QOM path of the femu device.  Optional when exactly one
+#     exists.
+#
+# Errors:
+#     - the device has no events_file
+#     - the schedule runs already
+#
+# Since: 10.1
+#
+# .. qmp-example::
+#
+#     -> { "execute": "femu-events-start",
+#          "arguments": { "path": "/machine/peripheral/femu0" } }
+#     <- { "return": {} }
+##
+{ 'command': 'femu-events-start',
+  'data': { '*path': 'str' } }
+
+##
+# @femu-events-stop:
+#
+# Stop the events_file schedule of a FEMU controller.  The command
+# lines count no match and the time lines wait, until
+# femu-events-start resumes the schedule.  What a line selected before
+# the stop still takes place, and the step count goes on.
+#
+# @path: QOM path of the femu device.  Optional when exactly one
+#     exists.
+#
+# Errors:
+#     - the device has no events_file
+#     - the schedule has not started, or it is stopped already
+#
+# Since: 10.1
+#
+# .. qmp-example::
+#
+#     -> { "execute": "femu-events-stop" }
+#     <- { "return": {} }
+##
+{ 'command': 'femu-events-stop',
+  'data': { '*path': 'str' } }
 
 ##
 # @FemuMemOwnerKind:

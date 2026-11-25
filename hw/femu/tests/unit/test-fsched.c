@@ -1479,6 +1479,36 @@ static void test_reclaim_json(void)
     CHECK(!strstr(buf, "reason"));
 }
 
+/*
+ * The start and stop of a schedule. A stop of 400 ns moves the epoch by
+ * 400, so a time 100 after the first start is due at 500 + 100 + 400 in
+ * the clock. A start that runs and a stop that waits or is stopped
+ * change nothing.
+ */
+static void test_run(void)
+{
+    FemuFsRun r = { 0 };
+
+    CHECK(femu_fs_run_stop(&r, 10) == FEMU_FS_RUN_WAITING);
+    CHECK(!r.started && !r.stopped);
+    CHECK(femu_fs_run_start(&r, 500) == FEMU_FS_RUN_OK);
+    CHECK(r.started && !r.stopped && r.epoch == 500);
+    CHECK(femu_fs_run_start(&r, 520) == FEMU_FS_RUN_RUNNING);
+    CHECK(r.epoch == 500);
+    CHECK(femu_fs_run_stop(&r, 550) == FEMU_FS_RUN_OK);
+    CHECK(r.stopped && r.stop_at == 550);
+    CHECK(femu_fs_run_stop(&r, 600) == FEMU_FS_RUN_STOPPED);
+    CHECK(r.stop_at == 550);
+    CHECK(femu_fs_run_start(&r, 950) == FEMU_FS_RUN_OK);
+    CHECK(!r.stopped && r.epoch == 900);
+    /* the time after the epoch leaves the stop out */
+    CHECK(1000 - r.epoch == 100);
+    /* a second stop adds its own time only */
+    CHECK(femu_fs_run_stop(&r, 1000) == FEMU_FS_RUN_OK);
+    CHECK(femu_fs_run_start(&r, 1030) == FEMU_FS_RUN_OK);
+    CHECK(r.epoch == 930);
+}
+
 int main(void)
 {
     test_grammar();
@@ -1507,6 +1537,7 @@ int main(void)
     test_wb_json();
     test_terminal();
     test_reclaim_json();
+    test_run();
     printf("1..%d\n", ntests);
     return failures ? 1 : 0;
 }

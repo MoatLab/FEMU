@@ -6357,6 +6357,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_STRING("mode", FemuCtrl, mode_name),
     DEFINE_PROP_STRING("io_trace", FemuCtrl, io_trace),
     DEFINE_PROP_STRING("events_file", FemuCtrl, events_file),
+    DEFINE_PROP_STRING("events_start", FemuCtrl, events_start),
     DEFINE_PROP_STRING("events_log", FemuCtrl, events_log),
     DEFINE_PROP_UINT32("events_max_faults", FemuCtrl, events_max_faults,
                        4096),

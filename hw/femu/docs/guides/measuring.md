@@ -292,10 +292,43 @@ reads and checks the whole file and names the line of any error.
 - Limits: 1024 lines, each of at most 256 bytes, and 64 KiB a file. Time
   lines and command lines share the 1024. Not with `csd_pause`.
 
+### Start and stop
+
+`events_start` sets when the schedule starts. `enable` (the default)
+starts it at the first enable. `qmp` waits for the QMP command
+`femu-events-start`, so a test can boot, make a file system and then
+start the faults. `femu-events-stop` stops a running schedule, and
+`femu-events-start` resumes it. Both work with either value.
+
+```text
+ WAITING --femu-events-start, or first enable (enable)--> RUNNING
+ RUNNING --femu-events-stop--> STOPPED --femu-events-start--> RUNNING
+ RUNNING --every event ran, no line can select--> DONE
+```
+
+- A stop freezes the match count of each command line and the time of
+  the time lines. On a resume the times move on by the time of the
+  stop: a line at 1000 ms runs 1000 ms of running time after the start.
+- The `step` count goes on during a stop, since it counts commands.
+- A stop cancels nothing that a line selected before it: a pending cut,
+  a `wb-fail` mark and a held command stay.
+- A start before the first enable is the start: the enable then changes
+  nothing. `events_start=qmp` needs `events_file`.
+- A start of a running schedule, and a stop of a waiting or a stopped
+  one, fail with an error. A schedule with a `%` line never reaches
+  DONE.
+
+```text
+ -> { "execute": "femu-events-start",
+      "arguments": { "path": "/machine/peripheral/femu0" } }
+ <- { "return": {} }
+```
+
 ### Command lines
 
 A line that starts with `@` names commands, not a time. The FTL thread
-checks each command against these lines after the first enable. A file
+checks each command against these lines while the schedule runs (see
+[start and stop](#start-and-stop)). A file
 can mix time lines and command lines. Command lines work on bbssd only.
 
 ```text

@@ -3,7 +3,10 @@
  * events_file: a timed list of actions on the controller, for experiments.
  *
  *   realize: read and check the file, compile each time once (WAITING)
- *   first successful enable: epoch = femu_io_now(n), start the timer
+ *   first successful enable (events_start=enable) or femu-events-start
+ *   (either value): epoch = femu_io_now(n), start the timer (RUNNING)
+ *   femu-events-stop: no timer, no match counts (STOPPED); a start
+ *   resumes, with the epoch moved on by the time of the stop
  *   timer: run each event whose time has come, set it for the next one
  *   last event run, or one failed: DONE; resets keep epoch and cursor
  *
@@ -82,9 +85,9 @@ struct FemuEventSched {
     FemuEvent *ev;
     int nr;
     int cursor;
-    bool started;
+    bool qmp;                   /* events_start=qmp: femu-events-start */
     bool test_clock;            /* qtest: x-events-now runs the events */
-    int64_t epoch;
+    FemuFsRun run;              /* started, stopped and the epoch */
     QEMUTimer *timer;
 };
 
@@ -684,8 +687,9 @@ static void femu_fsched_free(struct FemuFsched *f)
  * @errp: the error, with the line, of a file that is refused
  *
  * Returns true with no file, or with a schedule waiting for the first
- * enable. Refused with csd_pause, whose frozen clock the timer does not
- * follow. Time lines and command lines share the limit of 1024. Only a
+ * enable or femu-events-start. Refused with csd_pause, whose frozen clock
+ * the timer does not follow. Time lines and command lines share the
+ * limit of 1024. Only a
  * schedule with a command line gets a record ring and events_log.
  */
 bool femu_events_init(FemuCtrl *n, Error **errp)
@@ -699,6 +703,7 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
     guint nr_lines;
     size_t len;
     FILE *f_in;
+    bool qmp;
 
     if (n->events_max_faults < FEMU_FR_SLOTS_MIN ||
         n->events_max_faults > FEMU_FR_SLOTS_MAX) {
@@ -706,9 +711,19 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
                    FEMU_FR_SLOTS_MIN, FEMU_FR_SLOTS_MAX);
         return false;
     }
+    if (n->events_start && strcmp(n->events_start, "enable") &&
+        strcmp(n->events_start, "qmp")) {
+        error_setg(errp, "events_start takes enable or qmp");
+        return false;
+    }
+    qmp = n->events_start && !strcmp(n->events_start, "qmp");
     if (!n->events_file) {
         if (n->events_log) {
             error_setg(errp, "events_log needs events_file");
+            return false;
+        }
+        if (qmp) {
+            error_setg(errp, "events_start=qmp needs events_file");
             return false;
         }
         return true;
@@ -755,6 +770,7 @@ bool femu_events_init(FemuCtrl *n, Error **errp)
     nsze = g_new0(uint64_t, MAX(n->namespace_limit, 1));
     femu_fsched_dev(n, &dev, nsze);
     s = g_new0(struct FemuEventSched, 1);
+    s->qmp = qmp;
     s->ev = g_new0(FemuEvent, FEMU_EVENTS_MAX_LINES);
     f = g_new0(struct FemuFsched, 1);
     f->log_fd = -1;
@@ -905,7 +921,7 @@ static void femu_events_run(FemuCtrl *n, int64_t now, bool real)
 
         femu_events_one(n, ev, now);
         if (real) {
-            now = femu_io_now(n) - s->epoch;
+            now = femu_io_now(n) - s->run.epoch;
         }
         if (ev->result == FEMU_EVENT_RESULT_FAILED) {
             s->cursor = s->nr;
@@ -919,11 +935,11 @@ static void femu_events_set_timer(FemuCtrl *n)
 {
     struct FemuEventSched *s = n->events;
 
-    if (s->test_clock || s->cursor >= s->nr) {
+    if (s->test_clock || s->run.stopped || s->cursor >= s->nr) {
         timer_del(s->timer);
         return;
     }
-    timer_mod(s->timer, s->epoch + s->ev[s->cursor].deadline_ns);
+    timer_mod(s->timer, s->run.epoch + s->ev[s->cursor].deadline_ns);
 }
 
 static void femu_events_fire(void *opaque)
@@ -931,37 +947,109 @@ static void femu_events_fire(void *opaque)
     FemuCtrl *n = opaque;
     struct FemuEventSched *s = n->events;
 
-    if (!s || s->test_clock) {
+    if (!s || s->test_clock || s->run.stopped) {
         return;
     }
-    femu_events_run(n, femu_io_now(n) - s->epoch, true);
+    femu_events_run(n, femu_io_now(n) - s->run.epoch, true);
     femu_events_set_timer(n);
 }
 
-/* the controller became ready: the first time starts the schedule */
-void femu_events_start(FemuCtrl *n)
+/*
+ * Start the schedule, or resume it after a stop. The caller has checked
+ * that it waits or is stopped.
+ */
+static void femu_events_go(FemuCtrl *n)
 {
     struct FemuEventSched *s = n->events;
+    int rc = femu_fs_run_start(&s->run, femu_io_now(n));
 
-    if (!s || s->started) {
-        return;
-    }
-    s->started = true;
+    assert(rc == FEMU_FS_RUN_OK);
     if (n->fsched) {
         /* commands count from here; the FTL thread reads this once a step */
         qatomic_set(&n->fsched->running, true);
     }
-    s->epoch = femu_io_now(n);
-    s->timer = timer_new_ns(QEMU_CLOCK_REALTIME, femu_events_fire, n);
-    /* the last time must still fit after the epoch */
-    if (s->nr && s->ev[s->nr - 1].deadline_ns > INT64_MAX - s->epoch) {
-        for (int i = 0; i < s->nr; i++) {
+    if (!s->timer) {
+        s->timer = timer_new_ns(QEMU_CLOCK_REALTIME, femu_events_fire, n);
+    }
+    /* the last time must still fit after the epoch, which a resume moves */
+    if (s->cursor < s->nr &&
+        s->ev[s->nr - 1].deadline_ns > INT64_MAX - s->run.epoch) {
+        for (int i = s->cursor; i < s->nr; i++) {
             s->ev[i].result = FEMU_EVENT_RESULT_FAILED;
             s->ev[i].error = g_strdup("its time does not fit after the "
-                                      "first enable");
+                                      "start");
         }
         s->cursor = s->nr;
         return;
+    }
+    femu_events_set_timer(n);
+}
+
+/*
+ * The controller became ready. With events_start=enable the first time
+ * starts the schedule; with events_start=qmp only femu-events-start does.
+ */
+void femu_events_start(FemuCtrl *n)
+{
+    struct FemuEventSched *s = n->events;
+
+    if (!s || s->run.started || s->qmp) {
+        return;
+    }
+    femu_events_go(n);
+}
+
+/**
+ * femu_events_qmp_start - femu-events-start: start or resume the schedule
+ * @n: the controller
+ * @errp: the error when it has no schedule, or the schedule runs
+ *
+ * A start before the first enable is a start: the enable then changes
+ * nothing.
+ */
+void femu_events_qmp_start(FemuCtrl *n, Error **errp)
+{
+    struct FemuEventSched *s = n->events;
+
+    if (!s) {
+        error_setg(errp, "the femu device has no events_file");
+        return;
+    }
+    if (s->run.started && !s->run.stopped) {
+        error_setg(errp, "the events_file schedule runs already");
+        return;
+    }
+    femu_events_go(n);
+}
+
+/**
+ * femu_events_qmp_stop - femu-events-stop: stop the schedule
+ * @n: the controller
+ * @errp: the error when it has no schedule, or it does not run
+ *
+ * The match counts and the time stop. What a line selected before
+ * stays: a pending cut, a mark, a held command. The step count goes on.
+ */
+void femu_events_qmp_stop(FemuCtrl *n, Error **errp)
+{
+    struct FemuEventSched *s = n->events;
+    int rc;
+
+    if (!s) {
+        error_setg(errp, "the femu device has no events_file");
+        return;
+    }
+    rc = femu_fs_run_stop(&s->run, femu_io_now(n));
+    if (rc == FEMU_FS_RUN_WAITING) {
+        error_setg(errp, "the events_file schedule has not started");
+        return;
+    }
+    if (rc == FEMU_FS_RUN_STOPPED) {
+        error_setg(errp, "the events_file schedule is stopped already");
+        return;
+    }
+    if (n->fsched) {
+        qatomic_set(&n->fsched->running, false);
     }
     femu_events_set_timer(n);
 }
@@ -2119,7 +2207,8 @@ static void femu_events_test_now(Object *obj, Visitor *v, const char *name,
         return;
     }
     s->test_clock = true;
-    if (!s->started) {
+    /* the time of a stopped schedule does not move */
+    if (!s->run.started || s->run.stopped) {
         return;
     }
     timer_del(s->timer);
@@ -2394,7 +2483,8 @@ FemuEvents *femu_events_info(FemuCtrl *n, Error **errp)
     info = g_new0(FemuEvents, 1);
     info->path = object_get_canonical_path(OBJECT(n));
     /* a command line that can still select keeps the schedule running */
-    info->state = !s->started ? FEMU_EVENTS_STATE_WAITING :
+    info->state = !s->run.started ? FEMU_EVENTS_STATE_WAITING :
+                  s->run.stopped ? FEMU_EVENTS_STATE_STOPPED :
                   s->cursor < s->nr ||
                   (n->fsched && !femu_fs_done(n->fsched->l, n->fsched->nr)) ?
                   FEMU_EVENTS_STATE_RUNNING : FEMU_EVENTS_STATE_DONE;

@@ -331,6 +331,11 @@
     "kind": "static",
     "type": "uint32"
    },
+   "events_start": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
    "extended": {
     "default": 0,
     "kind": "static",

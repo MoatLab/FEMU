@@ -1191,6 +1191,9 @@ void femu_test_fsched_hang_report(void *obj, void *data,
 void femu_test_fsched_cfs(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_fsched_cfs_paths(void *obj, void *data,
                                 QGuestAllocator *alloc);
+void femu_test_fsched_start(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fsched_start_early(void *obj, void *data,
+                                  QGuestAllocator *alloc);
 void femu_test_ready_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_recovery_delay(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ready_sysreset(void *obj, void *data, QGuestAllocator *alloc);

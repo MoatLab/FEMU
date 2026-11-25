@@ -459,6 +459,49 @@ bool femu_wb_lba_lost(const uint8_t *now, const uint8_t *undo,
 uint8_t femu_wb_apply_why(bool slot, bool failed, bool buffer, bool atomic,
                           bool marked, uint32_t pages);
 
+/*
+ * When a schedule runs. events_start=enable starts it at the first
+ * enable, events_start=qmp at femu-events-start. A stop freezes the
+ * time: on a resume the epoch moves on by the time the stop lasted, so
+ * a time line still runs that long after the start, not counting the
+ * stop. The caller keeps the match counts frozen while it is stopped.
+ *
+ *   WAITING --start--> RUNNING --stop--> STOPPED --start--> RUNNING
+ */
+typedef struct FemuFsRun {
+    bool started;
+    bool stopped;
+    int64_t epoch;              /* ns: the times count from here */
+    int64_t stop_at;            /* ns: when the stop came */
+} FemuFsRun;
+
+/* what femu_fs_run_start() and femu_fs_run_stop() return */
+enum {
+    FEMU_FS_RUN_OK,
+    FEMU_FS_RUN_RUNNING,        /* start: it already runs */
+    FEMU_FS_RUN_WAITING,        /* stop: it has not started */
+    FEMU_FS_RUN_STOPPED,        /* stop: it is stopped already */
+};
+
+/**
+ * femu_fs_run_start - start a waiting schedule, or resume a stopped one
+ * @r: the schedule
+ * @now: the time now, in ns, of a clock that never goes back
+ *
+ * Returns FEMU_FS_RUN_OK, or FEMU_FS_RUN_RUNNING with @r unchanged.
+ */
+int femu_fs_run_start(FemuFsRun *r, int64_t now);
+
+/**
+ * femu_fs_run_stop - stop a running schedule
+ * @r: the schedule
+ * @now: the time now, on the clock of femu_fs_run_start()
+ *
+ * Returns FEMU_FS_RUN_OK, or FEMU_FS_RUN_WAITING or FEMU_FS_RUN_STOPPED
+ * with @r unchanged.
+ */
+int femu_fs_run_stop(FemuFsRun *r, int64_t now);
+
 /**
  * femu_fs_done - whether no line can select again
  * @l: the lines

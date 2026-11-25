@@ -258,7 +258,11 @@ own description allows. A message keeps its format directives (`%s`,
 - events_log needs a command line in events_file
 - events_log needs events_file
 - events_log: '%s' is the events_file, or a persist_file, pel_file, io_trace or events_log of a device
+- events_start=qmp needs events_file
 - test clock does not work with events_file
+- the events_file schedule has not started
+- the events_file schedule is stopped already
+- the events_file schedule runs already
 - the femu device has no events_file
 - x-events-now needs an events_file
 - x-fault-bh-hold needs a cfs line in events_file
@@ -282,6 +286,11 @@ own description allows. A message keeps its format directives (`%s`,
 ## `events_max_faults`
 
 - events_max_faults takes %u to %u
+
+## `events_start`
+
+- events_start takes enable or qmp
+- events_start=qmp needs events_file
 
 ## `extended`
 

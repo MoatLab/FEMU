@@ -1264,6 +1264,24 @@ FemuEvents *qmp_query_femu_events(const char *path, Error **errp)
     return n ? femu_events_info(n, errp) : NULL;
 }
 
+void qmp_femu_events_start(const char *path, Error **errp)
+{
+    FemuCtrl *n = femu_query_find(path, errp);
+
+    if (n) {
+        femu_events_qmp_start(n, errp);
+    }
+}
+
+void qmp_femu_events_stop(const char *path, Error **errp)
+{
+    FemuCtrl *n = femu_query_find(path, errp);
+
+    if (n) {
+        femu_events_qmp_stop(n, errp);
+    }
+}
+
 /* add the stages, returned-after-due and bands of @from into @to */
 static void femu_query_stage_add(FemuStageSet *to, const FemuStageSet *from)
 {
