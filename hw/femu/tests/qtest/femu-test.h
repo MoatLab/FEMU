@@ -993,6 +993,7 @@ void femu_test_ftl_trace(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ftl_trace_var(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_ftl_trace_mp(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_gc_erase_order(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_gc_clock(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_geometry_big(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_buffer_bg(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_buffer_flush_fence(void *obj, void *data,

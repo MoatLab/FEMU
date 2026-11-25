@@ -828,6 +828,91 @@ void femu_test_gc_erase_order(void *obj, void *data,
     femu_disable(&c);
 }
 
+/* set the uint32 test property @prop of device gc-clock */
+static void femu_gc_clock_set(QTestState *qts, const char *prop,
+                              uint32_t value)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/gc-clock',"
+                           "'property':%s,'value':%u}}", prop, value);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/*
+ * Host CPU time must not enter the modelled GC chain (x-gc-clock). The
+ * FTL thread stalls GC_HOLD_US before each GC read (x-gc-hold-us), as a
+ * slow host would. The NAND times are a few us, so the NAND work of a
+ * whole forced loop takes well under GC_HOLD_US. A pass books at its start
+ * time, so the fence of each erased line passes the start of its pass by
+ * NAND time alone. One booking on the host clock moves the fence by at
+ * least GC_HOLD_US. Both copy fences and erase starts are measured, so an
+ * erase booked on the host clock also fails.
+ *
+ *   host   |pass start|hold|rd 1|hold|rd 2| ...
+ *   model  |[rd 1][prog 1][rd 2][prog 2]...|fence     (pass clock)
+ *   leak   |    hold    [rd 1][prog 1]   hold   [rd 2]...|fence
+ *
+ * @data: "on", or "control": x-gc-pass-off opens no pass, so each booking
+ * takes the host clock and the span must reach GC_HOLD_US.
+ */
+#define GC_HOLD_US 4000
+
+void femu_test_gc_clock(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool control = !strcmp(data, "control");
+    FemuCtrlState c = { 0 };
+    const uint32_t pages = 256;
+    uint64_t buf = guest_alloc(alloc, 64 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t victims;
+    uint64_t span;
+    uint32_t seed = 1;
+    QDict *rsp;
+    uint32_t i;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 64 * 4096);
+    for (i = 0; i < pages; i += 64) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 64, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_gc_clock_set(qts, "x-gc-pass-off", control);
+    femu_gc_clock_set(qts, "x-gc-hold-us", GC_HOLD_US);
+    for (i = 0; i < 200; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (seed >> 8) % pages, 1,
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_gc_clock_set(qts, "x-gc-hold-us", 0);
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-clock',"
+                    "'property':'x-gc-clock'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-gc-clock %s: %s", (const char *)data,
+                   qdict_get_str(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64, &victims, &span), ==, 2);
+    qobject_unref(rsp);
+
+    g_assert_cmpuint(victims, >, 0);
+    if (control) {
+        g_assert_cmpuint(span, >=, GC_HOLD_US * 1000ULL);
+    } else {
+        g_assert_cmpuint(span, <, GC_HOLD_US * 1000ULL / 2);
+    }
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_disable(&c);
+}
+
 /*
  * A bbssd device of 2^31 sectors, one past the old limit, starts, and
  * query-femu reports its 64-bit totals. 8 x 4 x 256 x 1024 pages of 256

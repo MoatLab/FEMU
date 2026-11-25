@@ -1214,6 +1214,11 @@ uint64_t ssd_erase_lun_block(struct ssd *ssd, int ch, int lun, int blk,
                               nand_lun_end(lunp));
 
             ssd->gc_order_lun_early += at < ssd->gc_erase_fence;
+            /* x-gc-clock: an erase on the host clock starts after the stall */
+            if (ssd->gc_check_ns && at > ssd->gc_check_ns) {
+                ssd->gc_check_span = MAX(ssd->gc_check_span,
+                                         at - ssd->gc_check_ns);
+            }
         }
         lat = ssd_advance_status_multiplane(ssd, ppas, spp->pls_per_lun, &gce);
     }
@@ -1269,10 +1274,18 @@ void mark_block_free(struct ssd *ssd, struct ppa *ppa)
  */
 bool ssd_gc_pass_begin(struct ssd *ssd)
 {
-    if (!ssd->sp.gc_erase_order || ssd->gc_pass_ns) {
+    if (!ssd->sp.gc_erase_order) {
         return false;
     }
-    ssd->gc_pass_ns = ssd_now(ssd);
+    /* x-gc-clock: the outermost pass, or each pass in the control */
+    if (!ssd->gc_pass_ns) {
+        ssd->gc_check_ns = ssd_now(ssd);
+    }
+    if (ssd->gc_pass_ns ||
+        (ssd->n && qatomic_read(&ssd->n->test_gc_pass_off))) {
+        return false;
+    }
+    ssd->gc_pass_ns = ssd->gc_check_ns;
     return ssd->gc_pass_ns != 0;
 }
 
@@ -1320,6 +1333,10 @@ uint64_t gc_read_page(struct ssd *ssd, struct ppa *ppa)
     if (ssd->sp.enable_gc_delay) {
         uint64_t lat;
 
+        /* x-gc-hold-us: a slow host, which must not move the booking */
+        if (unlikely(ssd->n && qatomic_read(&ssd->n->test_gc_hold_us))) {
+            g_usleep(qatomic_read(&ssd->n->test_gc_hold_us));
+        }
         if (ssd->sp.gc_erase_order && ssd_media_seal_read(ssd, ppa)) {
             ssd->gc_order_src_seals++;
         }
@@ -1406,6 +1423,13 @@ uint64_t ssd_gc_erase_start(struct ssd *ssd, struct line *victim,
     if (!*fence) {
         return ssd->gc_pass_ns;
     }
+    if (ssd->gc_check_ns) {
+        ssd->gc_check_victims++;
+        if (*fence > ssd->gc_check_ns) {
+            ssd->gc_check_span = MAX(ssd->gc_check_span,
+                                     *fence - ssd->gc_check_ns);
+        }
+    }
     now = gc_clock(ssd);
     ssd->gc_order_victims++;
     if (*fence <= now) {
@@ -1429,6 +1453,17 @@ char *ssd_gc_order_report(struct ssd *ssd)
                            ssd->gc_order_victims, ssd->gc_order_early,
                            ssd->gc_order_lun_early, ssd->gc_order_seals,
                            ssd->gc_order_src_seals);
+}
+
+/*
+ * x-gc-clock: "victims span_ns". span_ns is the most that a copy fence or an
+ * erase start passed the start of the outermost open pass. On the pass clock
+ * it is NAND time alone; a booking on the host clock adds x-gc-hold-us.
+ */
+char *ssd_gc_clock_report(struct ssd *ssd)
+{
+    return g_strdup_printf("%" PRIu64 " %" PRIu64, ssd->gc_check_victims,
+                           ssd->gc_check_span);
 }
 
 /**

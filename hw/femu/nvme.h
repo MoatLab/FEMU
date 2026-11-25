@@ -3516,6 +3516,8 @@ typedef struct FemuCtrl {
     uint32_t        test_cmt_slots; /* qtest: CMT slots instead of the MiB size */
     uint32_t        test_precon_break; /* qtest: plan skips background GC */
     bool            test_tp_hold;   /* qtest: publish no pending TP */
+    uint32_t        test_gc_hold_us; /* qtest: host stall before a GC read */
+    uint32_t        test_gc_pass_off; /* qtest: open no GC pass (control) */
     bool            tier_idle;      /* the FTL thread runs idle folds */
     bool            tier_upkeep;    /* the FTL thread runs owed pool folds */
     bool            gc_idle;        /* the FTL thread collects when idle */

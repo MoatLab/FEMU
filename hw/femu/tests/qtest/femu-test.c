@@ -4269,6 +4269,24 @@ static void femu_register_nodes(void)
             "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "gc_erase_order=off,pg_wr_lat=2000000",
     });
+    /* fast NAND, so the NAND work of a pass is far below x-gc-hold-us */
+    qos_add_test("gc-clock", "femu", femu_test_gc_clock,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            "id=gc-clock,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pg_rd_lat=2000,pg_wr_lat=5000,blk_er_lat=20000",
+    });
+    /* the control: with no pass, the stalls reach the fence */
+    qos_add_test("gc-clock-control", "femu", femu_test_gc_clock,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"control",
+        .edge.extra_device_opts =
+            "id=gc-clock,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=19,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "pg_rd_lat=2000,pg_wr_lat=5000,blk_er_lat=20000",
+    });
     qos_add_test("gc-erase-order-fdp-on", "femu", femu_test_gc_erase_order,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"on",

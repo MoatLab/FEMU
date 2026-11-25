@@ -6797,6 +6797,24 @@ static char *femu_test_gc_order(Object *obj, Error **errp)
     return report;
 }
 
+/* qtest only: the GC clock check of namespace 1 (ssd_gc_clock_report()) */
+static char *femu_test_gc_clock(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    char *report;
+    bool resume;
+
+    if (!ns || !NS_BBSSD(ns) || !ns->ssd) {
+        error_setg(errp, "the GC clock check requires a bbssd namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    report = ssd_gc_clock_report(ns->ssd);
+    nvme_resume_pollers(n, resume);
+    return report;
+}
+
 /* x-ftl-probe: Set an LPN of namespace 1, then Get its mapping */
 static void femu_test_ftl_probe_set(Object *obj, const char *value,
                                     Error **errp)
@@ -7715,6 +7733,11 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-flush-check", femu_test_flush_check,
                                 NULL);
         object_property_add_str(obj, "x-gc-order", femu_test_gc_order, NULL);
+        object_property_add_str(obj, "x-gc-clock", femu_test_gc_clock, NULL);
+        femu_test_add_u32(obj, "x-gc-hold-us",
+                          &FEMU(obj)->test_gc_hold_us, true);
+        femu_test_add_u32(obj, "x-gc-pass-off",
+                          &FEMU(obj)->test_gc_pass_off, true);
         object_property_add_str(obj, "x-rain-fail", NULL,
                                 femu_test_rain_fail);
         object_property_add_str(obj, "x-rain-check", femu_test_rain_check,

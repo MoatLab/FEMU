@@ -957,6 +957,13 @@ struct ssd {
      */
     uint64_t gc_pass_ns;
     /*
+     * x-gc-clock: the start of the outermost pass, the erased lines with a
+     * fence, and the most a fence or an erase start passed that start.
+     */
+    uint64_t gc_check_ns;
+    uint64_t gc_check_victims;
+    uint64_t gc_check_span;
+    /*
      * Lines that forced collection freed with GC delay on, and when the NAND
      * work of the last of them ends on every LUN. A front end that blocks
      * writes until collection is done waits until then.
@@ -1127,6 +1134,7 @@ uint64_t ssd_buffer_flush_seal(struct ssd *ssd, uint64_t stime);
 /* the Flush seals, Flush end, program end and seal waits (x-flush-check) */
 char *ssd_flush_report(struct ssd *ssd);
 char *ssd_gc_order_report(struct ssd *ssd);
+char *ssd_gc_clock_report(struct ssd *ssd);
 uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
 void ssd_release_stream(struct ssd *ssd, unsigned slot);
 void ssd_deallocate_fdp_ns(struct ssd *ssd, NvmeNamespace *ns);
