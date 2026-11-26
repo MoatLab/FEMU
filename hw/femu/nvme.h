@@ -2894,6 +2894,15 @@ typedef struct FemuPlm {
     uint32_t        events;
     /* the warnings this DTWIN gave, ETYP bits 2:0 (FTL thread) */
     uint32_t        warned;
+    /*
+     * A Set 14h DTWIN held to @hold_end (main loop, BQL). It completes
+     * with @hold_sc; success enters DTWIN then.
+     */
+    bool            held;
+    uint16_t        hold_sc;
+    NvmeAerHold     hold;
+    int64_t         hold_end;
+    QEMUTimer       *hold_timer;
     QemuSeqLock     seq;
     FemuPlmSnap     snap;
 } FemuPlm;
@@ -4185,6 +4194,9 @@ void femu_plm_excursion(FemuCtrl *n);
 bool femu_plm_idle_due(FemuCtrl *n);
 void femu_plm_reset(FemuCtrl *n);
 void femu_plm_format(FemuCtrl *n);
+void femu_plm_drop(FemuCtrl *n);
+bool femu_plm_abort(FemuCtrl *n, uint16_t cid);
+void femu_plm_timer_cb(void *opaque);
 void femu_plm_add_props(Object *obj);
 bool femu_sanns_check(FemuCtrl *n, Error **errp);
 bool femu_sanns_busy(FemuCtrl *n);
@@ -4472,6 +4484,9 @@ uint16_t femu_nvme_rw_check_req(FemuCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
                                 uint64_t meta_size);
 
 void nvme_process_sq_admin(void *opaque);
+void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
+                        const NvmeAerResult *result, uint32_t nsid,
+                        uint16_t status);
 void nvme_process_aers(FemuCtrl *n);
 bool nvme_enqueue_event(FemuCtrl *n, uint8_t event_type, uint8_t event_info,
                         uint8_t log_page);

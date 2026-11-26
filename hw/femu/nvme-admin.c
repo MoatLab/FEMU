@@ -5301,6 +5301,11 @@ static uint16_t nvme_abort_req(FemuCtrl *n, NvmeCmd *cmd, uint32_t *result)
     if (nvme_check_sqid(n, sqid)) {
         return NVME_SUCCESS;
     }
+    /* a held Set 14h has left the queue: it completes now, before this */
+    if (!sqid && femu_plm_abort(n, cid)) {
+        *result = 0;
+        return NVME_SUCCESS;
+    }
 
     sq = n->sq[sqid];
 
@@ -6669,9 +6674,13 @@ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 #define FEMU_AER_MAX_QUEUED     16
 #define FEMU_AER_MAX_NS_QUEUED  (FEMU_AER_MAX_QUEUED + NVME_MAX_NAMESPACES)
 
-/* Post one admin completion for an entry the controller had been holding. */
-static void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
-                               const NvmeAerResult *result, uint32_t nsid)
+/*
+ * Post one admin completion, with @status, for an entry the controller had
+ * been holding.
+ */
+void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
+                        const NvmeAerResult *result, uint32_t nsid,
+                        uint16_t status)
 {
     NvmeCQueue *cq = n->cq[hold->cqid];
     NvmeSQueue *sq = n->sq[hold->sqid];
@@ -6690,7 +6699,7 @@ static void nvme_post_held_cqe(FemuCtrl *n, const NvmeAerHold *hold,
     memcpy(&cqe.n.result, result, sizeof(*result));
     cqe.n.rsvd = cpu_to_le32(nsid);
     cqe.cid = hold->cid;
-    cqe.status = cpu_to_le16(NVME_SUCCESS << 1 | cq->phase);
+    cqe.status = cpu_to_le16(status << 1 | cq->phase);
     cqe.sq_id = cpu_to_le16(hold->sqid);
     /* where the queue head is now, not where it was when the request came */
     cqe.sq_head = cpu_to_le16(sq ? sq->head : hold->sq_head);
@@ -6765,7 +6774,7 @@ void nvme_process_aers(FemuCtrl *n)
         n->outstanding_aers--;
 
         nvme_post_held_cqe(n, &n->aer_held[n->outstanding_aers],
-                           &event->result, event->nsid);
+                           &event->result, event->nsid, NVME_SUCCESS);
         g_free(event);
         femu_lsi_room(n);
     }
@@ -6917,6 +6926,18 @@ static void nvme_run_sq_admin(void *opaque)
      * from the completion queue head doorbell.
      */
     while (!nvme_sq_empty(sq) && !nvme_cq_full(cq)) {
+        /*
+         * plm: the next command may end a held Set 14h, whose completion
+         * posts first. Fetch it only with room for both; the hold timer
+         * runs this again once the held one has posted. A size-2 CQ never
+         * has room for two, and an Abort must still end the hold, so it
+         * fetches as usual: the held CQE then follows the command's own
+         * (femu_plm_hold_drop()).
+         */
+        if (unlikely(n->plm_st.held) && cq->size > 2 &&
+            (cq->tail + 2) % cq->size == cq->head) {
+            break;
+        }
         if (sq->phys_contig) {
             addr = sq->dma_addr + sq->head * n->sqe_size;
         } else {
@@ -6950,6 +6971,16 @@ static void nvme_run_sq_admin(void *opaque)
                 if (!QSIMPLEQ_EMPTY(&n->aer_queue)) {
                     nvme_process_aers(n);
                 }
+            }
+            /* a held Set 14h DTWIN: later admin commands still run */
+            if (cmd.opcode == NVME_ADM_CMD_SET_FEATURES &&
+                NVME_GETSETFEAT_FID(le32_to_cpu(cmd.cdw10)) ==
+                NVME_PLM_WINDOW && n->plm_st.held) {
+                n->plm_st.hold.cid = cmd.cid;
+                n->plm_st.hold.sqid = sq->sqid;
+                n->plm_st.hold.cqid = sq->cqid;
+                n->plm_st.hold.sq_head = sq->head;
+                continue;
             }
             /* a held cache disable: nothing more runs until it completes */
             if (cmd.opcode == NVME_ADM_CMD_SET_FEATURES && n->vwc_held) {
@@ -6995,7 +7026,7 @@ static bool femu_vwc_post(FemuCtrl *n)
         timer_mod(n->vwc_timer, femu_dev_now(n) + SCALE_MS);
         return false;
     }
-    nvme_post_held_cqe(n, &n->vwc_hold, &res, 0);
+    nvme_post_held_cqe(n, &n->vwc_hold, &res, 0, NVME_SUCCESS);
     n->vwc_held = false;
     return true;
 }

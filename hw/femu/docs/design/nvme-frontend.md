@@ -1161,7 +1161,7 @@ bit 12 (PLEAN), and a new log 0Bh entry raises the notice.
 
 ```text
  DISABLED (PLMW 000b) --Set 13h LPE=1--> NDWIN (PLMW 010b)
- NDWIN --Set 14h WSEL 001b--> DTWIN (PLMW 001b)
+ NDWIN --Set 14h WSEL 001b, held to its deadline--> DTWIN (PLMW 001b)
  DTWIN --Set 14h WSEL 010b, or Set 13h LPE=1--> NDWIN
  DTWIN --a limit passed (MVEAT), or a forced GC pass (DEAT)--> NDWIN
  DTWIN --Format NVM or Sanitize, no event--> NDWIN
@@ -1183,7 +1183,7 @@ media work, and the host selects DTWIN again.
 | --- | --- |
 | Set 13h | CDW11 is NVMSETID 1, CDW12 bit 0 is LPE; the 512-byte data holds ENEV, DTRT, DTWT and DTTT (Figure 423). ENEV bits 13:3, bytes 31:2 and bytes 511:56 must be 0. LPE=1 enters NDWIN, also from DTWIN; LPE=0 disables PLM and keeps the thresholds |
 | Get 13h | Dword 0 is LPE, the data the 512-byte structure; Select 1 and 2 give LPE 0 and zeros |
-| Set 14h | needs LPE=1; WSEL 001b DTWIN or 010b NDWIN, at once. DTWIN while in DTWIN keeps the window and its start time |
+| Set 14h | needs LPE=1; WSEL 001b DTWIN or 010b NDWIN. NDWIN takes effect at once. DTWIN from NDWIN completes at its deadline (below). DTWIN while in DTWIN keeps the window and its start time |
 | Get 14h | needs LPE=1; Dword 0 is the window; Select 1 and 2 give NDWIN |
 | both | NSID 0 only, CDW11 bits 31:16 reserved, SV=1 is Feature Identifier Not Saveable; log 12h gives NVM Set scope (bit 22). A reset returns both to their defaults (Figure 403); the level of 12h stays |
 
@@ -1239,6 +1239,53 @@ are atomics. Only Set 13h, Set 14h and a reset pause the data plane.
  Set 13h, 14h, reset --> pause --> window, start time, snapshot --> resume
  FTL request or idle step -------> snapshot (seqlock write)
  Get Log 0Ah, 0Bh ---------------> seqlock read + atomic reads, no pause
+```
+
+#### The held Set 14h
+
+A Set 14h DTWIN from NDWIN completes at a deadline (design 5.2). The
+deadline is `plm_ndwin_min_ms` (NTWTML) after the NDWIN entry, or the end
+of the media work booked when the command came, whichever is later.
+Host I/O after the command does not move it. So the DTWIN starts with no
+GC work still on the dies.
+
+```text
+ Set 14h DTWIN --> deadline = MAX(NDWIN entry + NTWTML, media end now)
+                     |past        |future
+                     v            v
+                   DTWIN, CQE   NO_COMPLETE: cid, sqid, cqid kept; timer
+                                NDWIN stays; the FTL starts no background work
+                                timer at the deadline, CQ has room --> CQE, DTWIN
+```
+
+Unlike a held cache disable, the hold does not stop the admin queue: an
+AER, a Get Features or a log read still runs. While a 14h is held, the
+admin queue fetches a command only with room for two completions. So a
+command that ends the hold posts the held CQE first:
+
+| Event while held | The held Set 14h | The new command |
+| --- | --- | --- |
+| CC.EN 1 to 0, shutdown, reset, unplug | timer stops; no CQE, the queues are gone | n/a |
+| Abort, SQID 0, the held CID | CQE Command Abort Requested (07h) | Dword 0 bit 0 clear |
+| Cancel | none: Cancel names only commands of its own I/O queue | as usual |
+| a second Set 14h | CQE Command Sequence Error (0Ch) | runs as usual |
+| Set 13h LPE=0 | CQE Invalid Field in Command | runs as usual |
+| Set 13h LPE=1 | CQE Command Sequence Error | runs: a new NDWIN |
+| Format NVM, Sanitize | CQE Command Sequence Error | runs as usual |
+
+After a drop, the FTL works as the window says again.
+
+A size-2 admin CQ holds one CQE, so it never has room for two. There the
+rule is off, so an Abort still ends the hold:
+
+```text
+ admin CQ size > 2: fetch while held only with 2 free slots
+                    --> held CQE, then the command's CQE
+ admin CQ size 2:   fetch as usual
+   Abort, Format, Sanitize --> the command's CQE; the timer posts the
+                               held CQE once the host frees the slot
+   Set 13h, Set 14h        --> 0Ch for the new command; the hold stays,
+                               so the host may send it again
 ```
 
 #### The DTWIN limits
@@ -1498,6 +1545,16 @@ registers with no guest. Cases that target this chapter include:
 | `plm-format`, `plm-sanitize` | Format NVM and Sanitize in DTWIN, with every ENEV bit and AEC bit 12: NDWIN after the command, ETYP 0, no log 0Bh entry, no AEN; the FTL runs NDWIN work again |
 | `plm-format-buffer` | Format NVM in DTWIN with 40 buffered pages and the free lines at the high mark + 1: NDWIN, ETYP 0, no log 0Bh entry |
 | `plm-vwc` | a cache disable in DTWIN that forces no GC keeps DTWIN; one whose drain forces GC at the high mark leaves with ETYP DEAT and the log 0Bh entry |
+| `plm-hold` | `plm_ndwin_min_ms` 1000: a Set 14h DTWIN completes after 1000 ms, while a Get 14h behind it answers NDWIN and the FTL holds background work; with 1.5 s programs, a 14h after a write completes when the program ends |
+| `plm-hold-reset` | CC.EN 0 while a 14h waits: no CQE after the next enable, past the deadline; the FTL holds nothing |
+| `plm-hold-abort` | Abort of the held CID: its CQE 07h comes first, then the Abort with Dword 0 bit 0 clear; NDWIN; no CQE at the old deadline |
+| `plm-hold-cancel` | a Cancel that names the held CID fails; the 14h still completes at its deadline and enters DTWIN |
+| `plm-hold-second` | a second 14h NDWIN: 0Ch first, then success; a second 14h DTWIN: 0Ch first, and the second is held |
+| `plm-hold-lpe0`, `plm-hold-lpe1` | 13h LPE=0: the held 14h gets Invalid Field first, PLM is disabled; LPE=1: 0Ch first, a new NDWIN |
+| `plm-hold-format`, `plm-hold-sanitize` | Format or Sanitize: the held 14h gets 0Ch first, then the command succeeds; NDWIN |
+| `plm-hold-small-abort`, `plm-hold-small-seq`, `plm-hold-small-full` | admin CQ of 2 entries: an Abort ends the hold, its CQE first, then 07h; a second 14h gets 0Ch and the hold stays to its deadline; a held CQE waits while the CQ is full and posts once the host takes a CQE |
+| `plm-hold-room` | admin CQ of 4 with one free slot: an Abort waits in the SQ; once the host takes a CQE, 07h comes first, then the Abort |
+| `plm-hold-unplug` | unplug while a 14h waits: QEMU answers past the deadline (liveness only; the sanitizer run checks the timer leak) |
 | `plm-aen-race` | 64 log 0Bh reads race an MVEAT exit: each time the log data or the AEN shows the entry (timing dependent) |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
@@ -1581,7 +1638,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | `hw/femu/dma.c` | PRP and SGL mapping, `femu_dma_rw` |
 | `hw/femu/lib/rte_ring.c`, `hw/femu/lib/pqueue.c` | the rings and the completion heap |
 | `hw/femu/nvme.h` | `NvmeSQueue`, `NvmeCQueue`, `NvmeRequest`, `FemuCtrl`, `FemuPollerCtr`, register layout |
-| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot, the NDWIN target in `femu_plm_init()`, the DTWIN amounts, limits and warnings in `femu_plm_count()` and `femu_plm_step()`, the AEN in `femu_plm_event()`, the NDWIN of Format and Sanitize in `femu_plm_format()` |
+| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot, the NDWIN target in `femu_plm_init()`, the DTWIN amounts, limits and warnings in `femu_plm_count()` and `femu_plm_step()`, the AEN in `femu_plm_event()`, the NDWIN of Format and Sanitize in `femu_plm_format()`, the held Set 14h and its drop paths in `femu_plm_hold_post()`, `femu_plm_abort()` and `femu_plm_drop()` |
 | `hw/femu/bbssd/ftl-line-gc.c`, `hw/femu/bbssd/bb.c` | `ssd_plm_prep_due()`, `ssd_plm_prep_step()`, `bb_plm_idle()`: the NDWIN preparation GC; the DEAT check in `do_gc_pass()` |
 | `hw/femu/femu-ext-ops.h` | `FemuExtCtrlOps`, the mode handler table, and its rules |
 

@@ -931,6 +931,8 @@ static void nvme_clear_ctrl(FemuCtrl *n, bool shutdown)
     resume = nvme_pause_pollers(n);
     /* the queues go below: a held cache disable cannot complete now */
     femu_vwc_drop(n);
+    /* nor a held Set 14h */
+    femu_plm_drop(n);
     /* a start still under way ends here; a cut keeps recovery_pending */
     if (n->ready_timer) {
         timer_del(n->ready_timer);
@@ -1194,6 +1196,7 @@ static void femu_shut_clear(FemuCtrl *n)
     n->bar.csts &= ~(CSTS_SHST_MASK << CSTS_SHST_SHIFT);
     /* a held cache disable ends with the queues it would post to */
     femu_vwc_drop(n);
+    femu_plm_drop(n);
 }
 
 /* the SHST field alone, never ORed: 01b then 10b must not read 11b */
@@ -4216,6 +4219,7 @@ static void femu_realize_undo(FemuCtrl *n)
     g_clear_pointer(&n->shut_timer, timer_free);
     g_clear_pointer(&n->durable_timer, timer_free);
     g_clear_pointer(&n->vwc_timer, timer_free);
+    g_clear_pointer(&n->plm_st.hold_timer, timer_free);
     g_clear_pointer(&n->plp_timer, timer_free);
     g_clear_pointer(&n->wrr_tried, g_free);
     femu_opal_stop(n);
@@ -6101,6 +6105,7 @@ static void femu_exit(PCIDevice *pci_dev)
     g_clear_pointer(&n->shut_timer, timer_free);
     g_clear_pointer(&n->durable_timer, timer_free);
     g_clear_pointer(&n->vwc_timer, timer_free);
+    g_clear_pointer(&n->plm_st.hold_timer, timer_free);
     g_clear_pointer(&n->plp_timer, timer_free);
     if (n->cxl_dev) {
         femu_cxl_nvme_ops->detach(n);

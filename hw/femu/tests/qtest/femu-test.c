@@ -360,6 +360,10 @@ static void *femu_ocp_before(GString *cmd_line, void *arg)
     "gc_thres_pcent_high=95,rrl=on,plm=on,subsys=plmsub"
 /* ... with a DTWIN that no test outlasts (DTWTM one hour) */
 #define FEMU_PLM_GC_LONG FEMU_PLM_GC_GEO ",plm_dtwin_ms=3600000"
+/* a Set 14h DTWIN waits 2 s in NDWIN (NTWTML) */
+#define FEMU_PLM_HOLD \
+    "id=plmh,femu_mode=1,rrl=on,plm=on,subsys=plmsub,plm_ndwin_ms=3000," \
+    "plm_ndwin_min_ms=2000," FEMU_CAPS_GEO
 #define FEMU_ONCS_DEFAULT   0x19d   /* the oncs property's default */
 #define FEMU_ONCS_OCSSD     0x10    /* Save/Select only: no generic command */
 
@@ -2349,6 +2353,13 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "id=plms," FEMU_PLM_GC_LONG,
         .before = femu_plm_before,
     });
+    qos_add_test("plm-vwc", "femu", femu_test_plm_vwc,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmv," FEMU_PLM_GC_LONG ",vwc=1,buffer_size=64,"
+            "buffer_thres_pcent=90",
+        .before = femu_plm_before,
+    });
     qos_add_test("plm-format-buffer", "femu", femu_test_plm_format_buffer,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
@@ -2356,11 +2367,85 @@ static void femu_register_nodes(void)
             "buffer_thres_pcent=90",
         .before = femu_plm_before,
     });
-    qos_add_test("plm-vwc", "femu", femu_test_plm_vwc,
+    qos_add_test("plm-hold", "femu", femu_test_plm_hold,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
-            "id=plmv," FEMU_PLM_GC_LONG ",vwc=1,buffer_size=64,"
-            "buffer_thres_pcent=90",
+            "id=plmt,femu_mode=1,rrl=on,plm=on,subsys=plmsub,"
+            "plm_ndwin_min_ms=1000,plm_dtwin_ms=3600000,"
+            "pg_wr_lat=1500000000," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-reset", "femu", femu_test_plm_hold_reset,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-abort", "femu", femu_test_plm_hold_abort,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-cancel", "femu", femu_test_plm_hold_cancel,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-second", "femu", femu_test_plm_hold_second,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-lpe0", "femu", femu_test_plm_hold_lpe,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"lpe0",
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-lpe1", "femu", femu_test_plm_hold_lpe,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"lpe1",
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-format", "femu", femu_test_plm_hold_format,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"format",
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-sanitize", "femu", femu_test_plm_hold_format,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"sanitize",
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-small-abort", "femu", femu_test_plm_hold_small,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"abort",
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-small-seq", "femu", femu_test_plm_hold_small,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"seq",
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-small-full", "femu", femu_test_plm_hold_small,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"full",
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-hold-room", "femu", femu_test_plm_hold_room,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    /* the hot-plugged controller goes away; the next test needs a new QEMU */
+    qos_add_test("plm-hold-unplug", "femu", femu_test_plm_hold_unplug,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = FEMU_PLM_HOLD,
         .before = femu_plm_before,
     });
     qos_add_test("plm-golden-off", "femu", femu_test_plm_golden_off,

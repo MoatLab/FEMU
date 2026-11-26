@@ -55,6 +55,17 @@
  *   ENEV bit set --> log 0Bh entry --> new, AEC bit 12? --> AEN 04h/0Bh
  *   the Notice stays masked until the host reads log 0Bh
  *
+ * A Set 14h DTWIN from NDWIN waits until plm_ndwin_min_ms (NTWTML) has
+ * passed in NDWIN and the media work booked at its arrival has ended
+ * (design 5.2). Meanwhile the window stays NDWIN, the FTL starts no
+ * background work, and later admin commands run:
+ *
+ *   Set 14h DTWIN --> held, timer at the deadline --> CQE, DTWIN
+ *   reset, teardown -----------------------------> no CQE
+ *   Abort of it ---------------------------------> CQE 07h, then the Abort
+ *   Set 13h LPE=0 -------------------------------> CQE 02h, then the 13h
+ *   Set 14h, Set 13h LPE=1, Format, Sanitize ----> CQE 0Ch, then the command
+ *
  * With plm=off, none of this changes what the controller reports.
  */
 
@@ -407,6 +418,8 @@ bool femu_plm_init(FemuCtrl *n, Error **errp)
     ssd->plm = true;
     ssd->plm_lines = target;
     femu_plm_snap(n, false);
+    /* the held Set 14h; its deadline is on the clock of femu_dev_now() */
+    pl->hold_timer = timer_new_ns(QEMU_CLOCK_REALTIME, femu_plm_timer_cb, n);
     return true;
 }
 
@@ -448,6 +461,20 @@ static void femu_plm_estimates(FemuPlm *pl, const FemuPlmSnap *s,
 }
 
 /*
+ * The FTL work of window @w: background work holds in DTWIN, and the
+ * preparation runs in NDWIN. A held Set 14h holds as DTWIN does.
+ */
+static void femu_plm_flags(FemuCtrl *n, uint8_t w)
+{
+    struct ssd *ssd = n->ssd;
+
+    if (ssd && ssd->plm) {
+        qatomic_set(&ssd->plm_hold, w == FEMU_PLMW_DTWIN);
+        qatomic_set(&ssd->plm_prep, w == FEMU_PLMW_NDWIN);
+    }
+}
+
+/*
  * Enter window @w: the DTWIN amounts count from now. The caller is the
  * main loop with the data plane paused, realize and reset, or the FTL
  * thread inside its sweep for an autonomous exit.
@@ -455,13 +482,8 @@ static void femu_plm_estimates(FemuPlm *pl, const FemuPlmSnap *s,
 static void femu_plm_window(FemuCtrl *n, uint8_t w)
 {
     FemuPlm *pl = &n->plm_st;
-    struct ssd *ssd = n->ssd;
 
-    /* the FTL thread holds background work in DTWIN, prepares in NDWIN */
-    if (ssd && ssd->plm) {
-        qatomic_set(&ssd->plm_hold, w == FEMU_PLMW_DTWIN);
-        qatomic_set(&ssd->plm_prep, w == FEMU_PLMW_NDWIN);
-    }
+    femu_plm_flags(n, w);
     qatomic_set(&pl->ndwin_dtwte, pl->dtwin_ms);
     pl->rd_bytes = 0;
     pl->wr_bytes = 0;
@@ -491,14 +513,166 @@ void femu_plm_reset(FemuCtrl *n)
     femu_plm_window(n, FEMU_PLMW_OFF);
 }
 
+/*
+ * When a held Set 14h DTWIN may complete (design 5.2): NTWTML after the
+ * NDWIN entry, and the end of the media work booked when it came. So the
+ * DTWIN starts with no GC work on the dies, and later host I/O does not
+ * move the deadline. The caller holds the pause, so the FTL is idle.
+ */
+static int64_t femu_plm_hold_end(FemuCtrl *n)
+{
+    FemuPlm *pl = &n->plm_st;
+    int64_t end = 0;
+
+    /* start_ms rounds down: one more ms keeps at least NTWTML */
+    if (pl->ndwin_min_ms) {
+        end = (qatomic_read(&pl->start_ms) + 1 + pl->ndwin_min_ms) *
+              SCALE_MS;
+    }
+    if (n->ssd) {
+        end = MAX(end, (int64_t)ssd_media_last_end(n->ssd));
+    }
+    return end;
+}
+
+/* the admin CQ of the held Set 14h has room for @need more CQEs */
+static bool femu_plm_hold_room(FemuCtrl *n, uint32_t need)
+{
+    NvmeCQueue *cq = n->cq[n->plm_st.hold.cqid];
+
+    if (!cq) {
+        return true;
+    }
+    return cq->size - 1 - (cq->tail + cq->size - cq->head) % cq->size >=
+           need;
+}
+
+/*
+ * Post the held Set 14h: at its deadline with success, or at once when a
+ * drop set an error in @hold_sc. @need is 2 when a command's own CQE
+ * follows. Without room the timer tries again. Success enters DTWIN; an
+ * error leaves NDWIN and lets the FTL work again. Returns true when no
+ * command is held any more.
+ */
+static bool femu_plm_hold_post(FemuCtrl *n, uint32_t need)
+{
+    FemuPlm *pl = &n->plm_st;
+    NvmeAerResult res = { 0 };
+    bool resume;
+
+    if (!pl->held) {
+        return true;
+    }
+    if (pl->hold_sc == NVME_SUCCESS && femu_dev_now(n) < pl->hold_end) {
+        timer_mod(pl->hold_timer, pl->hold_end);
+        return false;
+    }
+    if (!femu_plm_hold_room(n, need)) {
+        timer_mod(pl->hold_timer, femu_dev_now(n) + SCALE_MS);
+        return false;
+    }
+    pl->held = false;
+    timer_del(pl->hold_timer);
+    resume = nvme_pause_pollers(n);
+    if (pl->hold_sc == NVME_SUCCESS) {
+        femu_plm_window(n, FEMU_PLMW_DTWIN);
+    } else {
+        femu_plm_flags(n, qatomic_read(&pl->window));
+    }
+    nvme_resume_pollers(n, resume);
+    nvme_post_held_cqe(n, &pl->hold, &res, 0, pl->hold_sc);
+    return true;
+}
+
+/*
+ * A command ends the held Set 14h with @sc, and its own CQE comes next.
+ * The admin queue fetches it with room for two CQEs, so the held one
+ * posts first. A size-2 admin CQ has room for one only. Then @must keeps
+ * @sc for the timer, which posts the held CQE after the command's own;
+ * without @must the hold stays as it was. Returns true when nothing is
+ * held any more.
+ */
+static bool femu_plm_hold_drop(FemuCtrl *n, uint16_t sc, bool must)
+{
+    FemuPlm *pl = &n->plm_st;
+
+    if (!pl->held) {
+        return true;
+    }
+    if (!femu_plm_hold_room(n, 2) && !must) {
+        return false;
+    }
+    /* a drop that waits for room keeps its status */
+    if (pl->hold_sc == NVME_SUCCESS) {
+        pl->hold_sc = sc;
+    }
+    return femu_plm_hold_post(n, 2);
+}
+
+/* the deadline of the held Set 14h passed, or its CQ had no room */
+void femu_plm_timer_cb(void *opaque)
+{
+    FemuCtrl *n = opaque;
+
+    if (n->plm_st.held && femu_plm_hold_post(n, 1) && n->sq[0]) {
+        /* commands that waited for room for two CQEs run now */
+        nvme_process_sq_admin(n->sq[0]);
+    }
+}
+
+/**
+ * femu_plm_abort - Abort of a held Set 14h
+ * @n: the controller
+ * @cid: the CID that the Abort names on the admin queue
+ *
+ * The held command completes with Command Abort Requested before the
+ * Abort does. Returns true when @cid named it.
+ */
+bool femu_plm_abort(FemuCtrl *n, uint16_t cid)
+{
+    FemuPlm *pl = &n->plm_st;
+
+    if (!pl->held || pl->hold.sqid || le16_to_cpu(pl->hold.cid) != cid) {
+        return false;
+    }
+    femu_plm_hold_drop(n, NVME_CMD_ABORT_REQ, true);
+    return true;
+}
+
+/**
+ * femu_plm_drop - a reset, a shutdown or teardown ends the held Set 14h
+ * @n: the controller
+ *
+ * The queues go, so the command never completes (design 5.3). The FTL
+ * works as the window says again.
+ */
+void femu_plm_drop(FemuCtrl *n)
+{
+    FemuPlm *pl = &n->plm_st;
+    bool resume;
+
+    if (pl->hold_timer) {
+        timer_del(pl->hold_timer);
+    }
+    if (!pl->held) {
+        return;
+    }
+    pl->held = false;
+    resume = nvme_pause_pollers(n);
+    femu_plm_flags(n, qatomic_read(&pl->window));
+    nvme_resume_pollers(n, resume);
+}
+
 /**
  * femu_plm_format - a Format NVM or a Sanitize is about to change the media
  * @n: the controller
  *
  * The set leaves DTWIN before the drain of the command, with no ETYP bit
  * and no event (design D2): the host asked for this media work. A forced
- * GC in the drain then finds NDWIN, so it is no excursion. The caller is
- * the main loop; the pause nests in one the caller holds.
+ * GC in the drain then finds NDWIN, so it is no excursion. A held Set
+ * 14h ends with Command Sequence Error, first when the CQ has room for
+ * two (femu_plm_hold_drop()). The caller is the main
+ * loop; the pause nests in one the caller holds.
  */
 void femu_plm_format(FemuCtrl *n)
 {
@@ -507,6 +681,7 @@ void femu_plm_format(FemuCtrl *n)
     if (!n->plm) {
         return;
     }
+    femu_plm_hold_drop(n, NVME_CMD_SEQ_ERROR, true);
     resume = nvme_pause_pollers(n);
     if (qatomic_read(&n->plm_st.window) == FEMU_PLMW_DTWIN) {
         femu_plm_window(n, FEMU_PLMW_NDWIN);
@@ -788,9 +963,12 @@ static bool femu_plm_cfg_ok(const uint8_t *cfg)
  *
  * 13h stores the thresholds; LPE=1 enters NDWIN (5.2.26.1.12), also from
  * DTWIN, and LPE=0 disables PLM. Events stay until log 0Ah is read. 14h
- * selects the window at once; a DTWIN while in DTWIN keeps its amounts,
- * so a host cannot renew the budget without an NDWIN. Both change state
- * that the FTL thread reads, so they pause the data plane.
+ * NDWIN takes effect at once. 14h DTWIN from NDWIN is held to the
+ * deadline of femu_plm_hold_end() and returns NVME_NO_COMPLETE. A DTWIN
+ * while in DTWIN keeps its amounts, so a host cannot renew the budget
+ * without an NDWIN. A held 14h ends before either command runs (design
+ * 5.3). Both change state that the FTL thread reads, so they pause the
+ * data plane.
  */
 uint16_t femu_plm_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
@@ -801,6 +979,7 @@ uint16_t femu_plm_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint8_t cfg[FEMU_PLM_CFG_SIZE];
     uint8_t wsel = dw12 & 0x7;
     uint16_t status;
+    int64_t end;
     bool resume;
 
     if (!femu_plm_set_ok(dw11)) {
@@ -819,6 +998,15 @@ uint16_t femu_plm_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         if (!femu_plm_cfg_ok(cfg)) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
+        /*
+         * LPE=0: no PLM for the held 14h (5.2.26.1.13); LPE=1: a new NDWIN.
+         * In a size-2 admin CQ the held CQE cannot post before this one.
+         * Then nothing changes, so the host may send this 13h again.
+         */
+        if (!femu_plm_hold_drop(n, (dw12 & 0x1) ? NVME_CMD_SEQ_ERROR :
+                                NVME_INVALID_FIELD | NVME_DNR, false)) {
+            return NVME_CMD_SEQ_ERROR;
+        }
         resume = nvme_pause_pollers(n);
         memcpy(pl->cfg, cfg, sizeof(cfg));
         pl->lpe = dw12 & 0x1;
@@ -833,8 +1021,26 @@ uint16_t femu_plm_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                            wsel != FEMU_PLMW_NDWIN) || !pl->lpe) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    /* this 14h replaces a held one; no room changes nothing, as for 13h */
+    if (!femu_plm_hold_drop(n, NVME_CMD_SEQ_ERROR, false)) {
+        return NVME_CMD_SEQ_ERROR;
+    }
     /* under the pause: the FTL thread may have left DTWIN on its own */
     resume = nvme_pause_pollers(n);
+    if (wsel == FEMU_PLMW_DTWIN &&
+        qatomic_read(&pl->window) == FEMU_PLMW_NDWIN) {
+        end = femu_plm_hold_end(n);
+        if (end > femu_dev_now(n)) {
+            /* NDWIN stays, with no new background work until the end */
+            pl->held = true;
+            pl->hold_sc = NVME_SUCCESS;
+            pl->hold_end = end;
+            femu_plm_flags(n, FEMU_PLMW_DTWIN);
+            nvme_resume_pollers(n, resume);
+            timer_mod(pl->hold_timer, end);
+            return NVME_NO_COMPLETE;
+        }
+    }
     if (qatomic_read(&pl->window) != wsel) {
         femu_plm_window(n, wsel);
     }

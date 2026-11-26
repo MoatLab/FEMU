@@ -21413,59 +21413,6 @@ void femu_test_plm_format(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
- * Format NVM in DTWIN with 40 pages in the write buffer and the free
- * lines at the high mark + 1, as plm-vwc sets them up. There a cache
- * disable drains them and forces GC (DEAT). Format drops them instead:
- *
- *   DTWIN, 40 pages buffered, 5 free lines --> Format: NDWIN, ETYP 0,
- *     no 0Bh entry
- *
- * The Format drain runs only with power_loss, which plm refuses. So no
- * test can tell NDWIN before the drain from after it. This one catches
- * a Format that writes the buffer back in DTWIN.
- */
-void femu_test_plm_format_buffer(void *obj, void *data,
-                                 QGuestAllocator *alloc)
-{
-    QFemu *femu = obj;
-    QTestState *qts = femu->dev.bus->qts;
-    FemuCtrlState c = { 0 };
-    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
-    uint64_t lbuf = guest_alloc(alloc, 4096);
-    int64_t v[FEMU_PLMF_N];
-    uint8_t log[512];
-
-    femu_enable(&c, &femu->dev, alloc);
-    femu_create_io_queues(&c);
-    femu_plm_dtwwt(qts, "plmb", 1000000);
-    femu_plm_enable(&c, lbuf, 0xc007);
-    femu_plm_win(&c, lbuf, 1);
-    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
-    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
-                    ==, NVME_SUCCESS);
-    femu_plm_fill(&c, qts, "plmb", buf, 5);
-    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 1, NULL)),
-                    ==, NVME_SUCCESS);
-    for (int lpn = 0; lpn < 40; lpn++) {
-        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
-                                        (uint64_t)lpn * 8, buf)), ==,
-                        NVME_SUCCESS);
-    }
-    femu_plm_ftl(qts, "plmb", v);
-    g_assert_cmpint(v[FEMU_PLMF_FREE], ==, 5);
-    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 1);
-    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
-    femu_plm_log0a(&c, true, lbuf, log);
-    g_assert_cmpuint(log[0], ==, 2);
-    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
-    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
-    femu_queue_free(&c, &c.io);
-    femu_disable(&c);
-    guest_free(alloc, lbuf);
-    guest_free(alloc, buf);
-}
-
-/*
  * A cache disable (Set Features 06h, WCE 0) drains the write buffer. The
  * host caused that drain, so a forced GC in it is a DEAT (design D2).
  * ENEV bit 15 is set; x-plm-dtwwt keeps the writes under DTWWT.
@@ -21531,6 +21478,525 @@ void femu_test_plm_vwc(void *obj, void *data, QGuestAllocator *alloc)
     femu_disable(&c);
     guest_free(alloc, lbuf);
     guest_free(alloc, buf);
+}
+
+/*
+ * Format NVM in DTWIN with 40 pages in the write buffer and the free
+ * lines at the high mark + 1, as plm-vwc sets them up. There a cache
+ * disable drains them and forces GC (DEAT). Format drops them instead:
+ *
+ *   DTWIN, 40 pages buffered, 5 free lines --> Format: NDWIN, ETYP 0,
+ *     no 0Bh entry
+ *
+ * The Format drain runs only with power_loss, which plm refuses. So no
+ * test can tell NDWIN before the drain from after it. This one catches
+ * a Format that writes the buffer back in DTWIN.
+ */
+void femu_test_plm_format_buffer(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    int64_t v[FEMU_PLMF_N];
+    uint8_t log[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmb", 1000000);
+    femu_plm_enable(&c, lbuf, 0xc007);
+    femu_plm_win(&c, lbuf, 1);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_plm_fill(&c, qts, "plmb", buf, 5);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 1, NULL)),
+                    ==, NVME_SUCCESS);
+    for (int lpn = 0; lpn < 40; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_ftl(qts, "plmb", v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], ==, 5);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 1);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, buf);
+}
+
+/* an admin command with CDW10 to CDW12 and data @buf; do not wait: its CID */
+static uint16_t femu_plm_send(FemuCtrlState *c, uint8_t opcode, uint32_t nsid,
+                              uint32_t dw10, uint32_t dw11, uint32_t dw12,
+                              uint64_t buf)
+{
+    NvmeCmd cmd = { 0 };
+
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(dw10);
+    cmd.cdw11 = cpu_to_le32(dw11);
+    cmd.cdw12 = cpu_to_le32(dw12);
+    femu_submit(c, &c->admin, &cmd);
+    return le16_to_cpu(cmd.cid);
+}
+
+/* the next admin CQE, which must be for @cid: its status code */
+static uint16_t femu_plm_next(FemuCtrlState *c, uint16_t cid, uint32_t *res)
+{
+    uint16_t got;
+    uint16_t sc = FEMU_SC(femu_complete(c, &c->admin, &got, res));
+
+    g_assert_cmpint(got, ==, cid);
+    return sc;
+}
+
+/*
+ * LPE=1, then a Set 14h DTWIN that the hold keeps: its CID. A Get 14h
+ * behind it completes first with NDWIN, so the admin queue still runs.
+ */
+static uint16_t femu_plm_hold_start(FemuCtrlState *c, uint64_t buf)
+{
+    uint16_t cid;
+    uint32_t res;
+
+    femu_plm_enable(c, buf, 0);
+    cid = femu_plm_send(c, NVME_ADM_CMD_SET_FEATURES, 0, 0x14, 1, 1, buf);
+    g_assert_cmphex(femu_plm_get(c, 0x14, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 2);
+    return cid;
+}
+
+/* the window by Get 14h (2 NDWIN, 1 DTWIN), and the FTL hold and prep */
+static void femu_plm_hold_check(FemuCtrlState *c, uint64_t buf,
+                                const char *id, uint32_t w, int hold,
+                                int prep)
+{
+    int64_t v[FEMU_PLMF_N];
+    uint32_t res;
+
+    g_assert_cmphex(femu_plm_get(c, 0x14, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, w);
+    femu_plm_ftl(c->pdev->bus->qts, id, v);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, hold);
+    g_assert_cmpint(v[FEMU_PLMF_PREP], ==, prep);
+}
+
+/*
+ * The held Set 14h DTWIN completes at its deadline (design 5.2), on a
+ * device with plm_ndwin_min_ms 1000 and 1.5 s programs:
+ *
+ *   LPE=1 (NDWIN) --> 14h DTWIN: held; Get 14h answers NDWIN, and the
+ *     FTL holds background work --> success after >= 1000 ms, DTWIN
+ *   NDWIN, 1100 ms on --> a write books a 1.5 s program --> 14h DTWIN:
+ *     success only when that program ends, about 1.5 s after the write
+ *
+ * It catches a hold that ignores NTWTML or the media end.
+ */
+void femu_test_plm_hold(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    NvmeRwCmd rw = { 0 };
+    int64_t t0;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    t0 = g_get_monotonic_time();
+    cid = femu_plm_hold_start(&c, lbuf);
+    femu_plm_hold_check(&c, lbuf, "plmt", 2, 1, 0);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_SUCCESS);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 1000 * 1000);
+    femu_plm_hold_check(&c, lbuf, "plmt", 1, 1, 0);
+
+    /* NTWTML has passed: only the booked program holds the request */
+    femu_plm_win(&c, lbuf, 2);
+    g_usleep(1100 * 1000);
+    qtest_memset(qts, buf, 0x4d, FEMU_DATA_SIZE);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(4096 / c.lba_size - 1);
+    t0 = g_get_monotonic_time();
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    g_usleep(100 * 1000);
+    cid = femu_plm_send(&c, NVME_ADM_CMD_SET_FEATURES, 0, 0x14, 1, 1, lbuf);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_SUCCESS);
+    g_test_message("14h after the write: %" PRId64 " ms",
+                   (g_get_monotonic_time() - t0) / 1000);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 1200 * 1000);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    femu_plm_hold_check(&c, lbuf, "plmt", 1, 1, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, buf);
+}
+
+/*
+ * CC.EN 1 to 0 while a Set 14h waits (plm_ndwin_min_ms 2000): no CQE of
+ * it comes after the next enable, past its deadline, and the FTL holds
+ * nothing. It catches a reset that leaves the timer or the hold.
+ *
+ * A normal shutdown with CC.EN still 1 runs the same teardown, but no
+ * reset follows it. Past the deadline, no CQE of the held command comes
+ * and the FTL holds nothing. It catches a shutdown that leaves the hold.
+ */
+void femu_test_plm_hold_reset(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    int64_t v[FEMU_PLMF_N];
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_plm_hold_start(&c, lbuf);
+    qpci_io_writel(c.pdev, c.bar, 0x14, FEMU_CC_ENABLE | FEMU_CC_SHN_NORMAL);
+    g_assert_cmphex(femu_csts(&c), ==, NVME_CSTS_READY | (2 << 2));
+    g_usleep(2500 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    femu_plm_ftl(femu->dev.bus->qts, "plmh", v);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 0);
+    femu_disable(&c);
+
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, &femu->dev, alloc);
+    femu_plm_hold_start(&c, lbuf);
+    femu_disable(&c);
+
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, &femu->dev, alloc);
+    g_usleep(2500 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, lbuf, &res), ==,
+                    NVME_INVALID_FIELD);
+    femu_plm_ftl(femu->dev.bus->qts, "plmh", v);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 0);
+    g_assert_cmpint(v[FEMU_PLMF_PREP], ==, 0);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+}
+
+/*
+ * Abort (SQID 0) of the held Set 14h: its CQE comes first with Command
+ * Abort Requested, then the Abort with Dword 0 bit 0 clear (performed).
+ * The set stays in NDWIN, the FTL works again, and nothing posts at the
+ * old deadline.
+ */
+void femu_test_plm_hold_abort(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint16_t cid;
+    uint16_t acid;
+    uint32_t res = 1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    cid = femu_plm_hold_start(&c, lbuf);
+    acid = femu_plm_send(&c, NVME_ADM_CMD_ABORT, 0, (uint32_t)cid << 16, 0,
+                         0, 0);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_CMD_ABORT_REQ);
+    g_assert_cmphex(femu_plm_next(&c, acid, &res), ==, NVME_SUCCESS);
+    g_assert_cmpuint(res & 1, ==, 0);
+    femu_plm_hold_check(&c, lbuf, "plmh", 2, 0, 1);
+    g_usleep(2300 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+}
+
+/*
+ * Cancel is an I/O command on its own I/O queue (Base 2.3, 7.1), so it
+ * cannot name an admin command. A Cancel that names the held CID on SQID
+ * 0 fails, and the hold stays: the Set 14h completes at its deadline
+ * with success, and the set enters DTWIN. (cancel=on refuses a
+ * femu-subsys, which plm needs.)
+ */
+void femu_test_plm_hold_cancel(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    NvmeCmd cancel = { 0 };
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    cid = femu_plm_hold_start(&c, lbuf);
+    cancel.opcode = FEMU_IO_CANCEL;
+    cancel.nsid = cpu_to_le32(1);
+    cancel.cdw10 = cpu_to_le32((uint32_t)cid << 16);
+    g_assert_cmphex(femu_io(&c, &cancel), !=, NVME_SUCCESS);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    femu_plm_hold_check(&c, lbuf, "plmh", 2, 1, 0);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_SUCCESS);
+    femu_plm_hold_check(&c, lbuf, "plmh", 1, 1, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+}
+
+/*
+ * A second Set 14h ends the held one with Command Sequence Error, whose
+ * CQE comes first:
+ *
+ *   held DTWIN, then NDWIN --> 0Ch, then success; NDWIN, FTL works
+ *   held DTWIN, then DTWIN --> 0Ch; the second is held, then success
+ */
+void femu_test_plm_hold_second(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint16_t cid;
+    uint16_t cid2;
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    cid = femu_plm_hold_start(&c, lbuf);
+    cid2 = femu_plm_send(&c, NVME_ADM_CMD_SET_FEATURES, 0, 0x14, 1, 2, 0);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_CMD_SEQ_ERROR);
+    g_assert_cmphex(femu_plm_next(&c, cid2, NULL), ==, NVME_SUCCESS);
+    femu_plm_hold_check(&c, lbuf, "plmh", 2, 0, 1);
+
+    cid = femu_plm_send(&c, NVME_ADM_CMD_SET_FEATURES, 0, 0x14, 1, 1, 0);
+    cid2 = femu_plm_send(&c, NVME_ADM_CMD_SET_FEATURES, 0, 0x14, 1, 1, 0);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_CMD_SEQ_ERROR);
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, lbuf, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 2);
+    g_assert_cmphex(femu_plm_next(&c, cid2, NULL), ==, NVME_SUCCESS);
+    femu_plm_hold_check(&c, lbuf, "plmh", 1, 1, 0);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+}
+
+/*
+ * Set 13h while a Set 14h waits; its CQE comes first. @data "lpe0":
+ * Invalid Field, as PLM is no longer enabled (5.2.26.1.13), and the set
+ * is DISABLED. "lpe1": Command Sequence Error, and the set is in a new
+ * NDWIN. Nothing posts at the old deadline.
+ */
+void femu_test_plm_hold_lpe(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    bool lpe = !strcmp(data, "lpe1");
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint8_t cfg[512];
+    uint16_t cid;
+    uint16_t cid13;
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    cid = femu_plm_hold_start(&c, lbuf);
+    femu_plm_cfg(cfg, 0, 0, 0, 0);
+    qtest_memwrite(c.pdev->bus->qts, lbuf, cfg, sizeof(cfg));
+    cid13 = femu_plm_send(&c, NVME_ADM_CMD_SET_FEATURES, 0, 0x13, 1, lpe,
+                          lbuf);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==,
+                    lpe ? NVME_CMD_SEQ_ERROR : NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_plm_next(&c, cid13, NULL), ==, NVME_SUCCESS);
+    if (lpe) {
+        femu_plm_hold_check(&c, lbuf, "plmh", 2, 0, 1);
+    } else {
+        int64_t v[FEMU_PLMF_N];
+
+        g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, lbuf, &res), ==,
+                        NVME_INVALID_FIELD);
+        femu_plm_ftl(c.pdev->bus->qts, "plmh", v);
+        g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 0);
+        g_assert_cmpint(v[FEMU_PLMF_PREP], ==, 0);
+    }
+    g_usleep(2300 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+}
+
+/*
+ * Format NVM (@data "format") or Sanitize ("sanitize") while a Set 14h
+ * waits: the held CQE comes first with Command Sequence Error, then the
+ * command succeeds. The set is in NDWIN and the FTL works again.
+ */
+void femu_test_plm_hold_format(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    bool san = !strcmp(data, "sanitize");
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint16_t cid;
+    uint16_t fcid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    cid = femu_plm_hold_start(&c, lbuf);
+    if (san) {
+        fcid = femu_plm_send(&c, FEMU_ADM_SANITIZE, 0, 0x2, 0, 0, 0);
+    } else {
+        fcid = femu_plm_send(&c, NVME_ADM_CMD_FORMAT_NVM, 1, 0, 0, 0, 0);
+    }
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_CMD_SEQ_ERROR);
+    g_assert_cmphex(femu_plm_next(&c, fcid, NULL), ==, NVME_SUCCESS);
+    femu_plm_hold_check(&c, lbuf, "plmh", 2, 0, 1);
+    g_usleep(2300 * 1000);
+    g_assert_false(femu_cq_ready(&c, &c.admin));
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+}
+
+/* admin CQ slot @k past the head holds a new CQE */
+static bool femu_plm_slot_ready(FemuCtrlState *c, uint16_t k)
+{
+    uint16_t size = c->acq_entries ? c->acq_entries : FEMU_QSIZE;
+    uint16_t slot = (c->admin.cq_head + k) % size;
+    uint8_t phase = c->admin.phase ^ (slot < c->admin.cq_head);
+    NvmeCqe cqe;
+
+    qtest_memread(c->pdev->bus->qts, c->admin.cq_addr + slot * sizeof(cqe),
+                  &cqe, sizeof(cqe));
+    return (le16_to_cpu(cqe.status) & 1) == phase;
+}
+
+/*
+ * A held Set 14h with an admin CQ of two entries, which holds one CQE.
+ * The two-slot fetch rule does not apply, so commands still run:
+ *
+ *   "abort": Abort of the held CID --> the Abort's CQE, then 07h; NDWIN
+ *   "seq":   a second 14h --> 0Ch, nothing changes; the held 14h
+ *            completes at its deadline with success, DTWIN
+ *   "full":  a Get 14h fills the CQ past the deadline --> no held CQE;
+ *            the host takes the Get --> the timer posts the 14h, DTWIN
+ *
+ * It catches a rule that never fetches with a size-2 CQ, and a held CQE
+ * written into a full CQ.
+ */
+void femu_test_plm_hold_small(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { .acq_entries = 2 };
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint16_t cid;
+    uint16_t ncid;
+    uint32_t res = 1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    cid = femu_plm_hold_start(&c, lbuf);
+    if (!strcmp(data, "abort")) {
+        ncid = femu_plm_send(&c, NVME_ADM_CMD_ABORT, 0, (uint32_t)cid << 16,
+                             0, 0, 0);
+        g_assert_cmphex(femu_plm_next(&c, ncid, &res), ==, NVME_SUCCESS);
+        g_assert_cmpuint(res & 1, ==, 0);
+        g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==,
+                        NVME_CMD_ABORT_REQ);
+        femu_plm_hold_check(&c, lbuf, "plmh", 2, 0, 1);
+    } else if (!strcmp(data, "seq")) {
+        ncid = femu_plm_send(&c, NVME_ADM_CMD_SET_FEATURES, 0, 0x14, 1, 2,
+                             0);
+        g_assert_cmphex(femu_plm_next(&c, ncid, NULL), ==,
+                        NVME_CMD_SEQ_ERROR);
+        femu_plm_hold_check(&c, lbuf, "plmh", 2, 1, 0);
+        g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_SUCCESS);
+        femu_plm_hold_check(&c, lbuf, "plmh", 1, 1, 0);
+    } else {
+        ncid = femu_plm_send(&c, NVME_ADM_CMD_GET_FEATURES, 0, 0x14, 1, 0,
+                             lbuf);
+        g_usleep(2300 * 1000);
+        g_assert_true(femu_plm_slot_ready(&c, 0));
+        g_assert_false(femu_plm_slot_ready(&c, 1));
+        g_assert_cmphex(femu_plm_next(&c, ncid, &res), ==, NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, 2);
+        g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_SUCCESS);
+        femu_plm_hold_check(&c, lbuf, "plmh", 1, 1, 0);
+    }
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+}
+
+/*
+ * A held Set 14h with an admin CQ of four entries and one free slot:
+ *
+ *   two Get 14h CQEs not taken, then an Abort of the held CID
+ *     --> the Abort waits in the SQ: no third CQE
+ *   the host takes one --> 07h, then the Abort's CQE
+ *
+ * It catches the fetch of a dropping command without room for two.
+ */
+void femu_test_plm_hold_room(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { .acq_entries = 4 };
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint16_t cid;
+    uint16_t g1;
+    uint16_t g2;
+    uint16_t acid;
+    uint32_t res = 1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    cid = femu_plm_hold_start(&c, lbuf);
+    g1 = femu_plm_send(&c, NVME_ADM_CMD_GET_FEATURES, 0, 0x14, 1, 0, lbuf);
+    g2 = femu_plm_send(&c, NVME_ADM_CMD_GET_FEATURES, 0, 0x14, 1, 0, lbuf);
+    acid = femu_plm_send(&c, NVME_ADM_CMD_ABORT, 0, (uint32_t)cid << 16, 0,
+                         0, 0);
+    g_usleep(200 * 1000);
+    g_assert_true(femu_plm_slot_ready(&c, 0));
+    g_assert_true(femu_plm_slot_ready(&c, 1));
+    g_assert_false(femu_plm_slot_ready(&c, 2));
+    g_assert_cmphex(femu_plm_next(&c, g1, NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_next(&c, g2, NULL), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_CMD_ABORT_REQ);
+    g_assert_cmphex(femu_plm_next(&c, acid, &res), ==, NVME_SUCCESS);
+    g_assert_cmpuint(res & 1, ==, 0);
+    femu_plm_hold_check(&c, lbuf, "plmh", 2, 0, 1);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+}
+
+/*
+ * Unplug a plm controller while its Set 14h waits. The teardown drops
+ * the hold and frees its timer. Without a sanitizer build this proves
+ * liveness only: QEMU still answers past the deadline. The sanitizer
+ * run of the qtests checks that the timer does not leak.
+ */
+void femu_test_plm_hold_unplug(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    QPCIDevice *pdev;
+
+    femu_rrl_add(qts, "'id':'plmu','addr':'5','plm':true,'femu_mode':1,"
+                 "'rrl':true,'subsys':'plmsub-r','plm_ndwin_ms':3000,"
+                 "'plm_ndwin_min_ms':2000," FEMU_RRL_GEO, NULL);
+    pdev = qpci_device_find(femu->dev.bus, QPCI_DEVFN(5, 0));
+    g_assert_nonnull(pdev);
+    femu_enable(&c, pdev, alloc);
+    femu_plm_hold_start(&c, lbuf);
+    qpci_unplug_acpi_device_test(qts, "plmu", 5);
+    g_usleep(2500 * 1000);
+    qtest_qmp_assert_success(qts, "{'execute':'query-status'}");
+    g_free(pdev);
+    guest_free(alloc, lbuf);
+    qos_invalidate_command_line();
 }
 
 /*

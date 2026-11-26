@@ -95,7 +95,10 @@ uint16_t femu_complete(FemuCtrlState *c, FemuQueue *q, uint16_t *cid,
     if (result) {
         *result = le32_to_cpu(cqe.result);
     }
-    q->cq_head = (q->cq_head + 1) % FEMU_QSIZE;
+    /* an admin CQ that acq_entries made small wraps sooner */
+    q->cq_head = (q->cq_head + 1) %
+                 (q == &c->admin && c->acq_entries ? c->acq_entries :
+                  FEMU_QSIZE);
     if (q->cq_head == 0) {
         q->phase ^= 1;
     }

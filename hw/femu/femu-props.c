@@ -376,7 +376,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "3600000; FEMU reports it as given; 1000 (default)" },
     { "plm_ndwin_min_ms",
       "plm: NDWIN Time Minimum Low (NTWTML) of log 0Ah, in ms, 0 to "
-      "plm_ndwin_ms; 0 (default)" },
+      "plm_ndwin_ms; a Set Features 14h DTWIN completes no earlier than "
+      "this after the NDWIN starts, and not before the media work booked "
+      "at its arrival ends; 0 (default)" },
     { "plm_ndwin_lines",
       "plm: free lines that the NDWIN preparation GC collects up to, from "
       "one above the gc_thres_pcent_high lines to what the user data "
