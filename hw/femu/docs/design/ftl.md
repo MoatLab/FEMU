@@ -1481,10 +1481,25 @@ keep full recovery, and GC reads stay outside the retry model. Without
 soft bits, levels 9 and 4 make the same attempts, but level 9 fails the
 read where level 4 does not. Realize refuses `rrl` with `persist_file`:
 the level must survive a power cycle, and the file does not keep it. Identify Controller sets CTRATT bit 3 and RRLS bits
-4, 9 and 15. Feature 12h has NVM subsystem scope: it takes NSID 0 only,
-and realize refuses `rrl` in a subsystem. It is not saveable, and the
-level persists across resets. A Set of another level fails with Invalid
-Field.
+4, 9 and 15. Feature 12h has NVM subsystem scope: it takes NSID 0 only.
+It is not saveable, and the level persists across resets. A Set of
+another level fails with Invalid Field.
+
+The `rrl` property works without `rber_ppb` too. In that case, Feature
+12h takes each level of RRLS. The retry model is off, so no level changes
+a read. Each read then completes as at level 4. Realize still asks for one bbssd
+FTL: it refuses other modes, `namespace_modes`, `ns_mgmt` and shared
+namespaces.
+
+```text
+ rrl=on, rber_ppb > 0   the level bounds the retry model (table above)
+ rrl=on, rber_ppb 0     Feature 12h works; reads see no change
+```
+
+The level has subsystem scope, and FEMU keeps it in the controller. So a
+femu-subsys with an `rrl` controller takes that one controller only.
+Realize refuses a second controller that joins it, with or without
+`rrl`.
 
 ### Read-only end of life (`eol_read_only`)
 

@@ -18774,6 +18774,171 @@ void femu_test_rrl(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * rrl=on with rber_ppb 0: Feature 12h takes levels 4, 9 and 15, but the
+ * retry model is off, so no level changes a read. Each read returns the
+ * written data with success, as at level 4, and no media error counts.
+ */
+void femu_test_rrl_no_rber(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const uint32_t levels[] = { 4, 9, 15, 4 };
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint8_t id[4096];
+    uint8_t want[4096];
+    uint8_t got[4096];
+    uint64_t err0;
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, id, sizeof(id));
+    g_assert_cmphex(ldl_le_p(id + 96) & (1 << 3), ==, 1 << 3);
+    g_assert_cmphex(lduw_le_p(id + 100), ==, 0x8210);
+    g_assert_cmphex(femu_rrl_set(&c, 5), ==, NVME_INVALID_FIELD);
+
+    for (size_t i = 0; i < sizeof(want); i++) {
+        want[i] = i * 7 + 3;
+    }
+    qtest_memwrite(qts, buf, want, sizeof(want));
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 0, buf)), ==,
+                    NVME_SUCCESS);
+    err0 = femu_rrl_media_errors(&c, log);
+    for (size_t i = 0; i < G_N_ELEMENTS(levels); i++) {
+        g_assert_cmphex(femu_rrl_set(&c, levels[i]), ==, NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 0, &res)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, levels[i]);
+        qtest_memset(qts, buf, 0, sizeof(got));
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, got, sizeof(got));
+        g_assert_cmpmem(got, sizeof(got), want, sizeof(want));
+    }
+    g_assert_cmpuint(femu_rrl_media_errors(&c, log), ==, err0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, buf);
+}
+
+/* device_add @opts; NULL @msg expects success, else an error naming @msg */
+static void femu_rrl_add(QTestState *qts, const char *opts, const char *msg)
+{
+    g_autofree char *cmd = g_strdup_printf(
+        "{'execute':'device_add','arguments':{'driver':'femu',%s}}", opts);
+    QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+    if (msg) {
+        const char *desc;
+
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("%s: %s", opts, desc);
+        g_assert_nonnull(strstr(desc, msg));
+    } else {
+        if (!qdict_haskey(rsp, "return")) {
+            g_test_message("%s refused: %s", opts,
+                           qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                         "desc"));
+            g_assert_not_reached();
+        }
+    }
+    qobject_unref(rsp);
+}
+
+#define FEMU_RRL_GEO \
+    "'devsz_mb':64,'secsz':512,'secs_per_pg':8,'pgs_per_blk':16," \
+    "'blks_per_pl':80,'pls_per_lun':1,'luns_per_ch':4,'nchs':4"
+
+/*
+ * rrl in a femu-subsys. The main controller has rrl=on in rrlsub. @data
+ * "one": it realizes, and Identify reports Endurance Groups and RRLVLS;
+ * Feature 12h works. "two": a second controller in rrlsub is refused,
+ * with or without rrl; an rrl controller is refused in rrlsub-b, which
+ * holds a NoSSD controller already. The control: the same rrl controller
+ * realizes in the empty rrlsub-c.
+ */
+void femu_test_rrl_subsys(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *msg = "a subsystem with rrl takes a single controller";
+    FemuCtrlState c = { 0 };
+    uint64_t buf;
+    uint8_t id[4096];
+    uint32_t res;
+
+    if (!strcmp(data, "one")) {
+        buf = guest_alloc(alloc, 4096);
+        femu_enable(&c, &femu->dev, alloc);
+        g_assert_cmphex(femu_identify(&c, 0, 1, 0, buf), ==, NVME_SUCCESS);
+        qtest_memread(qts, buf, id, sizeof(id));
+        g_assert_cmphex(ldl_le_p(id + 96) & 0x18, ==, 0x18);
+        g_assert_cmpuint(lduw_le_p(id + 340), ==, 1);       /* ENDGIDMAX */
+        g_assert_cmphex(femu_rrl_set(&c, 15), ==, NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 0, &res)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, 15);
+        g_assert_cmphex(femu_rrl_set(&c, 4), ==, NVME_SUCCESS);
+        femu_disable(&c);
+        guest_free(alloc, buf);
+        return;
+    }
+    femu_rrl_add(qts, "'id':'rrl2','addr':'5','femu_mode':2,'devsz_mb':1,"
+                 "'subsys':'rrlsub'", msg);
+    femu_rrl_add(qts, "'id':'rrl2','addr':'5','femu_mode':1,'rrl':true,"
+                 "'subsys':'rrlsub'," FEMU_RRL_GEO, msg);
+    femu_rrl_add(qts, "'id':'rrlb','addr':'5','femu_mode':2,'devsz_mb':1,"
+                 "'subsys':'rrlsub-b'", NULL);
+    femu_rrl_add(qts, "'id':'rrlb2','addr':'6','femu_mode':1,'rrl':true,"
+                 "'subsys':'rrlsub-b'," FEMU_RRL_GEO, msg);
+    femu_rrl_add(qts, "'id':'rrlc','addr':'6','femu_mode':1,'rrl':true,"
+                 "'subsys':'rrlsub-c'," FEMU_RRL_GEO, NULL);
+    qpci_unplug_acpi_device_test(qts, "rrlc", 6);
+    qpci_unplug_acpi_device_test(qts, "rrlb", 5);
+    qos_invalidate_command_line();
+}
+
+/*
+ * rrl without rber_ppb asks for one bbssd FTL: other modes, ns_mgmt and
+ * namespace_modes are refused with an rrl message; persist_file stays
+ * refused.
+ */
+void femu_test_rrl_modes(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'femu_mode':2", "rrl is not supported with a femu_mode other" },
+        { "'femu_mode':3", "rrl is not supported with a femu_mode other" },
+        { "'femu_mode':1,'ns_mgmt':true",
+          "rrl is not supported with managed or shared namespaces" },
+        { "'femu_mode':1,'namespaces':2,'namespace_modes':'bbssd,,znssd,',"
+          "'secsz':512,'secs_per_pg':8,'pgs_per_blk':64,'blks_per_pl':80,"
+          "'pls_per_lun':1,'luns_per_ch':2,'nchs':2",
+          "rrl is not supported with namespace_modes" },
+        { "'femu_mode':1,'persist_file':'rrl.img'",
+          "rrl is not supported with persist_file" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *opts = g_strdup_printf(
+            "'id':'rrlm','addr':'5','rrl':true,'devsz_mb':64,%s",
+            cases[i].opts);
+
+        femu_rrl_add(qts, opts, cases[i].msg);
+    }
+    qos_invalidate_command_line();
+}
+
+/*
  * Read disturb with real draws: rber_read_double=1 doubles the error mean
  * with each read of the block. A fresh block reads with no retry; after 40
  * reads the mean reaches the cap and reads need retries. Without the read

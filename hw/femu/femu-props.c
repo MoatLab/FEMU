@@ -131,10 +131,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "only with persist_ftl. Not with namespace_modes, ns_mgmt, shared "
       "namespaces, cxl_ssd, metadata or sanitize_ms" },
     { "rrl",
-      "bbssd with rber_ppb: Read Recovery Levels (Feature 12h, levels 4, "
-      "9 and 15). Level 4 (default) recovers as the retry model does; 9 "
-      "skips soft decode and 15 (Fast Fail) makes one hard decode, and a "
-      "codeword they leave uncorrected fails the read; off (default)" },
+      "bbssd: Read Recovery Levels (Feature 12h, levels 4, 9 and 15). "
+      "With rber_ppb, level 4 (default) recovers as the retry model does; "
+      "9 skips soft decode and 15 (Fast Fail) makes one hard decode, and a "
+      "codeword they leave uncorrected fails the read. Without rber_ppb a "
+      "level changes no read. One controller per subsystem; off (default)" },
     { "io_trace",
       "host file for an I/O trace: one CSV line per completed I/O command "
       "(t_submit_ns, t_cqe_ns, sqid, cid, nsid, opcode, slba, nlb, status), "

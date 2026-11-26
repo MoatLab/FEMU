@@ -830,6 +830,11 @@ static int nvme_init_subsys(FemuCtrl *n, Error **errp)
                        "controller");
             return -1;
         }
+        /* the level has subsystem scope; FEMU keeps it in the controller */
+        if (other && (n->rrl || other->rrl)) {
+            error_setg(errp, "a subsystem with rrl takes a single controller");
+            return -1;
+        }
     }
 
     /* past every admission check: from here this controller writes S */
@@ -5419,15 +5424,24 @@ static void femu_realize_steps(PCIDevice *pci_dev, Error **errp)
             return;
         }
     }
-    /* Read Recovery Levels cut the recovery of the retry model short */
+    /*
+     * Without rber_ppb the level changes no read, but it still lives in one
+     * bbssd FTL; with rber_ppb the block above checked this.
+     */
     if (n->rrl && !n->bb_params.rber_ppb) {
-        error_setg(errp, "FEMU: rrl needs rber_ppb");
-        return;
-    }
-    /* the level has NVM subsystem scope; FEMU keeps it in the controller */
-    if (n->rrl && n->subsys) {
-        error_setg(errp, "FEMU: rrl is not supported with a subsystem");
-        return;
+        const char *why = NULL;
+
+        if (n->femu_mode != FEMU_BBSSD_MODE) {
+            why = "a femu_mode other than 1";
+        } else if (n->namespace_modes && n->namespace_modes[0]) {
+            why = "namespace_modes";
+        } else if (n->ns_mgmt || nvme_ns_shared(n)) {
+            why = "managed or shared namespaces";
+        }
+        if (why) {
+            error_setg(errp, "FEMU: rrl is not supported with %s", why);
+            return;
+        }
     }
     /* the level must persist across power cycles; the file does not keep it */
     if (n->rrl && n->persist_file) {

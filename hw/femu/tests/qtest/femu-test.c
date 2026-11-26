@@ -321,6 +321,16 @@ static void *femu_rot_before(GString *cmd_line, void *arg)
     return arg;
 }
 
+/* rrlsub for the main controller; rrlsub-b and rrlsub-c for hot-plugs */
+static void *femu_rrl_before(GString *cmd_line, void *arg)
+{
+    g_string_prepend(cmd_line,
+        " -device femu-subsys,id=rrlsub,nqn=rrlsub"
+        " -device femu-subsys,id=rrlsub-b,nqn=rrlsub-b"
+        " -device femu-subsys,id=rrlsub-c,nqn=rrlsub-c ");
+    return arg;
+}
+
 static void *femu_ocp_before(GString *cmd_line, void *arg)
 {
     g_string_prepend(cmd_line, " -device femu-subsys,id=ocpsub,nqn=ocpsub ");
@@ -2111,6 +2121,24 @@ static void femu_register_nodes(void)
             "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,rber_ppb=1,rrl=on,read_cache_mb=1"
             ",rr_steps=2,rr_soft_ns=10000000,pg_rd_lat=100000000" });
+    qos_add_test("rrl-no-rber", "femu", femu_test_rrl_no_rber,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "femu_mode=1,rrl=on," FEMU_CAPS_GEO });
+    qos_add_test("rrl-subsys-one", "femu", femu_test_rrl_subsys,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"one",
+        .edge.extra_device_opts =
+            "femu_mode=1,rrl=on,subsys=rrlsub," FEMU_CAPS_GEO,
+        .before = femu_rrl_before,
+    });
+    qos_add_test("rrl-subsys-two", "femu", femu_test_rrl_subsys,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"two",
+        .edge.extra_device_opts =
+            "femu_mode=1,rrl=on,subsys=rrlsub," FEMU_CAPS_GEO,
+        .before = femu_rrl_before,
+    });
+    qos_add_test("rrl-modes", "femu", femu_test_rrl_modes, NULL);
     qos_add_test("rber-clean", "femu", femu_test_rber_scripted,
                  &(QOSGraphTestOptions) { .arg = (void *)"clean",
         .edge.extra_device_opts =

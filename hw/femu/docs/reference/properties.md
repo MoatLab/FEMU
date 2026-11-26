@@ -231,7 +231,7 @@ Devices:
 | `rr_floor_pct` | `uint8` | `10` | bbssd with rber_ppb: percent of the error mean that no retry removes, 0 to 100 |
 | `rr_soft_senses` | `uint32` | `3` | bbssd with rber_ppb: page reads of one soft decode, 0 to 8 |
 | `rr_soft_ns` | `uint32` | `20000` | bbssd with rber_ppb: controller time in ns of one soft decode, at most 10^7; it does not hold the LUN |
-| `rrl` | `bool` | `off` | bbssd with rber_ppb: Read Recovery Levels (Feature 12h, levels 4, 9 and 15). Level 4 (default) recovers as the retry model does; 9 skips soft decode and 15 (Fast Fail) makes one hard decode, and a codeword they leave uncorrected fails the read; off (default) |
+| `rrl` | `bool` | `off` | bbssd: Read Recovery Levels (Feature 12h, levels 4, 9 and 15). With rber_ppb, level 4 (default) recovers as the retry model does; 9 skips soft decode and 15 (Fast Fail) makes one hard decode, and a codeword they leave uncorrected fails the read. Without rber_ppb a level changes no read. One controller per subsystem; off (default) |
 | `rber_seed` | `uint32` | `1` | bbssd with rber_ppb: seed of the decode outcome generator; the same seed and trace give the same counts |
 | `pd_edge_wls` | `int32` | `0` | bbssd, CSD, KV: program disturb, bottom wordlines of each block whose reads take pd_edge_tiers more ECC tiers; set with pd_edge_tiers and ecc_step_ns; 0 (default) turns the term off. A wordline is the pages per wordline of nand_cell_type (else the effective cell_pages, 3 with pgtype_lat, else 1) contiguous pages |
 | `pd_edge_tiers` | `int32` | `0` | bbssd, CSD, KV: program disturb, ECC tiers added to a read of a pd_edge_wls wordline, 0 to 4, under the shared tier cap; chosen values for sensitivity studies, not fitted to error rates |
