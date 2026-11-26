@@ -991,6 +991,11 @@
     "kind": "static",
     "type": "bool"
    },
+   "plm": {
+    "default": false,
+    "kind": "static",
+    "type": "bool"
+   },
    "plp": {
     "default": false,
     "kind": "static",

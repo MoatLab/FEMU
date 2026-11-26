@@ -331,6 +331,19 @@ static void *femu_rrl_before(GString *cmd_line, void *arg)
     return arg;
 }
 
+/*
+ * plmsub for the main controller; the empty plmsub-r and plmsub-sh
+ * (shared namespaces) take the refused hot-plugs of plm-refused.
+ */
+static void *femu_plm_before(GString *cmd_line, void *arg)
+{
+    g_string_prepend(cmd_line,
+        " -device femu-subsys,id=plmsub,nqn=plmsub"
+        " -device femu-subsys,id=plmsub-r,nqn=plmsub-r"
+        " -device femu-subsys,id=plmsub-sh,nqn=plmsub-sh,ns_mgmt=on ");
+    return arg;
+}
+
 static void *femu_ocp_before(GString *cmd_line, void *arg)
 {
     g_string_prepend(cmd_line, " -device femu-subsys,id=ocpsub,nqn=ocpsub ");
@@ -2139,6 +2152,44 @@ static void femu_register_nodes(void)
         .before = femu_rrl_before,
     });
     qos_add_test("rrl-modes", "femu", femu_test_rrl_modes, NULL);
+    qos_add_test("plm-identify", "femu", femu_test_plm_identify,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,rrl=on,plm=on,subsys=plmsub," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-identify-hints", "femu", femu_test_plm_identify,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"hints",
+        .edge.extra_device_opts = "femu_mode=1,rrl=on,plm=on,perf_hints=on,"
+            "subsys=plmsub," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-rrl", "femu", femu_test_plm_rrl,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,rrl=on,plm=on,subsys=plmsub," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-refused", "femu", femu_test_plm_refused,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "femu_mode=1,rrl=on,plm=on,subsys=plmsub," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-golden-off", "femu", femu_test_plm_golden_off,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"plain",
+        .edge.extra_device_opts = "femu_mode=1,subsys=plmsub," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-golden-off-rrl", "femu", femu_test_plm_golden_off,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"rrl",
+        .edge.extra_device_opts =
+            "femu_mode=1,rrl=on,subsys=plmsub," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
     qos_add_test("rber-clean", "femu", femu_test_rber_scripted,
                  &(QOSGraphTestOptions) { .arg = (void *)"clean",
         .edge.extra_device_opts =

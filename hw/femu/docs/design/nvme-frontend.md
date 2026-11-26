@@ -770,7 +770,8 @@ State Transition, 0Ch), LBA Range Type (03h), Temperature Threshold (04h), Error
 Recovery (05h), Volatile Write Cache (06h, only with `vwc=1`), Number of
 Queues (07h), Interrupt Coalescing (08h), Interrupt Vector Configuration
 (09h), Write Atomicity (0Ah), Asynchronous Event Configuration (0Bh),
-Timestamp (0Eh), Read Recovery Level (12h, only with `rrl=on`), LBA
+Timestamp (0Eh), Read Recovery Level (12h, only with `rrl=on`; see
+[NVM Sets](#nvm-sets-plm) for its NVMSETID), LBA
 Status Information Attributes (15h, NVM and ZNS), Host Behavior Support
 (16h), Command Set Profile (19h), FDP (1Dh, 1Eh, only with FDP on), Key
 Value Configuration (20h, only with a KV namespace) and Software Progress
@@ -1102,6 +1103,57 @@ the blocks sees a state between the two.
   `fused-cw-life` holds the FTL thread and checks Sanitize, Format and SQ
   deletion.
 
+### NVM Sets (`plm`)
+
+Predictable Latency Mode (Base 2.3, 8.1.20) works per NVM Set. A set
+belongs to one Endurance Group, and FEMU reports a group only with a
+femu-subsys. With `plm=on`, the controller has one NVM Set, NVMSETID 1,
+in Endurance Group 1. The set holds the one namespace and its bbssd FTL.
+
+```text
+ femu-subsys
+   controller (rrl=on, plm=on)
+     namespace 1 --> NVM Set 1 --> Endurance Group 1
+
+ Identify Controller   CTRATT bit 2 (NSETS), NSETIDMAX 1
+ Identify Namespace    NVMSETID 1: CNS 00h bytes 101:100, CNS 08h 11:10
+ Identify CNS 04h      NVM Set List: NUMENT 1 for a start of 0 or 1, else 0
+ Feature 12h           NVM Set scope (log 12h bit 22); CDW11 NVMSETID 1 only
+```
+
+The one entry of CNS 04h (Figure 334) has these fields:
+
+| Field | Value |
+| --- | --- |
+| NSETID, ENDGID | 1, 1 |
+| R4KRT | one NAND page read plus the channel time of 4 KiB, in 100 ns |
+| OWS | NOWS + 1 blocks in bytes with `perf_hints=on`; 0 (not specified) when the namespace has no NOWS hint |
+| TNVMSC | the capacity of the namespace, as TNVMCAP |
+| UNVMSC | 0: there is no Namespace Management |
+
+Get and Set Features 12h take NSID 0 only. With `plm=on`, an NVMSETID
+other than 1 fails with Invalid Field in Command. NVMSETID 0h is reserved
+(3.2.2). Without NVM Sets, Feature 12h ignores NVMSETID, as before.
+Create I/O Submission Queue ignores its NVMSETID: FEMU has no SQ
+Associations.
+
+The `plm` property needs `rrl=on`, because PLM needs Read Recovery
+Levels. It also needs a femu-subsys, exactly one namespace and page
+mapping. Realize refuses the configurations below. The rrl rule of a
+subsystem applies too: the subsystem takes this one controller.
+
+```text
+ refused with plm=on   femu_mode other than bbssd, namespace_modes, ns_mgmt,
+                       shared namespaces, FDP, ocp, gc_pace, streams,
+                       tier_mode, cxl_ssd, power_loss, persist_file
+ needed with plm=on    rrl=on, a femu-subsys, namespaces=1, mapping=page
+```
+
+The Deterministic and Non-Deterministic Windows (features 13h and 14h, logs
+0Ah and 0Bh) are not in FEMU yet. CTRATT bit 5 stays clear, so a host sees
+NVM Sets without Predictable Latency Mode. With `plm=off`, every field
+above stays as before, and CNS 04h fails with Invalid Field in Command.
+
 ### Asynchronous events
 
 The controller holds up to `aerl` + 1 Asynchronous Event Requests; one more
@@ -1195,6 +1247,10 @@ registers with no guest. Cases that target this chapter include:
 | `v2-refusals` | CC.AMS other than round robin fails the enable; Identify CNS 00h on a KV namespace fails with Invalid I/O Command Set while CNS 08h answers; logs 00h and 05h refuse an unknown CSI; CNS 07h for KV is refused under CC.CSS 000b while CNS 1Ah is not; CNS 1Fh answers an allocated NSID and refuses 0 and FFFFFFFFh |
 | `endgrp-reported` | with a subsystem and FDP off, CTRATT bit 4, ENDGIDMAX and the ENDGID of a block and a KV namespace (CNS 08h, and CNS 05h for KV) report the one endurance group; CNS 19h lists group 1 for a start of 0 or 1 and no group for 2 or FFFFh; the FDP pages, FDP Mode and I/O Management are refused |
 | `endgrp-list-absent` | without a subsystem, CNS 19h fails with Invalid Field |
+| `plm-golden-off` | with `rrl=on`, a subsystem and `plm=off`: CTRATT bit 2, NSETIDMAX and both NVMSETID fields are 0; CNS 04h fails; Feature 12h keeps subsystem scope and ignores NVMSETID |
+| `plm-identify`, `plm-identify-hints` | with `plm=on`: CTRATT bit 2, NSETIDMAX 1, NVMSETID 1 in CNS 00h and 08h; CNS 04h lists set 1 in group 1 for a start of 0 or 1 and no set from 2; OWS is 0 without a NOWS hint and NOWS + 1 blocks with `perf_hints=on` |
+| `plm-rrl` | with `plm=on`: Feature 12h refuses NVMSETID 0 and 7, and CDW11 bits 31:16, and takes 1; a refused Set keeps the level; SEL 3 gives changeable only; log 12h gives it NVM Set scope |
+| `plm-refused` | each realize refusal of `plm` |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
 
@@ -1277,6 +1333,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | `hw/femu/dma.c` | PRP and SGL mapping, `femu_dma_rw` |
 | `hw/femu/lib/rte_ring.c`, `hw/femu/lib/pqueue.c` | the rings and the completion heap |
 | `hw/femu/nvme.h` | `NvmeSQueue`, `NvmeCQueue`, `NvmeRequest`, `FemuCtrl`, `FemuPollerCtr`, register layout |
+| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h) |
 | `hw/femu/femu-ext-ops.h` | `FemuExtCtrlOps`, the mode handler table, and its rules |
 
 ## Related pages

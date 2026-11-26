@@ -969,6 +969,11 @@ own description allows. A message keeps its format directives (`%s`,
 - plane_reads needs the plain channel model: no ONFI profile, onfi_cache_read, bus phases, pe_suspend or read_prio
 - plane_reads works with bbssd, CSD or KV namespaces only (KV keeps the LUN rule)
 
+## `plm`
+
+- femu: plm is not supported with %s
+- femu: plm needs %s
+
 ## `plp`
 
 - ocp_profile DP-CFG-6 A needs plp=on

@@ -262,6 +262,7 @@ listed one by one.
 - `io_trace` gives a Zone Append the LBA where it landed, or its submitted SLBA when it fails. Before, an append line had no range.
 - `mode=NAME` (ocssd, bbssd, nossd, zns, csd, kv) sets the emulated SSD type by name; `femu_mode` keeps taking the number.
 - Read Recovery Levels (`rrl`, off by default): Feature 12h sets level 4, 9 or 15 (Fast Fail). With `rber_ppb`, the level bounds the retry and soft decode of host reads, and a read it leaves uncorrected fails. Without `rber_ppb`, Feature 12h takes each level but changes no read. A femu-subsys takes one `rrl` controller only.
+- `plm=on` (with `rrl` and a femu-subsys) adds NVM Sets, the first step of Predictable Latency Mode: one set in Endurance Group 1, listed by Identify CNS 04h. Feature 12h then takes NVMSETID 1 only. See [NVM Sets](design/nvme-frontend.md#nvm-sets-plm).
 - `persist_ftl` (off by default): `persist_file` also keeps the bbssd FTL state of a page-mapped drive (mapping, page and block state, lines, write pointer, counters), so a restarted drive continues aged. A load checks every record first; other FTL properties fail realize.
 - OCP Event Injection (Feature C0h, `ocp=on`): event 0016h takes die `inject_die` offline at runtime. With die parity, reads of the die take its stripe, and log C0h counts them as XOR recoveries; without it, they fail with Unrecovered Read Error.
 - Inline encryption engine (`crypto_mbps`, off by default): the data every command reads or programs passes one engine of that throughput, which caps the bandwidth of a self-encrypting drive.

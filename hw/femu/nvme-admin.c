@@ -1625,6 +1625,7 @@ static uint16_t nvme_identify_ns_cs_indep(FemuCtrl *n, NvmeCmd *cmd,
             le16_to_cpu(ns->id_ns.endgid) == 1) {
             id[0] |= 1 << 4;
         }
+        stw_le_p(&id[10], le16_to_cpu(ns->id_ns.nvmsetid));
         stw_le_p(&id[12], le16_to_cpu(ns->id_ns.endgid));
         id[14] = 0x1;                       /* NSTAT.NRDY */
         /* one Reachability Group holds every namespace (Base 8.1.21) */
@@ -1826,6 +1827,8 @@ static uint16_t nvme_identify(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_identify_nslist_csi(n, cmd, true);
     case NVME_ID_CNS_NS_DESCR_LIST:
         return nvme_identify_ns_descr_list(n, cmd);
+    case NVME_ID_CNS_NVMSET_LIST:
+        return femu_plm_nvmset_list(n, cmd);
     case NVME_ID_CNS_IO_COMMAND_SET:
         return nvme_identify_cmd_set(n, cmd);
     case NVME_ID_CNS_ENDGRP_LIST:
@@ -2044,6 +2047,15 @@ static uint16_t nvme_get_feature_default(FemuCtrl *n, NvmeCmd *cmd,
     return NVME_SUCCESS;
 }
 
+/*
+ * NVMSETID of Feature 12h (CDW11 bits 15:0): with plm=on it must name the
+ * one set; 0h is reserved (3.2.2). Without NVM Sets it is ignored.
+ */
+static bool nvme_rrl_nvmset_ok(FemuCtrl *n, uint32_t dw11)
+{
+    return !n->plm || (dw11 & 0xffff) == FEMU_PLM_NVMSETID;
+}
+
 static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
 {
     NvmeRangeType *rt;
@@ -2062,10 +2074,11 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         return nvme_resv_get_feature(n, cmd, cqe);
     }
     /*
-     * Read Recovery Level: NVM subsystem scope takes NSID 0 only (4.4);
-     * CDW11 bits 31:16 are reserved.
+     * Read Recovery Level: NVM subsystem or NVM Set scope takes NSID 0 only
+     * (4.4); CDW11 bits 31:16 are reserved.
      */
-    if (fid == NVME_READ_RECOVERY && (nsid || dw11 & 0xffff0000u)) {
+    if (fid == NVME_READ_RECOVERY && (nsid || dw11 & 0xffff0000u ||
+                                      !nvme_rrl_nvmset_ok(n, dw11))) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
     /* NVM subsystem scope with no NSID use: NSID 0 only (4.4) */
@@ -2703,12 +2716,14 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     case NVME_READ_RECOVERY: {
         /*
          * Figures 419 and 420: CDW12 bits 3:0 the level; NVMSETID (CDW11
-         * bits 15:0) is ignored, as there are no NVM Sets. The level is
-         * not saveable, and it persists across resets (Base 2.3, 4.4).
+         * bits 15:0) names the set with plm=on, and is ignored without NVM
+         * Sets. The level is not saveable, and it persists across resets
+         * (Base 2.3, 4.4).
          */
         uint32_t dw12 = le32_to_cpu(cmd->cdw12);
 
         if (dw12 & ~0xfu || dw11 & 0xffff0000u ||
+            !nvme_rrl_nvmset_ok(n, dw11) ||
             !(NVME_RRLS & (1u << dw12))) {
             return NVME_INVALID_FIELD | NVME_DNR;
         }
@@ -2958,6 +2973,7 @@ static uint16_t nvme_error_log_info(FemuCtrl *n, NvmeCmd *cmd, uint32_t buf_len,
 #define NVME_FID_CCC            (1u << 4)
 #define NVME_FID_SCOPE_NS       (1u << 20)
 #define NVME_FID_SCOPE_CTRL     (1u << 21)
+#define NVME_FID_SCOPE_NSET     (1u << 22)
 #define NVME_FID_SCOPE_ENDGRP   (1u << 23)
 #define NVME_FID_SCOPE_SUBSYS   (1u << 25)
 
@@ -3013,6 +3029,8 @@ static uint16_t nvme_fid_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         }
         if (fid == NVME_FDP_MODE) {
             scope = NVME_FID_SCOPE_ENDGRP;
+        } else if (fid == NVME_READ_RECOVERY && n->plm) {
+            scope = NVME_FID_SCOPE_NSET;
         } else if (fid == NVME_SPINUP_CONTROL || fid == NVME_POWER_MEAS ||
                    fid == NVME_READ_RECOVERY || nvme_ocp_subsys_fid(fid)) {
             scope = NVME_FID_SCOPE_SUBSYS;

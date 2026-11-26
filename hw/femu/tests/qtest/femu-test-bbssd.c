@@ -18938,6 +18938,299 @@ void femu_test_rrl_modes(void *obj, void *data, QGuestAllocator *alloc)
     qos_invalidate_command_line();
 }
 
+/* Identify @cns with CDW11 @dw11 into @id; the command must succeed */
+static void femu_plm_identify(FemuCtrlState *c, uint64_t buf, uint32_t nsid,
+                              uint32_t cns, uint32_t dw11, uint8_t *id)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(femu_identify(c, nsid, cns, dw11, buf), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, id, 4096);
+}
+
+static bool femu_plm_zero(const uint8_t *p, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (p[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * plm=on: Identify Controller sets CTRATT bit 2 (NSETS) and NSETIDMAX 1,
+ * with bits 3 and 4 (rrl, subsystem) and without bit 5 (PLM). Namespace 1
+ * reports NVMSETID 1 in CNS 00h and 08h. CNS 04h with a start of 0 or 1
+ * lists one set: NSETID 1, ENDGID 1, R4KRT above 0, TNVMSC equal to
+ * TNVMCAP and UNVMSC 0; every other byte is 0. A start of 2 or FFFFh
+ * lists no set. OWS follows NOWS of CNS 00h: @data "hints" (perf_hints=on)
+ * has a NOWS hint and OWS (NOWS + 1) blocks in bytes; without it NOWS is
+ * 0 and OWS is 0h, not specified.
+ */
+void femu_test_plm_identify(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const uint32_t starts[] = { 0, 1, 2, 0xffff };
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t ctrl[4096];
+    uint8_t id[4096];
+    uint8_t *e = id + 128;
+    bool hints = data && !strcmp(data, "hints");
+    uint32_t nows;
+    uint32_t ows;
+    uint8_t lbads;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_plm_identify(&c, buf, 0, 0x01, 0, ctrl);
+    g_assert_cmphex(ldl_le_p(ctrl + 96) & 0x3c, ==, 0x1c);
+    g_assert_cmpuint(lduw_le_p(ctrl + 338), ==, 1);         /* NSETIDMAX */
+    g_assert_cmpuint(lduw_le_p(ctrl + 340), ==, 1);         /* ENDGIDMAX */
+    g_assert_cmpuint(ldq_le_p(ctrl + 280), >, 0);           /* TNVMCAP */
+
+    femu_plm_identify(&c, buf, 1, 0x00, 0, id);
+    g_assert_cmpuint(lduw_le_p(id + 100), ==, 1);           /* NVMSETID */
+    g_assert_cmpuint(lduw_le_p(id + 102), ==, 1);           /* ENDGID */
+    nows = lduw_le_p(id + 72);
+    lbads = id[128 + 4 * (id[26] & 0xf) + 2];
+    ows = nows ? (nows + 1) << lbads : 0;
+    if (hints) {
+        g_assert_cmpuint(nows, >, 0);
+        g_assert_cmpuint(ows, >=, 4096);
+    } else {
+        g_assert_cmpuint(nows, ==, 0);
+    }
+    femu_plm_identify(&c, buf, 1, 0x08, 0, id);
+    g_assert_cmpuint(lduw_le_p(id + 10), ==, 1);
+    g_assert_cmpuint(lduw_le_p(id + 12), ==, 1);
+
+    for (size_t i = 0; i < G_N_ELEMENTS(starts); i++) {
+        femu_plm_identify(&c, buf, 0, 0x04, starts[i], id);
+        g_test_message("CNS 04h from %u: NUMENT %u, R4KRT %u, OWS %u",
+                       starts[i], id[0], ldl_le_p(e + 8), ldl_le_p(e + 12));
+        g_assert_true(femu_plm_zero(id + 1, 127));
+        if (starts[i] > 1) {
+            g_assert_cmpuint(id[0], ==, 0);
+            g_assert_true(femu_plm_zero(e, 4096 - 128));
+            continue;
+        }
+        g_assert_cmpuint(id[0], ==, 1);
+        g_assert_cmpuint(lduw_le_p(e), ==, 1);               /* NSETID */
+        g_assert_cmpuint(lduw_le_p(e + 2), ==, 1);           /* ENDGID */
+        g_assert_true(femu_plm_zero(e + 4, 4));
+        g_assert_cmpuint(ldl_le_p(e + 8), >, 0);             /* R4KRT */
+        g_assert_cmpuint(ldl_le_p(e + 12), ==, ows);         /* OWS */
+        g_assert_cmpmem(e + 16, 16, ctrl + 280, 16);         /* TNVMSC */
+        g_assert_true(femu_plm_zero(e + 32, 16));            /* UNVMSC */
+        g_assert_true(femu_plm_zero(e + 48, 4096 - 128 - 48));
+    }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * plm=on: Feature 12h has NVM Set scope. Set and Get refuse NVMSETID 0
+ * (reserved), 2 and 7, and take 1; NSID stays 0 only. A refused Set
+ * leaves level 4. NVMSETID is CDW11 bits 15:0, and bits 31:16 are
+ * reserved (Figure 419), so 10001h fails too. SEL 3 reports changeable
+ * only: not saveable, not namespace specific. The FID Supported and
+ * Effects log gives 12h FSUPP and NSETSCPE (bit 22) and no other scope.
+ */
+void femu_test_plm_rrl(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const uint32_t bad[] = { 0, 2, 7, 0xffff, 0x10001, 0xffff0001 };
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 1024);
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    for (size_t i = 0; i < G_N_ELEMENTS(bad); i++) {
+        g_assert_cmphex(femu_rrl_set_full(&c, false, 0, bad[i], 15), ==,
+                        NVME_INVALID_FIELD);
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, bad[i],
+                                                 &res)), ==,
+                        NVME_INVALID_FIELD);
+    }
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 1, 1, 15), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 1, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 4);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 3, 0, 1, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0x4);
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 0, 1, 15), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 1, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 15);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 1, 0, 1, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 4);
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 0, 1, 4), ==, NVME_SUCCESS);
+
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x12, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 0x12 * 4), ==, 1u | 1u << 22);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * plm=off, the default. @data "plain" is a bbssd controller in a
+ * subsystem, which master also realizes; "rrl" adds rrl=on. Every field
+ * that plm sets stays 0: CTRATT bit 2, NSETIDMAX and NVMSETID in CNS 00h
+ * and 08h. CNS 04h fails with Invalid Field. With rrl, Feature 12h keeps
+ * subsystem scope (bit 25) and ignores NVMSETID.
+ *
+ * The SHA-256 of Identify Controller, Identify Namespace, log 00h and
+ * log 12h must equal femu_plm_golden[], which master eef4fb15b gave for
+ * "plain". Master refuses rrl in a subsystem, so the "rrl" values come
+ * from the first tree that realizes it, before plm existed. To
+ * regenerate, run this test on that build with FEMU_PLM_GOLDEN=print,
+ * which prints the values and compares nothing.
+ */
+static const char *const femu_plm_golden[2][4] = {
+    {
+        "4f51ababd520c5bca4fa9f9038031ea5318cb154e4b51387b2b6cfff17380878",
+        "2611eafefd226dc7d768d699240d97411e26f04eb5e0a4cffd50b1a928c0b32b",
+        "0253d961acfe6adabee05a88d730b644363ab6b9c3264c41c792ede241d26bce",
+        "fcf558eb92572823c8b1c1b6975e0f3d58452668f03f3a4f2a64475e25e7a2d4",
+    }, {
+        "137233ea5054ce9772641e372d87e171e391962fa9b7cb32340d87aef75c3a50",
+        "2611eafefd226dc7d768d699240d97411e26f04eb5e0a4cffd50b1a928c0b32b",
+        "0253d961acfe6adabee05a88d730b644363ab6b9c3264c41c792ede241d26bce",
+        "2c1673fc32beac858dc52f14b09310af4caca1c9d8d0011508fa3a290a207c5b",
+    },
+};
+
+void femu_test_plm_golden_off(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool rrl = !strcmp(data, "rrl");
+    const char *golden = g_getenv("FEMU_PLM_GOLDEN");
+    bool print = golden && !strcmp(golden, "print");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t data4k[4][4096];
+    uint8_t ns08[4096];
+    static const uint32_t len[4] = { 4096, 4096, 1024, 1024 };
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_plm_identify(&c, buf, 0, 0x01, 0, data4k[0]);
+    g_assert_cmphex(ldl_le_p(data4k[0] + 96) & 0x3c, ==, rrl ? 0x18 : 0x10);
+    g_assert_cmpuint(lduw_le_p(data4k[0] + 338), ==, 0);
+    femu_plm_identify(&c, buf, 1, 0x00, 0, data4k[1]);
+    g_assert_cmpuint(lduw_le_p(data4k[1] + 100), ==, 0);
+    g_assert_cmpuint(lduw_le_p(data4k[1] + 102), ==, 1);
+    femu_plm_identify(&c, buf, 1, 0x08, 0, ns08);
+    g_assert_cmpuint(lduw_le_p(ns08 + 10), ==, 0);
+    g_assert_cmpuint(lduw_le_p(ns08 + 12), ==, 1);
+    g_assert_cmphex(femu_identify(&c, 0, 0x04, 0, buf), ==,
+                    NVME_INVALID_FIELD);
+
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x00, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, data4k[2], 1024);
+    g_assert_cmphex(ldl_le_p(data4k[2] + 0x0a * 4), ==, 0);
+    g_assert_cmphex(ldl_le_p(data4k[2] + 0x0b * 4), ==, 0);
+    qtest_memset(qts, buf, 0, 4096);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x12, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, data4k[3], 1024);
+    g_assert_cmphex(ldl_le_p(data4k[3] + 0x12 * 4), ==,
+                    rrl ? 1u | 1u << 25 : 0);
+    g_assert_cmphex(ldl_le_p(data4k[3] + 0x13 * 4), ==, 0);
+    g_assert_cmphex(ldl_le_p(data4k[3] + 0x14 * 4), ==, 0);
+
+    for (int i = 0; i < 4; i++) {
+        g_autofree char *sum = g_compute_checksum_for_data(G_CHECKSUM_SHA256,
+                                                           data4k[i], len[i]);
+
+        g_test_message("plm-golden-off %s %d: %s", (char *)data, i, sum);
+        if (!print) {
+            g_assert_cmpstr(sum, ==, femu_plm_golden[rrl][i]);
+        }
+    }
+
+    if (rrl) {
+        g_assert_cmphex(femu_rrl_set_full(&c, false, 0, 7, 15), ==,
+                        NVME_SUCCESS);
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x12, 0, 0, 7, &res)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmpuint(res, ==, 15);
+        g_assert_cmphex(femu_rrl_set(&c, 4), ==, NVME_SUCCESS);
+    }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Each realize refusal of plm, by device_add into empty subsystems:
+ * plmsub-r, plmsub-sh (ns_mgmt=on) and fdpsub (FDP). The control, the
+ * same controller with none of them, realizes in plmsub-r.
+ */
+#define FEMU_PLM_OK "'devsz_mb':64,'femu_mode':1,'rrl':true," \
+                    "'subsys':'plmsub-r'"
+
+void femu_test_plm_refused(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        const char *opts;
+        const char *msg;
+    } cases[] = {
+        { "'devsz_mb':64,'femu_mode':2,'rrl':true,'subsys':'plmsub-r'",
+          "plm is not supported with a femu_mode other than 1" },
+        { "'devsz_mb':64,'femu_mode':3,'rrl':true,'subsys':'plmsub-r'",
+          "plm is not supported with a femu_mode other than 1" },
+        { "'devsz_mb':64,'femu_mode':1,'rrl':true,'subsys':'plmsub-r',"
+          "'namespaces':2,'namespace_modes':'bbssd,,znssd,',"
+          "'secsz':512,'secs_per_pg':8,'pgs_per_blk':64,'blks_per_pl':80,"
+          "'pls_per_lun':1,'luns_per_ch':2,'nchs':2",
+          "plm is not supported with namespace_modes" },
+        { "'devsz_mb':64,'femu_mode':1,'rrl':true,'ns_mgmt':true",
+          "plm is not supported with managed or shared namespaces" },
+        { "'devsz_mb':64,'femu_mode':1,'rrl':true,'subsys':'plmsub-sh'",
+          "plm is not supported with managed or shared namespaces" },
+        { "'devsz_mb':64,'femu_mode':1,'rrl':true,'subsys':'fdpsub'",
+          "plm is not supported with FDP" },
+        { "'devsz_mb':64,'femu_mode':1,'rrl':true,'ocp':true",
+          "plm is not supported with ocp" },
+        { FEMU_PLM_OK ",'gc_pace':true", "plm is not supported with gc_pace" },
+        { FEMU_PLM_OK ",'streams':true", "plm is not supported with streams" },
+        { FEMU_PLM_OK ",'tier_mode':'static'",
+          "plm is not supported with tier_mode" },
+        { FEMU_PLM_OK ",'power_loss':true",
+          "plm is not supported with power_loss" },
+        { FEMU_PLM_OK ",'persist_file':'plm.img'",
+          "plm is not supported with persist_file" },
+        { "'devsz_mb':64,'femu_mode':1,'subsys':'plmsub-r'",
+          "plm needs rrl=on" },
+        { "'devsz_mb':64,'femu_mode':1,'rrl':true", "plm needs a femu-subsys" },
+        { FEMU_PLM_OK ",'namespaces':2", "plm needs exactly one namespace" },
+        { FEMU_PLM_OK ",'mapping':'dftl'", "plm needs mapping=page" },
+    };
+
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *opts = g_strdup_printf(
+            "'id':'plmr','addr':'5','plm':true,%s", cases[i].opts);
+
+        femu_rrl_add(qts, opts, cases[i].msg);
+    }
+    femu_rrl_add(qts, "'id':'plmr','addr':'5','plm':true,'femu_mode':1,"
+                 "'rrl':true,'subsys':'plmsub-r'," FEMU_RRL_GEO, NULL);
+    qpci_unplug_acpi_device_test(qts, "plmr", 5);
+    qos_invalidate_command_line();
+}
+
 /*
  * Read disturb with real draws: rber_read_double=1 doubles the error mean
  * with each read of the block. A fresh block reads with no retry; after 40

@@ -348,6 +348,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "protected namespace fail with Namespace Is Write Protected; not with "
       "FDP, ns_mgmt, shared namespaces, cxl_ssd or persist_file; off "
       "(default)" },
+    { "plm",
+      "bbssd with rrl and a femu-subsys: NVM Sets for Predictable Latency "
+      "Mode (Base 2.3 3.2.2), one set (NVMSETID 1) in Endurance Group 1 "
+      "over one namespace; CNS 04h lists it, and Feature 12h takes "
+      "NVMSETID 1 only; needs mapping=page; not with FDP, ocp, gc_pace, "
+      "streams, tier_mode, cxl_ssd, power_loss, persist_file or ns_mgmt; "
+      "off (default)" },
     { "sanitize_ns",
       "bbssd, NoSSD with sanitize_ops: Sanitize Namespace (8Ch, Base 2.3 "
       "5.2.23), a crypto erase of one namespace while other namespaces keep "

@@ -160,6 +160,7 @@ enum NvmeFdpEventFlags {
 };
 
 enum NvmeIdCtrlCtratt {
+    NVME_CTRATT_NSETS   = 1 <<  2,
     NVME_CTRATT_ENDGRPS = 1 <<  4,
     NVME_CTRATT_UUIDL   = 1 <<  9,
     NVME_CTRATT_ELBAS   = 1 << 15,
@@ -1460,6 +1461,7 @@ enum NvmeIdCns {
     NVME_ID_CNS_CTRL                  = 0x01,
     NVME_ID_CNS_NS_ACTIVE_LIST        = 0x02,
     NVME_ID_CNS_NS_DESCR_LIST         = 0x03,
+    NVME_ID_CNS_NVMSET_LIST           = 0x04,
     NVME_ID_CNS_CS_NS                 = 0x05,
     NVME_ID_CNS_CS_CTRL               = 0x06,
     NVME_ID_CNS_NS_CS_INDEP           = 0x08,
@@ -3373,6 +3375,8 @@ typedef struct FemuCtrl {
      */
     bool            power_limit;
     bool            ns_wp;          /* Namespace Write Protection */
+    /* plm=on: one NVM Set, NVMSETID 1, in Endurance Group 1 */
+    bool            plm;
     bool            sanitize_ns;    /* Sanitize Namespace (8Ch) */
     /* shared_ftl=on: the bbssd namespaces share the FTL of namespace 1 */
     bool            shared_ftl;
@@ -4102,6 +4106,10 @@ bool femu_hctm_supported(FemuCtrl *n);
 void femu_thermal_stop(FemuCtrl *n);
 bool femu_pmeas_check(FemuCtrl *n, Error **errp);
 bool femu_wp_check(FemuCtrl *n, Error **errp);
+/* the one NVM Set of plm=on */
+#define FEMU_PLM_NVMSETID   1
+bool femu_plm_check(FemuCtrl *n, Error **errp);
+uint16_t femu_plm_nvmset_list(FemuCtrl *n, NvmeCmd *cmd);
 bool femu_sanns_check(FemuCtrl *n, Error **errp);
 bool femu_sanns_busy(FemuCtrl *n);
 uint16_t femu_sanns_cmd(FemuCtrl *n, NvmeCmd *cmd);

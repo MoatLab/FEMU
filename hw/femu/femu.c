@@ -2072,6 +2072,7 @@ static void nvme_ns_init_identify(FemuCtrl *n, NvmeIdNs *id_ns)
     id_ns->nmic          = nvme_ns_shared(n) ? 1 : 0;
     /* a subsystem has one endurance group, which holds every namespace */
     id_ns->endgid        = cpu_to_le16(n->subsys ? 1 : 0);
+    id_ns->nvmsetid      = cpu_to_le16(n->plm ? FEMU_PLM_NVMSETID : 0);
     id_ns->mc            = n->mc;
     /*
      * Types 1 to 3 with the protection information in the last eight bytes
@@ -3362,6 +3363,11 @@ static void nvme_init_ctrl(FemuCtrl *n)
     if (n->rrl) {
         id->ctratt |= cpu_to_le32(1 << 3);
         id->rrls = cpu_to_le16(NVME_RRLS);
+    }
+    /* the one NVM Set of plm=on */
+    if (n->plm) {
+        id->ctratt |= cpu_to_le32(NVME_CTRATT_NSETS);
+        id->nsetidmax = cpu_to_le16(FEMU_PLM_NVMSETID);
     }
     /*
      * PMS, and the sample interval: one sample a second, SRS 5h (10 ms)
@@ -5408,6 +5414,10 @@ static void femu_realize_steps(PCIDevice *pci_dev, Error **errp)
             return;
         }
     }
+    /* before the rber_ppb and rrl checks, so a refusal names plm */
+    if (!femu_plm_check(n, errp)) {
+        return;
+    }
     /* the raw bit error model runs on one bbssd FTL; bb_init() checks more */
     if (n->bb_params.rber_ppb) {
         const char *why = NULL;
@@ -6455,6 +6465,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("power_meas", FemuCtrl, power_meas, false),
     DEFINE_PROP_BOOL("power_limit", FemuCtrl, power_limit, false),
     DEFINE_PROP_BOOL("ns_wp", FemuCtrl, ns_wp, false),
+    DEFINE_PROP_BOOL("plm", FemuCtrl, plm, false),
     DEFINE_PROP_BOOL("sanitize_ns", FemuCtrl, sanitize_ns, false),
     DEFINE_PROP_BOOL("cancel", FemuCtrl, cancel, false),
     DEFINE_PROP_BOOL("fused_cw", FemuCtrl, fused_cw, false),

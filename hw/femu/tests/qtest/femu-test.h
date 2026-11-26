@@ -1259,6 +1259,11 @@ void femu_test_rrl(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rrl_no_rber(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rrl_subsys(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rrl_modes(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_identify(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_rrl(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_golden_off(void *obj, void *data,
+                              QGuestAllocator *alloc);
+void femu_test_plm_refused(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rber_disturb(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rber_off(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rber_age(void *obj, void *data, QGuestAllocator *alloc);
