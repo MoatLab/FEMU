@@ -483,6 +483,10 @@ void bb_buffer_idle(FemuCtrl *n)
             }
         }
     }
+    /* still inside the sweep: no main-loop writer of the snapshot runs */
+    if (unlikely(n->plm) && n->dataplane_started) {
+        femu_plm_publish(n);
+    }
     n->ftl_in_sweep = false;
 }
 
@@ -513,6 +517,10 @@ void bb_gc_idle(FemuCtrl *n)
         }
         ssd_gc_idle_step(ssd, now);
         qatomic_set(&ssd->gc_idle_running, false);
+        /* DTWWE and the log 0Ah snapshot follow idle collection too */
+        if (unlikely(n->plm)) {
+            femu_plm_publish(n);
+        }
     }
     n->ftl_in_sweep = false;
 }

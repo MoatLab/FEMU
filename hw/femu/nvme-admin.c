@@ -40,6 +40,8 @@ static const bool nvme_feature_support[NVME_FID_MAX] = {
     [NVME_HOST_MEM_BUFFER]          = true,
     [NVME_SPINUP_CONTROL]           = true,
     [NVME_READ_RECOVERY]            = true,
+    [NVME_PLM_CONFIG]               = true,
+    [NVME_PLM_WINDOW]               = true,
     [NVME_HCTM]                     = true,
     [NVME_OCP_DSSD_AEN_CONFIG]      = true,
     [NVME_OCP_LATENCY_MONITOR]      = true,
@@ -104,6 +106,9 @@ static const uint32_t nvme_feature_cap[NVME_FID_MAX] = {
     [NVME_OCP_CLEAR_PCIE_ERRORS]    = NVME_FEAT_CAP_CHANGE,
     /* Read Recovery Level: changeable, not saveable here */
     [NVME_READ_RECOVERY]            = NVME_FEAT_CAP_CHANGE,
+    /* PLM Config and Window: not kept over a reset (Figure 403) */
+    [NVME_PLM_CONFIG]               = NVME_FEAT_CAP_CHANGE,
+    [NVME_PLM_WINDOW]               = NVME_FEAT_CAP_CHANGE,
     /* SERRI-10: Event Injection is not saveable */
     [NVME_OCP_EVENT_INJECTION]      = NVME_FEAT_CAP_CHANGE,
     [NVME_OCP_PLP_HEALTH_INTERVAL]  = NVME_FEAT_CAP_CHANGE |
@@ -367,6 +372,9 @@ bool nvme_fid_supported(FemuCtrl *n, uint8_t fid)
         return n->hmb_mb != 0;
     case NVME_READ_RECOVERY:
         return n->rrl;
+    case NVME_PLM_CONFIG:
+    case NVME_PLM_WINDOW:
+        return n->plm;
     case NVME_LBA_STATUS_ATTR:
         return nvme_admin_effects(n, NVME_ADM_CMD_GET_LBA_STATUS);
     case NVME_SPINUP_CONTROL:
@@ -2081,6 +2089,15 @@ static uint16_t nvme_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                                       !nvme_rrl_nvmset_ok(n, dw11))) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    /* 13h and 14h: NVM Set scope, NSID 0, CDW11 names set 1 (4.4) */
+    if (fid == NVME_PLM_CONFIG || fid == NVME_PLM_WINDOW) {
+        if (nsid || dw11 != FEMU_PLM_NVMSETID) {
+            return NVME_INVALID_FIELD | NVME_DNR;
+        }
+        if (sel != NVME_GETFEAT_SELECT_CAP) {
+            return femu_plm_get_feature(n, cmd, cqe);
+        }
+    }
     /* NVM subsystem scope with no NSID use: NSID 0 only (4.4) */
     if (fid == NVME_POWER_MEAS && nsid) {
         return NVME_INVALID_FIELD | NVME_DNR;
@@ -2334,7 +2351,8 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     if (nvme_resv_fid(fid)) {
         return nvme_resv_set_feature(n, cmd);
     }
-    if ((fid == NVME_READ_RECOVERY || fid == NVME_POWER_MEAS) && nsid) {
+    if ((fid == NVME_READ_RECOVERY || fid == NVME_POWER_MEAS ||
+         fid == NVME_PLM_CONFIG || fid == NVME_PLM_WINDOW) && nsid) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
 
@@ -2730,6 +2748,10 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         qatomic_set(&n->rrl_level, dw12);
         break;
     }
+    case NVME_PLM_CONFIG:
+    case NVME_PLM_WINDOW:
+        /* Figure 249: 14h is prohibited in the PEL, 13h optional */
+        return femu_plm_set_feature(n, cmd, cqe);
     case NVME_OCP_CLEAR_PCIE_ERRORS:
         /*
          * CPCIE-13: bit 31 clears the PCIe correctable error counters of
@@ -3029,7 +3051,8 @@ static uint16_t nvme_fid_effects(FemuCtrl *n, NvmeCmd *cmd, uint8_t csi,
         }
         if (fid == NVME_FDP_MODE) {
             scope = NVME_FID_SCOPE_ENDGRP;
-        } else if (fid == NVME_READ_RECOVERY && n->plm) {
+        } else if ((fid == NVME_READ_RECOVERY && n->plm) ||
+                   fid == NVME_PLM_CONFIG || fid == NVME_PLM_WINDOW) {
             scope = NVME_FID_SCOPE_NSET;
         } else if (fid == NVME_SPINUP_CONTROL || fid == NVME_POWER_MEAS ||
                    fid == NVME_READ_RECOVERY || nvme_ocp_subsys_fid(fid)) {
@@ -5091,6 +5114,10 @@ static uint16_t nvme_get_log(FemuCtrl *n, NvmeCmd *cmd)
         return nvme_ocp_hwcomp_log(n, cmd, len, off);
     case NVME_LOG_FW_SLOT_INFO:
         return nvme_fw_log_info(n, cmd, len, off, rae);
+    case NVME_LOG_PLM_SET:
+        return femu_plm_set_log(n, cmd, len, off, rae);
+    case NVME_LOG_PLM_EVENTS:
+        return femu_plm_event_log(n, cmd, len, off, rae);
     case NVME_LOG_CHANGED_NS_LIST:
         return nvme_changed_ns_log(n, cmd, len, off, rae);
     case NVME_LOG_CMD_EFFECTS:

@@ -38,6 +38,7 @@ DEVICES = [
                       "x-oc12-trace", "x-ocp-lat-skew-ms", "x-idle-mw", "x-telemetry-trigger",
                       "x-precon-break",
                       "x-persist-schema", "x-place-fail", "x-place-skip",
+                      "x-plm-event",
                       "x-rain-check",
                       "x-rain-fail",
                       "x-backend-size",
@@ -85,7 +86,9 @@ DEVICES = [
                     "vid", "did", "pci_pm", "acl", "cqr", "vwc", "temperature", "mpsmin",
                     "mpsmax", "oacs", "oncs", "sgl", "cmbsz", "cmbloc", "fw_slots", "sanitize_ms", "sanitize_ops", "ana", "power_states", "lockdown", "reservations", "ps_max_watts",
                     "power_limit", "ns_wp", "sanitize_ns", "cancel", "fused_cw",
-                    "plm", "shared_ftl", "x-opal", "x-opal-mpa",
+                    "plm", "plm_dtwin_ms", "plm_dtwin_reads",
+                    "plm_ndwin_ms", "plm_ndwin_min_ms", "shared_ftl",
+                    "x-opal", "x-opal-mpa",
                 ],
             },
             {

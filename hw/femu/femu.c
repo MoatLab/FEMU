@@ -899,6 +899,7 @@ static void nvme_reset_features(FemuCtrl *n)
     n->features.async_config    = 0x0;
     n->features.lsiri           = NVME_LSIPI;
     memset(n->features.host_behavior, 0, sizeof(n->features.host_behavior));
+    femu_plm_reset(n);
 
     for (i = 0; i <= n->nr_io_queues; i++) {
         n->features.int_vector_config[i] = i | (n->intc << 16);
@@ -3808,6 +3809,10 @@ static void *femu_ftl_thread(void *arg)
             } else {
                 lat = femu_ftl_process_req(n, req);
             }
+            /* the FTL state that log 0Ah reads without a pause */
+            if (unlikely(n->plm)) {
+                femu_plm_publish(n);
+            }
             /* idle collection counts quiet time from here (gc_idle_ms) */
             if (unlikely(n->gc_idle)) {
                 ssd_gc_idle_note(n->ssd, req->stime + lat);
@@ -5787,6 +5792,12 @@ static void femu_realize_steps(PCIDevice *pci_dev, Error **errp)
         }
     }
 
+    /* the DTWIN write limit comes from the FTL of namespace 1 */
+    if (!femu_plm_init(n, errp)) {
+        femu_realize_undo(n);
+        return;
+    }
+
     /* Managed devices name boot namespaces once, never during Create. */
     for (int i = 0; !n->shared_storage && i < n->num_namespaces; i++) {
         NvmeNamespace *ns = &n->namespaces[i];
@@ -6466,6 +6477,13 @@ static const Property femu_props[] = {
     DEFINE_PROP_BOOL("power_limit", FemuCtrl, power_limit, false),
     DEFINE_PROP_BOOL("ns_wp", FemuCtrl, ns_wp, false),
     DEFINE_PROP_BOOL("plm", FemuCtrl, plm, false),
+    DEFINE_PROP_UINT32("plm_dtwin_ms", FemuCtrl, plm_st.dtwin_ms,
+                       FEMU_PLM_DTWIN_MS),
+    DEFINE_PROP_UINT64("plm_dtwin_reads", FemuCtrl, plm_st.dtwin_reads,
+                       FEMU_PLM_DTWIN_READS),
+    DEFINE_PROP_UINT32("plm_ndwin_ms", FemuCtrl, plm_st.ndwin_ms,
+                       FEMU_PLM_NDWIN_MS),
+    DEFINE_PROP_UINT32("plm_ndwin_min_ms", FemuCtrl, plm_st.ndwin_min_ms, 0),
     DEFINE_PROP_BOOL("sanitize_ns", FemuCtrl, sanitize_ns, false),
     DEFINE_PROP_BOOL("cancel", FemuCtrl, cancel, false),
     DEFINE_PROP_BOOL("fused_cw", FemuCtrl, fused_cw, false),
@@ -7793,6 +7811,7 @@ static void femu_instance_init(Object *obj)
     qemu_mutex_init(&FEMU(obj)->rn_lock);
     qemu_mutex_init(&FEMU(obj)->ps_lock);
     seqlock_init(&FEMU(obj)->ocp_lat.seq);
+    seqlock_init(&FEMU(obj)->plm_st.seq);
     object_property_add_bool(obj, "simulate-power-loss", NULL,
                              femu_simulate_power_loss);
     femu_plp_add_props(obj);
@@ -7809,6 +7828,7 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-ns-test", NULL, femu_test_namespace);
         femu_sdc_add_props(obj);
         femu_lsi_add_props(obj);
+        femu_plm_add_props(obj);
         object_property_add_str(obj, "x-ftl-check", femu_test_ftl_check, NULL);
         object_property_add_uint64_ptr(obj, "x-mem-taken",
                                        &FEMU(obj)->budget.taken,

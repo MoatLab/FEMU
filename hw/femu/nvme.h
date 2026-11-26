@@ -1318,6 +1318,8 @@ enum NvmeLogIdentifier {
     NVME_LOG_DEV_SELF_TEST  = 0x06,
     NVME_LOG_TELEMETRY_HOST = 0x07,
     NVME_LOG_TELEMETRY_CTRL = 0x08,
+    NVME_LOG_PLM_SET        = 0x0a,    /* Predictable Latency, plm=on */
+    NVME_LOG_PLM_EVENTS     = 0x0b,    /* PL Event Aggregate, plm=on */
     NVME_LOG_ANA            = 0x0c,
     NVME_LOG_PERSISTENT_EVENT = 0x0d,
     NVME_LOG_LBA_STATUS     = 0x0e,
@@ -1682,6 +1684,8 @@ enum NvmeFeatureIds {
     NVME_TIMESTAMP                  = 0xe,
     NVME_HCTM                       = 0x10, /* Host Controlled Thermal Mgmt */
     NVME_READ_RECOVERY              = 0x12, /* Read Recovery Level, rrl=on */
+    NVME_PLM_CONFIG                 = 0x13, /* PLM Config, plm=on */
+    NVME_PLM_WINDOW                 = 0x14, /* PLM Window, plm=on */
     NVME_LBA_STATUS_ATTR            = 0x15, /* NVM 1.2, 4.1.3.5 */
     NVME_HOST_BEHAVIOR_SUPPORT      = 0x16,
     NVME_COMMAND_SET_PROFILE        = 0x19,
@@ -2842,6 +2846,44 @@ typedef struct FemuPollerCtr {
  */
 #define FEMU_KV_MAX_KEYS_MAX        1610612735u
 
+/*
+ * Predictable Latency Mode of the one NVM Set (femu-plm.c). The main loop
+ * writes the config and the window under a pause. The FTL thread writes
+ * the snapshot under @seq, so a log read never pauses the data plane.
+ */
+typedef struct FemuPlmSnap {
+    uint64_t        free_lines;     /* free lines of the FTL */
+    uint64_t        open_free;      /* free pages of the open data line */
+    uint64_t        buf_pages;      /* pages held in the write buffer */
+    uint64_t        dtwwe_min;      /* DTWWE low point since DTWIN entry */
+} FemuPlmSnap;
+
+typedef struct FemuPlm {
+    /* properties, and what realize derives from them */
+    uint32_t        dtwin_ms;       /* DTWTM */
+    uint64_t        dtwin_reads;    /* DTWRT, 4 KiB reads */
+    uint32_t        ndwin_ms;       /* NTWTMH */
+    uint32_t        ndwin_min_ms;   /* NTWTML */
+    uint64_t        dtwwt;          /* DTWWT, in @unit */
+    uint64_t        unit;           /* OWS bytes, or one flash page */
+    uint64_t        page_bytes;
+    uint64_t        line_pages;
+    uint64_t        high_lines;     /* gc_thres_lines_high */
+    /* Feature 13h: LPE and the Figure 423 structure */
+    bool            lpe;
+    uint8_t         cfg[512];
+    /* PLMW, and the time the window began (ms of femu_dev_now) */
+    uint8_t         window;
+    int64_t         start_ms;
+    /* DTWIN amounts, 4 KiB reads and @unit writes */
+    uint64_t        reads;
+    uint64_t        writes;
+    /* ETYP in bits 15:0; bit 16: the set is in log 0Bh */
+    uint32_t        events;
+    QemuSeqLock     seq;
+    FemuPlmSnap     snap;
+} FemuPlm;
+
 typedef struct FemuCtrl {
     PCIDevice       parent_obj;
     MemoryRegion    iomem;
@@ -3377,6 +3419,7 @@ typedef struct FemuCtrl {
     bool            ns_wp;          /* Namespace Write Protection */
     /* plm=on: one NVM Set, NVMSETID 1, in Endurance Group 1 */
     bool            plm;
+    FemuPlm         plm_st;
     bool            sanitize_ns;    /* Sanitize Namespace (8Ch) */
     /* shared_ftl=on: the bbssd namespaces share the FTL of namespace 1 */
     bool            shared_ftl;
@@ -4106,10 +4149,24 @@ bool femu_hctm_supported(FemuCtrl *n);
 void femu_thermal_stop(FemuCtrl *n);
 bool femu_pmeas_check(FemuCtrl *n, Error **errp);
 bool femu_wp_check(FemuCtrl *n, Error **errp);
-/* the one NVM Set of plm=on */
+/* the one NVM Set of plm=on, and the defaults of its window limits */
 #define FEMU_PLM_NVMSETID   1
+#define FEMU_PLM_DTWIN_MS       1000
+#define FEMU_PLM_DTWIN_READS    1048576
+#define FEMU_PLM_NDWIN_MS       1000
 bool femu_plm_check(FemuCtrl *n, Error **errp);
+bool femu_plm_init(FemuCtrl *n, Error **errp);
 uint16_t femu_plm_nvmset_list(FemuCtrl *n, NvmeCmd *cmd);
+uint16_t femu_plm_get_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+uint16_t femu_plm_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe);
+uint16_t femu_plm_set_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
+                          uint64_t off, bool rae);
+uint16_t femu_plm_event_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
+                            uint64_t off, bool rae);
+void femu_plm_event(FemuCtrl *n, uint32_t etyp);
+void femu_plm_publish(FemuCtrl *n);
+void femu_plm_reset(FemuCtrl *n);
+void femu_plm_add_props(Object *obj);
 bool femu_sanns_check(FemuCtrl *n, Error **errp);
 bool femu_sanns_busy(FemuCtrl *n);
 uint16_t femu_sanns_cmd(FemuCtrl *n, NvmeCmd *cmd);

@@ -413,6 +413,9 @@ uint32_t nvme_log_support(FemuCtrl *n, uint8_t csi, uint8_t lid)
         return nvme_can_sanitize(n) ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_ENDGRP:
         return n->subsys ? NVME_LIDS_LSUPP : 0;
+    case NVME_LOG_PLM_SET:
+    case NVME_LOG_PLM_EVENTS:
+        return n->plm ? NVME_LIDS_LSUPP : 0;
     case NVME_LOG_ROTATIONAL:
         /* no LID specific parameter; CDW11 LSI names the group */
         return nvme_subsys_rotational(n->subsys) ? NVME_LIDS_LSUPP : 0;

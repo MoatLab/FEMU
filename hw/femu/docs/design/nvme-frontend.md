@@ -737,6 +737,7 @@ Namespace Management.
 | Device Self-test | 06h | tests complete at once |
 | Telemetry Host / Controller | 07h, 08h | 07h: header plus the C0h counters captured by the last Create; 08h: the counters captured when a SMART warning, the temperature condition or thermal protection begins, kept until a read without RAE (header only with `ocp=on`) |
 | Endurance Group | 09h | with `femu-subsys`; Identify reports the group (CTRATT bit 4, ENDGIDMAX, ENDGID, and the Endurance Group List, CNS 19h) with it |
+| Predictable Latency Per NVM Set, Event Aggregate | 0Ah, 0Bh | with `plm=on`; see [NVM Sets](#nvm-sets-plm) |
 | Asymmetric Namespace Access | 0Ch | with `ana=on`: one group per namespace; the state comes from the runtime property `ana-state`; RGO leaves out the namespace lists |
 | Persistent Event | 0Dh | kept in `pel_file` if set |
 | OCP Hardware Component | C6h | with `ocp=on`: the emulated controller, NAND, DRAM, PMIC and board, then the serial number, the country of origin (not available), the hardware revision and the born-on date, the day the device was realized |
@@ -771,7 +772,8 @@ Recovery (05h), Volatile Write Cache (06h, only with `vwc=1`), Number of
 Queues (07h), Interrupt Coalescing (08h), Interrupt Vector Configuration
 (09h), Write Atomicity (0Ah), Asynchronous Event Configuration (0Bh),
 Timestamp (0Eh), Read Recovery Level (12h, only with `rrl=on`; see
-[NVM Sets](#nvm-sets-plm) for its NVMSETID), LBA
+[NVM Sets](#nvm-sets-plm) for its NVMSETID), Predictable Latency Mode
+Config and Window (13h, 14h, only with `plm=on`), LBA
 Status Information Attributes (15h, NVM and ZNS), Host Behavior Support
 (16h), Command Set Profile (19h), FDP (1Dh, 1Eh, only with FDP on), Key
 Value Configuration (20h, only with a KV namespace) and Software Progress
@@ -1149,10 +1151,67 @@ subsystem applies too: the subsystem takes this one controller.
  needed with plm=on    rrl=on, a femu-subsys, namespaces=1, mapping=page
 ```
 
-The Deterministic and Non-Deterministic Windows (features 13h and 14h, logs
-0Ah and 0Bh) are not in FEMU yet. CTRATT bit 5 stays clear, so a host sees
-NVM Sets without Predictable Latency Mode. With `plm=off`, every field
-above stays as before, and CNS 04h fails with Invalid Field in Command.
+#### The windows: features 13h and 14h, logs 0Ah and 0Bh
+
+The host enables Predictable Latency Mode with Feature 13h and then
+selects the window with Feature 14h. The controller starts no window by
+itself yet: it holds back no background work in a Deterministic Window
+(DTWIN) and leaves it on no limit. So CTRATT bit 5 (PLM) and OAES bit 12
+stay clear, and no Predictable Latency event raises an AEN.
+
+```text
+ DISABLED (PLMW 000b) --Set 13h LPE=1--> NDWIN (PLMW 010b)
+ NDWIN --Set 14h WSEL 001b--> DTWIN (PLMW 001b)
+ DTWIN --Set 14h WSEL 010b, or Set 13h LPE=1--> NDWIN
+ NDWIN, DTWIN --Set 13h LPE=0, or a reset--> DISABLED
+```
+
+| Command | Rule |
+| --- | --- |
+| Set 13h | CDW11 is NVMSETID 1, CDW12 bit 0 is LPE; the 512-byte data holds ENEV, DTRT, DTWT and DTTT (Figure 423). ENEV bits 13:3, bytes 31:2 and bytes 511:56 must be 0. LPE=1 enters NDWIN, also from DTWIN; LPE=0 disables PLM and keeps the thresholds |
+| Get 13h | Dword 0 is LPE, the data the 512-byte structure; Select 1 and 2 give LPE 0 and zeros |
+| Set 14h | needs LPE=1; WSEL 001b DTWIN or 010b NDWIN, at once. DTWIN while in DTWIN keeps the window and its start time |
+| Get 14h | needs LPE=1; Dword 0 is the window; Select 1 and 2 give NDWIN |
+| both | NSID 0 only, CDW11 bits 31:16 reserved, SV=1 is Feature Identifier Not Saveable; log 12h gives NVM Set scope (bit 22). A reset returns both to their defaults (Figure 403); the level of 12h stays |
+
+Log 0Ah takes NVMSETID 1 in LSI (CDW11 bits 31:16) and has 512 bytes; an
+offset of 512 or more fails with Invalid Field. It reports PLMW, ETYP, the
+limits and the estimates:
+
+| Field | Bytes | Value |
+| --- | --- | --- |
+| DTWRT, DTWTM | 39:32, 55:48 | `plm_dtwin_reads`, `plm_dtwin_ms` |
+| NTWTMH, NTWTML | 63:56, 71:64 | `plm_ndwin_ms`, `plm_ndwin_min_ms` |
+| DTWWT | 47:40 | the room of a full NDWIN, in OWS units (a flash page without NOWS): free lines at max(`gc_thres_lines`, high mark + 1), capped by the lines user data leaves free, less the high mark |
+| DTWRE, DTWWE, DTWTE | 151:128 | 0 while disabled. In NDWIN: DTWRT, min(DTWWT, room), DTWTM. In DTWIN: DTWRT, min(DTWWT, the low point of room since the entry), DTWTM less the time in DTWIN |
+
+The room is the writes that fit before forced collection: free lines above
+the high mark, plus the free pages of the open line, less the pages the
+write buffer holds. Log 0Bh has NUMENT and one entry for set 1 while an
+enabled event is pending; bytes past its 10 bytes read as zeros, at any
+offset. The rules of the events are those of Figures 223 to 225:
+
+- MVEAT and DEAT always set their ETYP bit; a warning bit needs its ENEV bit.
+- An event whose ENEV bit is set adds the log 0Bh entry.
+- A read of log 0Ah without RAE that returns ETYP (bytes 3:2) clears the ETYP bits and the entry it reported.
+- A read of log 0Bh without RAE ends its Notice; the entry stays.
+
+A log read never pauses the data plane. The FTL thread publishes its free
+lines, the free pages of the open line and the buffer count under a
+seqlock after each request and each idle collection or write-back step.
+The window, the start time and the event word
+are atomics. Only Set 13h, Set 14h and a reset pause the data plane.
+
+```text
+ Set 13h, 14h, reset --> pause --> window, start time, snapshot --> resume
+ FTL request or idle step -------> snapshot (seqlock write)
+ Get Log 0Ah, 0Bh ---------------> seqlock read + atomic reads, no pause
+```
+
+Figure 249 makes 14h prohibited in the Persistent Event Log of an I/O
+controller and 13h optional, so FEMU logs neither. With `plm=off`, every
+field above stays as before. CNS 04h, 13h and 14h fail with Invalid Field
+in Command, and logs 0Ah and 0Bh fail with Invalid Log Page.
 
 ### Asynchronous events
 
@@ -1247,10 +1306,16 @@ registers with no guest. Cases that target this chapter include:
 | `v2-refusals` | CC.AMS other than round robin fails the enable; Identify CNS 00h on a KV namespace fails with Invalid I/O Command Set while CNS 08h answers; logs 00h and 05h refuse an unknown CSI; CNS 07h for KV is refused under CC.CSS 000b while CNS 1Ah is not; CNS 1Fh answers an allocated NSID and refuses 0 and FFFFFFFFh |
 | `endgrp-reported` | with a subsystem and FDP off, CTRATT bit 4, ENDGIDMAX and the ENDGID of a block and a KV namespace (CNS 08h, and CNS 05h for KV) report the one endurance group; CNS 19h lists group 1 for a start of 0 or 1 and no group for 2 or FFFFh; the FDP pages, FDP Mode and I/O Management are refused |
 | `endgrp-list-absent` | without a subsystem, CNS 19h fails with Invalid Field |
-| `plm-golden-off` | with `rrl=on`, a subsystem and `plm=off`: CTRATT bit 2, NSETIDMAX and both NVMSETID fields are 0; CNS 04h fails; Feature 12h keeps subsystem scope and ignores NVMSETID |
+| `plm-golden-off` | with `rrl=on`, a subsystem and `plm=off`: CTRATT bit 2, NSETIDMAX and both NVMSETID fields are 0; CNS 04h fails; Feature 12h keeps subsystem scope and ignores NVMSETID; 13h, 14h, logs 0Ah and 0Bh are refused |
 | `plm-identify`, `plm-identify-hints` | with `plm=on`: CTRATT bit 2, NSETIDMAX 1, NVMSETID 1 in CNS 00h and 08h; CNS 04h lists set 1 in group 1 for a start of 0 or 1 and no set from 2; OWS is 0 without a NOWS hint and NOWS + 1 blocks with `perf_hints=on` |
 | `plm-rrl` | with `plm=on`: Feature 12h refuses NVMSETID 0 and 7, and CDW11 bits 31:16, and takes 1; a refused Set keeps the level; SEL 3 gives changeable only; log 12h gives it NVM Set scope |
-| `plm-refused` | each realize refusal of `plm` |
+| `plm-refused` | each realize refusal of `plm`, the window limit ranges, a limit without `plm=on`, and a device with no line above the high mark |
+| `plm-nsid` | NSID 1h and FFFFFFFFh on Get and Set 12h, 13h and 14h fail with Invalid Field |
+| `plm-config` | the checks of 13h and 14h, the 512-byte round trip, Select 1 to 3, 14h while disabled, 13h LPE=1 from DTWIN, log 12h and 00h entries, CTRATT bit 5 and OAES bit 12 clear |
+| `plm-lpe0` | 13h LPE=0 in DTWIN disables PLM, keeps the new thresholds and keeps the event until log 0Ah is read; LPE=0 from DISABLED |
+| `plm-logs` | log 0Ah limits, estimates, offsets and LSI checks; DTWTE falls and a second 14h DTWIN keeps it; log 0Bh zeros past 10 bytes; RAE; a read without ETYP clears nothing; ETYP with ENEV clear |
+| `plm-reset` | a reset in DTWIN with an event: 13h and 14h at defaults, logs empty, the 12h level kept |
+| `plm-no-pause` | log 0Ah reads return within 800 ms while idle GC steps sleep 1 s inside the FTL sweep |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
 
@@ -1333,7 +1398,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | `hw/femu/dma.c` | PRP and SGL mapping, `femu_dma_rw` |
 | `hw/femu/lib/rte_ring.c`, `hw/femu/lib/pqueue.c` | the rings and the completion heap |
 | `hw/femu/nvme.h` | `NvmeSQueue`, `NvmeCQueue`, `NvmeRequest`, `FemuCtrl`, `FemuPollerCtr`, register layout |
-| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h) |
+| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot |
 | `hw/femu/femu-ext-ops.h` | `FemuExtCtrlOps`, the mode handler table, and its rules |
 
 ## Related pages

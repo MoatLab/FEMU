@@ -996,6 +996,26 @@
     "kind": "static",
     "type": "bool"
    },
+   "plm_dtwin_ms": {
+    "default": 1000,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "plm_dtwin_reads": {
+    "default": 1048576,
+    "kind": "static",
+    "type": "uint64"
+   },
+   "plm_ndwin_min_ms": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
+   "plm_ndwin_ms": {
+    "default": 1000,
+    "kind": "static",
+    "type": "uint32"
+   },
    "plp": {
     "default": false,
     "kind": "static",

@@ -2177,6 +2177,47 @@ static void femu_register_nodes(void)
             "femu_mode=1,rrl=on,plm=on,subsys=plmsub," FEMU_CAPS_GEO,
         .before = femu_plm_before,
     });
+    qos_add_test("plm-nsid", "femu", femu_test_plm_nsid,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmd,femu_mode=1,rrl=on,plm=on,subsys=plmsub," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-config", "femu", femu_test_plm_config,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmd,femu_mode=1,rrl=on,plm=on,subsys=plmsub," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-lpe0", "femu", femu_test_plm_lpe0,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmd,femu_mode=1,rrl=on,plm=on,subsys=plmsub," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-logs", "femu", femu_test_plm_logs,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmd,femu_mode=1,rrl=on,plm=on,subsys=plmsub,"
+            "plm_dtwin_ms=2000,plm_dtwin_reads=4096,plm_ndwin_ms=3000,"
+            "plm_ndwin_min_ms=500," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-reset", "femu", femu_test_plm_reset,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmd,femu_mode=1,rrl=on,plm=on,subsys=plmsub," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-no-pause", "femu", femu_test_plm_no_pause,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95"
+            ",gc_idle_ms=1,gc_idle_pcent=50,rrl=on,plm=on,subsys=plmsub",
+        .before = femu_plm_before,
+    });
     qos_add_test("plm-golden-off", "femu", femu_test_plm_golden_off,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"plain",

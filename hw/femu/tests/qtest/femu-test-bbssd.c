@@ -19084,7 +19084,8 @@ void femu_test_plm_rrl(void *obj, void *data, QGuestAllocator *alloc)
  * subsystem, which master also realizes; "rrl" adds rrl=on. Every field
  * that plm sets stays 0: CTRATT bit 2, NSETIDMAX and NVMSETID in CNS 00h
  * and 08h. CNS 04h fails with Invalid Field. With rrl, Feature 12h keeps
- * subsystem scope (bit 25) and ignores NVMSETID.
+ * subsystem scope (bit 25) and ignores NVMSETID. Features 13h and 14h
+ * fail with Invalid Field, and logs 0Ah and 0Bh with Invalid Log Page.
  *
  * The SHA-256 of Identify Controller, Identify Namespace, log 00h and
  * log 12h must equal femu_plm_golden[], which master eef4fb15b gave for
@@ -19159,6 +19160,27 @@ void femu_test_plm_golden_off(void *obj, void *data, QGuestAllocator *alloc)
         }
     }
 
+    /* as on master: no PLM features or logs */
+    for (uint8_t fid = 0x13; fid <= 0x14; fid++) {
+        NvmeCmd cmd = { 0 };
+
+        g_assert_cmphex(FEMU_SC(femu_get_feature(&c, fid, 0, 0, 1, &res)),
+                        ==, NVME_INVALID_FIELD);
+        cmd.opcode = NVME_ADM_CMD_SET_FEATURES;
+        cmd.dptr.prp1 = cpu_to_le64(buf);
+        cmd.cdw10 = cpu_to_le32(fid);
+        cmd.cdw11 = cpu_to_le32(1);
+        cmd.cdw12 = cpu_to_le32(1);
+        qtest_memset(qts, buf, 0, 512);
+        g_assert_cmphex(FEMU_SC(femu_admin(&c, &cmd)), ==,
+                        NVME_INVALID_FIELD);
+    }
+    g_assert_cmphex(FEMU_SC(femu_log_cmd(&c, NVME_NSID_BROADCAST,
+                                         0x0a | 1u << 15, 0, buf, 512)), ==,
+                    NVME_INVALID_LOG_ID);
+    g_assert_cmphex(FEMU_SC(femu_log_cmd(&c, NVME_NSID_BROADCAST, 0x0b, 0,
+                                         buf, 16)), ==, NVME_INVALID_LOG_ID);
+
     if (rrl) {
         g_assert_cmphex(femu_rrl_set_full(&c, false, 0, 7, 15), ==,
                         NVME_SUCCESS);
@@ -19217,6 +19239,25 @@ void femu_test_plm_refused(void *obj, void *data, QGuestAllocator *alloc)
         { "'devsz_mb':64,'femu_mode':1,'rrl':true", "plm needs a femu-subsys" },
         { FEMU_PLM_OK ",'namespaces':2", "plm needs exactly one namespace" },
         { FEMU_PLM_OK ",'mapping':'dftl'", "plm needs mapping=page" },
+        { FEMU_PLM_OK ",'plm_dtwin_ms':0", "plm_dtwin_ms must be 1 to" },
+        { FEMU_PLM_OK ",'plm_dtwin_ms':3600001",
+          "plm_dtwin_ms must be 1 to" },
+        { FEMU_PLM_OK ",'plm_dtwin_reads':0", "plm_dtwin_reads must be 1 to" },
+        { FEMU_PLM_OK ",'plm_dtwin_reads':1099511627777",
+          "plm_dtwin_reads must be 1 to" },
+        { FEMU_PLM_OK ",'plm_ndwin_ms':3600001",
+          "plm_ndwin_ms must be 0 to" },
+        { FEMU_PLM_OK ",'plm_ndwin_min_ms':1001",
+          "plm_ndwin_min_ms must be 0 to plm_ndwin_ms" },
+        /* 74 of 80 lines hold data: no line is left above the high mark */
+        { "'devsz_mb':74,'femu_mode':1,'rrl':true,'subsys':'plmsub-r',"
+          "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+          "'pls_per_lun':1,'luns_per_ch':4,'nchs':4",
+          "plm needs free lines above gc_thres_pcent_high" },
+    };
+    static const char *const unset[] = {
+        "'plm_dtwin_ms':999", "'plm_dtwin_reads':7", "'plm_ndwin_ms':0",
+        "'plm_ndwin_min_ms':1",
     };
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -19225,10 +19266,635 @@ void femu_test_plm_refused(void *obj, void *data, QGuestAllocator *alloc)
 
         femu_rrl_add(qts, opts, cases[i].msg);
     }
+    /* a window limit without plm=on is a mistake, not a no-op */
+    for (int i = 0; i < ARRAY_SIZE(unset); i++) {
+        g_autofree char *opts = g_strdup_printf(
+            "'id':'plmr','addr':'5'," FEMU_PLM_OK ",%s", unset[i]);
+
+        femu_rrl_add(qts, opts, "needs plm=on");
+    }
     femu_rrl_add(qts, "'id':'plmr','addr':'5','plm':true,'femu_mode':1,"
                  "'rrl':true,'subsys':'plmsub-r'," FEMU_RRL_GEO, NULL);
     qpci_unplug_acpi_device_test(qts, "plmr", 5);
     qos_invalidate_command_line();
+}
+
+/* an admin command of the plm tests: the status code, Dword 0 in @res */
+static uint16_t femu_plm_admin(FemuCtrlState *c, uint8_t opcode, uint32_t nsid,
+                               uint32_t dw10, uint32_t dw11, uint32_t dw12,
+                               uint64_t buf, uint32_t *res)
+{
+    NvmeCmd cmd;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = opcode;
+    cmd.nsid = cpu_to_le32(nsid);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(dw10);
+    cmd.cdw11 = cpu_to_le32(dw11);
+    cmd.cdw12 = cpu_to_le32(dw12);
+    return FEMU_SC(femu_admin_result(c, &cmd, res));
+}
+
+/* Get Features @fid with Select @sel and CDW11 @dw11 */
+static uint16_t femu_plm_get(FemuCtrlState *c, uint8_t fid, uint8_t sel,
+                             uint32_t nsid, uint32_t dw11, uint64_t buf,
+                             uint32_t *res)
+{
+    return femu_plm_admin(c, NVME_ADM_CMD_GET_FEATURES, nsid,
+                          fid | (uint32_t)sel << 8, dw11, 0, buf, res);
+}
+
+/* Set Features @fid with SV @sv, CDW11 @dw11 and CDW12 @dw12 */
+static uint16_t femu_plm_set(FemuCtrlState *c, uint8_t fid, bool sv,
+                             uint32_t nsid, uint32_t dw11, uint32_t dw12,
+                             uint64_t buf)
+{
+    return femu_plm_admin(c, NVME_ADM_CMD_SET_FEATURES, nsid,
+                          fid | (sv ? 1u << 31 : 0), dw11, dw12, buf, NULL);
+}
+
+/* the Figure 423 structure: ENEV, DTRT, DTWT, DTTT and nothing else */
+static void femu_plm_cfg(uint8_t *cfg, uint16_t enev, uint64_t dtrt,
+                         uint64_t dtwt, uint64_t dttt)
+{
+    memset(cfg, 0, 512);
+    stw_le_p(cfg, enev);
+    stq_le_p(cfg + 32, dtrt);
+    stq_le_p(cfg + 40, dtwt);
+    stq_le_p(cfg + 48, dttt);
+}
+
+/* Set Features 13h on set 1 with @cfg as data */
+static uint16_t femu_plm_set13(FemuCtrlState *c, uint32_t dw12,
+                               const uint8_t *cfg, uint64_t buf)
+{
+    qtest_memwrite(c->pdev->bus->qts, buf, cfg, 512);
+    return femu_plm_set(c, 0x13, false, 0, 1, dw12, buf);
+}
+
+/*
+ * Get Log Page @lid with LSI @lsi, RAE @rae, @len bytes from @off. The
+ * buffer starts as A5h, so bytes the controller does not write show.
+ */
+static uint16_t femu_plm_log(FemuCtrlState *c, uint8_t lid, uint16_t lsi,
+                             bool rae, uint64_t off, uint32_t len,
+                             uint64_t buf, uint8_t *out)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint32_t numd = len / 4 - 1;
+    NvmeCmd cmd;
+    uint16_t sc;
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    cmd.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw10 = cpu_to_le32(lid | (rae ? 1u << 15 : 0) |
+                            (numd & 0xffff) << 16);
+    cmd.cdw11 = cpu_to_le32((numd >> 16) | (uint32_t)lsi << 16);
+    cmd.cdw12 = cpu_to_le32((uint32_t)off);
+    cmd.cdw13 = cpu_to_le32((uint32_t)(off >> 32));
+    qtest_memset(qts, buf, 0xa5, len);
+    sc = FEMU_SC(femu_admin(c, &cmd));
+    if (out && sc == NVME_SUCCESS) {
+        qtest_memread(qts, buf, out, len);
+    }
+    return sc;
+}
+
+/* log 0Ah of set 1, all 512 bytes */
+static void femu_plm_log0a(FemuCtrlState *c, bool rae, uint64_t buf,
+                           uint8_t *log)
+{
+    g_assert_cmphex(femu_plm_log(c, 0x0a, 1, rae, 0, 512, buf, log), ==,
+                    NVME_SUCCESS);
+}
+
+/* NUMENT of log 0Bh, with entry 1 checked against it */
+static uint64_t femu_plm_nument(FemuCtrlState *c, bool rae, uint64_t buf)
+{
+    uint8_t agg[16];
+
+    g_assert_cmphex(femu_plm_log(c, 0x0b, 0, rae, 0, 16, buf, agg), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(lduw_le_p(agg + 8), ==, ldq_le_p(agg) ? 1 : 0);
+    g_assert_true(femu_plm_zero(agg + 10, 6));
+    return ldq_le_p(agg);
+}
+
+/* x-plm-event of device "plmd": record ETYP bits as the FTL will */
+static void femu_plm_inject(QTestState *qts, uint32_t etyp)
+{
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/plmd',"
+                             "'property':'x-plm-event','value':%d}}",
+                             (int)etyp);
+}
+
+/*
+ * NSID 1h and FFFFFFFFh on Get and Set Features 12h, 13h and 14h fail
+ * with Invalid Field (4.4 and Figure 92); NSID 0 succeeds. PLM is on,
+ * so 14h fails for the NSID and not for a disabled PLM.
+ */
+void femu_test_plm_nsid(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const uint32_t nsids[] = { 1, NVME_NSID_BROADCAST };
+    static const uint8_t fids[] = { 0x12, 0x13, 0x14 };
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t cfg[512];
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_plm_cfg(cfg, 0, 0, 0, 0);
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, buf), ==, NVME_SUCCESS);
+    for (size_t i = 0; i < G_N_ELEMENTS(fids); i++) {
+        uint32_t dw12 = fids[i] == 0x12 ? 4 : fids[i] == 0x14 ? 2 : 1;
+
+        for (size_t j = 0; j < G_N_ELEMENTS(nsids); j++) {
+            qtest_memwrite(femu->dev.bus->qts, buf, cfg, 512);
+            g_assert_cmphex(femu_plm_get(&c, fids[i], 0, nsids[j], 1, buf,
+                                         &res), ==, NVME_INVALID_FIELD);
+            g_assert_cmphex(femu_plm_set(&c, fids[i], false, nsids[j], 1,
+                                         dw12, buf), ==, NVME_INVALID_FIELD);
+        }
+        qtest_memwrite(femu->dev.bus->qts, buf, cfg, 512);
+        g_assert_cmphex(femu_plm_set(&c, fids[i], false, 0, 1, dw12, buf),
+                        ==, NVME_SUCCESS);
+        g_assert_cmphex(femu_plm_get(&c, fids[i], 0, 0, 1, buf, &res), ==,
+                        NVME_SUCCESS);
+    }
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Features 13h and 14h, and what plm=on lists for them.
+ *
+ *   13h  NVMSETID 0, 2, FFFFh, 10001h and CDW12 bit 1 refused; SV=1 is
+ *        Not Saveable; reserved ENEV bits and bytes refused; the data
+ *        round trips in exactly 512 bytes; Select 1 and 2 give LPE 0
+ *        and zeros, Select 3 changeable only
+ *   14h  refused while PLM is disabled, Select 3 still answers; WSEL 0,
+ *        3 to 7 and CDW12 bit 3 refused; LPE=1 gives NDWIN; 13h LPE=1
+ *        in DTWIN gives NDWIN again
+ *   log  12h: FSUPP and NVM Set scope for 13h and 14h; 00h: 0Ah and 0Bh;
+ *        Identify keeps CTRATT bit 5 and OAES bit 12 clear (a later step)
+ *   AEC  Feature 0Bh keeps bit 12
+ */
+void femu_test_plm_config(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const uint32_t bad_set[] = { 0, 2, 0xffff, 0x10001, 0xffff0001 };
+    static const struct {
+        size_t at;
+        uint8_t val;
+    } bad_cfg[] = {
+        { 0, 0x08 }, { 1, 0x20 }, { 2, 1 }, { 31, 1 }, { 56, 1 }, { 511, 1 },
+    };
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t cfg[512];
+    uint8_t got[1024];
+    uint8_t ctrl[4096];
+    uint8_t log[512];
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_plm_identify(&c, buf, 0, 0x01, 0, ctrl);
+    g_assert_cmphex(ldl_le_p(ctrl + 96) & (1u << 5), ==, 0);
+    g_assert_cmphex(ldl_le_p(ctrl + 92) & (1u << 12), ==, 0);
+
+    /* disabled: 14h refused, its capabilities still answer */
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, buf, &res), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 1, 0, 1, buf, &res), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 1, buf), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 3, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0x4);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmpuint(log[0], ==, 0);
+    g_assert_true(femu_plm_zero(log + 128, 24));
+
+    femu_plm_cfg(cfg, 0xc007, 1234, 56, 78);
+    for (size_t i = 0; i < G_N_ELEMENTS(bad_set); i++) {
+        qtest_memwrite(qts, buf, cfg, 512);
+        g_assert_cmphex(femu_plm_set(&c, 0x13, false, 0, bad_set[i], 1, buf),
+                        ==, NVME_INVALID_FIELD);
+        g_assert_cmphex(femu_plm_get(&c, 0x13, 0, 0, bad_set[i], buf, &res),
+                        ==, NVME_INVALID_FIELD);
+        g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, bad_set[i], 2, buf),
+                        ==, NVME_INVALID_FIELD);
+        g_assert_cmphex(femu_plm_get(&c, 0x14, 3, 0, bad_set[i], buf, &res),
+                        ==, NVME_INVALID_FIELD);
+    }
+    g_assert_cmphex(femu_plm_set13(&c, 0x3, cfg, buf), ==,
+                    NVME_INVALID_FIELD);
+    qtest_memwrite(qts, buf, cfg, 512);
+    g_assert_cmphex(femu_plm_set(&c, 0x13, true, 0, 1, 1, buf), ==,
+                    NVME_FID_NOT_SAVEABLE);
+    for (size_t i = 0; i < G_N_ELEMENTS(bad_cfg); i++) {
+        uint8_t bad[512];
+
+        memcpy(bad, cfg, sizeof(bad));
+        bad[bad_cfg[i].at] |= bad_cfg[i].val;
+        g_assert_cmphex(femu_plm_set13(&c, 1, bad, buf), ==,
+                        NVME_INVALID_FIELD);
+    }
+    /* nothing above took: PLM is still disabled */
+    g_assert_cmphex(femu_plm_get(&c, 0x13, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 0);
+
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, buf), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0xa5, sizeof(got));
+    g_assert_cmphex(femu_plm_get(&c, 0x13, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, got, sizeof(got));
+    g_assert_cmpuint(res, ==, 1);
+    g_assert_cmpmem(got, 512, cfg, 512);
+    for (size_t i = 512; i < sizeof(got); i++) {
+        g_assert_cmphex(got[i], ==, 0xa5);
+    }
+    for (uint8_t sel = 1; sel <= 2; sel++) {
+        qtest_memset(qts, buf, 0xa5, 512);
+        g_assert_cmphex(femu_plm_get(&c, 0x13, sel, 0, 1, buf, &res), ==,
+                        NVME_SUCCESS);
+        qtest_memread(qts, buf, got, 512);
+        g_assert_cmpuint(res, ==, 0);
+        g_assert_true(femu_plm_zero(got, 512));
+    }
+    g_assert_cmphex(femu_plm_get(&c, 0x13, 3, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 0x4);
+    g_assert_cmphex(femu_plm_get(&c, 0x13, 4, 0, 1, buf, &res), ==,
+                    NVME_INVALID_FIELD);
+
+    /* LPE=1: NDWIN */
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 2);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    for (uint32_t w = 0; w < 8; w++) {
+        if (w == 1 || w == 2) {
+            continue;
+        }
+        g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, w, buf), ==,
+                        NVME_INVALID_FIELD);
+    }
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 0x9, buf), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_plm_set(&c, 0x14, true, 0, 1, 1, buf), ==,
+                    NVME_FID_NOT_SAVEABLE);
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 1, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 1);
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 1, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 2);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmpuint(log[0], ==, 1);
+    /* 13h LPE=1 always ends in NDWIN, also from DTWIN */
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 2);
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 2, buf), ==,
+                    NVME_SUCCESS);
+
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x12, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 0x13 * 4), ==, 1u | 1u << 22);
+    g_assert_cmphex(qtest_readl(qts, buf + 0x14 * 4), ==, 1u | 1u << 22);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, 0x00, buf, 1024, 0)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(qtest_readl(qts, buf + 0x0a * 4), ==, 1);
+    g_assert_cmphex(qtest_readl(qts, buf + 0x0b * 4), ==, 1);
+    /* AEC keeps bit 12 (PLEALCN) for the later notice */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 12,
+                                             NULL)), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x0b, 0, 0, 0, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(res, ==, 1u << 12);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Set 13h LPE=0 in DTWIN: PLMW 000b, the new thresholds stored, Get 14h
+ * refused, and the event of the DTWIN kept until log 0Ah is read: ETYP
+ * MVEAT and the log 0Bh entry stay over LPE=0. LPE=0 from DISABLED only
+ * stores the thresholds. The estimates read 0 while disabled.
+ */
+void femu_test_plm_lpe0(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t cfg[512];
+    uint8_t got[512];
+    uint8_t log[512];
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_plm_cfg(cfg, 1u << 14, 0, 0, 0);
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 1, buf), ==,
+                    NVME_SUCCESS);
+    femu_plm_inject(qts, 1u << 14);
+
+    femu_plm_cfg(cfg, 0x7, 11, 22, 33);
+    g_assert_cmphex(femu_plm_set13(&c, 0, cfg, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_get(&c, 0x13, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, got, 512);
+    g_assert_cmpuint(res, ==, 0);
+    g_assert_cmpmem(got, 512, cfg, 512);
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, buf, &res), ==,
+                    NVME_INVALID_FIELD);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmpuint(log[0], ==, 0);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+    g_assert_true(femu_plm_zero(log + 128, 24));
+    g_assert_cmpuint(femu_plm_nument(&c, true, buf), ==, 1);
+
+    /* from DISABLED: the thresholds change, nothing else */
+    femu_plm_cfg(cfg, 0x4000, 44, 55, 66);
+    g_assert_cmphex(femu_plm_set13(&c, 0, cfg, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_get(&c, 0x13, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, got, 512);
+    g_assert_cmpmem(got, 512, cfg, 512);
+    femu_plm_log0a(&c, false, buf, log);
+    g_assert_cmpuint(log[0], ==, 0);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, buf), ==, 0);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Logs 0Ah and 0Bh. The device sets plm_dtwin_ms 2000, plm_dtwin_reads
+ * 4096, plm_ndwin_ms 3000 and plm_ndwin_min_ms 500.
+ *
+ *   0Ah  LSI 0, 2, FFFFh and an offset of 512 refused; the limits, the
+ *        NDWIN estimates and zero reserved bytes; an offset read equals
+ *        the same bytes of a whole read; DTWTE falls in DTWIN, and a
+ *        second 14h DTWIN does not restart it
+ *   0Bh  10 bytes, zeros past them, also from an offset past them
+ *   RAE  an RAE read keeps ETYP and the entry; 0Bh without RAE keeps the
+ *        entry; 0Ah without RAE clears both, but only when the read
+ *        returns ETYP (offset 508 or 4 keeps them). DEAT with ENEV clear sets
+ *        ETYP and no entry; a warning needs its ENEV bit
+ */
+void femu_test_plm_logs(void *obj, void *data, QGuestAllocator *alloc)
+{
+    static const uint16_t bad_lsi[] = { 0, 2, 0xffff };
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t cfg[512];
+    uint8_t log[512];
+    uint8_t part[16];
+    uint8_t agg[512];
+    uint64_t dtwwt;
+    uint64_t dtwte;
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    for (size_t i = 0; i < G_N_ELEMENTS(bad_lsi); i++) {
+        g_assert_cmphex(femu_plm_log(&c, 0x0a, bad_lsi[i], true, 0, 512,
+                                     buf, NULL), ==, NVME_INVALID_FIELD);
+    }
+    g_assert_cmphex(femu_plm_log(&c, 0x0a, 1, true, 512, 4, buf, NULL), ==,
+                    NVME_INVALID_FIELD);
+    g_assert_cmphex(femu_plm_log(&c, 0x0a, 1, true, 508, 4, buf, part), ==,
+                    NVME_SUCCESS);
+    g_assert_true(femu_plm_zero(part, 4));
+
+    femu_plm_cfg(cfg, 1u << 14, 0, 0, 0);
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, buf), ==, NVME_SUCCESS);
+    femu_plm_log0a(&c, true, buf, log);
+    dtwwt = ldq_le_p(log + 40);
+    g_test_message("log 0Ah: DTWWT %" PRIu64 ", DTWWE %" PRIu64, dtwwt,
+                   ldq_le_p(log + 136));
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmpuint(log[1], ==, 0);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_true(femu_plm_zero(log + 4, 28));
+    g_assert_cmpuint(ldq_le_p(log + 32), ==, 4096);          /* DTWRT */
+    g_assert_cmpuint(dtwwt, >, 0);                           /* DTWWT */
+    g_assert_cmpuint(ldq_le_p(log + 48), ==, 2000);          /* DTWTM */
+    g_assert_cmpuint(ldq_le_p(log + 56), ==, 3000);          /* NTWTMH */
+    g_assert_cmpuint(ldq_le_p(log + 64), ==, 500);           /* NTWTML */
+    g_assert_true(femu_plm_zero(log + 72, 56));
+    g_assert_cmpuint(ldq_le_p(log + 128), ==, 4096);         /* DTWRE */
+    g_assert_cmpuint(ldq_le_p(log + 136), ==, dtwwt);        /* DTWWE */
+    g_assert_cmpuint(ldq_le_p(log + 144), ==, 2000);         /* DTWTE */
+    g_assert_true(femu_plm_zero(log + 152, 512 - 152));
+    g_assert_cmphex(femu_plm_log(&c, 0x0a, 1, true, 32, 16, buf, part), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpmem(part, 16, log + 32, 16);
+
+    /* DTWIN: the time estimate falls, and 14h DTWIN again keeps it */
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 1, buf), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, true, buf, log);
+    dtwte = ldq_le_p(log + 144);
+    g_assert_cmpuint(log[0], ==, 1);
+    g_assert_cmpuint(ldq_le_p(log + 128), ==, 4096);
+    g_assert_cmpuint(ldq_le_p(log + 136), <=, dtwwt);
+    g_assert_cmpuint(dtwte, <=, 2000);
+    g_assert_cmpuint(dtwte, >, 1000);
+    g_usleep(400 * 1000);
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 1, buf), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, true, buf, log);
+    g_test_message("DTWTE %" PRIu64 ", then %" PRIu64, dtwte,
+                   ldq_le_p(log + 144));
+    g_assert_cmpuint(ldq_le_p(log + 144), <=, dtwte - 300);
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 2, buf), ==,
+                    NVME_SUCCESS);
+
+    /* 0Bh: no entry yet; past 10 bytes zeros, at any offset */
+    g_assert_cmphex(femu_plm_log(&c, 0x0b, 0, true, 0, 512, buf, agg), ==,
+                    NVME_SUCCESS);
+    g_assert_true(femu_plm_zero(agg, 512));
+    g_assert_cmphex(femu_plm_log(&c, 0x0b, 0, true, 12, 16, buf, part), ==,
+                    NVME_SUCCESS);
+    g_assert_true(femu_plm_zero(part, 16));
+    g_assert_cmphex(femu_plm_log(&c, 0x0b, 0, true, 4096, 8, buf, part), ==,
+                    NVME_SUCCESS);
+    g_assert_true(femu_plm_zero(part, 8));
+
+    /* an enabled event: RAE keeps it, 0Ah without RAE clears it */
+    femu_plm_inject(qts, 1u << 14);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+    g_assert_cmphex(femu_plm_log(&c, 0x0b, 0, true, 8, 4, buf, part), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(lduw_le_p(part), ==, 1);
+    g_assert_cmpuint(femu_plm_nument(&c, true, buf), ==, 1);
+    g_assert_cmpuint(femu_plm_nument(&c, false, buf), ==, 1);
+    g_assert_cmpuint(femu_plm_nument(&c, true, buf), ==, 1);
+    /* without RAE, but ETYP not returned: the events stay */
+    g_assert_cmphex(femu_plm_log(&c, 0x0a, 1, false, 508, 4, buf, part), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_log(&c, 0x0a, 1, false, 4, 8, buf, part), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+    g_assert_cmpuint(femu_plm_nument(&c, true, buf), ==, 1);
+    femu_plm_log0a(&c, false, buf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, buf), ==, 0);
+
+    /* ETYP without ENEV: DEAT sets its bit, a warning does not */
+    femu_plm_inject(qts, 1u << 15 | 1u << 0);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 15);
+    g_assert_cmpuint(femu_plm_nument(&c, true, buf), ==, 0);
+    femu_plm_log0a(&c, false, buf, log);
+    femu_plm_cfg(cfg, 0x1, 0, 0, 0);
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, buf), ==, NVME_SUCCESS);
+    femu_plm_inject(qts, 1u << 0);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, buf), ==, 1);
+    femu_plm_log0a(&c, false, buf, log);
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A Controller Level Reset in DTWIN with an event pending: 13h and 14h
+ * do not persist (Figure 403), so after it LPE is 0, the thresholds are
+ * zero, 14h is refused, log 0Ah shows PLMW 000b and no ETYP, and log
+ * 0Bh is empty. The 12h level, which persists, stays 15.
+ */
+void femu_test_plm_reset(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint8_t cfg[512];
+    uint8_t got[512];
+    uint8_t log[512];
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_plm_cfg(cfg, 0xc007, 1, 2, 3);
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 1, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 0, 1, 15), ==, NVME_SUCCESS);
+    femu_plm_inject(qts, 1u << 14);
+    g_assert_cmpuint(femu_plm_nument(&c, true, buf), ==, 1);
+    femu_disable(&c);
+
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, &femu->dev, alloc);
+    qtest_memset(qts, buf, 0xa5, 512);
+    g_assert_cmphex(femu_plm_get(&c, 0x13, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    qtest_memread(qts, buf, got, 512);
+    g_assert_cmpuint(res, ==, 0);
+    g_assert_true(femu_plm_zero(got, 512));
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, buf, &res), ==,
+                    NVME_INVALID_FIELD);
+    femu_plm_log0a(&c, true, buf, log);
+    g_assert_cmpuint(log[0], ==, 0);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, buf), ==, 0);
+    g_assert_cmphex(femu_plm_get(&c, 0x12, 0, 0, 1, buf, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 15);
+    g_assert_cmphex(femu_rrl_set_full(&c, false, 0, 1, 4), ==, NVME_SUCCESS);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A log read never pauses the data plane. Each idle GC step sleeps 1 s
+ * inside the FTL sweep (x-gc-idle-latch), where a pause would wait for
+ * it. Log 0Ah reads run back to back for 3 s while steps run, and each
+ * must return within 800 ms. x-gc-idle-order then shows that steps ran.
+ */
+void femu_test_plm_no_pause(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint8_t cfg[512];
+    int64_t end;
+    int64_t worst = 0;
+    unsigned int reads = 0;
+    unsigned int steps = 0;
+    int running;
+    QDict *rsp;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_cfg(cfg, 0, 0, 0, 0);
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, lbuf), ==, NVME_SUCCESS);
+    femu_gci_hold(qts, true);
+    femu_gci_dead_lines(&c, qts, buf);
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/gc-test',"
+                             "'property':'x-gc-idle-latch','value':1000}}");
+    femu_gci_hold(qts, false);
+    end = g_get_monotonic_time() + 3 * G_USEC_PER_SEC;
+    while (g_get_monotonic_time() < end) {
+        int64_t t0 = g_get_monotonic_time();
+        uint8_t log[512];
+
+        femu_plm_log0a(&c, true, lbuf, log);
+        g_assert_cmpuint(log[0], ==, 2);
+        worst = MAX(worst, g_get_monotonic_time() - t0);
+        reads++;
+    }
+    femu_gci_hold(qts, true);
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/gc-test',"
+                             "'property':'x-gc-idle-latch','value':0}}");
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-gc-idle-order'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"), "%d %u",
+                           &running, &steps), ==, 2);
+    qobject_unref(rsp);
+    g_test_message("%u log reads, the slowest %" PRId64 " us; %u steps",
+                   reads, worst, steps);
+    g_assert_cmpint(running, ==, 0);
+    g_assert_cmpuint(steps, >, 0);
+    g_assert_cmpint(worst, <, 800 * 1000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, buf);
 }
 
 /*

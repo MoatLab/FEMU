@@ -971,8 +971,10 @@ own description allows. A message keeps its format directives (`%s`,
 
 ## `plm`
 
+- femu: %s needs plm=on
 - femu: plm is not supported with %s
 - femu: plm needs %s
+- x-plm-event takes ETYP bits 0 to 2, 14 and 15 with plm=on
 
 ## `plp`
 

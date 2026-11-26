@@ -352,9 +352,23 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "bbssd with rrl and a femu-subsys: NVM Sets for Predictable Latency "
       "Mode (Base 2.3 3.2.2), one set (NVMSETID 1) in Endurance Group 1 "
       "over one namespace; CNS 04h lists it, and Feature 12h takes "
-      "NVMSETID 1 only; needs mapping=page; not with FDP, ocp, gc_pace, "
-      "streams, tier_mode, cxl_ssd, power_loss, persist_file or ns_mgmt; "
+      "NVMSETID 1 only; Features 13h and 14h and logs 0Ah and 0Bh give "
+      "host-selected windows; needs femu_mode=1 and mapping=page; not with "
+      "namespace_modes, FDP, ocp, gc_pace, streams, tier_mode, cxl_ssd, "
+      "power_loss, persist_file or ns_mgmt; "
       "off (default)" },
+    { "plm_dtwin_ms",
+      "plm: DTWIN Time Maximum (DTWTM) of log 0Ah, in ms, 1 to 3600000; "
+      "1000 (default)" },
+    { "plm_dtwin_reads",
+      "plm: DTWIN Reads Typical (DTWRT) of log 0Ah, in 4 KiB reads, 1 to "
+      "2^40; 1048576 (default)" },
+    { "plm_ndwin_ms",
+      "plm: NDWIN Time Minimum High (NTWTMH) of log 0Ah, in ms, 0 to "
+      "3600000; FEMU reports it as given; 1000 (default)" },
+    { "plm_ndwin_min_ms",
+      "plm: NDWIN Time Minimum Low (NTWTML) of log 0Ah, in ms, 0 to "
+      "plm_ndwin_ms; 0 (default)" },
     { "sanitize_ns",
       "bbssd, NoSSD with sanitize_ops: Sanitize Namespace (8Ch, Base 2.3 "
       "5.2.23), a crypto erase of one namespace while other namespaces keep "
