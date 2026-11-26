@@ -21356,6 +21356,184 @@ void femu_test_plm_aen_race(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * Format NVM (@data "format") or Sanitize ("sanitize") in DTWIN, with
+ * every ENEV bit and AEC bit 12 set (design D2):
+ *
+ *   DTWIN --Format or Sanitize--> NDWIN, ETYP 0, no 0Bh entry, no AEN
+ *
+ * The FTL then runs NDWIN work again. It catches a command that raises
+ * DEAT, and one that leaves the set in DTWIN.
+ */
+void femu_test_plm_format(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    bool san = !strcmp(data, "sanitize");
+    const char *id = san ? "plms" : "plmf";
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    int64_t v[FEMU_PLMF_N];
+    uint8_t log[512];
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 12,
+                                             NULL)), ==, NVME_SUCCESS);
+    femu_plm_enable(&c, lbuf, 0xc007);
+    femu_plm_win(&c, lbuf, 1);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 16; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_ftl(qts, id, v);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 1);
+    cid = femu_aer(&c);
+    if (san) {
+        g_assert_cmphex(femu_sanitize(&c, 0x2), ==, NVME_SUCCESS);
+    } else {
+        g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+    femu_plm_ftl(qts, id, v);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 0);
+    g_assert_cmpint(v[FEMU_PLMF_PREP], ==, 1);
+    g_assert_cmpint(femu_plm_aer_wait(&c, cid, 300), ==, -1);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Format NVM in DTWIN with 40 pages in the write buffer and the free
+ * lines at the high mark + 1, as plm-vwc sets them up. There a cache
+ * disable drains them and forces GC (DEAT). Format drops them instead:
+ *
+ *   DTWIN, 40 pages buffered, 5 free lines --> Format: NDWIN, ETYP 0,
+ *     no 0Bh entry
+ *
+ * The Format drain runs only with power_loss, which plm refuses. So no
+ * test can tell NDWIN before the drain from after it. This one catches
+ * a Format that writes the buffer back in DTWIN.
+ */
+void femu_test_plm_format_buffer(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    int64_t v[FEMU_PLMF_N];
+    uint8_t log[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmb", 1000000);
+    femu_plm_enable(&c, lbuf, 0xc007);
+    femu_plm_win(&c, lbuf, 1);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_plm_fill(&c, qts, "plmb", buf, 5);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 1, NULL)),
+                    ==, NVME_SUCCESS);
+    for (int lpn = 0; lpn < 40; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_ftl(qts, "plmb", v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], ==, 5);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 1);
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A cache disable (Set Features 06h, WCE 0) drains the write buffer. The
+ * host caused that drain, so a forced GC in it is a DEAT (design D2).
+ * ENEV bit 15 is set; x-plm-dtwwt keeps the writes under DTWWT.
+ *
+ *   DTWIN, 8 pages buffered, many free lines --> WCE 0: no GC, DTWIN
+ *   DTWIN, free lines at the high mark + 1, 40 pages buffered
+ *     --> WCE 0: the drain forces GC --> NDWIN, ETYP DEAT, 0Bh entry
+ *
+ * It catches a drain that skips the excursion check.
+ */
+void femu_test_plm_vwc(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    int64_t v[FEMU_PLMF_N];
+    uint8_t log[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmv", 1000000);
+    femu_plm_enable(&c, lbuf, 1u << 15);
+    femu_plm_win(&c, lbuf, 1);
+    qtest_memset(qts, buf, 0x2e, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 8; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 1);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+
+    /* the cache is off: the fill programs each write */
+    femu_plm_fill(&c, qts, "plmv", buf, 5);
+    femu_plm_ftl(qts, "plmv", v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], ==, 5);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 1);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 1, NULL)),
+                    ==, NVME_SUCCESS);
+    for (int lpn = 0; lpn < 40; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_ftl(qts, "plmv", v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], ==, 5);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 1);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 1);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x06, false, 0, 0, NULL)),
+                    ==, NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 15);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 1);
+    femu_plm_log0a(&c, false, lbuf, log);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, buf);
+}
+
+/*
  * Read disturb with real draws: rber_read_double=1 doubles the error mean
  * with each read of the block. A fresh block reads with no retry; after 40
  * reads the mean reaches the cap and reads need retries. Without the read

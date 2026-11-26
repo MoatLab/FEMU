@@ -2337,6 +2337,32 @@ static void femu_register_nodes(void)
             "id=plmd," FEMU_PLM_GC_LONG ",plm_dtwin_reads=8",
         .before = femu_plm_before,
     });
+    qos_add_test("plm-format", "femu", femu_test_plm_format,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"format",
+        .edge.extra_device_opts = "id=plmf," FEMU_PLM_GC_LONG,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-sanitize", "femu", femu_test_plm_format,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"sanitize",
+        .edge.extra_device_opts = "id=plms," FEMU_PLM_GC_LONG,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-format-buffer", "femu", femu_test_plm_format_buffer,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmb," FEMU_PLM_GC_LONG ",vwc=1,buffer_size=64,"
+            "buffer_thres_pcent=90",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-vwc", "femu", femu_test_plm_vwc,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmv," FEMU_PLM_GC_LONG ",vwc=1,buffer_size=64,"
+            "buffer_thres_pcent=90",
+        .before = femu_plm_before,
+    });
     qos_add_test("plm-golden-off", "femu", femu_test_plm_golden_off,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"plain",

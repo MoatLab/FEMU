@@ -4184,6 +4184,7 @@ void femu_plm_step(FemuCtrl *n);
 void femu_plm_excursion(FemuCtrl *n);
 bool femu_plm_idle_due(FemuCtrl *n);
 void femu_plm_reset(FemuCtrl *n);
+void femu_plm_format(FemuCtrl *n);
 void femu_plm_add_props(Object *obj);
 bool femu_sanns_check(FemuCtrl *n, Error **errp);
 bool femu_sanns_busy(FemuCtrl *n);

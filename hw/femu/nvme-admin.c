@@ -2589,6 +2589,8 @@ static uint16_t nvme_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
         /*
          * A disabled cache may not hold pages, and no later write may come
          * to drain it. Drain here; if a page finds no room, keep the cache on.
+         * plm: the host caused this drain, so a forced GC in it ends a
+         * DTWIN with DEAT (do_gc_pass()).
          */
         if (!(dw11 & 1)) {
             uint16_t status = bbssd_flush_all(n);
@@ -4710,6 +4712,12 @@ static uint16_t nvme_sanitize_finish(FemuCtrl *n)
     }
 
     resume = nvme_pause_pollers(n);
+    /*
+     * The host may set DTWIN while a background sanitize runs. Today
+     * sanitize_ms refuses a femu-subsys, which plm needs, so this call
+     * finds NDWIN. It stays for when the two work together.
+     */
+    femu_plm_format(n);
     /* a staged fused Write must not land after the erase */
     femu_fused_retire(n, NULL, NVME_SANITIZE_IN_PROGRESS);
     /* buffered writes reach the media first, so they are sanitized too */
@@ -4842,6 +4850,8 @@ static uint16_t nvme_sanitize(FemuCtrl *n, NvmeCmd *cmd)
                                  NVME_LOG_SANITIZE, n->namespaces[i].id, true);
         }
     }
+    /* plm: NDWIN before the drain, with no event (design D2) */
+    femu_plm_format(n);
     trace_femu_sanitize(dw10, false);
     sanitize->cdw10 = dw10;
     sanitize->cdw11 = le32_to_cpu(cmd->cdw11);
@@ -5802,6 +5812,14 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
         nvme_format_prep_free(n, prep);
         return NVME_CMD_SEQ_ERROR | NVME_DNR;
     }
+
+    /*
+     * plm: NDWIN before the drain, with no event (design D2). A Format
+     * that fails after this point stays in NDWIN, by design: the window
+     * moved before any media work, and a failed Format may have done
+     * some. The host selects DTWIN again.
+     */
+    femu_plm_format(n);
 
     /* validated, and nothing changed yet: Format NVM Start (Figure 245) */
     stl_le_p(ev, nsid);

@@ -36,7 +36,9 @@
  *
  * A held item keeps its state and runs in the next NDWIN. (*) A forced
  * GC pass with a victim first moves the set to NDWIN with ETYP DEAT,
- * then runs. A failed die is a DEAT too.
+ * then runs. A failed die is a DEAT too, and so is a forced GC in the
+ * drain of a cache disable, which the host caused. Format NVM and
+ * Sanitize move the set to NDWIN before their drain, with no event.
  *
  * The FTL thread counts the DTWIN reads and writes, and leaves DTWIN on
  * its own when one passes its limit, or when the time ends (MVEAT):
@@ -487,6 +489,29 @@ void femu_plm_reset(FemuCtrl *n)
     memset(pl->cfg, 0, sizeof(pl->cfg));
     qatomic_set(&pl->events, 0);
     femu_plm_window(n, FEMU_PLMW_OFF);
+}
+
+/**
+ * femu_plm_format - a Format NVM or a Sanitize is about to change the media
+ * @n: the controller
+ *
+ * The set leaves DTWIN before the drain of the command, with no ETYP bit
+ * and no event (design D2): the host asked for this media work. A forced
+ * GC in the drain then finds NDWIN, so it is no excursion. The caller is
+ * the main loop; the pause nests in one the caller holds.
+ */
+void femu_plm_format(FemuCtrl *n)
+{
+    bool resume;
+
+    if (!n->plm) {
+        return;
+    }
+    resume = nvme_pause_pollers(n);
+    if (qatomic_read(&n->plm_st.window) == FEMU_PLMW_DTWIN) {
+        femu_plm_window(n, FEMU_PLMW_NDWIN);
+    }
+    nvme_resume_pollers(n, resume);
 }
 
 /**

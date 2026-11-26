@@ -1164,8 +1164,20 @@ bit 12 (PLEAN), and a new log 0Bh entry raises the notice.
  NDWIN --Set 14h WSEL 001b--> DTWIN (PLMW 001b)
  DTWIN --Set 14h WSEL 010b, or Set 13h LPE=1--> NDWIN
  DTWIN --a limit passed (MVEAT), or a forced GC pass (DEAT)--> NDWIN
+ DTWIN --Format NVM or Sanitize, no event--> NDWIN
  NDWIN, DTWIN --Set 13h LPE=0, or a reset--> DISABLED
 ```
+
+Format NVM and Sanitize move the set to NDWIN before their drain, with
+no ETYP bit, no log 0Bh entry and no AEN: the host asked for the media
+work. A background Sanitize does this again when it ends, since the host
+may select DTWIN while it runs. Today `sanitize_ms` refuses a femu-subsys,
+which plm needs, so that second step finds NDWIN.
+
+The Format and Sanitize drains run only with `power_loss`, which plm
+refuses. Without it, the buffered pages are dropped with no GC. A Format
+that fails after its start stays in NDWIN: the window moved before any
+media work, and the host selects DTWIN again.
 
 | Command | Rule |
 | --- | --- |
@@ -1302,7 +1314,19 @@ never blocks a write:
 ```
 
 DEAT sets its ETYP bit also with ENEV clear; the log 0Bh entry needs
-ENEV bit 15 (DTE). A failed die (`x-rain-fail`) is a DEAT too: the
+ENEV bit 15 (DTE). A cache disable (Set Features 06h, WCE 0) drains the
+write buffer on the main loop with the FTL thread paused. The host
+caused that drain, so a forced GC pass in it is a DEAT with its event;
+a drain that forces no GC keeps the DTWIN.
+
+```text
+ Set 06h WCE 0 --> pause --> drain the buffer --> free lines at the high mark?
+                                                   |yes                |no
+                                                   v                   v
+                                     do_gc_pass(force): DEAT       still DTWIN
+```
+
+A failed die (`x-rain-fail`) is a DEAT too: the
 failure closes the open lines and starts a rebuild. Read-only media
 alone is no excursion, since no GC can run there. After a DEAT, DTWTE
 in NDWIN keeps the time the aborted DTWIN had left, so the host can line
@@ -1471,6 +1495,9 @@ registers with no guest. Cases that target this chapter include:
 | `plm-mveat-time` | `plm_dtwin_ms` 300 and no I/O: the idle FTL thread leaves DTWIN after 300 ms and within 800 ms, with MVEAT |
 | `plm-warn` | DTRW, DTWW and DTTW each fire once per DTWIN when the estimate falls below the threshold, with their ENEV bit; with ENEV clear, no bit and no entry; DTTW comes from the idle FTL thread |
 | `plm-aen` | AEC bit 12 clear: an entry and no AEN; set: an MVEAT exit gives AEN 04h, log 0Bh; no second AEN while the Notice is masked; the log 0Bh read ends it; no AEN while the entry stays; a masked MVEAT exit on the FTL thread gives no AEN |
+| `plm-format`, `plm-sanitize` | Format NVM and Sanitize in DTWIN, with every ENEV bit and AEC bit 12: NDWIN after the command, ETYP 0, no log 0Bh entry, no AEN; the FTL runs NDWIN work again |
+| `plm-format-buffer` | Format NVM in DTWIN with 40 buffered pages and the free lines at the high mark + 1: NDWIN, ETYP 0, no log 0Bh entry |
+| `plm-vwc` | a cache disable in DTWIN that forces no GC keeps DTWIN; one whose drain forces GC at the high mark leaves with ETYP DEAT and the log 0Bh entry |
 | `plm-aen-race` | 64 log 0Bh reads race an MVEAT exit: each time the log data or the AEN shows the entry (timing dependent) |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
@@ -1554,7 +1581,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | `hw/femu/dma.c` | PRP and SGL mapping, `femu_dma_rw` |
 | `hw/femu/lib/rte_ring.c`, `hw/femu/lib/pqueue.c` | the rings and the completion heap |
 | `hw/femu/nvme.h` | `NvmeSQueue`, `NvmeCQueue`, `NvmeRequest`, `FemuCtrl`, `FemuPollerCtr`, register layout |
-| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot, the NDWIN target in `femu_plm_init()`, the DTWIN amounts, limits and warnings in `femu_plm_count()` and `femu_plm_step()`, the AEN in `femu_plm_event()` |
+| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot, the NDWIN target in `femu_plm_init()`, the DTWIN amounts, limits and warnings in `femu_plm_count()` and `femu_plm_step()`, the AEN in `femu_plm_event()`, the NDWIN of Format and Sanitize in `femu_plm_format()` |
 | `hw/femu/bbssd/ftl-line-gc.c`, `hw/femu/bbssd/bb.c` | `ssd_plm_prep_due()`, `ssd_plm_prep_step()`, `bb_plm_idle()`: the NDWIN preparation GC; the DEAT check in `do_gc_pass()` |
 | `hw/femu/femu-ext-ops.h` | `FemuExtCtrlOps`, the mode handler table, and its rules |
 
