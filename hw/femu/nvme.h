@@ -162,6 +162,7 @@ enum NvmeFdpEventFlags {
 enum NvmeIdCtrlCtratt {
     NVME_CTRATT_NSETS   = 1 <<  2,
     NVME_CTRATT_ENDGRPS = 1 <<  4,
+    NVME_CTRATT_PLM     = 1 <<  5,   /* Predictable Latency Mode */
     NVME_CTRATT_UUIDL   = 1 <<  9,
     NVME_CTRATT_ELBAS   = 1 << 15,
     NVME_CTRATT_FDPS    = 1 << 19,
@@ -1899,9 +1900,11 @@ static inline void nvme_check_size(void)
 #define NVME_AEC_FW_ACTIVATION (1u << 9)
 #define NVME_AEC_TELEMETRY  (1u << 10)  /* Telemetry Log Notices */
 #define NVME_AEC_ANA_CHANGE (1u << 11)  /* ANA Change Notices */
+#define NVME_AEC_PLEA       (1u << 12)  /* PL Event Aggregate Log Change */
 /* LBA Status Information Poll Interval, 100 ms units; the LSIRI floor */
 #define NVME_LSIPI          10
 #define NVME_AER_INFO_ANA_CHANGE 0x03   /* notice: ANA Change */
+#define NVME_AER_INFO_PLEA      0x04    /* notice: PL Event Aggregate Log */
 #define NVME_AER_INFO_TELEMETRY 0x02    /* notice: Telemetry Log Changed */
 #define NVME_AER_INFO_RESV_LOG  0x00    /* I/O specific: log 80h has pages */
 #define NVME_AER_INFO_SANITIZED 0x01    /* I/O specific: sanitize done */
@@ -2885,8 +2888,12 @@ typedef struct FemuPlm {
     /* their bytes: units round up once over the window (FTL thread) */
     uint64_t        rd_bytes;
     uint64_t        wr_bytes;
+    /* qtest only: ETYP bits to record after the next log 0Bh copy */
+    uint32_t        after_copy;
     /* ETYP in bits 15:0; bit 16: the set is in log 0Bh */
     uint32_t        events;
+    /* the warnings this DTWIN gave, ETYP bits 2:0 (FTL thread) */
+    uint32_t        warned;
     QemuSeqLock     seq;
     FemuPlmSnap     snap;
 } FemuPlm;

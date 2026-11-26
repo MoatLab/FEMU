@@ -2313,6 +2313,30 @@ static void femu_register_nodes(void)
             "id=plmg," FEMU_PLM_GC_GEO ",plm_dtwin_ms=300",
         .before = femu_plm_before,
     });
+    qos_add_test("plm-warn", "femu", femu_test_plm_warn,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmg," FEMU_PLM_GC_GEO ",plm_dtwin_ms=2000,"
+            "plm_dtwin_reads=64,plm_dtwin_writes=32",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-aen", "femu", femu_test_plm_aen,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmd," FEMU_PLM_GC_LONG ",plm_dtwin_reads=16",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-aen-after-copy", "femu", femu_test_plm_aen_after_copy,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=plmd," FEMU_PLM_GC_LONG,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-aen-race", "femu", femu_test_plm_aen_race,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmd," FEMU_PLM_GC_LONG ",plm_dtwin_reads=8",
+        .before = femu_plm_before,
+    });
     qos_add_test("plm-golden-off", "femu", femu_test_plm_golden_off,
                  &(QOSGraphTestOptions) {
         .arg = (void *)"plain",

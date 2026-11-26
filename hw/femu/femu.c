@@ -3367,7 +3367,8 @@ static void nvme_init_ctrl(FemuCtrl *n)
     }
     /* the one NVM Set of plm=on */
     if (n->plm) {
-        id->ctratt |= cpu_to_le32(NVME_CTRATT_NSETS);
+        id->ctratt |= cpu_to_le32(NVME_CTRATT_NSETS | NVME_CTRATT_PLM);
+        id->oaes |= cpu_to_le32(NVME_AEC_PLEA);
         id->nsetidmax = cpu_to_le16(FEMU_PLM_NVMSETID);
     }
     /*

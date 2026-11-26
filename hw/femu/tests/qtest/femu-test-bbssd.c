@@ -18960,8 +18960,9 @@ static bool femu_plm_zero(const uint8_t *p, size_t len)
 }
 
 /*
- * plm=on: Identify Controller sets CTRATT bit 2 (NSETS) and NSETIDMAX 1,
- * with bits 3 and 4 (rrl, subsystem) and without bit 5 (PLM). Namespace 1
+ * plm=on: Identify Controller sets CTRATT bit 2 (NSETS), bit 5 (PLM),
+ * OAES bit 12 (PLEAN) and NSETIDMAX 1, with bits 3 and 4 (rrl, subsystem).
+ * Namespace 1
  * reports NVMSETID 1 in CNS 00h and 08h. CNS 04h with a start of 0 or 1
  * lists one set: NSETID 1, ENDGID 1, R4KRT above 0, TNVMSC equal to
  * TNVMCAP and UNVMSC 0; every other byte is 0. A start of 2 or FFFFh
@@ -18985,7 +18986,8 @@ void femu_test_plm_identify(void *obj, void *data, QGuestAllocator *alloc)
 
     femu_enable(&c, &femu->dev, alloc);
     femu_plm_identify(&c, buf, 0, 0x01, 0, ctrl);
-    g_assert_cmphex(ldl_le_p(ctrl + 96) & 0x3c, ==, 0x1c);
+    g_assert_cmphex(ldl_le_p(ctrl + 96) & 0x3c, ==, 0x3c);
+    g_assert_cmphex(ldl_le_p(ctrl + 92) & (1u << 12), ==, 1u << 12);
     g_assert_cmpuint(lduw_le_p(ctrl + 338), ==, 1);         /* NSETIDMAX */
     g_assert_cmpuint(lduw_le_p(ctrl + 340), ==, 1);         /* ENDGIDMAX */
     g_assert_cmpuint(ldq_le_p(ctrl + 280), >, 0);           /* TNVMCAP */
@@ -19125,6 +19127,7 @@ void femu_test_plm_golden_off(void *obj, void *data, QGuestAllocator *alloc)
     femu_enable(&c, &femu->dev, alloc);
     femu_plm_identify(&c, buf, 0, 0x01, 0, data4k[0]);
     g_assert_cmphex(ldl_le_p(data4k[0] + 96) & 0x3c, ==, rrl ? 0x18 : 0x10);
+    g_assert_cmphex(ldl_le_p(data4k[0] + 92) & (1u << 12), ==, 0);
     g_assert_cmpuint(lduw_le_p(data4k[0] + 338), ==, 0);
     femu_plm_identify(&c, buf, 1, 0x00, 0, data4k[1]);
     g_assert_cmpuint(lduw_le_p(data4k[1] + 100), ==, 0);
@@ -19455,7 +19458,7 @@ void femu_test_plm_nsid(void *obj, void *data, QGuestAllocator *alloc)
  *        3 to 7 and CDW12 bit 3 refused; LPE=1 gives NDWIN; 13h LPE=1
  *        in DTWIN gives NDWIN again
  *   log  12h: FSUPP and NVM Set scope for 13h and 14h; 00h: 0Ah and 0Bh;
- *        Identify keeps CTRATT bit 5 and OAES bit 12 clear (a later step)
+ *        Identify sets CTRATT bit 5 (PLM) and OAES bit 12 (PLEAN)
  *   AEC  Feature 0Bh keeps bit 12
  */
 void femu_test_plm_config(void *obj, void *data, QGuestAllocator *alloc)
@@ -19479,8 +19482,8 @@ void femu_test_plm_config(void *obj, void *data, QGuestAllocator *alloc)
 
     femu_enable(&c, &femu->dev, alloc);
     femu_plm_identify(&c, buf, 0, 0x01, 0, ctrl);
-    g_assert_cmphex(ldl_le_p(ctrl + 96) & (1u << 5), ==, 0);
-    g_assert_cmphex(ldl_le_p(ctrl + 92) & (1u << 12), ==, 0);
+    g_assert_cmphex(ldl_le_p(ctrl + 96) & (1u << 5), ==, 1u << 5);
+    g_assert_cmphex(ldl_le_p(ctrl + 92) & (1u << 12), ==, 1u << 12);
 
     /* disabled: 14h refused, its capabilities still answer */
     g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, buf, &res), ==,
@@ -19593,7 +19596,7 @@ void femu_test_plm_config(void *obj, void *data, QGuestAllocator *alloc)
                     NVME_SUCCESS);
     g_assert_cmphex(qtest_readl(qts, buf + 0x0a * 4), ==, 1);
     g_assert_cmphex(qtest_readl(qts, buf + 0x0b * 4), ==, 1);
-    /* AEC keeps bit 12 (PLEALCN) for the later notice */
+    /* AEC keeps bit 12 (PLEALCN), the enable of the notice */
     g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 12,
                                              NULL)), ==, NVME_SUCCESS);
     g_assert_cmphex(FEMU_SC(femu_get_feature(&c, 0x0b, 0, 0, 0, &res)), ==,
@@ -20912,6 +20915,444 @@ void femu_test_plm_mveat_time(void *obj, void *data, QGuestAllocator *alloc)
     femu_plm_log0a(&c, false, lbuf, log);
     femu_disable(&c);
     guest_free(alloc, lbuf);
+}
+
+/*
+ * The warnings (Figure 423), with plm_dtwin_reads 64, plm_dtwin_writes 32
+ * and plm_dtwin_ms 2000. Each warning sets its ETYP bit and the log 0Bh
+ * entry once, when its estimate falls below its threshold while its ENEV
+ * bit is set:
+ *
+ *   DTRW  DTRT 60: DTWRE 60 gives none, 59 gives it; three more reads
+ *         after log 0Ah clears it give no second one
+ *   none  ENEV clear, DTRT 60: ten reads give no warning bit, no entry
+ *   DTRW  a new DTWIN gives it again
+ *   DTWW  DTWT 30: DTWWE 30 gives none, 29 gives it
+ *   DTTW  DTTT 1800, no I/O: the idle FTL thread gives it when DTWTE
+ *         falls below 1800, after 200 ms, in DTWIN
+ */
+void femu_test_plm_warn(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint8_t cfg[512];
+    uint8_t log[512];
+    int64_t t0;
+    int64_t t;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_enable(&c, lbuf, 0);
+    qtest_memset(qts, buf, 0x7d, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 16; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+
+    /* DTRW */
+    femu_plm_cfg(cfg, 0x1, 60, 0, 0);
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, lbuf), ==, NVME_SUCCESS);
+    femu_plm_win(&c, lbuf, 1);
+    g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 4, buf, list)), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(ldq_le_p(log + 128), ==, 60);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 1);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 1);
+    femu_plm_log0a(&c, false, lbuf, log);
+    for (int i = 0; i < 3; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(ldq_le_p(log + 128), ==, 56);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+
+    /* ENEV clear: the threshold alone gives nothing */
+    femu_plm_cfg(cfg, 0, 60, 0, 0);
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, lbuf), ==, NVME_SUCCESS);
+    femu_plm_win(&c, lbuf, 1);
+    for (int i = 0; i < 10; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(ldq_le_p(log + 128), ==, 54);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+
+    /* a new DTWIN: DTRW fires again */
+    femu_plm_cfg(cfg, 0x1, 60, 0, 0);
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, lbuf), ==, NVME_SUCCESS);
+    femu_plm_win(&c, lbuf, 1);
+    for (int i = 0; i < 5; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_log0a(&c, false, lbuf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 0);
+
+    /* DTWW */
+    femu_plm_cfg(cfg, 0x2, 0, 30, 0);
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, lbuf), ==, NVME_SUCCESS);
+    femu_plm_win(&c, lbuf, 1);
+    for (int i = 0; i < 2; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)i * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(ldq_le_p(log + 136), ==, 30);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 2 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 1);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 1);
+    femu_plm_log0a(&c, false, lbuf, log);
+
+    /* DTTW: from the idle FTL thread */
+    femu_plm_cfg(cfg, 0x4, 0, 0, 1800);
+    g_assert_cmphex(femu_plm_set13(&c, 1, cfg, lbuf), ==, NVME_SUCCESS);
+    t0 = g_get_monotonic_time();
+    femu_plm_win(&c, lbuf, 1);
+    for (;;) {
+        femu_plm_log0a(&c, true, lbuf, log);
+        t = g_get_monotonic_time() - t0;
+        if (lduw_le_p(log + 2) || t > 1000 * 1000) {
+            break;
+        }
+        g_usleep(10 * 1000);
+    }
+    g_test_message("DTTW after %" PRId64 " us", t);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 2);
+    g_assert_cmpuint(log[0], ==, 1);
+    g_assert_cmpint(t, >=, 199 * 1000);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 1);
+    femu_plm_log0a(&c, false, lbuf, log);
+    femu_plm_win(&c, lbuf, 2);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/* wait up to @ms for the AER @cid: its Dword 0, or -1 when none came */
+static int64_t femu_plm_aer_wait(FemuCtrlState *c, uint16_t cid, int ms)
+{
+    int64_t end = g_get_monotonic_time() + (int64_t)ms * 1000;
+    uint32_t res = 0;
+    uint16_t got;
+
+    while (!femu_cq_ready(c, &c->admin)) {
+        if (g_get_monotonic_time() > end) {
+            return -1;
+        }
+        g_usleep(10 * 1000);
+    }
+    g_assert_cmphex(FEMU_SC(femu_complete(c, &c->admin, &got, &res)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(got, ==, cid);
+    return res;
+}
+
+/*
+ * The Predictable Latency Event Aggregate Log Change notice (AEN Notice,
+ * information 04h, log 0Bh), with ENEV bit 14 and plm_dtwin_reads 16.
+ *
+ *   AEC 12 clear  an MVEAT entry gives no AEN; 0Ah without RAE clears
+ *                 ETYP and the entry
+ *   AEC 12 set    a real MVEAT exit (read 17) completes the AER
+ *   masked, FTL   0Ah clears the entry, a real MVEAT exit on the FTL
+ *                 thread adds it again: no AEN
+ *   masked        0Ah clears the entry, a new entry comes: no AEN until
+ *                 log 0Bh is read; that read drops the queued notice
+ *   no new entry  an event while the entry stays gives no AEN
+ *   unmasked      0Ah clears the entry, a new entry gives the AEN
+ *
+ * Any AEN that comes early completes before an admin command, which
+ * then fails its CID check.
+ */
+void femu_test_plm_aen(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint8_t log[512];
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_enable(&c, lbuf, 1u << 14);
+    qtest_memset(qts, buf, 0x8d, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 4; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+
+    /* AEC bit 12 clear: the entry, and no AEN */
+    cid = femu_aer(&c);
+    femu_plm_inject(qts, 1u << 14);
+    g_assert_cmpint(femu_plm_aer_wait(&c, cid, 300), ==, -1);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 1);
+    femu_plm_log0a(&c, false, lbuf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+
+    /* AEC bit 12 set: a real MVEAT completes the outstanding AER */
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 12,
+                                             NULL)), ==, NVME_SUCCESS);
+    femu_plm_win(&c, lbuf, 1);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 4, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(femu_plm_aer_wait(&c, cid, 300), ==, -1);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_aer_wait(&c, cid, 2000), ==, 0x000b0402);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+
+    /* masked: an MVEAT exit of the FTL thread adds the entry, no AEN */
+    cid = femu_aer(&c);
+    femu_plm_log0a(&c, false, lbuf, log);
+    femu_plm_win(&c, lbuf, 1);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 4, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(femu_plm_aer_wait(&c, cid, 500), ==, -1);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+
+    /* masked: a new entry waits for the log 0Bh read */
+    femu_plm_log0a(&c, false, lbuf, log);
+    femu_plm_inject(qts, 1u << 14);
+    g_assert_cmpint(femu_plm_aer_wait(&c, cid, 300), ==, -1);
+    g_assert_cmpuint(femu_plm_nument(&c, false, lbuf), ==, 1);
+    g_assert_cmpint(femu_plm_aer_wait(&c, cid, 300), ==, -1);
+
+    /* the entry stays: no new entry, no AEN */
+    femu_plm_inject(qts, 1u << 14);
+    g_assert_cmpint(femu_plm_aer_wait(&c, cid, 300), ==, -1);
+
+    /* unmasked: the next new entry completes the AER */
+    femu_plm_log0a(&c, false, lbuf, log);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+    femu_plm_inject(qts, 1u << 14);
+    g_assert_cmphex(femu_plm_aer_wait(&c, cid, 2000), ==, 0x000b0402);
+    g_assert_cmpuint(femu_plm_nument(&c, false, lbuf), ==, 1);
+    femu_plm_log0a(&c, false, lbuf, log);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * An entry that comes after the log 0Bh copy and before the read drops
+ * the queued notice, with AEC bit 12 and ENEV bit 14. The race test
+ * cannot reach this window on demand; x-plm-after-copy places the entry
+ * there, as the FTL thread may:
+ *
+ *   Get Log 0Bh --> copy NUMENT 0 --> entry, notice queued --> drop
+ *                                     --> notice queued again --> AEN
+ *
+ * The copy shows no entry, so the AEN must come, and the next log 0Bh
+ * read must show the entry.
+ */
+void femu_test_plm_aen_after_copy(void *obj, void *data,
+                                  QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint64_t gbuf = guest_alloc(alloc, 4096);
+    NvmeCmd get = { 0 };
+    uint8_t log[512];
+    bool aen = false;
+    bool logged = false;
+    uint16_t log_cid;
+    uint16_t aer;
+    uint16_t got;
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_plm_enable(&c, lbuf, 1u << 14);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 12,
+                                             NULL)), ==, NVME_SUCCESS);
+    aer = femu_aer(&c);
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/plmd',"
+                             "'property':'x-plm-after-copy','value':%d}}",
+                             1 << 14);
+
+    /* the AEN may complete before or after the Get Log */
+    get.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+    get.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+    get.dptr.prp1 = cpu_to_le64(gbuf);
+    get.cdw10 = cpu_to_le32(0x0b | 3u << 16);   /* 16 bytes, no RAE */
+    qtest_memset(qts, gbuf, 0xa5, 16);
+    log_cid = c.cid;
+    femu_submit(&c, &c.admin, &get);
+    while (!logged) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, &got, &res)), ==,
+                        NVME_SUCCESS);
+        if (got == log_cid) {
+            logged = true;
+        } else {
+            g_assert_cmpint(got, ==, aer);
+            g_assert_cmphex(res, ==, 0x000b0402);
+            aen = true;
+        }
+    }
+    g_assert_cmpuint(qtest_readq(qts, gbuf), ==, 0);
+    if (!aen) {
+        g_assert_cmphex(femu_plm_aer_wait(&c, aer, 2000), ==, 0x000b0402);
+    }
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 1);
+    femu_plm_log0a(&c, false, lbuf, log);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+
+    /* the hook fired once: a second read adds nothing */
+    femu_plm_log0a(&c, false, lbuf, log);
+    g_assert_cmpuint(femu_plm_nument(&c, false, lbuf), ==, 0);
+    femu_disable(&c);
+    guest_free(alloc, gbuf);
+    guest_free(alloc, lbuf);
+}
+
+/*
+ * A log 0Bh read without RAE races an MVEAT exit of the FTL thread, 64
+ * times, with AEC bit 12 and ENEV bit 14. The read copies the entry,
+ * then drops a queued notice. Each time, the host must learn of the new
+ * entry from the log data or from the AEN:
+ *
+ *   I/O read 9 (DTWRT 8) --> FTL thread: entry, notice queued
+ *   Get Log 0Bh ----------> copy NUMENT ... drop queued notice
+ *   NUMENT 0 in the copy --> the AEN must still come
+ *
+ * The race is timing dependent, so one run may not reach it.
+ */
+void femu_test_plm_aen_race(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint64_t gbuf = guest_alloc(alloc, 4096);
+    uint8_t log[512];
+    int seen = 0;
+    int sent = 0;
+    uint16_t aer;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_enable(&c, lbuf, 1u << 14);
+    g_assert_cmphex(FEMU_SC(femu_set_feature(&c, 0x0b, false, 0, 1u << 12,
+                                             NULL)), ==, NVME_SUCCESS);
+    qtest_memset(qts, buf, 0x9d, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 4; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    aer = femu_aer(&c);
+    for (int round = 0; round < 64; round++) {
+        NvmeRwCmd rw = { 0 };
+        NvmeCmd get = { 0 };
+        uint16_t log_cid;
+        uint16_t got;
+        uint32_t res;
+        uint64_t nument;
+        bool aen = false;
+        bool logged = false;
+        int64_t r;
+
+        /* clear ETYP and the entry, then a new DTWIN at its read limit */
+        femu_plm_log0a(&c, false, lbuf, log);
+        femu_plm_win(&c, lbuf, 1);
+        for (int i = 0; i < 2; i++) {
+            g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 4, buf, list)),
+                            ==, NVME_SUCCESS);
+        }
+        rw.opcode = NVME_CMD_READ;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.nlb = cpu_to_le16(4096 / c.lba_size - 1);
+        get.opcode = NVME_ADM_CMD_GET_LOG_PAGE;
+        get.nsid = cpu_to_le32(NVME_NSID_BROADCAST);
+        get.dptr.prp1 = cpu_to_le64(gbuf);
+        get.cdw10 = cpu_to_le32(0x0b | 3u << 16);   /* 16 bytes, no RAE */
+        qtest_memset(qts, gbuf, 0xa5, 16);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+        log_cid = c.cid;
+        femu_submit(&c, &c.admin, &get);
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+        while (!logged) {
+            g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.admin, &got,
+                                                  &res)), ==, NVME_SUCCESS);
+            if (got == log_cid) {
+                logged = true;
+            } else {
+                g_assert_cmpint(got, ==, aer);
+                g_assert_cmphex(res, ==, 0x000b0402);
+                aen = true;
+            }
+        }
+        nument = qtest_readq(qts, gbuf);
+        if (!aen) {
+            r = femu_plm_aer_wait(&c, aer, nument ? 200 : 2000);
+            if (r >= 0) {
+                g_assert_cmphex(r, ==, 0x000b0402);
+                aen = true;
+            }
+        }
+        g_assert_true(aen || nument);
+        seen += nument != 0;
+        sent += aen;
+        if (aen) {
+            /* the posted notice masks the type until a log 0Bh read */
+            femu_plm_nument(&c, false, lbuf);
+            aer = femu_aer(&c);
+        }
+    }
+    g_test_message("64 rounds: the log showed the entry %d times, the AEN "
+                   "came %d times", seen, sent);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, gbuf);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
 }
 
 /*

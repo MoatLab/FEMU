@@ -1156,8 +1156,8 @@ subsystem applies too: the subsystem takes this one controller.
 The host enables Predictable Latency Mode with Feature 13h and then
 selects the window with Feature 14h. A Deterministic Window (DTWIN) also
 ends on its own when it passes a limit (MVEAT), or when a forced GC
-pass is due (DEAT). CTRATT bit 5 (PLM) and OAES bit 12 stay clear, and
-no Predictable Latency event raises an AEN yet.
+pass is due (DEAT). Identify Controller sets CTRATT bit 5 (PLM) and OAES
+bit 12 (PLEAN), and a new log 0Bh entry raises the notice.
 
 ```text
  DISABLED (PLMW 000b) --Set 13h LPE=1--> NDWIN (PLMW 010b)
@@ -1193,9 +1193,29 @@ enabled event is pending; bytes past its 10 bytes read as zeros, at any
 offset. The rules of the events are those of Figures 223 to 225:
 
 - MVEAT and DEAT always set their ETYP bit; a warning bit needs its ENEV bit.
+- A warning fires once per DTWIN, when its estimate falls below its threshold: DTRW for DTWRE below DTRT, DTWW for DTWWE below DTWT, DTTW for DTWTE below DTTT.
 - An event whose ENEV bit is set adds the log 0Bh entry.
+- A new entry raises an AEN (Notice, information 04h, log 0Bh) when AEC bit 12 is set.
 - A read of log 0Ah without RAE that returns ETYP (bytes 3:2) clears the ETYP bits and the entry it reported.
 - A read of log 0Bh without RAE ends its Notice; the entry stays.
+
+```text
+ FTL thread: limit, excursion or warning
+   |
+   v
+ ETYP bits (+ entry if ENEV) --> entry new and AEC bit 12? --yes--> AEN queue
+                                                                     |
+ main loop: aer_bh posts the AEN; the Notice type is masked  <-------+
+            Get Log 0Bh, no RAE --> mask cleared, a queued notice dropped
+            Get Log 0Ah, no RAE --> ETYP and entry cleared
+```
+
+The FTL thread may add an entry while a log 0Bh read runs, after the
+read copied the data and before it drops the queued notice. The read
+then sends the notice again, so the host learns of the entry.
+
+The time warning, like the time limit, needs no request: the idle FTL
+thread checks both.
 
 A log read never pauses the data plane. The FTL thread publishes its free
 lines, the free pages of the open line and the buffer count under a
@@ -1425,12 +1445,12 @@ registers with no guest. Cases that target this chapter include:
 | `v2-refusals` | CC.AMS other than round robin fails the enable; Identify CNS 00h on a KV namespace fails with Invalid I/O Command Set while CNS 08h answers; logs 00h and 05h refuse an unknown CSI; CNS 07h for KV is refused under CC.CSS 000b while CNS 1Ah is not; CNS 1Fh answers an allocated NSID and refuses 0 and FFFFFFFFh |
 | `endgrp-reported` | with a subsystem and FDP off, CTRATT bit 4, ENDGIDMAX and the ENDGID of a block and a KV namespace (CNS 08h, and CNS 05h for KV) report the one endurance group; CNS 19h lists group 1 for a start of 0 or 1 and no group for 2 or FFFFh; the FDP pages, FDP Mode and I/O Management are refused |
 | `endgrp-list-absent` | without a subsystem, CNS 19h fails with Invalid Field |
-| `plm-golden-off` | with `rrl=on`, a subsystem and `plm=off`: CTRATT bit 2, NSETIDMAX and both NVMSETID fields are 0; CNS 04h fails; Feature 12h keeps subsystem scope and ignores NVMSETID; 13h, 14h, logs 0Ah and 0Bh are refused |
-| `plm-identify`, `plm-identify-hints` | with `plm=on`: CTRATT bit 2, NSETIDMAX 1, NVMSETID 1 in CNS 00h and 08h; CNS 04h lists set 1 in group 1 for a start of 0 or 1 and no set from 2; OWS is 0 without a NOWS hint and NOWS + 1 blocks with `perf_hints=on` |
+| `plm-golden-off` | with `rrl=on`, a subsystem and `plm=off`: CTRATT bits 2 and 5, OAES bit 12, NSETIDMAX and both NVMSETID fields are 0; log 00h LSUPP of 0Ah and 0Bh is 0; CNS 04h fails; Feature 12h keeps subsystem scope and ignores NVMSETID; 13h, 14h, logs 0Ah and 0Bh are refused |
+| `plm-identify`, `plm-identify-hints` | with `plm=on`: CTRATT bits 2 and 5, OAES bit 12, NSETIDMAX 1, NVMSETID 1 in CNS 00h and 08h; CNS 04h lists set 1 in group 1 for a start of 0 or 1 and no set from 2; OWS is 0 without a NOWS hint and NOWS + 1 blocks with `perf_hints=on` |
 | `plm-rrl` | with `plm=on`: Feature 12h refuses NVMSETID 0 and 7, and CDW11 bits 31:16, and takes 1; a refused Set keeps the level; SEL 3 gives changeable only; log 12h gives it NVM Set scope |
 | `plm-refused` | each realize refusal of `plm`, the window limit ranges, `plm_ndwin_lines` out of range, a limit without `plm=on`, and a device with no line above the high mark |
 | `plm-nsid` | NSID 1h and FFFFFFFFh on Get and Set 12h, 13h and 14h fail with Invalid Field |
-| `plm-config` | the checks of 13h and 14h, the 512-byte round trip, Select 1 to 3, 14h while disabled, 13h LPE=1 from DTWIN, log 12h and 00h entries, CTRATT bit 5 and OAES bit 12 clear |
+| `plm-config` | the checks of 13h and 14h, the 512-byte round trip, Select 1 to 3, 14h while disabled, 13h LPE=1 from DTWIN, log 12h and 00h entries, CTRATT bit 5 and OAES bit 12 set |
 | `plm-lpe0` | 13h LPE=0 in DTWIN disables PLM, keeps the new thresholds and keeps the event until log 0Ah is read; LPE=0 from DISABLED |
 | `plm-logs` | log 0Ah limits, estimates, offsets and LSI checks; DTWTE falls and a second 14h DTWIN keeps it; log 0Bh zeros past 10 bytes; RAE; a read without ETYP clears nothing; ETYP with ENEV clear |
 | `plm-reset` | a reset in DTWIN with an event: 13h and 14h at defaults, logs empty, the 12h level kept |
@@ -1449,6 +1469,9 @@ registers with no guest. Cases that target this chapter include:
 | `plm-counts` | Compare and Verify of 4 pages lower DTWRE by 4; Copy of 4 pages lowers DTWRE and DTWWE by 4; Write Zeroes with DEAC lowers DTWWE by 1; DSM, Flush and a failed Read change nothing |
 | `plm-ows` | `perf_hints=on` with a 64 KiB OWS: sixteen 4 KiB writes lower DTWWE by 1, the 17th by 2 |
 | `plm-mveat-time` | `plm_dtwin_ms` 300 and no I/O: the idle FTL thread leaves DTWIN after 300 ms and within 800 ms, with MVEAT |
+| `plm-warn` | DTRW, DTWW and DTTW each fire once per DTWIN when the estimate falls below the threshold, with their ENEV bit; with ENEV clear, no bit and no entry; DTTW comes from the idle FTL thread |
+| `plm-aen` | AEC bit 12 clear: an entry and no AEN; set: an MVEAT exit gives AEN 04h, log 0Bh; no second AEN while the Notice is masked; the log 0Bh read ends it; no AEN while the entry stays; a masked MVEAT exit on the FTL thread gives no AEN |
+| `plm-aen-race` | 64 log 0Bh reads race an MVEAT exit: each time the log data or the AEN shows the entry (timing dependent) |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
 
@@ -1531,7 +1554,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | `hw/femu/dma.c` | PRP and SGL mapping, `femu_dma_rw` |
 | `hw/femu/lib/rte_ring.c`, `hw/femu/lib/pqueue.c` | the rings and the completion heap |
 | `hw/femu/nvme.h` | `NvmeSQueue`, `NvmeCQueue`, `NvmeRequest`, `FemuCtrl`, `FemuPollerCtr`, register layout |
-| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot, the NDWIN target in `femu_plm_init()`, the DTWIN amounts and limits in `femu_plm_count()` and `femu_plm_step()` |
+| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot, the NDWIN target in `femu_plm_init()`, the DTWIN amounts, limits and warnings in `femu_plm_count()` and `femu_plm_step()`, the AEN in `femu_plm_event()` |
 | `hw/femu/bbssd/ftl-line-gc.c`, `hw/femu/bbssd/bb.c` | `ssd_plm_prep_due()`, `ssd_plm_prep_step()`, `bb_plm_idle()`: the NDWIN preparation GC; the DEAT check in `do_gc_pass()` |
 | `hw/femu/femu-ext-ops.h` | `FemuExtCtrlOps`, the mode handler table, and its rules |
 

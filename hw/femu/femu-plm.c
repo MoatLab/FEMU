@@ -46,6 +46,13 @@
  *   femu_plm_step(): reads > DTWRT, writes > DTWWT or time >= DTWTM
  *                    --> NDWIN, ETYP MVEAT
  *
+ * An event and its notice (Figures 223 to 225, 5.2.2):
+ *
+ *   MVEAT, DEAT --------------------------> ETYP bit, also with ENEV clear
+ *   estimate < DTRT, DTWT or DTTT, ENEV --> warning bit, once per DTWIN
+ *   ENEV bit set --> log 0Bh entry --> new, AEC bit 12? --> AEN 04h/0Bh
+ *   the Notice stays masked until the host reads log 0Bh
+ *
  * With plm=off, none of this changes what the controller reports.
  */
 
@@ -75,6 +82,7 @@ enum {
 
 /* ETYP bits of log 0Ah, at the same places as the ENEV bits of 13h */
 #define FEMU_PLM_WARN       0x7u            /* DTRW, DTWW, DTTW */
+#define FEMU_PLM_DTTW       (1u << 2)
 #define FEMU_PLM_MVEAT      (1u << 14)
 #define FEMU_PLM_DEAT       (1u << 15)
 #define FEMU_PLM_ETYP       (FEMU_PLM_WARN | FEMU_PLM_MVEAT | FEMU_PLM_DEAT)
@@ -457,6 +465,7 @@ static void femu_plm_window(FemuCtrl *n, uint8_t w)
     pl->wr_bytes = 0;
     qatomic_set(&pl->reads, 0);
     qatomic_set(&pl->writes, 0);
+    qatomic_set(&pl->warned, 0);
     qatomic_set(&pl->start_ms, femu_dev_now(n) / SCALE_MS);
     qatomic_set(&pl->window, w);
     femu_plm_snap(n, w == FEMU_PLMW_DTWIN);
@@ -487,20 +496,31 @@ void femu_plm_reset(FemuCtrl *n)
  *
  * MVEAT and DEAT always set their ETYP bit. A warning bit sets only
  * while its ENEV bit is set. The log 0Bh entry comes only for a bit
- * whose ENEV bit is set (Figures 223 to 225).
+ * whose ENEV bit is set (Figures 223 to 225). A new entry raises the
+ * Notice when AEC bit 12 is set (5.2.26.1.5). Until the host reads log
+ * 0Bh, the Notice type stays masked, so a later entry waits (5.2.2).
+ * The FTL thread or the main loop may call it: the AEN queue has its
+ * own lock, and the main loop posts the AEN.
  */
 void femu_plm_event(FemuCtrl *n, uint32_t etyp)
 {
     FemuPlm *pl = &n->plm_st;
     uint32_t enev = lduw_le_p(pl->cfg);
     uint32_t set = etyp & (FEMU_PLM_MVEAT | FEMU_PLM_DEAT);
+    uint32_t old;
 
     set |= etyp & enev & FEMU_PLM_WARN;
     if (etyp & enev & FEMU_PLM_ETYP) {
         set |= FEMU_PLM_ENTRY;
     }
-    if (set) {
-        qatomic_or(&pl->events, set);
+    if (!set) {
+        return;
+    }
+    old = qatomic_fetch_or(&pl->events, set);
+    if ((set & ~old & FEMU_PLM_ENTRY) &&
+        (qatomic_read(&n->features.async_config) & NVME_AEC_PLEA)) {
+        nvme_enqueue_event(n, NVME_AER_TYPE_NOTICE, NVME_AER_INFO_PLEA,
+                           NVME_LOG_PLM_EVENTS);
     }
 }
 
@@ -566,14 +586,42 @@ void femu_plm_count(FemuCtrl *n, NvmeRequest *req)
     qatomic_set(&pl->writes, DIV_ROUND_UP(pl->wr_bytes, pl->unit));
 }
 
+/*
+ * The warnings of a DTWIN (Figure 423): each one fires once, when its
+ * estimate falls below its threshold (DTRT, DTWT, DTTT at bytes 32, 40
+ * and 48) while its ENEV bit is set.
+ */
+static void femu_plm_warn(FemuCtrl *n, int64_t now_ms)
+{
+    FemuPlm *pl = &n->plm_st;
+    uint32_t want = lduw_le_p(pl->cfg) & FEMU_PLM_WARN & ~pl->warned;
+    uint32_t warn = 0;
+    uint64_t est[3];
+
+    if (!want) {
+        return;
+    }
+    femu_plm_estimates(pl, &pl->snap, FEMU_PLMW_DTWIN, now_ms, est);
+    for (int i = 0; i < 3; i++) {
+        if ((want & (1u << i)) && est[i] < ldq_le_p(pl->cfg + 32 + 8 * i)) {
+            warn |= 1u << i;
+        }
+    }
+    if (warn) {
+        pl->warned |= warn;
+        femu_plm_event(n, warn);
+    }
+}
+
 /**
  * femu_plm_step - the end of an FTL step with plm=on
  * @n: the controller
  *
  * The FTL thread calls it inside its sweep, after a request or an idle
- * step. It publishes the snapshot for log 0Ah. In DTWIN it leaves for
- * NDWIN once the reads pass DTWRT, the writes pass DTWWT or the time
- * reaches DTWTM (8.1.20.1), with ETYP MVEAT.
+ * step. It publishes the snapshot for log 0Ah. In DTWIN it gives the
+ * warnings whose estimate fell below its threshold. It leaves for NDWIN
+ * once the reads pass DTWRT, the writes pass DTWWT or the time reaches
+ * DTWTM (8.1.20.1), with ETYP MVEAT.
  */
 void femu_plm_step(FemuCtrl *n)
 {
@@ -588,6 +636,7 @@ void femu_plm_step(FemuCtrl *n)
         return;
     }
     now_ms = femu_dev_now(n) / SCALE_MS;
+    femu_plm_warn(n, now_ms);
     if (qatomic_read(&pl->reads) > pl->dtwin_reads ||
         qatomic_read(&pl->writes) > pl->dtwwt ||
         now_ms - qatomic_read(&pl->start_ms) >= pl->dtwin_ms) {
@@ -622,15 +671,29 @@ void femu_plm_excursion(FemuCtrl *n)
 
 /*
  * femu_plm_idle_due - whether the idle FTL thread has a DTWIN step: the
- * time limit needs no request to pass
+ * time limit and the time warning need no request to pass
+ *
+ * bb_plm_idle() asks outside ftl_in_sweep, where a main-loop Set 13h or
+ * 14h may change cfg and warned. The answer is a hint only: the step
+ * inside the sweep checks again.
  */
 bool femu_plm_idle_due(FemuCtrl *n)
 {
     FemuPlm *pl = &n->plm_st;
+    uint32_t want;
+    int64_t t;
 
-    return qatomic_read(&pl->window) == FEMU_PLMW_DTWIN &&
-           femu_dev_now(n) / SCALE_MS - qatomic_read(&pl->start_ms) >=
-           pl->dtwin_ms;
+    if (qatomic_read(&pl->window) != FEMU_PLMW_DTWIN) {
+        return false;
+    }
+    t = femu_dev_now(n) / SCALE_MS - qatomic_read(&pl->start_ms);
+    if (t >= pl->dtwin_ms) {
+        return true;
+    }
+    /* DTWTE below DTTT, with DTTW enabled and not given yet */
+    want = lduw_le_p(pl->cfg) & FEMU_PLM_DTTW & ~qatomic_read(&pl->warned);
+    return want &&
+           (uint64_t)(pl->dtwin_ms - MAX(t, 0)) < ldq_le_p(pl->cfg + 48);
 }
 
 /* CDW11 of 13h, 14h and the LSI of log 0Ah name set 1; 31:16 reserved */
@@ -832,9 +895,11 @@ uint16_t femu_plm_event_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
 {
     uint8_t log[FEMU_PLM_AGG_SIZE] = { 0 };
     g_autofree uint8_t *buf = g_malloc0(len);
+    uint32_t seen = qatomic_read(&n->plm_st.events);
+    uint32_t etyp;
     uint16_t status;
 
-    if (qatomic_read(&n->plm_st.events) & FEMU_PLM_ENTRY) {
+    if (seen & FEMU_PLM_ENTRY) {
         log[0] = 1;                                 /* NUMENT */
         stw_le_p(log + 8, FEMU_PLM_NVMSETID);       /* entry 1 */
     }
@@ -843,9 +908,25 @@ uint16_t femu_plm_event_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
     }
     status = dma_read_prp(n, buf, len, le64_to_cpu(cmd->dptr.prp1),
                           le64_to_cpu(cmd->dptr.prp2));
+    /* qtest only: an entry that comes after the copy, as from the FTL */
+    etyp = qatomic_xchg(&n->plm_st.after_copy, 0);
+    if (etyp) {
+        femu_plm_event(n, etyp);
+    }
     if (!status && !rae) {
         nvme_clear_ns_events(n, NVME_AER_TYPE_NOTICE, NVME_LOG_PLM_EVENTS, 0,
                              true);
+        /*
+         * The FTL thread may add the entry after the copy above. Its
+         * notice was just dropped, and the host did not see the entry:
+         * send the notice again.
+         */
+        if (!(seen & FEMU_PLM_ENTRY) &&
+            (qatomic_read(&n->plm_st.events) & FEMU_PLM_ENTRY) &&
+            (qatomic_read(&n->features.async_config) & NVME_AEC_PLEA)) {
+            nvme_enqueue_event(n, NVME_AER_TYPE_NOTICE, NVME_AER_INFO_PLEA,
+                               NVME_LOG_PLM_EVENTS);
+        }
         qemu_bh_schedule(n->aer_bh);
     }
     return status;
@@ -867,6 +948,28 @@ static void femu_plm_test_event(Object *obj, Visitor *v, const char *name,
         return;
     }
     femu_plm_event(n, etyp);
+}
+
+/*
+ * qtest only: the next log 0Bh read records these ETYP bits after its
+ * copy and before it drops the queued notice, as the FTL thread may
+ */
+static void femu_plm_test_after_copy(Object *obj, Visitor *v,
+                                     const char *name, void *opaque,
+                                     Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    uint32_t etyp;
+
+    if (!visit_type_uint32(v, name, &etyp, errp)) {
+        return;
+    }
+    if (!n->plm || (etyp & ~FEMU_PLM_ETYP)) {
+        error_setg(errp, "x-plm-after-copy takes ETYP bits 0 to 2, 14 and "
+                   "15 with plm=on");
+        return;
+    }
+    qatomic_set(&n->plm_st.after_copy, etyp);
 }
 
 /*
@@ -951,6 +1054,8 @@ static void femu_plm_test_dtwwt(Object *obj, Visitor *v, const char *name,
 
 void femu_plm_add_props(Object *obj)
 {
+    object_property_add(obj, "x-plm-after-copy", "uint32", NULL,
+                        femu_plm_test_after_copy, NULL, NULL);
     object_property_add(obj, "x-plm-dtwwt", "uint64", NULL,
                         femu_plm_test_dtwwt, NULL, NULL);
     object_property_add(obj, "x-plm-event", "uint32", NULL,

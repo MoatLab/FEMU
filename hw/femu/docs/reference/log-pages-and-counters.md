@@ -137,6 +137,7 @@ of these happens:
 | Namespace Attribute Changed | with `ns_mgmt=on`, a namespace is attached, detached, deleted or formatted, and the host enabled the notice | Changed Namespace List (04h) |
 | SMART spare below threshold (02h), reliability (00h) | with `blk_pe_limit`: the spare falls below 20, the first block stays in service past its limit, or the media goes read-only; bit 0, 2 or 3 of Async Event Configuration enables each | SMART / Health (02h) |
 | Zone Descriptor Changed | an injected write fault (`err_write_fail_ppm`) made a ZNS zone read only, and the host enabled Zone Descriptor Changed notices (bit 27) | Changed Zone List (BFh) |
+| Predictable Latency Event Aggregate Log Change (Notice, 04h) | with `plm=on`, NVM Set 1 gets a log 0Bh entry: an event whose ENEV bit of Feature 13h is set; the host enabled the notice (bit 12) | Predictable Latency Event Aggregate (0Bh) |
 
 An event of a given type is reported once and then held back until the
 host reads the log page it named without Retain Asynchronous Event (RAE), so
