@@ -247,6 +247,13 @@ jobs:
     - name: Check the guest device test parses
       run: bash -n hw/femu/scripts/femu-test.sh
 
+    - name: Check the Predictable Latency Mode guest test verdicts
+      run: |
+        # Each self-test plants a fault for each rule, so a rule that
+        # cannot fail fails here. The guest steps run only in a guest.
+        python3 -I hw/femu/scripts/plm-verdict.py --self-test
+        python3 -I hw/femu/scripts/plm-guest.py --self-test
+
     - name: Check the guest image builder
       # Planted bad kernels, digests, CHECKSUMS files, check records and
       # GRUB menus must each fail; no network, no QEMU.

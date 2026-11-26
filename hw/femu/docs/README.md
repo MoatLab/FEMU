@@ -51,6 +51,7 @@ and what the guest needs. In short:
 | Flexible Data Placement | BBSSD with `femu-subsys,fdp=on` | `run-blackbox-fdp.sh` | [FDP](features/fdp.md) |
 | One NAND timing file for bbssd and ZNS | `nand_profile` | none | [NAND profiles](features/nand-profiles.md) |
 | A pSLC cache in front of MLC, TLC or QLC NAND | BBSSD with `nand_cell_type` and `tier_mode=static` | none | [Tiered NAND](features/tiered-nand.md) |
+| Host-selected windows that keep a short read tail (Predictable Latency Mode) | BBSSD with `femu-subsys`, `rrl=on`, `plm=on` | none | [PLM](features/plm.md) |
 | Create and delete namespaces from the guest | NoSSD or BBSSD with `ns_mgmt=on` | none | [Namespace management](features/ns-management-and-pi.md#namespace-management) |
 | Per-block metadata and protection information | NoSSD or BBSSD with `meta`, `mc`, `pi=on` | none | [Metadata and PI](features/ns-management-and-pi.md#metadata-and-protection-information) |
 | A TCG Opal self-encrypting drive: locking ranges and an MBR shadow | NoSSD or BBSSD with `x-opal=on` | none | [TCG Opal](features/tcg-opal.md) |

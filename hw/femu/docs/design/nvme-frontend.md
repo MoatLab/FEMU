@@ -1423,6 +1423,9 @@ controller and 13h optional, so FEMU logs neither. With `plm=off`, every
 field above stays as before. CNS 04h, 13h and 14h fail with Invalid Field
 in Command, and logs 0Ah and 0Bh fail with Invalid Log Page.
 
+The [Predictable Latency Mode](../features/plm.md) guide shows how to
+turn PLM on, drive it with nvme-cli and check it in a guest.
+
 ### Asynchronous events
 
 The controller holds up to `aerl` + 1 Asynchronous Event Requests; one more
