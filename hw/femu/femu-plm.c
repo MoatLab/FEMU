@@ -28,13 +28,15 @@
  *
  *   work                                     DTWIN     NDWIN
  *   host commands, Flush, full-buffer destage  run       run
- *   forced GC at gc_thres_lines_high           run       run
+ *   forced GC at gc_thres_lines_high           exit (*)  run
  *   background and idle GC, maint_idle         hold      run
  *   idle write-back, read reclaim, retention   hold      run
  *   wear levelling, RAIN rebuild, aged pad     hold      run
  *   preparation GC up to plm_ndwin_lines       hold      run
  *
- * A held item keeps its state and runs in the next NDWIN.
+ * A held item keeps its state and runs in the next NDWIN. (*) A forced
+ * GC pass with a victim first moves the set to NDWIN with ETYP DEAT,
+ * then runs. A failed die is a DEAT too.
  *
  * The FTL thread counts the DTWIN reads and writes, and leaves DTWIN on
  * its own when one passes its limit, or when the time ends (MVEAT):
@@ -405,8 +407,11 @@ bool femu_plm_init(FemuCtrl *n, Error **errp)
  *
  *   window   DTWRE               DTWWE                       DTWTE
  *   off      0                   0                           0
- *   NDWIN    DTWRT               min(DTWWT, room)            DTWTM
+ *   NDWIN    DTWRT               min(DTWWT, room)            DTWTM (*)
  *   DTWIN    DTWRT - reads       min(DTWWT - writes, low)    DTWTM - time
+ *
+ * (*) After a DEAT, the time the aborted DTWIN had left, so the host can
+ * line the set up with others again (8.1.20.1).
  */
 static void femu_plm_estimates(FemuPlm *pl, const FemuPlmSnap *s,
                                uint8_t window, int64_t now_ms, uint64_t *est)
@@ -420,7 +425,7 @@ static void femu_plm_estimates(FemuPlm *pl, const FemuPlmSnap *s,
         est[0] = pl->dtwin_reads;
         est[1] = MIN(pl->dtwwt, femu_plm_room(pl, s->free_lines,
                                               s->open_free, s->buf_pages));
-        est[2] = pl->dtwin_ms;
+        est[2] = qatomic_read(&pl->ndwin_dtwte);
     } else if (window == FEMU_PLMW_DTWIN) {
         reads = qatomic_read(&pl->reads);
         writes = qatomic_read(&pl->writes);
@@ -447,6 +452,7 @@ static void femu_plm_window(FemuCtrl *n, uint8_t w)
         qatomic_set(&ssd->plm_hold, w == FEMU_PLMW_DTWIN);
         qatomic_set(&ssd->plm_prep, w == FEMU_PLMW_NDWIN);
     }
+    qatomic_set(&pl->ndwin_dtwte, pl->dtwin_ms);
     pl->rd_bytes = 0;
     pl->wr_bytes = 0;
     qatomic_set(&pl->reads, 0);
@@ -587,6 +593,31 @@ void femu_plm_step(FemuCtrl *n)
         now_ms - qatomic_read(&pl->start_ms) >= pl->dtwin_ms) {
         femu_plm_exit(n, FEMU_PLM_MVEAT);
     }
+}
+
+/**
+ * femu_plm_excursion - work that DTWIN cannot hold starts
+ * @n: the controller
+ *
+ * A Deterministic Excursion (8.1.20.1): the set leaves DTWIN with ETYP
+ * DEAT before the work, so DTWIN never holds the GC that a write needs.
+ * do_gc_pass() calls it for a forced pass with a victim, and
+ * ssd_rain_fail() for a failed die. The FTL thread calls it inside its
+ * sweep, or the main loop under a pause, so one thread owns the window.
+ * DTWTE in NDWIN keeps the time the DTWIN had left.
+ */
+void femu_plm_excursion(FemuCtrl *n)
+{
+    FemuPlm *pl = &n->plm_st;
+    int64_t t;
+
+    if (qatomic_read(&pl->window) != FEMU_PLMW_DTWIN) {
+        return;
+    }
+    t = femu_dev_now(n) / SCALE_MS - qatomic_read(&pl->start_ms);
+    femu_plm_exit(n, FEMU_PLM_DEAT);
+    qatomic_set(&pl->ndwin_dtwte,
+                t < pl->dtwin_ms ? pl->dtwin_ms - MAX(t, 0) : 0);
 }
 
 /*

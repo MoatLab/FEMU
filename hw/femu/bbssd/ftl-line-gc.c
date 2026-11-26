@@ -829,6 +829,15 @@ bool ssd_rain_fail(struct ssd *ssd, int die, Error **errp)
     qatomic_or(&ssd->n->health_pending, bits);
     qatomic_or(&ssd->n->tel_req, bits);
     qemu_bh_schedule(ssd->n->aer_bh);
+    /*
+     * plm: the failure closed the open lines and starts a rebuild, which
+     * DTWIN cannot keep deterministic: a Deterministic Excursion. The
+     * caller has paused the FTL thread. Read-only media alone is no
+     * excursion: no GC can run there, and reads stay deterministic.
+     */
+    if (unlikely(ssd->plm)) {
+        femu_plm_excursion(ssd->n);
+    }
     return true;
 }
 
@@ -2644,6 +2653,15 @@ static int do_gc_pass(struct ssd *ssd, bool force)
     if (ssd->n->streams && victim_line->vpc && !ssd->lm.free_line_cnt) {
         pqueue_insert(ssd->lm.victim_line_pq, victim_line);
         return -1;
+    }
+
+    /*
+     * plm: a forced pass with a victim in DTWIN is a Deterministic
+     * Excursion. The set leaves DTWIN first, and the pass then runs, so
+     * no write waits. A pass with no victim does no work, so no exit.
+     */
+    if (force && unlikely(ssd->plm_hold)) {
+        femu_plm_excursion(ssd->n);
     }
 
     ftl_debug("GC-ing line:%d,ipc=%d,victim=%zu,full=%d,free=%d\n",

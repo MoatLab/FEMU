@@ -20383,53 +20383,6 @@ void femu_test_plm_buffer(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
-/*
- * A full device in DTWIN: 600 overwrites after the first fill need
- * forced GC at gc_thres_lines_high. Each write succeeds and erases
- * happen, so DTWIN never blocks the GC a write needs. No exit records
- * it yet: the window stays DTWIN with no ETYP bit (the DEAT exit comes
- * next). x-plm-dtwwt keeps the writes under DTWWT.
- */
-void femu_test_plm_dtwin_forced(void *obj, void *data,
-                                QGuestAllocator *alloc)
-{
-    QFemu *femu = obj;
-    QTestState *qts = femu->dev.bus->qts;
-    FemuCtrlState c = { 0 };
-    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
-    uint64_t lbuf = guest_alloc(alloc, 4096);
-    int64_t v0[FEMU_PLMF_N];
-    int64_t v[FEMU_PLMF_N];
-    uint8_t log[512];
-
-    femu_enable(&c, &femu->dev, alloc);
-    femu_create_io_queues(&c);
-    femu_plm_dtwwt(qts, "plmg", 1000000);
-    femu_plm_start(&c, lbuf, 1);
-    femu_plm_ftl(qts, "plmg", v0);
-    qtest_memset(qts, buf, 0x7e, FEMU_DATA_SIZE);
-    for (int i = 0; i < FEMU_PLM_USER_PGS + 600; i++) {
-        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
-                                        (uint64_t)(i % FEMU_PLM_USER_PGS) * 8,
-                                        buf)), ==, NVME_SUCCESS);
-    }
-    femu_plm_ftl(qts, "plmg", v);
-    g_test_message("DTWIN: %" PRId64 " erases, %" PRId64 " free lines",
-                   v[FEMU_PLMF_ERASES] - v0[FEMU_PLMF_ERASES],
-                   v[FEMU_PLMF_FREE]);
-    g_assert_cmpint(v[FEMU_PLMF_ERASES], >, v0[FEMU_PLMF_ERASES]);
-    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 1);
-    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
-                    NVME_SUCCESS);
-    femu_plm_log0a(&c, true, lbuf, log);
-    g_assert_cmpuint(log[0], ==, 1);
-    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
-    femu_queue_free(&c, &c.io);
-    femu_disable(&c);
-    guest_free(alloc, lbuf);
-    guest_free(alloc, buf);
-}
-
 /* Set 13h LPE=1 with ENEV @enev and no threshold: NDWIN */
 static void femu_plm_enable(FemuCtrlState *c, uint64_t buf, uint16_t enev)
 {
@@ -20444,6 +20397,126 @@ static void femu_plm_win(FemuCtrlState *c, uint64_t buf, uint32_t w)
 {
     g_assert_cmphex(femu_plm_set(c, 0x14, false, 0, 1, w, buf), ==,
                     NVME_SUCCESS);
+}
+
+/*
+ * A Deterministic Excursion (DEAT). A full device in DTWIN, with ENEV
+ * bit 15 (DTE): the first fill needs no GC, and the set stays in DTWIN
+ * with no ETYP bit. Overwrites then reach the high mark, and the first
+ * forced GC pass moves the set to NDWIN: ETYP DEAT alone, and the log
+ * 0Bh entry. Every write succeeds, so DTWIN never blocks the GC that a
+ * write needs, and GC erased lines. x-plm-dtwwt keeps the writes under
+ * DTWWT, so only the excursion can end the DTWIN. DTWTE in NDWIN keeps
+ * the time the DTWIN had left. A second DTWIN with ENEV clear ends with
+ * ETYP DEAT alone and no log 0Bh entry.
+ */
+void femu_test_plm_excursion(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+    uint8_t log[512];
+    int exit_at = -1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmg", 1000000);
+    femu_plm_enable(&c, lbuf, 1u << 15);
+    femu_plm_win(&c, lbuf, 1);
+    femu_plm_ftl(qts, "plmg", v0);
+    qtest_memset(qts, buf, 0x7e, FEMU_DATA_SIZE);
+    for (int i = 0; i < FEMU_PLM_USER_PGS + 600; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)(i % FEMU_PLM_USER_PGS) * 8,
+                                        buf)), ==, NVME_SUCCESS);
+        if (exit_at < 0) {
+            femu_plm_ftl(qts, "plmg", v);
+            if (!v[FEMU_PLMF_HOLD]) {
+                exit_at = i;
+                femu_plm_log0a(&c, true, lbuf, log);
+            }
+        }
+    }
+    femu_plm_ftl(qts, "plmg", v);
+    g_test_message("DEAT at write %d; %" PRId64 " erases, %" PRId64
+                   " free lines", exit_at,
+                   v[FEMU_PLMF_ERASES] - v0[FEMU_PLMF_ERASES],
+                   v[FEMU_PLMF_FREE]);
+    g_assert_cmpint(exit_at, >=, FEMU_PLM_USER_PGS);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 15);
+    /* DTWTE keeps what the DTWIN of one hour had left */
+    g_assert_cmpuint(ldq_le_p(log + 144), <, 3600000);
+    g_assert_cmpuint(ldq_le_p(log + 144), >, 3600000 - 600000);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 1);
+    g_assert_cmpint(v[FEMU_PLMF_ERASES], >, v0[FEMU_PLMF_ERASES]);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, false, lbuf, log);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+
+    /* ENEV clear: a second DEAT sets ETYP DEAT and adds no entry */
+    femu_plm_enable(&c, lbuf, 0);
+    femu_plm_win(&c, lbuf, 1);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(ldq_le_p(log + 144), <=, 3600000);
+    exit_at = -1;
+    for (int i = 0; i < 4 * FEMU_PLM_USER_PGS && exit_at < 0; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)(i % FEMU_PLM_USER_PGS) * 8,
+                                        buf)), ==, NVME_SUCCESS);
+        femu_plm_ftl(qts, "plmg", v);
+        if (!v[FEMU_PLMF_HOLD]) {
+            exit_at = i;
+        }
+    }
+    g_assert_cmpint(exit_at, >=, 0);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0x8000);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+    femu_plm_log0a(&c, false, lbuf, log);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A failed die is a Deterministic Excursion. In DTWIN with ENEV bit 15,
+ * x-rain-fail of die 1 moves the set to NDWIN with ETYP DEAT and the log
+ * 0Bh entry. DTWTE keeps the time the DTWIN had left.
+ */
+void femu_test_plm_rain(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint8_t log[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_enable(&c, lbuf, 1u << 15);
+    femu_plm_win(&c, lbuf, 1);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 1);
+    g_assert_true(femu_rain_fail(qts, 1));
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 15);
+    g_assert_cmpuint(ldq_le_p(log + 144), <=, 3600000);
+    g_assert_cmpuint(ldq_le_p(log + 144), >, 3600000 - 600000);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 1);
+    femu_plm_log0a(&c, false, lbuf, log);
+    g_assert_cmpuint(femu_plm_nument(&c, false, lbuf), ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
 }
 
 /*

@@ -1283,8 +1283,8 @@ void femu_test_plm_dtwwe_min(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_counts(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_ows(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_mveat_time(void *obj, void *data, QGuestAllocator *alloc);
-void femu_test_plm_dtwin_forced(void *obj, void *data,
-                                QGuestAllocator *alloc);
+void femu_test_plm_excursion(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_rain(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rber_disturb(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rber_off(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rber_age(void *obj, void *data, QGuestAllocator *alloc);

@@ -2262,10 +2262,19 @@ static void femu_register_nodes(void)
         .before = femu_plm_before,
     });
     /* the default target, named: qos would reuse the device above */
-    qos_add_test("plm-dtwin-forced", "femu", femu_test_plm_dtwin_forced,
+    qos_add_test("plm-excursion", "femu", femu_test_plm_excursion,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
             "id=plmg," FEMU_PLM_GC_LONG ",plm_ndwin_lines=7",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-rain", "femu", femu_test_plm_rain,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
+            "blks_per_pl=40,pls_per_lun=1,rrl=on,plm=on,subsys=plmsub,"
+            "plm_dtwin_ms=3600000",
         .before = femu_plm_before,
     });
     qos_add_test("plm-limits", "femu", femu_test_plm_limits,

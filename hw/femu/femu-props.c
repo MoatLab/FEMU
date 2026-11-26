@@ -354,9 +354,9 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "over one namespace; CNS 04h lists it, and Feature 12h takes "
       "NVMSETID 1 only; Features 13h and 14h and logs 0Ah and 0Bh give "
       "host-selected windows; in a Deterministic Window the FTL holds "
-      "background work (forced GC still runs), and in a Non-Deterministic "
-      "Window it collects up to plm_ndwin_lines; needs femu_mode=1 and "
-      "mapping=page; not with "
+      "background work and a forced GC ends the window first (DEAT), and in "
+      "a Non-Deterministic Window it collects up to plm_ndwin_lines; needs "
+      "femu_mode=1 and mapping=page; not with "
       "namespace_modes, FDP, ocp, gc_pace, streams, tier_mode, cxl_ssd, "
       "power_loss, persist_file or ns_mgmt; "
       "off (default)" },

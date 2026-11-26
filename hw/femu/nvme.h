@@ -2877,6 +2877,8 @@ typedef struct FemuPlm {
     /* PLMW, and the time the window began (ms of femu_dev_now) */
     uint8_t         window;
     int64_t         start_ms;
+    /* DTWTE in NDWIN: DTWTM, or the time a DEAT cut short */
+    uint64_t        ndwin_dtwte;
     /* DTWIN amounts, 4 KiB reads and @unit writes */
     uint64_t        reads;
     uint64_t        writes;
@@ -4172,6 +4174,7 @@ void femu_plm_event(FemuCtrl *n, uint32_t etyp);
 void femu_plm_publish(FemuCtrl *n);
 void femu_plm_count(FemuCtrl *n, NvmeRequest *req);
 void femu_plm_step(FemuCtrl *n);
+void femu_plm_excursion(FemuCtrl *n);
 bool femu_plm_idle_due(FemuCtrl *n);
 void femu_plm_reset(FemuCtrl *n);
 void femu_plm_add_props(Object *obj);

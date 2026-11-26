@@ -1805,7 +1805,7 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
     } else if (ssd->sp.gc_pace) {
         ssd_pace_tick(ssd);
     } else if (should_gc(ssd) && likely(!ssd->plm_hold)) {
-        /* a plm DTWIN holds it; the forced GC of the write path still runs */
+        /* a plm DTWIN holds it; a forced GC ends the DTWIN first (DEAT) */
         if (unlikely(ssd->precon_break)) {
             ssd->precon_skipped++;
         } else {

@@ -1155,15 +1155,15 @@ subsystem applies too: the subsystem takes this one controller.
 
 The host enables Predictable Latency Mode with Feature 13h and then
 selects the window with Feature 14h. A Deterministic Window (DTWIN) also
-ends on its own when it passes a limit (MVEAT). A forced GC in DTWIN
-records no exit yet. So CTRATT bit 5 (PLM) and OAES bit 12 stay clear,
-and no Predictable Latency event raises an AEN.
+ends on its own when it passes a limit (MVEAT), or when a forced GC
+pass is due (DEAT). CTRATT bit 5 (PLM) and OAES bit 12 stay clear, and
+no Predictable Latency event raises an AEN yet.
 
 ```text
  DISABLED (PLMW 000b) --Set 13h LPE=1--> NDWIN (PLMW 010b)
  NDWIN --Set 14h WSEL 001b--> DTWIN (PLMW 001b)
  DTWIN --Set 14h WSEL 010b, or Set 13h LPE=1--> NDWIN
- DTWIN --a limit passed (MVEAT)--> NDWIN
+ DTWIN --a limit passed (MVEAT), or a forced GC pass (DEAT)--> NDWIN
  NDWIN, DTWIN --Set 13h LPE=0, or a reset--> DISABLED
 ```
 
@@ -1184,7 +1184,7 @@ limits and the estimates:
 | DTWRT, DTWTM | 39:32, 55:48 | `plm_dtwin_reads`, `plm_dtwin_ms` |
 | NTWTMH, NTWTML | 63:56, 71:64 | `plm_ndwin_ms`, `plm_ndwin_min_ms` |
 | DTWWT | 47:40 | `plm_dtwin_writes`; by default the room of a full NDWIN, in OWS units (a flash page without NOWS): free lines at `plm_ndwin_lines`, less the high mark |
-| DTWRE, DTWWE, DTWTE | 151:128 | 0 while disabled. In NDWIN: DTWRT, min(DTWWT, room), DTWTM. In DTWIN: DTWRT, min(DTWWT, the low point of room since the entry), DTWTM less the time in DTWIN |
+| DTWRE, DTWWE, DTWTE | 151:128 | 0 while disabled. In NDWIN: DTWRT, min(DTWWT, room), DTWTM (after a DEAT, the time the DTWIN had left). In DTWIN: DTWRT, min(DTWWT, the low point of room since the entry), DTWTM less the time in DTWIN |
 
 The room is the writes that fit before forced collection: free lines above
 the high mark, plus the free pages of the open line, less the pages the
@@ -1255,16 +1255,38 @@ reclaim line or the wear levelling credit, and runs in the next NDWIN.
 | Work | DTWIN | NDWIN |
 | --- | --- | --- |
 | host commands, Flush, destage of a full write buffer | run | run |
-| forced GC at the high mark (`gc_thres_pcent_high`) | run | run |
+| forced GC at the high mark (`gc_thres_pcent_high`) | exit to NDWIN (DEAT), then run | run |
 | background GC at `gc_thres_lines`, idle GC and `maint_idle` | hold | run |
 | idle write-back (`buffer_low_pcent`) | hold | run |
 | read reclaim, retention refresh, wear levelling | hold | run |
 | RAIN rebuild, pad and close of aged open lines | hold | run |
 | preparation GC up to `plm_ndwin_lines` | hold | run |
 
-Forced GC still runs in DTWIN, so a full device never blocks a write.
-FEMU records no exit for it yet; a next stage adds the Deterministic
-Excursion (DEAT).
+A forced GC pass in DTWIN is a Deterministic Excursion (DEAT). The
+check sits in `do_gc_pass()` for a forced pass, after the victim choice,
+so a pass with no victim does no work and ends no DTWIN. Each forced GC
+site reaches it: the write path, a buffer
+destage, `ssd_gc_until_clear()` and a cache disable. The set leaves
+DTWIN first, and the pass then collects as before, so a full device
+never blocks a write:
+
+```text
+ write --> should_gc_high? --no--> program pages
+              |yes
+              v
+           do_gc(ssd, true) --> do_gc_pass(force) --> victim? --no--> return
+                                                        |yes
+                                                        +-- DTWIN? --yes--> NDWIN, ETYP DEAT
+                                                        v
+                                                     reclaim --> program pages
+```
+
+DEAT sets its ETYP bit also with ENEV clear; the log 0Bh entry needs
+ENEV bit 15 (DTE). A failed die (`x-rain-fail`) is a DEAT too: the
+failure closes the open lines and starts a rebuild. Read-only media
+alone is no excursion, since no GC can run there. After a DEAT, DTWTE
+in NDWIN keeps the time the aborted DTWIN had left, so the host can line
+the set up with other sets again (8.1.20.1).
 
 In NDWIN a preparation GC raises the free lines to `plm_ndwin_lines`. It
 runs after a request and in the idle pass of the FTL thread. A step
@@ -1419,7 +1441,8 @@ registers with no guest. Cases that target this chapter include:
 | `plm-fence` | with `gc_idle_ms` 3000, an idle GC step with no victim moves the shared fence; no preparation step runs before it |
 | `plm-reclaim` | a read reclaim queued by `read_reclaim_limit` waits through DTWIN writes and runs on the first NDWIN write |
 | `plm-buffer` | idle write-back (`buffer_low_pcent`) writes nothing back in DTWIN and drains to the low mark in NDWIN |
-| `plm-dtwin-forced` | a full device in DTWIN: every write succeeds through forced GC, and the window stays DTWIN |
+| `plm-excursion` | a full device in DTWIN: the first fill keeps DTWIN; the first forced GC pass moves the set to NDWIN with ETYP DEAT and the log 0Bh entry; every write succeeds; DTWTE keeps what the DTWIN had left; a second DEAT with ENEV clear sets ETYP DEAT and adds no entry |
+| `plm-rain` | a failed die in DTWIN with ENEV bit 15: NDWIN, ETYP DEAT, a log 0Bh entry |
 | `plm-limits` | `plm_dtwin_reads` 64: a 16 KiB read takes DTWRE down by 4; read 65 leaves DTWIN with MVEAT; with ENEV clear, ETYP has MVEAT and log 0Bh no entry; with EXV, the entry |
 | `plm-mveat-writes` | `plm_dtwin_writes` 32: DTWWE falls by one per 4 KiB write, four for 16 KiB, one for Write Zeroes; write 33 leaves DTWIN with MVEAT |
 | `plm-dtwwe-min` | with a write buffer, a deallocate raises the room but not DTWWE in DTWIN; NDWIN shows the higher room |
@@ -1509,7 +1532,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | `hw/femu/lib/rte_ring.c`, `hw/femu/lib/pqueue.c` | the rings and the completion heap |
 | `hw/femu/nvme.h` | `NvmeSQueue`, `NvmeCQueue`, `NvmeRequest`, `FemuCtrl`, `FemuPollerCtr`, register layout |
 | `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot, the NDWIN target in `femu_plm_init()`, the DTWIN amounts and limits in `femu_plm_count()` and `femu_plm_step()` |
-| `hw/femu/bbssd/ftl-line-gc.c`, `hw/femu/bbssd/bb.c` | `ssd_plm_prep_due()`, `ssd_plm_prep_step()`, `bb_plm_idle()`: the NDWIN preparation GC |
+| `hw/femu/bbssd/ftl-line-gc.c`, `hw/femu/bbssd/bb.c` | `ssd_plm_prep_due()`, `ssd_plm_prep_step()`, `bb_plm_idle()`: the NDWIN preparation GC; the DEAT check in `do_gc_pass()` |
 | `hw/femu/femu-ext-ops.h` | `FemuExtCtrlOps`, the mode handler table, and its rules |
 
 ## Related pages
