@@ -366,6 +366,11 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "plm_dtwin_reads",
       "plm: DTWIN Reads Typical (DTWRT) of log 0Ah, in 4 KiB reads, 1 to "
       "2^40; 1048576 (default)" },
+    { "plm_dtwin_writes",
+      "plm: DTWIN Writes Typical (DTWWT) of log 0Ah, in OWS units (a flash "
+      "page without NOWS), 1 to the room of a full NDWIN; a DTWIN ends "
+      "(MVEAT) when the writes pass it, or the reads pass plm_dtwin_reads, "
+      "or plm_dtwin_ms passes; 0 (default): that room" },
     { "plm_ndwin_ms",
       "plm: NDWIN Time Minimum High (NTWTMH) of log 0Ah, in ms, 0 to "
       "3600000; FEMU reports it as given; 1000 (default)" },

@@ -3809,9 +3809,9 @@ static void *femu_ftl_thread(void *arg)
             } else {
                 lat = femu_ftl_process_req(n, req);
             }
-            /* the FTL state that log 0Ah reads without a pause */
+            /* log 0Ah's FTL state, and the DTWIN limits (MVEAT) */
             if (unlikely(n->plm)) {
-                femu_plm_publish(n);
+                femu_plm_step(n);
             }
             /* idle collection counts quiet time from here (gc_idle_ms) */
             if (unlikely(n->gc_idle)) {
@@ -6490,6 +6490,7 @@ static const Property femu_props[] = {
                        FEMU_PLM_NDWIN_MS),
     DEFINE_PROP_UINT32("plm_ndwin_min_ms", FemuCtrl, plm_st.ndwin_min_ms, 0),
     DEFINE_PROP_UINT32("plm_ndwin_lines", FemuCtrl, plm_st.ndwin_lines, 0),
+    DEFINE_PROP_UINT64("plm_dtwin_writes", FemuCtrl, plm_st.dtwin_writes, 0),
     DEFINE_PROP_BOOL("sanitize_ns", FemuCtrl, sanitize_ns, false),
     DEFINE_PROP_BOOL("cancel", FemuCtrl, cancel, false),
     DEFINE_PROP_BOOL("fused_cw", FemuCtrl, fused_cw, false),

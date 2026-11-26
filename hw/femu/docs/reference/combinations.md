@@ -974,9 +974,14 @@ own description allows. A message keeps its format directives (`%s`,
 - femu: %s needs plm=on
 - femu: plm is not supported with %s
 - femu: plm needs %s
+- x-plm-dtwwt takes 1 or more with plm=on
 - x-plm-event takes ETYP bits 0 to 2, 14 and 15 with plm=on
 - x-plm-ftl needs plm=on
 - x-plm-lines takes 1 to the line count with plm=on
+
+## `plm_dtwin_writes`
+
+- femu: plm_dtwin_writes must be 0 to %
 
 ## `plm_ndwin_lines`
 

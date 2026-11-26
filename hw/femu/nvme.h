@@ -2865,6 +2865,7 @@ typedef struct FemuPlm {
     uint32_t        ndwin_ms;       /* NTWTMH */
     uint32_t        ndwin_min_ms;   /* NTWTML */
     uint32_t        ndwin_lines;    /* NDWIN free line target; 0: derived */
+    uint64_t        dtwin_writes;   /* DTWWT as set; 0: derived */
     uint64_t        dtwwt;          /* DTWWT, in @unit */
     uint64_t        unit;           /* OWS bytes, or one flash page */
     uint64_t        page_bytes;
@@ -2879,6 +2880,9 @@ typedef struct FemuPlm {
     /* DTWIN amounts, 4 KiB reads and @unit writes */
     uint64_t        reads;
     uint64_t        writes;
+    /* their bytes: units round up once over the window (FTL thread) */
+    uint64_t        rd_bytes;
+    uint64_t        wr_bytes;
     /* ETYP in bits 15:0; bit 16: the set is in log 0Bh */
     uint32_t        events;
     QemuSeqLock     seq;
@@ -4166,6 +4170,9 @@ uint16_t femu_plm_event_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
                             uint64_t off, bool rae);
 void femu_plm_event(FemuCtrl *n, uint32_t etyp);
 void femu_plm_publish(FemuCtrl *n);
+void femu_plm_count(FemuCtrl *n, NvmeRequest *req);
+void femu_plm_step(FemuCtrl *n);
+bool femu_plm_idle_due(FemuCtrl *n);
 void femu_plm_reset(FemuCtrl *n);
 void femu_plm_add_props(Object *obj);
 bool femu_sanns_check(FemuCtrl *n, Error **errp);

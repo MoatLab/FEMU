@@ -1813,6 +1813,8 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         }
     }
     if (unlikely(ssd->plm)) {
+        /* the DTWIN amounts: femu_plm_step() checks their limits */
+        femu_plm_count(n, req);
         ssd_plm_after_req(ssd);
     }
 

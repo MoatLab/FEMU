@@ -36,6 +36,14 @@
  *
  * A held item keeps its state and runs in the next NDWIN.
  *
+ * The FTL thread counts the DTWIN reads and writes, and leaves DTWIN on
+ * its own when one passes its limit, or when the time ends (MVEAT):
+ *
+ *   request --> count reads (4 KiB), writes (OWS) --> femu_plm_step()
+ *   idle pass, DTWIN time up ------------------------> femu_plm_step()
+ *   femu_plm_step(): reads > DTWRT, writes > DTWWT or time >= DTWTM
+ *                    --> NDWIN, ETYP MVEAT
+ *
  * With plm=off, none of this changes what the controller reports.
  */
 
@@ -104,6 +112,8 @@ bool femu_plm_check(FemuCtrl *n, Error **errp)
             why = "plm_ndwin_min_ms";
         } else if (pl->ndwin_lines) {
             why = "plm_ndwin_lines";
+        } else if (pl->dtwin_writes) {
+            why = "plm_dtwin_writes";
         }
         if (why) {
             error_setg(errp, "femu: %s needs plm=on", why);
@@ -373,6 +383,15 @@ bool femu_plm_init(FemuCtrl *n, Error **errp)
                    "free lines above gc_thres_pcent_high");
         return false;
     }
+    /* more writes than a full NDWIN leaves room for would force GC */
+    if (pl->dtwin_writes > pl->dtwwt) {
+        error_setg(errp, "femu: plm_dtwin_writes must be 0 to %" PRIu64,
+                   pl->dtwwt);
+        return false;
+    }
+    if (pl->dtwin_writes) {
+        pl->dtwwt = pl->dtwin_writes;
+    }
     ssd->plm = true;
     ssd->plm_lines = target;
     femu_plm_snap(n, false);
@@ -380,8 +399,43 @@ bool femu_plm_init(FemuCtrl *n, Error **errp)
 }
 
 /*
+ * The reliable estimates DTWRE, DTWWE and DTWTE at @now_ms, in the order
+ * of their ETYP and ENEV bits (design 2.4). In DTWIN each one only
+ * falls: the amounts only grow, and the DTWWE low point only falls.
+ *
+ *   window   DTWRE               DTWWE                       DTWTE
+ *   off      0                   0                           0
+ *   NDWIN    DTWRT               min(DTWWT, room)            DTWTM
+ *   DTWIN    DTWRT - reads       min(DTWWT - writes, low)    DTWTM - time
+ */
+static void femu_plm_estimates(FemuPlm *pl, const FemuPlmSnap *s,
+                               uint8_t window, int64_t now_ms, uint64_t *est)
+{
+    uint64_t reads;
+    uint64_t writes;
+    int64_t time_ms;
+
+    est[0] = est[1] = est[2] = 0;
+    if (window == FEMU_PLMW_NDWIN) {
+        est[0] = pl->dtwin_reads;
+        est[1] = MIN(pl->dtwwt, femu_plm_room(pl, s->free_lines,
+                                              s->open_free, s->buf_pages));
+        est[2] = pl->dtwin_ms;
+    } else if (window == FEMU_PLMW_DTWIN) {
+        reads = qatomic_read(&pl->reads);
+        writes = qatomic_read(&pl->writes);
+        time_ms = now_ms - qatomic_read(&pl->start_ms);
+        est[0] = pl->dtwin_reads > reads ? pl->dtwin_reads - reads : 0;
+        est[1] = pl->dtwwt > writes ? pl->dtwwt - writes : 0;
+        est[1] = MIN(est[1], s->dtwwe_min);
+        est[2] = time_ms < pl->dtwin_ms ? pl->dtwin_ms - MAX(time_ms, 0) : 0;
+    }
+}
+
+/*
  * Enter window @w: the DTWIN amounts count from now. The caller is the
- * main loop with the data plane paused, or realize and reset.
+ * main loop with the data plane paused, realize and reset, or the FTL
+ * thread inside its sweep for an autonomous exit.
  */
 static void femu_plm_window(FemuCtrl *n, uint8_t w)
 {
@@ -393,6 +447,8 @@ static void femu_plm_window(FemuCtrl *n, uint8_t w)
         qatomic_set(&ssd->plm_hold, w == FEMU_PLMW_DTWIN);
         qatomic_set(&ssd->plm_prep, w == FEMU_PLMW_NDWIN);
     }
+    pl->rd_bytes = 0;
+    pl->wr_bytes = 0;
     qatomic_set(&pl->reads, 0);
     qatomic_set(&pl->writes, 0);
     qatomic_set(&pl->start_ms, femu_dev_now(n) / SCALE_MS);
@@ -440,6 +496,110 @@ void femu_plm_event(FemuCtrl *n, uint32_t etyp)
     if (set) {
         qatomic_or(&pl->events, set);
     }
+}
+
+/*
+ * An autonomous exit from DTWIN with ETYP bit @etyp. The FTL thread calls
+ * it inside its sweep, or the main loop under a pause.
+ */
+static void femu_plm_exit(FemuCtrl *n, uint32_t etyp)
+{
+    if (qatomic_read(&n->plm_st.window) != FEMU_PLMW_DTWIN) {
+        return;
+    }
+    femu_plm_window(n, FEMU_PLMW_NDWIN);
+    femu_plm_event(n, etyp);
+}
+
+/**
+ * femu_plm_count - count a request of the FTL thread toward DTWIN
+ * @n: the controller
+ * @req: a request that ran its FTL step
+ *
+ * Reads in 4 KiB units: Read, Compare, Verify and the source of a Copy.
+ * Writes in OWS units: Write, Write Zeroes and the target of a Copy.
+ * The bytes add up over the window and round up to units once, so
+ * sixteen 4 KiB writes with a 64 KiB OWS are one write. Write Zeroes
+ * counts also with DEAC, as its blocks change. A failed command, DSM
+ * and Flush count nothing.
+ */
+void femu_plm_count(FemuCtrl *n, NvmeRequest *req)
+{
+    FemuPlm *pl = &n->plm_st;
+    uint64_t bytes;
+    uint64_t r = 0;
+    uint64_t w = 0;
+
+    if (qatomic_read(&pl->window) != FEMU_PLMW_DTWIN || !req->ns ||
+        req->status != NVME_SUCCESS) {
+        return;
+    }
+    bytes = (uint64_t)req->nlb << NVME_ID_NS_LBADS(req->ns);
+    switch (req->cmd.opcode) {
+    case NVME_CMD_READ:
+    case NVME_CMD_COMPARE:
+    case NVME_CMD_VERIFY:
+        r = bytes;
+        break;
+    case NVME_CMD_WRITE:
+    case NVME_CMD_WRITE_ZEROES:
+        w = bytes;
+        break;
+    case NVME_CMD_COPY:
+        /* the source ranges hold as many blocks as the target */
+        r = bytes;
+        w = bytes;
+        break;
+    default:
+        return;
+    }
+    /* the main loop zeroes them only under a pause */
+    pl->rd_bytes += r;
+    pl->wr_bytes += w;
+    qatomic_set(&pl->reads, DIV_ROUND_UP(pl->rd_bytes, 4096));
+    qatomic_set(&pl->writes, DIV_ROUND_UP(pl->wr_bytes, pl->unit));
+}
+
+/**
+ * femu_plm_step - the end of an FTL step with plm=on
+ * @n: the controller
+ *
+ * The FTL thread calls it inside its sweep, after a request or an idle
+ * step. It publishes the snapshot for log 0Ah. In DTWIN it leaves for
+ * NDWIN once the reads pass DTWRT, the writes pass DTWWT or the time
+ * reaches DTWTM (8.1.20.1), with ETYP MVEAT.
+ */
+void femu_plm_step(FemuCtrl *n)
+{
+    FemuPlm *pl = &n->plm_st;
+    int64_t now_ms;
+
+    if (!n->ssd || !pl->unit) {
+        return;
+    }
+    femu_plm_snap(n, false);
+    if (qatomic_read(&pl->window) != FEMU_PLMW_DTWIN) {
+        return;
+    }
+    now_ms = femu_dev_now(n) / SCALE_MS;
+    if (qatomic_read(&pl->reads) > pl->dtwin_reads ||
+        qatomic_read(&pl->writes) > pl->dtwwt ||
+        now_ms - qatomic_read(&pl->start_ms) >= pl->dtwin_ms) {
+        femu_plm_exit(n, FEMU_PLM_MVEAT);
+    }
+}
+
+/*
+ * femu_plm_idle_due - whether the idle FTL thread has a DTWIN step: the
+ * time limit needs no request to pass
+ */
+bool femu_plm_idle_due(FemuCtrl *n)
+{
+    FemuPlm *pl = &n->plm_st;
+
+    return qatomic_read(&pl->window) == FEMU_PLMW_DTWIN &&
+           femu_dev_now(n) / SCALE_MS - qatomic_read(&pl->start_ms) >=
+           pl->dtwin_ms;
 }
 
 /* CDW11 of 13h, 14h and the LSI of log 0Ah name set 1; 31:16 reserved */
@@ -554,11 +714,12 @@ uint16_t femu_plm_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
                            wsel != FEMU_PLMW_NDWIN) || !pl->lpe) {
         return NVME_INVALID_FIELD | NVME_DNR;
     }
+    /* under the pause: the FTL thread may have left DTWIN on its own */
+    resume = nvme_pause_pollers(n);
     if (qatomic_read(&pl->window) != wsel) {
-        resume = nvme_pause_pollers(n);
         femu_plm_window(n, wsel);
-        nvme_resume_pollers(n, resume);
     }
+    nvme_resume_pollers(n, resume);
     return NVME_SUCCESS;
 }
 
@@ -572,12 +733,8 @@ uint16_t femu_plm_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
  *
  * No pause: the FTL state comes from the seqlock snapshot and the rest
  * from qatomic reads. A read without RAE clears the ETYP bits and the
- * log 0Bh entry it reported; an event set during the read stays.
- *
- *   window   DTWRE               DTWWE                       DTWTE
- *   off      0                   0                           0
- *   NDWIN    DTWRT               min(DTWWT, room)            DTWTM
- *   DTWIN    DTWRT - reads       min(DTWWT - writes, low)    DTWTM - time
+ * log 0Bh entry it reported; an event set during the read stays. The
+ * estimates are those of femu_plm_estimates().
  */
 uint16_t femu_plm_set_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
                           uint64_t off, bool rae)
@@ -589,12 +746,7 @@ uint16_t femu_plm_set_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
     unsigned int seq;
     uint8_t window;
     uint32_t ev;
-    uint64_t reads;
-    uint64_t writes;
-    int64_t time_ms;
-    uint64_t dtwre = 0;
-    uint64_t dtwwe = 0;
-    uint64_t dtwte = 0;
+    uint64_t est[3];
     uint32_t n_bytes;
     uint16_t status;
 
@@ -607,21 +759,7 @@ uint16_t femu_plm_set_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
     } while (seqlock_read_retry(&pl->seq, seq));
     window = qatomic_read(&pl->window);
     ev = qatomic_read(&pl->events);
-
-    if (window == FEMU_PLMW_NDWIN) {
-        dtwre = pl->dtwin_reads;
-        dtwwe = MIN(pl->dtwwt, femu_plm_room(pl, s.free_lines, s.open_free,
-                                             s.buf_pages));
-        dtwte = pl->dtwin_ms;
-    } else if (window == FEMU_PLMW_DTWIN) {
-        reads = qatomic_read(&pl->reads);
-        writes = qatomic_read(&pl->writes);
-        time_ms = femu_dev_now(n) / SCALE_MS - qatomic_read(&pl->start_ms);
-        dtwre = pl->dtwin_reads > reads ? pl->dtwin_reads - reads : 0;
-        dtwwe = pl->dtwwt > writes ? pl->dtwwt - writes : 0;
-        dtwwe = MIN(dtwwe, s.dtwwe_min);
-        dtwte = time_ms < pl->dtwin_ms ? pl->dtwin_ms - MAX(time_ms, 0) : 0;
-    }
+    femu_plm_estimates(pl, &s, window, femu_dev_now(n) / SCALE_MS, est);
 
     log[0] = window;                                /* STSNVMS.PLMW */
     stw_le_p(log + 2, ev & FEMU_PLM_ETYP);          /* ETYP */
@@ -630,9 +768,9 @@ uint16_t femu_plm_set_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
     stq_le_p(log + 48, pl->dtwin_ms);               /* DTWTM */
     stq_le_p(log + 56, pl->ndwin_ms);               /* NTWTMH */
     stq_le_p(log + 64, pl->ndwin_min_ms);           /* NTWTML */
-    stq_le_p(log + 128, dtwre);                     /* DTWRE */
-    stq_le_p(log + 136, dtwwe);                     /* DTWWE */
-    stq_le_p(log + 144, dtwte);                     /* DTWTE */
+    stq_le_p(log + 128, est[0]);                    /* DTWRE */
+    stq_le_p(log + 136, est[1]);                    /* DTWWE */
+    stq_le_p(log + 144, est[2]);                    /* DTWTE */
 
     n_bytes = MIN(sizeof(log) - off, len);
     status = dma_read_prp(n, log + off, n_bytes,
@@ -755,8 +893,35 @@ static void femu_plm_test_lines(Object *obj, Visitor *v, const char *name,
     nvme_resume_pollers(n, resume);
 }
 
+/*
+ * qtest only: set DTWWT past the room of a full NDWIN, so a test can
+ * write more in one DTWIN than plm_dtwin_writes allows
+ */
+static void femu_plm_test_dtwwt(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    FemuPlm *pl = &n->plm_st;
+    uint64_t dtwwt;
+    bool resume;
+
+    if (!visit_type_uint64(v, name, &dtwwt, errp)) {
+        return;
+    }
+    if (!n->plm || !pl->unit || !dtwwt) {
+        error_setg(errp, "x-plm-dtwwt takes 1 or more with plm=on");
+        return;
+    }
+    resume = nvme_pause_pollers(n);
+    pl->dtwwt = dtwwt;
+    femu_plm_snap(n, false);
+    nvme_resume_pollers(n, resume);
+}
+
 void femu_plm_add_props(Object *obj)
 {
+    object_property_add(obj, "x-plm-dtwwt", "uint64", NULL,
+                        femu_plm_test_dtwwt, NULL, NULL);
     object_property_add(obj, "x-plm-event", "uint32", NULL,
                         femu_plm_test_event, NULL, NULL);
     object_property_add_str(obj, "x-plm-ftl", femu_plm_test_ftl, NULL);

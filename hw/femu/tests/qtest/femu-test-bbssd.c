@@ -19249,6 +19249,8 @@ void femu_test_plm_refused(void *obj, void *data, QGuestAllocator *alloc)
           "plm_ndwin_ms must be 0 to" },
         { FEMU_PLM_OK ",'plm_ndwin_min_ms':1001",
           "plm_ndwin_min_ms must be 0 to plm_ndwin_ms" },
+        { FEMU_PLM_OK ",'plm_dtwin_writes':1000000000",
+          "plm_dtwin_writes must be 0 to" },
         /* 74 of 80 lines hold data: no line is left above the high mark */
         { "'devsz_mb':74,'femu_mode':1,'rrl':true,'subsys':'plmsub-r',"
           "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
@@ -19267,6 +19269,7 @@ void femu_test_plm_refused(void *obj, void *data, QGuestAllocator *alloc)
     static const char *const unset[] = {
         "'plm_dtwin_ms':999", "'plm_dtwin_reads':7", "'plm_ndwin_ms':0",
         "'plm_ndwin_min_ms':1", "'plm_ndwin_lines':5",
+        "'plm_dtwin_writes':7",
     };
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -19947,6 +19950,19 @@ static void femu_plm_ftl(QTestState *qts, const char *id, int64_t *v)
     qobject_unref(rsp);
 }
 
+/*
+ * x-plm-dtwwt of device @id: DTWWT past the room of a full NDWIN, for a
+ * test that writes many lines in one DTWIN with no MVEAT exit
+ */
+static void femu_plm_dtwwt(QTestState *qts, const char *id, int dtwwt)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':%s,'property':'x-plm-dtwwt',"
+                             "'value':%d}}", path, dtwwt);
+}
+
 /* LPE=1, then Set 14h to window @w (1 DTWIN, 2 NDWIN) */
 static void femu_plm_start(FemuCtrlState *c, uint64_t buf, uint32_t w)
 {
@@ -20044,6 +20060,7 @@ void femu_test_plm_defer(void *obj, void *data, QGuestAllocator *alloc)
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "gc-test", 1000000);
     femu_plm_start(&c, buf, 1);
     femu_plm_ftl(qts, "gc-test", v0);
     femu_gci_state(qts, g0);
@@ -20101,6 +20118,7 @@ void femu_test_plm_ndwin_prep(void *obj, void *data, QGuestAllocator *alloc)
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmg", 1000000);
     femu_plm_start(&c, buf, 1);
     femu_plm_fill(&c, qts, "plmg", buf, 6);
     g_usleep(300 * 1000);
@@ -20158,6 +20176,7 @@ void femu_test_plm_prep_steady(void *obj, void *data, QGuestAllocator *alloc)
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmg", 1000000);
     femu_plm_start(&c, buf, 1);
     qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
     for (int lpn = 0; lpn < FEMU_PLM_USER_PGS; lpn++) {
@@ -20300,6 +20319,7 @@ void femu_test_plm_reclaim(void *obj, void *data, QGuestAllocator *alloc)
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmg", 1000000);
     femu_plm_start(&c, buf, 1);
     qtest_memset(qts, buf, 0x2d, FEMU_DATA_SIZE);
     for (int lpn = 0; lpn < 64; lpn++) {
@@ -20366,9 +20386,9 @@ void femu_test_plm_buffer(void *obj, void *data, QGuestAllocator *alloc)
 /*
  * A full device in DTWIN: 600 overwrites after the first fill need
  * forced GC at gc_thres_lines_high. Each write succeeds and erases
- * happen, so DTWIN never blocks the GC a write needs. S3 records no
- * exit for it yet: the window stays DTWIN with no ETYP bit (the DEAT
- * exit comes with S4b).
+ * happen, so DTWIN never blocks the GC a write needs. No exit records
+ * it yet: the window stays DTWIN with no ETYP bit (the DEAT exit comes
+ * next). x-plm-dtwwt keeps the writes under DTWWT.
  */
 void femu_test_plm_dtwin_forced(void *obj, void *data,
                                 QGuestAllocator *alloc)
@@ -20384,6 +20404,7 @@ void femu_test_plm_dtwin_forced(void *obj, void *data,
 
     femu_enable(&c, &femu->dev, alloc);
     femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmg", 1000000);
     femu_plm_start(&c, lbuf, 1);
     femu_plm_ftl(qts, "plmg", v0);
     qtest_memset(qts, buf, 0x7e, FEMU_DATA_SIZE);
@@ -20407,6 +20428,417 @@ void femu_test_plm_dtwin_forced(void *obj, void *data,
     femu_disable(&c);
     guest_free(alloc, lbuf);
     guest_free(alloc, buf);
+}
+
+/* Set 13h LPE=1 with ENEV @enev and no threshold: NDWIN */
+static void femu_plm_enable(FemuCtrlState *c, uint64_t buf, uint16_t enev)
+{
+    uint8_t cfg[512];
+
+    femu_plm_cfg(cfg, enev, 0, 0, 0);
+    g_assert_cmphex(femu_plm_set13(c, 1, cfg, buf), ==, NVME_SUCCESS);
+}
+
+/* Set 14h to window @w (1 DTWIN, 2 NDWIN) */
+static void femu_plm_win(FemuCtrlState *c, uint64_t buf, uint32_t w)
+{
+    g_assert_cmphex(femu_plm_set(c, 0x14, false, 0, 1, w, buf), ==,
+                    NVME_SUCCESS);
+}
+
+/*
+ * The read limit, plm_dtwin_reads 64 (DTWRT). Reads count in 4 KiB units,
+ * so a 16 KiB read takes DTWRE down by 4. DTWRE falls by one with each
+ * 4 KiB read and never rises. After 64 reads the set is still in DTWIN;
+ * read 65 passes DTWRT, and the set leaves on its own: PLMW 010b, ETYP
+ * MVEAT. With ENEV clear, ETYP still has MVEAT and log 0Bh has no entry.
+ * With ENEV bit 14 (EXV), four 64 KiB reads stay in DTWIN and the fifth
+ * exits with the entry.
+ */
+void femu_test_plm_limits(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint8_t log[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_enable(&c, lbuf, 0);
+    qtest_memset(qts, buf, 0x4d, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 16; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_win(&c, lbuf, 1);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 1);
+    g_assert_cmpuint(ldq_le_p(log + 32), ==, 64);           /* DTWRT */
+    g_assert_cmpuint(ldq_le_p(log + 128), ==, 64);          /* DTWRE */
+
+    g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 4, buf, list)), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(ldq_le_p(log + 128), ==, 60);
+    for (int i = 0; i < 60; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ,
+                                        (uint64_t)(i % 16) * 8, buf)), ==,
+                        NVME_SUCCESS);
+        femu_plm_log0a(&c, true, lbuf, log);
+        g_assert_cmpuint(log[0], ==, 1);
+        g_assert_cmpuint(ldq_le_p(log + 128), ==, 59 - i);
+    }
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+    g_assert_cmpuint(ldq_le_p(log + 128), ==, 64);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+    femu_plm_log0a(&c, false, lbuf, log);
+
+    /* ENEV EXV: the same exit adds the log 0Bh entry */
+    femu_plm_enable(&c, lbuf, 1u << 14);
+    femu_plm_win(&c, lbuf, 1);
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 1);
+    g_assert_cmpuint(ldq_le_p(log + 128), ==, 0);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+    g_assert_cmphex(FEMU_SC(femu_read_pages(&c, 0, 16, buf, list)), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 1);
+    femu_plm_log0a(&c, false, lbuf, log);
+    g_assert_cmpuint(femu_plm_nument(&c, true, lbuf), ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The write limit, plm_dtwin_writes 32 (DTWWT), with no NOWS: one unit is
+ * a flash page (4 KiB). DTWWE falls by one with each 4 KiB write, by four
+ * with a 16 KiB write and by one with a 4 KiB Write Zeroes. After 32
+ * units the set is still in DTWIN with DTWWE 0; write 33 exits with
+ * MVEAT. In NDWIN DTWWE is DTWWT again.
+ */
+void femu_test_plm_mveat_writes(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint8_t log[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_start(&c, lbuf, 1);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(ldq_le_p(log + 40), ==, 32);           /* DTWWT */
+    g_assert_cmpuint(ldq_le_p(log + 136), ==, 32);          /* DTWWE */
+
+    qtest_memset(qts, buf, 0x5d, FEMU_DATA_SIZE);
+    for (int i = 0; i < 16; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)i * 8, buf)), ==,
+                        NVME_SUCCESS);
+        femu_plm_log0a(&c, true, lbuf, log);
+        g_assert_cmpuint(ldq_le_p(log + 136), ==, 31 - i);
+    }
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 16, 4, buf, list)), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(ldq_le_p(log + 136), ==, 12);
+    g_assert_cmphex(femu_write_zeroes(&c, 20 * 8, 8), ==, NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(ldq_le_p(log + 136), ==, 11);
+    for (int i = 0; i < 11; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)(21 + i) * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 1);
+    g_assert_cmpuint(ldq_le_p(log + 136), ==, 0);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 32 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, false, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 2);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+    g_assert_cmpuint(ldq_le_p(log + 136), ==, 32);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * DTWWE never rises in DTWIN (8.1.20.1), also when the room does. With
+ * buffer_size 64, 20 buffered writes take the room, and DTWWE, down by
+ * 20; a deallocate of 10 of them gives the room back, and DTWWE stays.
+ * In NDWIN DTWWE follows the room again and is 10 higher, so the room
+ * did rise. x-plm-dtwwt puts DTWWT above the room, so the room bounds
+ * DTWWE.
+ */
+void femu_test_plm_dtwwe_min(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint8_t log[512];
+    uint64_t e0;
+    uint64_t e1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmg", 1000000);
+    femu_plm_start(&c, lbuf, 1);
+    femu_plm_log0a(&c, true, lbuf, log);
+    e0 = ldq_le_p(log + 136);
+    g_assert_cmpuint(e0, >, 20);
+    g_assert_cmpuint(e0, <, 1000000);
+
+    qtest_memset(qts, buf, 0x6d, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 20; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_log0a(&c, true, lbuf, log);
+    e1 = ldq_le_p(log + 136);
+    g_assert_cmpuint(e1, ==, e0 - 20);
+    g_assert_cmphex(femu_dealloc_pages(&c, 0, 10, buf), ==, NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 1);
+    g_assert_cmpuint(ldq_le_p(log + 136), ==, e1);
+
+    femu_plm_win(&c, lbuf, 2);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_test_message("DTWWE %" PRIu64 " --> %" PRIu64 ", NDWIN %" PRIu64,
+                   e0, e1, ldq_le_p(log + 136));
+    g_assert_cmpuint(ldq_le_p(log + 136), ==, e1 + 10);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, buf);
+}
+
+/* one command of @op over @npages 4 KiB pages; every page reads @data */
+static uint16_t femu_plm_pages(FemuCtrlState *c, uint8_t op, uint64_t page,
+                               uint32_t npages, uint64_t data, uint64_t list)
+{
+    NvmeRwCmd rw;
+
+    for (uint32_t i = 0; i + 1 < npages; i++) {
+        qtest_writeq(c->pdev->bus->qts, list + i * 8, data);
+    }
+    memset(&rw, 0, sizeof(rw));
+    rw.opcode = op;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(data);
+    rw.dptr.prp2 = cpu_to_le64(npages > 2 ? list : npages == 2 ? data : 0);
+    rw.slba = cpu_to_le64(page * (4096 / c->lba_size));
+    rw.nlb = cpu_to_le16(npages * (4096 / c->lba_size) - 1);
+    return FEMU_SC(femu_io(c, (NvmeCmd *)&rw));
+}
+
+/* DTWRE and DTWWE of log 0Ah, with RAE */
+static void femu_plm_est(FemuCtrlState *c, uint64_t lbuf, uint64_t *re,
+                         uint64_t *we)
+{
+    uint8_t log[512];
+
+    femu_plm_log0a(c, true, lbuf, log);
+    *re = ldq_le_p(log + 128);
+    *we = ldq_le_p(log + 136);
+}
+
+/*
+ * What each command adds to the DTWIN amounts, from log 0Ah. OWS is one
+ * 4 KiB page here.
+ *
+ *   command                           DTWRE   DTWWE
+ *   Compare, 4 pages                  -4      0
+ *   Verify, 4 pages                   -4      0
+ *   Copy, 4 pages                     -4      -4
+ *   Write Zeroes with DEAC, 1 page    0       -1
+ *   DSM Deallocate, Flush             0       0
+ *   Read past the namespace (fails)   0       0
+ *
+ * Write Zeroes counts with DEAC too, as its blocks change. The deallocate
+ * raises the room, but DTWWE never rises in DTWIN.
+ */
+void femu_test_plm_counts(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint64_t src = 0;
+    uint16_t nlb = 4 * (4096 / 512);
+    NvmeCmd wz = { 0 };
+    uint64_t re0;
+    uint64_t we0;
+    uint64_t re;
+    uint64_t we;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_enable(&c, lbuf, 0);
+    qtest_memset(qts, buf, 0x6e, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 8; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_win(&c, lbuf, 1);
+    femu_plm_est(&c, lbuf, &re0, &we0);
+
+    g_assert_cmphex(femu_plm_pages(&c, NVME_CMD_COMPARE, 0, 4, buf, list),
+                    ==, NVME_SUCCESS);
+    femu_plm_est(&c, lbuf, &re, &we);
+    g_assert_cmpuint(re, ==, re0 - 4);
+    g_assert_cmpuint(we, ==, we0);
+
+    g_assert_cmphex(FEMU_SC(femu_lba_cmd(&c, NVME_CMD_VERIFY, 0, nlb)), ==,
+                    NVME_SUCCESS);
+    femu_plm_est(&c, lbuf, &re, &we);
+    g_assert_cmpuint(re, ==, re0 - 8);
+    g_assert_cmpuint(we, ==, we0);
+
+    g_assert_cmphex(FEMU_SC(femu_copy(&c, list, 64, &src, &nlb, 1, 1, 0)),
+                    ==, NVME_SUCCESS);
+    femu_plm_est(&c, lbuf, &re, &we);
+    g_assert_cmpuint(re, ==, re0 - 12);
+    g_assert_cmpuint(we, ==, we0 - 4);
+
+    /* Write Zeroes of page 4, DEAC (CDW12 bit 25) */
+    wz.opcode = NVME_CMD_WRITE_ZEROES;
+    wz.nsid = cpu_to_le32(1);
+    wz.cdw10 = cpu_to_le32(4 * (4096 / 512));
+    wz.cdw12 = cpu_to_le32((4096 / 512 - 1) | (1u << 25));
+    g_assert_cmphex(FEMU_SC(femu_io(&c, &wz)), ==, NVME_SUCCESS);
+    femu_plm_est(&c, lbuf, &re, &we);
+    g_assert_cmpuint(re, ==, re0 - 12);
+    g_assert_cmpuint(we, ==, we0 - 5);
+
+    g_assert_cmphex(femu_plm_trim(&c, buf, 5, 2), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_flush_sc(&c), ==, NVME_SUCCESS);
+    g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 1ULL << 40, buf)), !=,
+                    NVME_SUCCESS);
+    femu_plm_est(&c, lbuf, &re, &we);
+    g_assert_cmpuint(re, ==, re0 - 12);
+    g_assert_cmpuint(we, ==, we0 - 5);
+    femu_plm_win(&c, lbuf, 2);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * perf_hints=on over 16 LUNs: OWS is 64 KiB, sixteen 4 KiB pages. The
+ * write bytes of a DTWIN round up to OWS units once:
+ *
+ *   16 writes of 4 KiB --> DTWWE - 1
+ *   one more           --> DTWWE - 2 (68 KiB rounds up to 2)
+ *
+ * A count that rounds each command up alone gives 16 and 17.
+ */
+void femu_test_plm_ows(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint64_t re;
+    uint64_t we0;
+    uint64_t we;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_enable(&c, lbuf, 0);
+    femu_plm_win(&c, lbuf, 1);
+    femu_plm_est(&c, lbuf, &re, &we0);
+    g_assert_cmpuint(we0, >, 2);
+    qtest_memset(qts, buf, 0x4f, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 16; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_plm_est(&c, lbuf, &re, &we);
+    g_assert_cmpuint(we, ==, we0 - 1);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 16 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    femu_plm_est(&c, lbuf, &re, &we);
+    g_assert_cmpuint(we, ==, we0 - 2);
+    femu_plm_win(&c, lbuf, 2);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The time limit, plm_dtwin_ms 300 (DTWTM), with no I/O: the idle FTL
+ * thread ends the DTWIN. No read sees NDWIN before 300 ms from the Set
+ * 14h, and the exit comes within 800 ms, with ETYP MVEAT.
+ */
+void femu_test_plm_mveat_time(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    FemuCtrlState c = { 0 };
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    uint8_t log[512];
+    int64_t t0;
+    int64_t t;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_plm_enable(&c, lbuf, 0);
+    t0 = g_get_monotonic_time();
+    femu_plm_win(&c, lbuf, 1);
+    for (;;) {
+        femu_plm_log0a(&c, true, lbuf, log);
+        t = g_get_monotonic_time() - t0;
+        if (log[0] != 1 || t > 800 * 1000) {
+            break;
+        }
+        g_usleep(10 * 1000);
+    }
+    g_test_message("DTWIN left after %" PRId64 " us", t);
+    g_assert_cmpuint(log[0], ==, 2);
+    /* the limit counts whole ms from the entry: allow 1 ms */
+    g_assert_cmpint(t, >=, 299 * 1000);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 1u << 14);
+    g_assert_cmpuint(ldq_le_p(log + 144), ==, 300);
+    femu_plm_log0a(&c, false, lbuf, log);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
 }
 
 /*

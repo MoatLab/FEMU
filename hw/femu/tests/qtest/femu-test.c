@@ -358,6 +358,8 @@ static void *femu_ocp_before(GString *cmd_line, void *arg)
     "femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,pgs_per_blk=16," \
     "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,gc_thres_pcent=90," \
     "gc_thres_pcent_high=95,rrl=on,plm=on,subsys=plmsub"
+/* ... with a DTWIN that no test outlasts (DTWTM one hour) */
+#define FEMU_PLM_GC_LONG FEMU_PLM_GC_GEO ",plm_dtwin_ms=3600000"
 #define FEMU_ONCS_DEFAULT   0x19d   /* the oncs property's default */
 #define FEMU_ONCS_OCSSD     0x10    /* Save/Select only: no generic command */
 
@@ -2226,18 +2228,18 @@ static void femu_register_nodes(void)
     qos_add_test("plm-defer", "femu", femu_test_plm_defer,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
-            "id=gc-test," FEMU_PLM_GC_GEO ",gc_idle_ms=1,gc_idle_pcent=50",
+            "id=gc-test," FEMU_PLM_GC_LONG ",gc_idle_ms=1,gc_idle_pcent=50",
         .before = femu_plm_before,
     });
     qos_add_test("plm-ndwin-prep", "femu", femu_test_plm_ndwin_prep,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
-            "id=plmg," FEMU_PLM_GC_GEO ",plm_ndwin_lines=12",
+            "id=plmg," FEMU_PLM_GC_LONG ",plm_ndwin_lines=12",
         .before = femu_plm_before,
     });
     qos_add_test("plm-prep-steady", "femu", femu_test_plm_prep_steady,
                  &(QOSGraphTestOptions) {
-        .edge.extra_device_opts = "id=plmg," FEMU_PLM_GC_GEO,
+        .edge.extra_device_opts = "id=plmg," FEMU_PLM_GC_LONG,
         .before = femu_plm_before,
     });
     qos_add_test("plm-fence", "femu", femu_test_plm_fence,
@@ -2249,13 +2251,13 @@ static void femu_register_nodes(void)
     qos_add_test("plm-reclaim", "femu", femu_test_plm_reclaim,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
-            "id=plmg," FEMU_PLM_GC_GEO ",read_reclaim_limit=4",
+            "id=plmg," FEMU_PLM_GC_LONG ",read_reclaim_limit=4",
         .before = femu_plm_before,
     });
     qos_add_test("plm-buffer", "femu", femu_test_plm_buffer,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
-            "id=plmg," FEMU_PLM_GC_GEO ",buffer_size=64,"
+            "id=plmg," FEMU_PLM_GC_LONG ",buffer_size=64,"
             "buffer_thres_pcent=90,buffer_low_pcent=25",
         .before = femu_plm_before,
     });
@@ -2263,7 +2265,43 @@ static void femu_register_nodes(void)
     qos_add_test("plm-dtwin-forced", "femu", femu_test_plm_dtwin_forced,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
-            "id=plmg," FEMU_PLM_GC_GEO ",plm_ndwin_lines=7",
+            "id=plmg," FEMU_PLM_GC_LONG ",plm_ndwin_lines=7",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-limits", "femu", femu_test_plm_limits,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmg," FEMU_PLM_GC_LONG ",plm_dtwin_reads=64",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-mveat-writes", "femu", femu_test_plm_mveat_writes,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmg," FEMU_PLM_GC_LONG ",plm_dtwin_writes=32",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-counts", "femu", femu_test_plm_counts,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=plmg," FEMU_PLM_GC_LONG ",vwc=1",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-ows", "femu", femu_test_plm_ows,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=plmo,femu_mode=1,rrl=on,plm=on,"
+            "perf_hints=on,plm_dtwin_ms=3600000,subsys=plmsub,"
+            FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-dtwwe-min", "femu", femu_test_plm_dtwwe_min,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmg," FEMU_PLM_GC_LONG ",buffer_size=64",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-mveat-time", "femu", femu_test_plm_mveat_time,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmg," FEMU_PLM_GC_GEO ",plm_dtwin_ms=300",
         .before = femu_plm_before,
     });
     qos_add_test("plm-golden-off", "femu", femu_test_plm_golden_off,

@@ -2037,6 +2037,10 @@ void bbssd_deallocate_all(NvmeNamespace *ns)
         ssd->buffer_unsealed = false;
         ssd->buffer_flush_fence = 0;
     }
+    /* plm: log 0Ah shows the new room at once, not at the next step */
+    if (ssd->plm) {
+        femu_plm_publish(ssd->n);
+    }
 }
 
 uint64_t ssd_trim(struct ssd *ssd, NvmeRequest *req)

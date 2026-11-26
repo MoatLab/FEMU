@@ -1154,15 +1154,16 @@ subsystem applies too: the subsystem takes this one controller.
 #### The windows: features 13h and 14h, logs 0Ah and 0Bh
 
 The host enables Predictable Latency Mode with Feature 13h and then
-selects the window with Feature 14h. The controller leaves no window by
-itself yet: a Deterministic Window (DTWIN) has no limit, and a forced GC
-in it records no exit. So CTRATT bit 5 (PLM) and OAES bit 12 stay clear,
+selects the window with Feature 14h. A Deterministic Window (DTWIN) also
+ends on its own when it passes a limit (MVEAT). A forced GC in DTWIN
+records no exit yet. So CTRATT bit 5 (PLM) and OAES bit 12 stay clear,
 and no Predictable Latency event raises an AEN.
 
 ```text
  DISABLED (PLMW 000b) --Set 13h LPE=1--> NDWIN (PLMW 010b)
  NDWIN --Set 14h WSEL 001b--> DTWIN (PLMW 001b)
  DTWIN --Set 14h WSEL 010b, or Set 13h LPE=1--> NDWIN
+ DTWIN --a limit passed (MVEAT)--> NDWIN
  NDWIN, DTWIN --Set 13h LPE=0, or a reset--> DISABLED
 ```
 
@@ -1182,7 +1183,7 @@ limits and the estimates:
 | --- | --- | --- |
 | DTWRT, DTWTM | 39:32, 55:48 | `plm_dtwin_reads`, `plm_dtwin_ms` |
 | NTWTMH, NTWTML | 63:56, 71:64 | `plm_ndwin_ms`, `plm_ndwin_min_ms` |
-| DTWWT | 47:40 | the room of a full NDWIN, in OWS units (a flash page without NOWS): free lines at `plm_ndwin_lines`, less the high mark |
+| DTWWT | 47:40 | `plm_dtwin_writes`; by default the room of a full NDWIN, in OWS units (a flash page without NOWS): free lines at `plm_ndwin_lines`, less the high mark |
 | DTWRE, DTWWE, DTWTE | 151:128 | 0 while disabled. In NDWIN: DTWRT, min(DTWWT, room), DTWTM. In DTWIN: DTWRT, min(DTWWT, the low point of room since the entry), DTWTM less the time in DTWIN |
 
 The room is the writes that fit before forced collection: free lines above
@@ -1207,6 +1208,43 @@ are atomics. Only Set 13h, Set 14h and a reset pause the data plane.
  FTL request or idle step -------> snapshot (seqlock write)
  Get Log 0Ah, 0Bh ---------------> seqlock read + atomic reads, no pause
 ```
+
+#### The DTWIN limits
+
+The FTL thread counts the reads and writes of each DTWIN from its entry.
+Reads count in 4 KiB units: Read, Compare, Verify and the source of a
+Copy. Writes count in OWS units: Write, Write Zeroes and the target of a
+Copy. The bytes add up over the DTWIN and round up to units once, so a
+16 KiB read is four reads, and sixteen 4 KiB writes with a 64 KiB OWS
+are one write. Write Zeroes counts also with DEAC, as its blocks change.
+A failed command, DSM Deallocate and Flush count nothing:
+
+```text
+ command done, status success? --no--> no count
+        |yes
+        v
+ rd_bytes += read bytes, wr_bytes += write bytes
+ reads  = ceil(rd_bytes / 4 KiB)
+ writes = ceil(wr_bytes / OWS)
+```
+
+Format and Sanitize publish the log 0Ah snapshot at once, so NDWIN
+shows the new room before the next FTL step.
+
+At the end of each request, and in the idle pass, the FTL thread checks
+the limits. It leaves DTWIN on its own, with ETYP MVEAT (8.1.20.1):
+
+```text
+ request --> count reads, writes --> reads > DTWRT?  --+
+ idle pass (no request) ----------> writes > DTWWT? --+--yes--> NDWIN, ETYP MVEAT
+                                    time >= DTWTM?  --+
+```
+
+The request that passes a limit completes as usual; the exit follows it.
+A second Set 14h DTWIN in DTWIN keeps the amounts, so a host cannot renew
+the budget without an NDWIN. The estimates of log 0Ah never rise in a
+DTWIN: DTWWE keeps the low point of the room, so a deallocate of a
+buffered page does not raise it.
 
 #### Work in each window
 
@@ -1382,6 +1420,12 @@ registers with no guest. Cases that target this chapter include:
 | `plm-reclaim` | a read reclaim queued by `read_reclaim_limit` waits through DTWIN writes and runs on the first NDWIN write |
 | `plm-buffer` | idle write-back (`buffer_low_pcent`) writes nothing back in DTWIN and drains to the low mark in NDWIN |
 | `plm-dtwin-forced` | a full device in DTWIN: every write succeeds through forced GC, and the window stays DTWIN |
+| `plm-limits` | `plm_dtwin_reads` 64: a 16 KiB read takes DTWRE down by 4; read 65 leaves DTWIN with MVEAT; with ENEV clear, ETYP has MVEAT and log 0Bh no entry; with EXV, the entry |
+| `plm-mveat-writes` | `plm_dtwin_writes` 32: DTWWE falls by one per 4 KiB write, four for 16 KiB, one for Write Zeroes; write 33 leaves DTWIN with MVEAT |
+| `plm-dtwwe-min` | with a write buffer, a deallocate raises the room but not DTWWE in DTWIN; NDWIN shows the higher room |
+| `plm-counts` | Compare and Verify of 4 pages lower DTWRE by 4; Copy of 4 pages lowers DTWRE and DTWWE by 4; Write Zeroes with DEAC lowers DTWWE by 1; DSM, Flush and a failed Read change nothing |
+| `plm-ows` | `perf_hints=on` with a 64 KiB OWS: sixteen 4 KiB writes lower DTWWE by 1, the 17th by 2 |
+| `plm-mveat-time` | `plm_dtwin_ms` 300 and no I/O: the idle FTL thread leaves DTWIN after 300 ms and within 800 ms, with MVEAT |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
 
@@ -1464,7 +1508,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | `hw/femu/dma.c` | PRP and SGL mapping, `femu_dma_rw` |
 | `hw/femu/lib/rte_ring.c`, `hw/femu/lib/pqueue.c` | the rings and the completion heap |
 | `hw/femu/nvme.h` | `NvmeSQueue`, `NvmeCQueue`, `NvmeRequest`, `FemuCtrl`, `FemuPollerCtr`, register layout |
-| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot, the NDWIN target in `femu_plm_init()` |
+| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot, the NDWIN target in `femu_plm_init()`, the DTWIN amounts and limits in `femu_plm_count()` and `femu_plm_step()` |
 | `hw/femu/bbssd/ftl-line-gc.c`, `hw/femu/bbssd/bb.c` | `ssd_plm_prep_due()`, `ssd_plm_prep_step()`, `bb_plm_idle()`: the NDWIN preparation GC |
 | `hw/femu/femu-ext-ops.h` | `FemuExtCtrlOps`, the mode handler table, and its rules |
 
