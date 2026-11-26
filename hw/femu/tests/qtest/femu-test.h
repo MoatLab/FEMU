@@ -1270,6 +1270,14 @@ void femu_test_plm_lpe0(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_logs(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_reset(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_no_pause(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_defer(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_ndwin_prep(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_prep_steady(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_fence(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_reclaim(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_buffer(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_dtwin_forced(void *obj, void *data,
+                                QGuestAllocator *alloc);
 void femu_test_rber_disturb(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rber_off(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rber_age(void *obj, void *data, QGuestAllocator *alloc);

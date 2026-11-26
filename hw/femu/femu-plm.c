@@ -24,6 +24,18 @@
  *   FTL thread: after a request or idle step --> seqlock write of the snapshot
  *   main loop: Get Log 0Ah, 0Bh --> seqlock read + qatomic reads, no pause
  *
+ * What the FTL thread does in each window (design 2.1):
+ *
+ *   work                                     DTWIN     NDWIN
+ *   host commands, Flush, full-buffer destage  run       run
+ *   forced GC at gc_thres_lines_high           run       run
+ *   background and idle GC, maint_idle         hold      run
+ *   idle write-back, read reclaim, retention   hold      run
+ *   wear levelling, RAIN rebuild, aged pad     hold      run
+ *   preparation GC up to plm_ndwin_lines       hold      run
+ *
+ * A held item keeps its state and runs in the next NDWIN.
+ *
  * With plm=off, none of this changes what the controller reports.
  */
 
@@ -90,6 +102,8 @@ bool femu_plm_check(FemuCtrl *n, Error **errp)
             why = "plm_ndwin_ms";
         } else if (pl->ndwin_min_ms) {
             why = "plm_ndwin_min_ms";
+        } else if (pl->ndwin_lines) {
+            why = "plm_ndwin_lines";
         }
         if (why) {
             error_setg(errp, "femu: %s needs plm=on", why);
@@ -279,22 +293,44 @@ void femu_plm_publish(FemuCtrl *n)
     femu_plm_snap(n, false);
 }
 
+/*
+ * The most free lines that NDWIN can reach (design 2.5): the lines in
+ * service, less the lines the user data fills when packed, the open
+ * write pointer lines and one spare.
+ */
+static uint64_t femu_plm_fmax(NvmeNamespace *ns, struct ssd *ssd,
+                              uint64_t page_bytes)
+{
+    uint64_t usable = 0;
+    uint64_t user;
+    uint64_t wps;
+
+    for (int i = 0; i < ssd->sp.tt_lines; i++) {
+        struct line *l = &ssd->lm.lines[i];
+
+        usable += !l->retired && !l->spare && !l->reserve;
+    }
+    user = DIV_ROUND_UP(DIV_ROUND_UP(ns->size, page_bytes),
+                        MAX(ssd->sp.line_data_pgs, 1));
+    wps = 1 + ssd->sp.hot_cold_sep + ssd->sp.gc_frontier;
+    return usable > user + wps + 1 ? usable - user - wps - 1 : 0;
+}
+
 /**
  * femu_plm_init - derive the window limits from the FTL
  * @n: the controller
  * @errp: set on a refusal
  *
- * DTWWT is the room of a full NDWIN: free lines at the NDWIN target and
- * an empty buffer. The target is gc_thres_lines, at least one line above
- * gc_thres_lines_high, and at most the lines that the user data leaves
- * free with the open line and one spare (design 2.5).
+ * The NDWIN target is plm_ndwin_lines, from one line above
+ * gc_thres_lines_high to what the user data leaves free. By default it
+ * is gc_thres_lines, kept in that range (design 2.5). DTWWT is the room
+ * of a full NDWIN: free lines at the target and an empty buffer.
  */
 bool femu_plm_init(FemuCtrl *n, Error **errp)
 {
     FemuPlm *pl = &n->plm_st;
     NvmeNamespace *ns = &n->namespaces[0];
     struct ssd *ssd = ns->ssd;
-    uint64_t user_lines;
     uint64_t fmax;
     uint64_t target;
 
@@ -312,18 +348,33 @@ bool femu_plm_init(FemuCtrl *n, Error **errp)
     if (!pl->unit) {
         pl->unit = pl->page_bytes;
     }
-    user_lines = DIV_ROUND_UP(ns->size / pl->page_bytes, pl->line_pages);
-    fmax = (uint64_t)ssd->sp.tt_lines > user_lines + 2 ?
-           ssd->sp.tt_lines - user_lines - 2 : 0;
-    target = MAX((uint64_t)MAX(ssd->sp.gc_thres_lines, 0),
-                 pl->high_lines + 1);
-    target = MIN(target, fmax);
+    fmax = femu_plm_fmax(ns, ssd, pl->page_bytes);
+    /* no target fits: forced GC would start before NDWIN could end */
+    if (fmax <= pl->high_lines) {
+        error_setg(errp, "femu: plm needs %s",
+                   "free lines above gc_thres_pcent_high");
+        return false;
+    }
+    if (pl->ndwin_lines &&
+        (pl->ndwin_lines <= pl->high_lines || pl->ndwin_lines > fmax)) {
+        error_setg(errp, "femu: plm_ndwin_lines must be %d to %d",
+                   (int)(pl->high_lines + 1), (int)fmax);
+        return false;
+    }
+    target = pl->ndwin_lines;
+    if (!target) {
+        target = MAX((uint64_t)MAX(ssd->sp.gc_thres_lines, 0),
+                     pl->high_lines + 1);
+        target = MIN(target, fmax);
+    }
     pl->dtwwt = femu_plm_room(pl, target, 0, 0);
     if (!pl->dtwwt) {
         error_setg(errp, "femu: plm needs %s",
                    "free lines above gc_thres_pcent_high");
         return false;
     }
+    ssd->plm = true;
+    ssd->plm_lines = target;
     femu_plm_snap(n, false);
     return true;
 }
@@ -335,7 +386,13 @@ bool femu_plm_init(FemuCtrl *n, Error **errp)
 static void femu_plm_window(FemuCtrl *n, uint8_t w)
 {
     FemuPlm *pl = &n->plm_st;
+    struct ssd *ssd = n->ssd;
 
+    /* the FTL thread holds background work in DTWIN, prepares in NDWIN */
+    if (ssd && ssd->plm) {
+        qatomic_set(&ssd->plm_hold, w == FEMU_PLMW_DTWIN);
+        qatomic_set(&ssd->plm_prep, w == FEMU_PLMW_NDWIN);
+    }
     qatomic_set(&pl->reads, 0);
     qatomic_set(&pl->writes, 0);
     qatomic_set(&pl->start_ms, femu_dev_now(n) / SCALE_MS);
@@ -643,8 +700,66 @@ static void femu_plm_test_event(Object *obj, Visitor *v, const char *name,
     femu_plm_event(n, etyp);
 }
 
+/*
+ * qtest only: the FTL side of the window, "hold prep stalled free target
+ * steps erases copies reclaims write-backs", read with the controller
+ * paused
+ */
+static char *femu_plm_test_ftl(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    struct ssd *ssd = n->plm ? n->ssd : NULL;
+    char *out;
+    bool resume;
+
+    if (!ssd || !ssd->plm) {
+        error_setg(errp, "x-plm-ftl needs plm=on");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    out = g_strdup_printf("%d %d %d %d %d %" PRIu64 " %" PRIu64 " %" PRIu64
+                          " %" PRIu64 " %" PRIu64,
+                          ssd->plm_hold, ssd->plm_prep, ssd->plm_stalled,
+                          ssd->lm.free_line_cnt, ssd->plm_lines,
+                          ssd->plm_steps, ssd->total_erases,
+                          ssd->gc_write_pages, ssd->read_reclaims,
+                          ssd->buffer_bg_pages);
+    nvme_resume_pollers(n, resume);
+    return out;
+}
+
+/*
+ * qtest only: set the NDWIN target past what plm_ndwin_lines allows, so
+ * a test can reach the state where no step frees a line
+ */
+static void femu_plm_test_lines(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    struct ssd *ssd = n->plm ? n->ssd : NULL;
+    uint32_t lines;
+    bool resume;
+
+    if (!visit_type_uint32(v, name, &lines, errp)) {
+        return;
+    }
+    if (!ssd || !ssd->plm || !lines ||
+        lines > (uint32_t)ssd->sp.tt_lines) {
+        error_setg(errp, "x-plm-lines takes 1 to the line count with plm=on");
+        return;
+    }
+    resume = nvme_pause_pollers(n);
+    ssd->plm_lines = lines;
+    /* a new target may be in reach: try again */
+    qatomic_set(&ssd->plm_stalled, false);
+    nvme_resume_pollers(n, resume);
+}
+
 void femu_plm_add_props(Object *obj)
 {
     object_property_add(obj, "x-plm-event", "uint32", NULL,
                         femu_plm_test_event, NULL, NULL);
+    object_property_add_str(obj, "x-plm-ftl", femu_plm_test_ftl, NULL);
+    object_property_add(obj, "x-plm-lines", "uint32", NULL,
+                        femu_plm_test_lines, NULL, NULL);
 }

@@ -1571,6 +1571,26 @@ static void ssd_wait_take(struct ssd *ssd, NvmeRequest *req)
     }
 }
 
+/*
+ * plm, after a request: a stalled preparation tries again once the host
+ * has written or deallocated a line of pages since the stall. It counts
+ * plm_wr_total, since precon resets host_write_pages and a failed write
+ * lowers it. Fewer pages cannot give a forced pass a line to free, and
+ * a retry on each write would copy whole lines for nothing. In NDWIN a
+ * preparation step runs here when one is due, as background GC does.
+ */
+static void ssd_plm_after_req(struct ssd *ssd)
+{
+    if (ssd->plm_stalled &&
+        ssd->plm_wr_total + ssd->plm_trim_pages >=
+        ssd->plm_stall_mark + ssd->sp.pgs_per_line) {
+        qatomic_set(&ssd->plm_stalled, false);
+    }
+    if (ssd_plm_prep_due(ssd, ssd_now(ssd))) {
+        ssd_plm_prep_step(ssd);
+    }
+}
+
 uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
 {
     struct ssd *ssd = ns->ssd;
@@ -1784,12 +1804,16 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         fdp_slc_tick(ssd);
     } else if (ssd->sp.gc_pace) {
         ssd_pace_tick(ssd);
-    } else if (should_gc(ssd)) {
+    } else if (should_gc(ssd) && likely(!ssd->plm_hold)) {
+        /* a plm DTWIN holds it; the forced GC of the write path still runs */
         if (unlikely(ssd->precon_break)) {
             ssd->precon_skipped++;
         } else {
             do_gc(ssd, false);
         }
+    }
+    if (unlikely(ssd->plm)) {
+        ssd_plm_after_req(ssd);
     }
 
     /* the pSLC tier's turn: a fold when its pool has no page left */

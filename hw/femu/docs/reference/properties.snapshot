@@ -1006,6 +1006,11 @@
     "kind": "static",
     "type": "uint64"
    },
+   "plm_ndwin_lines": {
+    "default": 0,
+    "kind": "static",
+    "type": "uint32"
+   },
    "plm_ndwin_min_ms": {
     "default": 0,
     "kind": "static",

@@ -842,7 +842,9 @@ void ssd_rain_rebuild_step(struct ssd *ssd)
     struct ssdparams *spp = &ssd->sp;
     struct line_mgmt *lm = &ssd->lm;
 
+    /* plm: a DTWIN holds the rebuild, and NDWIN runs it */
     if (!spp->rain_rebuild || !spp->rain_nfail || ssd->media_ro ||
+        unlikely(ssd->plm_hold) ||
         should_gc_high(ssd) || lm->free_line_cnt < 2) {
         return;
     }
@@ -897,8 +899,11 @@ void ssd_pd_close_aged(struct ssd *ssd, uint64_t stime)
     struct write_pointer *wps[6 + ARRAY_SIZE(ssd->stream_wp)];
     int n = 0;
 
-    /* read-only media keeps its erased pages for the writes in flight */
-    if (ssd->media_ro) {
+    /*
+     * Read-only media keeps its erased pages for the writes in flight. A
+     * plm DTWIN holds the pad, and the line closes in the next NDWIN.
+     */
+    if (ssd->media_ro || unlikely(ssd->plm_hold)) {
         return;
     }
     wps[n++] = &ssd->wp;
@@ -2701,7 +2706,8 @@ int do_read_reclaim(struct ssd *ssd)
     enum ssd_reclaim_why why;
     struct write_pointer *wpp;
 
-    if (!line || ssd->media_ro) {
+    /* plm: the line stays queued through a DTWIN */
+    if (!line || ssd->media_ro || unlikely(ssd->plm_hold)) {
         return -1;
     }
 
@@ -2827,8 +2833,10 @@ int do_wear_level(struct ssd *ssd)
                  (!tw->curline || (!tw->curline->vpc && !tw->curline->ipc));
     uint64_t copied;
 
+    /* plm: a DTWIN holds the move; the credit keeps its cap */
     if (!spp->wl_spread || ssd->wl_credit < cost || !(data_ok || tp_ok) ||
-        should_gc_high(ssd) || lm->free_line_cnt < 2 || ssd->media_ro) {
+        should_gc_high(ssd) || lm->free_line_cnt < 2 || ssd->media_ro ||
+        unlikely(ssd->plm_hold)) {
         return -1;
     }
 
@@ -2939,12 +2947,13 @@ uint64_t ssd_media_last_end(struct ssd *ssd)
  *
  * The host and the media were quiet for gc_idle_ns, and the work of the
  * last step ended. It reads only timestamps this thread alone writes, so it
- * runs outside ftl_in_sweep. ssd_gc_idle_step() checks the line rule.
+ * runs outside ftl_in_sweep. ssd_gc_idle_step() checks the line rule. A
+ * plm DTWIN holds every step, maint_idle work too.
  */
 bool ssd_gc_idle_due(struct ssd *ssd, uint64_t now)
 {
     return ssd->gc_idle_ns && now >= ssd->gc_idle_busy + ssd->gc_idle_ns &&
-           now >= ssd->gc_idle_fence;
+           now >= ssd->gc_idle_fence && !qatomic_read(&ssd->plm_hold);
 }
 
 /*
@@ -3105,6 +3114,87 @@ void ssd_gc_idle_note(struct ssd *ssd, uint64_t req_end)
 {
     ssd->gc_idle_busy = MAX(ssd->gc_idle_busy,
                             MAX(req_end, ssd_media_last_end(ssd)));
+}
+
+/**
+ * ssd_plm_prep_due - whether a plm preparation step may start at @now
+ * @ssd: the FTL of NVM Set 1
+ * @now: ssd_now()
+ *
+ * In NDWIN, while fewer lines than plm_ndwin_lines are free, the last
+ * step did not stall, and the media work of the last step (and of idle
+ * collection, which shares the fence) has ended. The cheap tests go
+ * first: the FTL thread asks on each idle pass.
+ *
+ * bb_plm_idle() asks once outside ftl_in_sweep, where a main-loop
+ * Format may clear plm_stalled, so those flags use qatomic. Only the FTL
+ * thread changes free_line_cnt. The check inside the sweep decides.
+ */
+bool ssd_plm_prep_due(struct ssd *ssd, uint64_t now)
+{
+    /* precon_break: the background GC of the request path skips too */
+    return qatomic_read(&ssd->plm_prep) &&
+           !qatomic_read(&ssd->plm_stalled) &&
+           ssd->lm.free_line_cnt < ssd->plm_lines && !ssd->media_ro &&
+           !ssd->precon_break &&
+           now >= ssd->gc_idle_fence && now >= ssd_media_last_end(ssd);
+}
+
+/**
+ * ssd_plm_prep_step - one plm preparation step, inside ftl_in_sweep
+ * @ssd: the FTL of NVM Set 1
+ *
+ * Forced passes until one more line is free. A background pass skips a
+ * victim with few invalid pages, so in a steady state of 90 % valid
+ * victims it would never gain. A forced pass often fills a new line
+ * with its copies; with one invalid page per victim, pgs_per_line
+ * passes still free a line. A pass that copies as many pages as the
+ * newest line holds and frees none cannot gain on a later pass, so the
+ * step ends there. A fully valid line never enters the victim queue,
+ * so this needs a newest line shorter than the victim, for example one
+ * with a grown bad block. A step that frees none stalls the preparation
+ * until the host writes or deallocates a line of pages, or a Format
+ * runs, so the FTL thread never spins on it.
+ *
+ *   f0 = free --> forced pass --> free > f0? --yes--> done
+ *                    ^               |no
+ *                    |          copied a whole line? --yes--> stalled
+ *                    |               |no
+ *                    +-- passes < pgs_per_line, victim found
+ *                                    |else
+ *                                    v
+ *                                 stalled
+ */
+void ssd_plm_prep_step(struct ssd *ssd)
+{
+    struct line *open = ssd->wp.curline;
+    /* the data pages of the newest line, the fewest any line holds */
+    uint64_t whole = open ? ssd_line_data_pgs(ssd, open) :
+                            ssd->sp.line_data_pgs;
+    int f0 = ssd->lm.free_line_cnt;
+    /* one clock for the step: host time between victims adds nothing */
+    bool opened = ssd_gc_pass_begin(ssd);
+
+    for (int i = 0; i < ssd->sp.pgs_per_line &&
+                    ssd->lm.free_line_cnt <= f0; i++) {
+        uint64_t c0 = ssd->gc_write_pages;
+
+        if (do_gc(ssd, true) == -1) {
+            break;
+        }
+        if (ssd->lm.free_line_cnt <= f0 &&
+            ssd->gc_write_pages - c0 >= whole) {
+            break;
+        }
+    }
+    ssd_gc_pass_end(ssd, opened);
+    ssd->plm_steps++;
+    if (ssd->lm.free_line_cnt <= f0) {
+        qatomic_set(&ssd->plm_stalled, true);
+        ssd->plm_stall_mark = ssd->plm_wr_total + ssd->plm_trim_pages;
+    }
+    /* the next step, and idle collection, wait for this media work */
+    ssd->gc_idle_fence = MAX(ssd->gc_idle_fence, ssd_media_last_end(ssd));
 }
 
 /* release what ssd_init_lines() took */

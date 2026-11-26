@@ -110,7 +110,9 @@ uint64_t ssd_buffer_bg_step(struct ssd *ssd, uint64_t now)
     int before = ssd->write_buffer_cnt;
     uint64_t lat;
 
-    if (!ssd_buffer_bg_wants(ssd) || ssd_media_last_end(ssd) > now) {
+    /* a plm DTWIN holds it; a full buffer and a Flush still destage */
+    if (!ssd_buffer_bg_wants(ssd) || unlikely(ssd->plm_hold) ||
+        ssd_media_last_end(ssd) > now) {
         return 0;
     }
     lat = buffer_destage(ssd, MIN(before - low, dies), now, true);
@@ -1446,6 +1448,7 @@ uint64_t ssd_read(struct ssd *ssd, NvmeRequest *req)
 static void ssd_host_pages(struct ssd *ssd, uint64_t lpn, uint64_t pages)
 {
     ssd->host_write_pages += pages;
+    ssd->plm_wr_total += pages;
     if (unlikely(ssd->nr_ns_slices)) {
         ssd_ns_ctr_of(ssd, lpn)->host_write_pages += pages;
     }
@@ -1826,6 +1829,12 @@ static uint64_t ssd_deallocate_lpns(struct ssd *ssd, uint64_t start_lpn,
 
         deallocated++;
     }
+    /*
+     * plm: a stalled preparation counts these toward its retry. DSM and
+     * Write Zeroes with DEAC come here; a Copy counts as host pages, and
+     * Format and Sanitize clear the stall in bbssd_deallocate_all().
+     */
+    ssd->plm_trim_pages += deallocated;
 
     return deallocated;
 }
@@ -1997,6 +2006,8 @@ void bbssd_deallocate_all(NvmeNamespace *ns)
     if (!ssd || !ssd->sp.tt_pgs) {
         return;
     }
+    /* plm: every line may be free now, so the preparation tries again */
+    qatomic_set(&ssd->plm_stalled, false);
     /* durable_at_done: the namespace's data is gone, and so is its history */
     if (ssd_durable_on(ssd)) {
         ssd_durable_drop_ns(ssd, ns);

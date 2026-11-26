@@ -19254,10 +19254,19 @@ void femu_test_plm_refused(void *obj, void *data, QGuestAllocator *alloc)
           "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
           "'pls_per_lun':1,'luns_per_ch':4,'nchs':4",
           "plm needs free lines above gc_thres_pcent_high" },
+        /* 64 data lines of 80: the target is 5 (high 4, plus 1) to 14 */
+        { "'devsz_mb':64,'femu_mode':1,'rrl':true,'subsys':'plmsub-r',"
+          "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+          "'pls_per_lun':1,'luns_per_ch':4,'nchs':4,'plm_ndwin_lines':4",
+          "plm_ndwin_lines must be 5 to 14" },
+        { "'devsz_mb':64,'femu_mode':1,'rrl':true,'subsys':'plmsub-r',"
+          "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
+          "'pls_per_lun':1,'luns_per_ch':4,'nchs':4,'plm_ndwin_lines':15",
+          "plm_ndwin_lines must be 5 to 14" },
     };
     static const char *const unset[] = {
         "'plm_dtwin_ms':999", "'plm_dtwin_reads':7", "'plm_ndwin_ms':0",
-        "'plm_ndwin_min_ms':1",
+        "'plm_ndwin_min_ms':1", "'plm_ndwin_lines':5",
     };
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -19273,8 +19282,10 @@ void femu_test_plm_refused(void *obj, void *data, QGuestAllocator *alloc)
 
         femu_rrl_add(qts, opts, "needs plm=on");
     }
+    /* the control, with the largest target that the data leaves free */
     femu_rrl_add(qts, "'id':'plmr','addr':'5','plm':true,'femu_mode':1,"
-                 "'rrl':true,'subsys':'plmsub-r'," FEMU_RRL_GEO, NULL);
+                 "'rrl':true,'subsys':'plmsub-r','plm_ndwin_lines':14,"
+                 FEMU_RRL_GEO, NULL);
     qpci_unplug_acpi_device_test(qts, "plmr", 5);
     qos_invalidate_command_line();
 }
@@ -19891,6 +19902,507 @@ void femu_test_plm_no_pause(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpint(running, ==, 0);
     g_assert_cmpuint(steps, >, 0);
     g_assert_cmpint(worst, <, 800 * 1000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The S3 tests use one channel, one LUN and 80 lines of 16 pages, with
+ * 48 lines of user data (768 pages). gc_thres_lines is 7 and
+ * gc_thres_lines_high is 4, so the default NDWIN target is 7.
+ */
+#define FEMU_PLM_USER_PGS   768
+
+/* fields of x-plm-ftl */
+enum {
+    FEMU_PLMF_HOLD,
+    FEMU_PLMF_PREP,
+    FEMU_PLMF_STALLED,
+    FEMU_PLMF_FREE,
+    FEMU_PLMF_TARGET,
+    FEMU_PLMF_STEPS,
+    FEMU_PLMF_ERASES,
+    FEMU_PLMF_COPIES,
+    FEMU_PLMF_RECLAIMS,
+    FEMU_PLMF_BGPAGES,
+    FEMU_PLMF_N,
+};
+
+/* x-plm-ftl of device @id: the FTL side of the window */
+static void femu_plm_ftl(QTestState *qts, const char *id, int64_t *v)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-plm-ftl'}}", path);
+    g_auto(GStrv) f = NULL;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(f), ==, FEMU_PLMF_N);
+    for (int i = 0; i < FEMU_PLMF_N; i++) {
+        v[i] = g_ascii_strtoll(f[i], NULL, 10);
+    }
+    qobject_unref(rsp);
+}
+
+/* LPE=1, then Set 14h to window @w (1 DTWIN, 2 NDWIN) */
+static void femu_plm_start(FemuCtrlState *c, uint64_t buf, uint32_t w)
+{
+    uint8_t cfg[512];
+
+    femu_plm_cfg(cfg, 0, 0, 0, 0);
+    g_assert_cmphex(femu_plm_set13(c, 1, cfg, buf), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_set(c, 0x14, false, 0, 1, w, buf), ==,
+                    NVME_SUCCESS);
+}
+
+/*
+ * Write every user page once, then overwrite from LPN 0 on until at most
+ * @lines lines are free. Each overwritten line holds no valid page. The
+ * loop fails, and does not hang, when something frees lines during it.
+ */
+static void femu_plm_fill(FemuCtrlState *c, QTestState *qts, const char *id,
+                          uint64_t buf, int64_t lines)
+{
+    int64_t v[FEMU_PLMF_N];
+
+    qtest_memset(qts, buf, 0x5c, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < FEMU_PLM_USER_PGS; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    for (int lpn = 0; ; lpn++) {
+        if (lpn % 16 == 0) {
+            femu_plm_ftl(qts, id, v);
+            if (v[FEMU_PLMF_FREE] <= lines) {
+                return;
+            }
+        }
+        g_assert_cmpint(lpn, <, FEMU_PLM_USER_PGS);
+        g_assert_cmpint(FEMU_SC(femu_rw(c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+}
+
+/* DSM Deallocate of the 4 KiB pages [@page, @page + @npages) */
+static uint16_t femu_plm_trim(FemuCtrlState *c, uint64_t buf, uint64_t page,
+                              uint32_t npages)
+{
+    uint8_t range[16] = { 0 };
+    NvmeCmd cmd = { 0 };
+
+    stl_le_p(range + 4, npages * (4096 / c->lba_size));
+    stq_le_p(range + 8, page * (4096 / c->lba_size));
+    qtest_memwrite(c->pdev->bus->qts, buf, range, sizeof(range));
+    cmd.opcode = NVME_CMD_DSM;
+    cmd.nsid = cpu_to_le32(1);
+    cmd.dptr.prp1 = cpu_to_le64(buf);
+    cmd.cdw11 = cpu_to_le32(FEMU_DSM_AD);
+    return FEMU_SC(femu_io(c, &cmd));
+}
+
+/* poll x-plm-ftl of @id for up to @ms until field @f reaches @want */
+static void femu_plm_wait(QTestState *qts, const char *id, int f,
+                          int64_t want, int ms, int64_t *v)
+{
+    int64_t end = g_get_monotonic_time() + (int64_t)ms * 1000;
+
+    for (;;) {
+        femu_plm_ftl(qts, id, v);
+        if (v[f] >= want || g_get_monotonic_time() > end) {
+            return;
+        }
+        g_usleep(20 * 1000);
+    }
+}
+
+/*
+ * DTWIN holds background work; NDWIN runs it (design 2.1). The device
+ * has gc_idle_ms 1 and gc_idle_pcent 50 (idle target 40 lines).
+ *
+ *   DTWIN: writes take the free lines from 31 to 6, under gc_thres_lines
+ *          (7), and no erase and no GC copy happens: background GC waits
+ *   DTWIN: 300 ms of idle time run no idle GC step and no erase
+ *   NDWIN: idle GC steps run and erase, with no host I/O
+ *
+ * It catches a background GC or an idle GC step that ignores the DTWIN.
+ */
+void femu_test_plm_defer(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+    int g0[4];
+    int g[4];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_start(&c, buf, 1);
+    femu_plm_ftl(qts, "gc-test", v0);
+    femu_gci_state(qts, g0);
+    g_assert_cmpint(v0[FEMU_PLMF_HOLD], ==, 1);
+    g_assert_cmpint(v0[FEMU_PLMF_TARGET], ==, 7);
+
+    femu_plm_fill(&c, qts, "gc-test", buf, 6);
+    femu_plm_ftl(qts, "gc-test", v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], ==, 6);
+    g_assert_cmpint(v[FEMU_PLMF_ERASES], ==, v0[FEMU_PLMF_ERASES]);
+    g_assert_cmpint(v[FEMU_PLMF_COPIES], ==, v0[FEMU_PLMF_COPIES]);
+
+    g_usleep(300 * 1000);
+    femu_gci_state(qts, g);
+    femu_plm_ftl(qts, "gc-test", v);
+    g_assert_cmpint(g[0], ==, g0[0]);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], ==, 6);
+    g_assert_cmpint(v[FEMU_PLMF_ERASES], ==, v0[FEMU_PLMF_ERASES]);
+
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 2, buf), ==,
+                    NVME_SUCCESS);
+    femu_plm_wait(qts, "gc-test", FEMU_PLMF_FREE, 8, 3000, v);
+    femu_gci_state(qts, g);
+    g_test_message("NDWIN: %d idle steps, %" PRId64 " free lines, %" PRId64
+                   " erases", g[0], v[FEMU_PLMF_FREE], v[FEMU_PLMF_ERASES]);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 0);
+    g_assert_cmpint(g[0], >, g0[0]);
+    g_assert_cmpint(v[FEMU_PLMF_ERASES], >, v0[FEMU_PLMF_ERASES]);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], >=, 8);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The NDWIN preparation runs in the idle pass of the FTL thread. The
+ * device has no gc_idle_ms and plm_ndwin_lines 12.
+ *
+ *   DTWIN: fill to 6 free lines; 300 ms idle: no step, no erase
+ *   NDWIN: with no host I/O, steps raise the free lines to exactly 12
+ *          (one line per step), then stop: no step runs in 300 ms
+ *
+ * It catches a preparation that runs only after requests, or an idle
+ * term of the FTL thread without plm.
+ */
+void femu_test_plm_ndwin_prep(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+    int64_t steps;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_start(&c, buf, 1);
+    femu_plm_fill(&c, qts, "plmg", buf, 6);
+    g_usleep(300 * 1000);
+    femu_plm_ftl(qts, "plmg", v0);
+    g_assert_cmpint(v0[FEMU_PLMF_TARGET], ==, 12);
+    g_assert_cmpint(v0[FEMU_PLMF_FREE], ==, 6);
+    g_assert_cmpint(v0[FEMU_PLMF_STEPS], ==, 0);
+    g_assert_cmpint(v0[FEMU_PLMF_PREP], ==, 0);
+
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 2, buf), ==,
+                    NVME_SUCCESS);
+    femu_plm_wait(qts, "plmg", FEMU_PLMF_FREE, 12, 5000, v);
+    g_test_message("NDWIN: %" PRId64 " free lines after %" PRId64 " steps",
+                   v[FEMU_PLMF_FREE], v[FEMU_PLMF_STEPS]);
+    g_assert_cmpint(v[FEMU_PLMF_PREP], ==, 1);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], ==, 12);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], >=, 6);
+    g_assert_cmpint(v[FEMU_PLMF_STALLED], ==, 0);
+    steps = v[FEMU_PLMF_STEPS];
+    g_usleep(300 * 1000);
+    femu_plm_ftl(qts, "plmg", v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], ==, 12);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], ==, steps);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A steady state where every victim is 15/16 (94 %) valid, below the
+ * one-eighth invalid share that a background pass needs. x-plm-lines
+ * sets a target of 60 lines, past what the data leaves free, so only the
+ * stop rule can end the preparation.
+ *
+ *   NDWIN: forced passes still free lines (a background pass frees none),
+ *          but never more than 31: 48 lines of data and the open line
+ *   then:  a step frees no line: stalled is set, and over 300 ms no
+ *          further step runs, so the FTL thread does not spin; a read
+ *          completes
+ *   15 page writes, one less than a line: no step and no GC copy
+ *   the 16th page: one more step runs, and it stalls again
+ *   a deallocate of 15 mapped pages: no step; one more page: one step
+ *   Format: every page is invalid, and steps run with no host write
+ */
+void femu_test_plm_prep_steady(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+    int64_t steps;
+    int64_t copies;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_start(&c, buf, 1);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < FEMU_PLM_USER_PGS; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    /* one invalid page in each of the 48 data lines */
+    for (int j = 0; j < FEMU_PLM_USER_PGS / 16; j++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)(16 * j + 5) * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/plmg',"
+                             "'property':'x-plm-lines','value':60}}");
+    femu_plm_ftl(qts, "plmg", v0);
+    g_assert_cmpint(v0[FEMU_PLMF_STEPS], ==, 0);
+
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 2, buf), ==,
+                    NVME_SUCCESS);
+    femu_plm_wait(qts, "plmg", FEMU_PLMF_STALLED, 1, 10000, v);
+    g_test_message("steady: free %" PRId64 " --> %" PRId64 " in %" PRId64
+                   " steps, %" PRId64 " copies", v0[FEMU_PLMF_FREE],
+                   v[FEMU_PLMF_FREE], v[FEMU_PLMF_STEPS],
+                   v[FEMU_PLMF_COPIES] - v0[FEMU_PLMF_COPIES]);
+    g_assert_cmpint(v[FEMU_PLMF_STALLED], ==, 1);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], >, v0[FEMU_PLMF_FREE]);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], <=, 80 - 48 - 1);
+    steps = v[FEMU_PLMF_STEPS];
+    g_usleep(300 * 1000);
+    femu_plm_ftl(qts, "plmg", v);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], ==, steps);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+
+    /* one page short of a line since the stall: no retry */
+    copies = v[FEMU_PLMF_COPIES];
+    for (int i = 0; i < 15; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)(16 * i + 7) * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    g_usleep(300 * 1000);
+    femu_plm_ftl(qts, "plmg", v);
+    g_assert_cmpint(v[FEMU_PLMF_STALLED], ==, 1);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], ==, steps);
+    g_assert_cmpint(v[FEMU_PLMF_COPIES], ==, copies);
+
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, (16 * 15 + 7) * 8,
+                                    buf)), ==, NVME_SUCCESS);
+    femu_plm_wait(qts, "plmg", FEMU_PLMF_STEPS, steps + 1, 5000, v);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], >, steps);
+    femu_plm_wait(qts, "plmg", FEMU_PLMF_STALLED, 1, 5000, v);
+    g_assert_cmpint(v[FEMU_PLMF_STALLED], ==, 1);
+
+    /* a deallocated page counts as a written one toward the retry */
+    steps = v[FEMU_PLMF_STEPS];
+    copies = v[FEMU_PLMF_COPIES];
+    g_assert_cmphex(femu_plm_trim(&c, buf, 400, 15), ==, NVME_SUCCESS);
+    g_usleep(300 * 1000);
+    femu_plm_ftl(qts, "plmg", v);
+    g_assert_cmpint(v[FEMU_PLMF_STALLED], ==, 1);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], ==, steps);
+    g_assert_cmpint(v[FEMU_PLMF_COPIES], ==, copies);
+    g_assert_cmphex(femu_plm_trim(&c, buf, 415, 1), ==, NVME_SUCCESS);
+    femu_plm_wait(qts, "plmg", FEMU_PLMF_STEPS, steps + 1, 5000, v);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], >, steps);
+    femu_plm_wait(qts, "plmg", FEMU_PLMF_STALLED, 1, 5000, v);
+
+    /* Format deallocates every page: the stall clears with no write */
+    steps = v[FEMU_PLMF_STEPS];
+    g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+    femu_plm_wait(qts, "plmg", FEMU_PLMF_STEPS, steps + 1, 5000, v);
+    g_test_message("Format: %" PRId64 " steps, %" PRId64 " free lines",
+                   v[FEMU_PLMF_STEPS] - steps, v[FEMU_PLMF_FREE]);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], >, steps);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The preparation shares gc_idle_fence with idle GC (gc_idle_ms 3000).
+ * With no victim, an idle GC step moves the fence 3 s ahead. x-plm-lines
+ * then makes a step due in every other way. No step may run for 1.5 s;
+ * after the fence one runs. It catches a due check without the fence.
+ */
+void femu_test_plm_fence(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    int64_t v[FEMU_PLMF_N];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_gci_hold(qts, true);
+    femu_plm_start(&c, buf, 2);
+    qtest_memset(qts, buf, 0x6b, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < FEMU_PLM_USER_PGS; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_usleep(3300 * 1000);
+    {
+        g_autofree char *k = femu_gci_kick(qts);
+
+        g_assert_cmpstr(k, ==, "none");
+    }
+    femu_plm_ftl(qts, "gc-test", v);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], ==, 0);
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':'/machine/peripheral/gc-test',"
+                             "'property':'x-plm-lines','value':40}}");
+    g_usleep(1500 * 1000);
+    femu_plm_ftl(qts, "gc-test", v);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], ==, 0);
+    femu_plm_wait(qts, "gc-test", FEMU_PLMF_STEPS, 1, 3000, v);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], >=, 1);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * read_reclaim_limit 4: eight reads of LPN 0 queue its line. A write in
+ * DTWIN leaves it queued, with no reclaim. After Set 14h NDWIN, the next
+ * write runs it. It catches a read reclaim that ignores the DTWIN.
+ */
+void femu_test_plm_reclaim(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    int64_t v[FEMU_PLMF_N];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_start(&c, buf, 1);
+    qtest_memset(qts, buf, 0x2d, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 64; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    for (int i = 0; i < 8; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 100 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    femu_plm_ftl(qts, "plmg", v);
+    g_assert_cmpint(v[FEMU_PLMF_RECLAIMS], ==, 0);
+
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 2, buf), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, 101 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    femu_plm_ftl(qts, "plmg", v);
+    g_assert_cmpint(v[FEMU_PLMF_RECLAIMS], ==, 1);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Idle write-back (buffer_size 64, buffer_low_pcent 25): 40 buffered
+ * pages stay in the buffer through 500 ms of idle DTWIN. In NDWIN the
+ * idle FTL thread writes 24 back, down to the low mark. It catches an
+ * idle write-back that ignores the DTWIN.
+ */
+void femu_test_plm_buffer(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    int64_t v[FEMU_PLMF_N];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_start(&c, buf, 1);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 40; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_usleep(500 * 1000);
+    femu_plm_ftl(qts, "plmg", v);
+    g_assert_cmpint(v[FEMU_PLMF_BGPAGES], ==, 0);
+
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 2, buf), ==,
+                    NVME_SUCCESS);
+    femu_plm_wait(qts, "plmg", FEMU_PLMF_BGPAGES, 24, 5000, v);
+    g_assert_cmpint(v[FEMU_PLMF_BGPAGES], ==, 24);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A full device in DTWIN: 600 overwrites after the first fill need
+ * forced GC at gc_thres_lines_high. Each write succeeds and erases
+ * happen, so DTWIN never blocks the GC a write needs. S3 records no
+ * exit for it yet: the window stays DTWIN with no ETYP bit (the DEAT
+ * exit comes with S4b).
+ */
+void femu_test_plm_dtwin_forced(void *obj, void *data,
+                                QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+    uint8_t log[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_start(&c, lbuf, 1);
+    femu_plm_ftl(qts, "plmg", v0);
+    qtest_memset(qts, buf, 0x7e, FEMU_DATA_SIZE);
+    for (int i = 0; i < FEMU_PLM_USER_PGS + 600; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)(i % FEMU_PLM_USER_PGS) * 8,
+                                        buf)), ==, NVME_SUCCESS);
+    }
+    femu_plm_ftl(qts, "plmg", v);
+    g_test_message("DTWIN: %" PRId64 " erases, %" PRId64 " free lines",
+                   v[FEMU_PLMF_ERASES] - v0[FEMU_PLMF_ERASES],
+                   v[FEMU_PLMF_FREE]);
+    g_assert_cmpint(v[FEMU_PLMF_ERASES], >, v0[FEMU_PLMF_ERASES]);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 1);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                    NVME_SUCCESS);
+    femu_plm_log0a(&c, true, lbuf, log);
+    g_assert_cmpuint(log[0], ==, 1);
+    g_assert_cmphex(lduw_le_p(log + 2), ==, 0);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
     guest_free(alloc, lbuf);

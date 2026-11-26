@@ -1154,10 +1154,10 @@ subsystem applies too: the subsystem takes this one controller.
 #### The windows: features 13h and 14h, logs 0Ah and 0Bh
 
 The host enables Predictable Latency Mode with Feature 13h and then
-selects the window with Feature 14h. The controller starts no window by
-itself yet: it holds back no background work in a Deterministic Window
-(DTWIN) and leaves it on no limit. So CTRATT bit 5 (PLM) and OAES bit 12
-stay clear, and no Predictable Latency event raises an AEN.
+selects the window with Feature 14h. The controller leaves no window by
+itself yet: a Deterministic Window (DTWIN) has no limit, and a forced GC
+in it records no exit. So CTRATT bit 5 (PLM) and OAES bit 12 stay clear,
+and no Predictable Latency event raises an AEN.
 
 ```text
  DISABLED (PLMW 000b) --Set 13h LPE=1--> NDWIN (PLMW 010b)
@@ -1182,7 +1182,7 @@ limits and the estimates:
 | --- | --- | --- |
 | DTWRT, DTWTM | 39:32, 55:48 | `plm_dtwin_reads`, `plm_dtwin_ms` |
 | NTWTMH, NTWTML | 63:56, 71:64 | `plm_ndwin_ms`, `plm_ndwin_min_ms` |
-| DTWWT | 47:40 | the room of a full NDWIN, in OWS units (a flash page without NOWS): free lines at max(`gc_thres_lines`, high mark + 1), capped by the lines user data leaves free, less the high mark |
+| DTWWT | 47:40 | the room of a full NDWIN, in OWS units (a flash page without NOWS): free lines at `plm_ndwin_lines`, less the high mark |
 | DTWRE, DTWWE, DTWTE | 151:128 | 0 while disabled. In NDWIN: DTWRT, min(DTWWT, room), DTWTM. In DTWIN: DTWRT, min(DTWWT, the low point of room since the entry), DTWTM less the time in DTWIN |
 
 The room is the writes that fit before forced collection: free lines above
@@ -1207,6 +1207,65 @@ are atomics. Only Set 13h, Set 14h and a reset pause the data plane.
  FTL request or idle step -------> snapshot (seqlock write)
  Get Log 0Ah, 0Bh ---------------> seqlock read + atomic reads, no pause
 ```
+
+#### Work in each window
+
+In DTWIN the FTL thread does the work that host commands need, and holds
+the rest. A held item keeps its state, for example a queued read
+reclaim line or the wear levelling credit, and runs in the next NDWIN.
+
+| Work | DTWIN | NDWIN |
+| --- | --- | --- |
+| host commands, Flush, destage of a full write buffer | run | run |
+| forced GC at the high mark (`gc_thres_pcent_high`) | run | run |
+| background GC at `gc_thres_lines`, idle GC and `maint_idle` | hold | run |
+| idle write-back (`buffer_low_pcent`) | hold | run |
+| read reclaim, retention refresh, wear levelling | hold | run |
+| RAIN rebuild, pad and close of aged open lines | hold | run |
+| preparation GC up to `plm_ndwin_lines` | hold | run |
+
+Forced GC still runs in DTWIN, so a full device never blocks a write.
+FEMU records no exit for it yet; a next stage adds the Deterministic
+Excursion (DEAT).
+
+In NDWIN a preparation GC raises the free lines to `plm_ndwin_lines`. It
+runs after a request and in the idle pass of the FTL thread. A step
+starts when the media work of the last step, and of idle GC, has ended;
+both share one fence. It uses forced passes, since a background pass
+skips a victim with few invalid pages:
+
+```text
+ NDWIN, free < plm_ndwin_lines, not stalled, media idle
+   |
+   v
+ f0 = free --> forced pass --> free > f0? --yes--> step done, fence = media end
+                  ^               |no
+                  |          copied a whole line? --yes--> stalled
+                  |               |no
+                  +-- at most pgs_per_line passes
+                                  |still no gain
+                                  v
+                               stalled: no step until the host writes
+                               or deallocates a line of pages, or Format
+```
+
+With one invalid page per victim, a step of `pgs_per_line` passes still
+frees a line. A pass that copies as many pages as the newest line holds
+and frees none ends the step at once. A fully valid line never enters
+the victim queue, so this needs a newest line shorter than the victim,
+for example one with a grown bad block. The stall stops the FTL thread
+from spinning on a device where no victim can free a line. A retry
+needs a line of new host pages or deallocated pages, since fewer pages
+cannot give a forced pass a line to free. The count of host pages only
+grows: precon and a failed write do not lower it. Write Zeroes with
+DEAC counts as a deallocate, a Copy as host pages, and Format or
+Sanitize clears the stall.
+
+`plm_ndwin_lines` is at least one line above the high mark. It is at
+most the lines in service, less the lines the user data fills when
+packed, the open write pointer lines and one spare. By default it is
+`gc_thres_lines`, kept in that range. Realize refuses a value out of
+range, and refuses `plm` when no value fits.
 
 Figure 249 makes 14h prohibited in the Persistent Event Log of an I/O
 controller and 13h optional, so FEMU logs neither. With `plm=off`, every
@@ -1309,13 +1368,20 @@ registers with no guest. Cases that target this chapter include:
 | `plm-golden-off` | with `rrl=on`, a subsystem and `plm=off`: CTRATT bit 2, NSETIDMAX and both NVMSETID fields are 0; CNS 04h fails; Feature 12h keeps subsystem scope and ignores NVMSETID; 13h, 14h, logs 0Ah and 0Bh are refused |
 | `plm-identify`, `plm-identify-hints` | with `plm=on`: CTRATT bit 2, NSETIDMAX 1, NVMSETID 1 in CNS 00h and 08h; CNS 04h lists set 1 in group 1 for a start of 0 or 1 and no set from 2; OWS is 0 without a NOWS hint and NOWS + 1 blocks with `perf_hints=on` |
 | `plm-rrl` | with `plm=on`: Feature 12h refuses NVMSETID 0 and 7, and CDW11 bits 31:16, and takes 1; a refused Set keeps the level; SEL 3 gives changeable only; log 12h gives it NVM Set scope |
-| `plm-refused` | each realize refusal of `plm`, the window limit ranges, a limit without `plm=on`, and a device with no line above the high mark |
+| `plm-refused` | each realize refusal of `plm`, the window limit ranges, `plm_ndwin_lines` out of range, a limit without `plm=on`, and a device with no line above the high mark |
 | `plm-nsid` | NSID 1h and FFFFFFFFh on Get and Set 12h, 13h and 14h fail with Invalid Field |
 | `plm-config` | the checks of 13h and 14h, the 512-byte round trip, Select 1 to 3, 14h while disabled, 13h LPE=1 from DTWIN, log 12h and 00h entries, CTRATT bit 5 and OAES bit 12 clear |
 | `plm-lpe0` | 13h LPE=0 in DTWIN disables PLM, keeps the new thresholds and keeps the event until log 0Ah is read; LPE=0 from DISABLED |
 | `plm-logs` | log 0Ah limits, estimates, offsets and LSI checks; DTWTE falls and a second 14h DTWIN keeps it; log 0Bh zeros past 10 bytes; RAE; a read without ETYP clears nothing; ETYP with ENEV clear |
 | `plm-reset` | a reset in DTWIN with an event: 13h and 14h at defaults, logs empty, the 12h level kept |
 | `plm-no-pause` | log 0Ah reads return within 800 ms while idle GC steps sleep 1 s inside the FTL sweep |
+| `plm-defer` | DTWIN writes take the free lines under `gc_thres_lines` with no erase or GC copy; idle time in DTWIN runs no idle GC step; NDWIN runs them |
+| `plm-ndwin-prep` | with no host I/O, NDWIN raises the free lines to exactly `plm_ndwin_lines`, then runs no more steps; DTWIN runs none |
+| `plm-prep-steady` | every victim 94 % valid: the preparation still frees lines, up to the packed bound, then stalls and stops; 15 written pages start no step and no copy, the 16th starts one; the same for 15 and 16 deallocated pages; Format clears the stall |
+| `plm-fence` | with `gc_idle_ms` 3000, an idle GC step with no victim moves the shared fence; no preparation step runs before it |
+| `plm-reclaim` | a read reclaim queued by `read_reclaim_limit` waits through DTWIN writes and runs on the first NDWIN write |
+| `plm-buffer` | idle write-back (`buffer_low_pcent`) writes nothing back in DTWIN and drains to the low mark in NDWIN |
+| `plm-dtwin-forced` | a full device in DTWIN: every write succeeds through forced GC, and the window stays DTWIN |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
 
@@ -1398,7 +1464,8 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | `hw/femu/dma.c` | PRP and SGL mapping, `femu_dma_rw` |
 | `hw/femu/lib/rte_ring.c`, `hw/femu/lib/pqueue.c` | the rings and the completion heap |
 | `hw/femu/nvme.h` | `NvmeSQueue`, `NvmeCQueue`, `NvmeRequest`, `FemuCtrl`, `FemuPollerCtr`, register layout |
-| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot |
+| `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot, the NDWIN target in `femu_plm_init()` |
+| `hw/femu/bbssd/ftl-line-gc.c`, `hw/femu/bbssd/bb.c` | `ssd_plm_prep_due()`, `ssd_plm_prep_step()`, `bb_plm_idle()`: the NDWIN preparation GC |
 | `hw/femu/femu-ext-ops.h` | `FemuExtCtrlOps`, the mode handler table, and its rules |
 
 ## Related pages

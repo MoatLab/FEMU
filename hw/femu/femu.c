@@ -3866,10 +3866,11 @@ static void *femu_ftl_thread(void *arg)
 
         /*
          * No request this pass: the pSLC tier may fold, and idle
-         * collection may run, in the idle time.
+         * collection and the plm preparation may run, in the idle time.
          */
         idle = unlikely(n->tier_idle || n->gc_idle || n->buffer_bg ||
-                        n->tier_upkeep || n->durable_at_done) && !busy;
+                        n->tier_upkeep || n->durable_at_done || n->plm) &&
+               !busy;
         if (idle) {
             if (n->tier_upkeep) {
                 bb_tier_upkeep(n);
@@ -3879,6 +3880,10 @@ static void *femu_ftl_thread(void *arg)
             }
             if (n->gc_idle) {
                 bb_gc_idle(n);
+            }
+            /* after idle collection: the two share gc_idle_fence */
+            if (n->plm) {
+                bb_plm_idle(n);
             }
             if (n->buffer_bg || n->durable_at_done) {
                 bb_buffer_idle(n);
@@ -6484,6 +6489,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("plm_ndwin_ms", FemuCtrl, plm_st.ndwin_ms,
                        FEMU_PLM_NDWIN_MS),
     DEFINE_PROP_UINT32("plm_ndwin_min_ms", FemuCtrl, plm_st.ndwin_min_ms, 0),
+    DEFINE_PROP_UINT32("plm_ndwin_lines", FemuCtrl, plm_st.ndwin_lines, 0),
     DEFINE_PROP_BOOL("sanitize_ns", FemuCtrl, sanitize_ns, false),
     DEFINE_PROP_BOOL("cancel", FemuCtrl, cancel, false),
     DEFINE_PROP_BOOL("fused_cw", FemuCtrl, fused_cw, false),

@@ -693,6 +693,20 @@ struct ssd {
     bool gc_idle_hold;      /* qtest: no step runs on the FTL thread */
     uint32_t gc_idle_latch_ms; /* qtest: a step sleeps this long in the sweep */
     bool gc_idle_running;   /* qtest: a step is inside the sweep now */
+    /*
+     * plm: the window of NVM Set 1. The main loop sets plm_hold and
+     * plm_prep under a pause; the rest is FTL thread state.
+     */
+    bool plm;               /* plm=on: this FTL is NVM Set 1 */
+    bool plm_hold;          /* DTWIN: background work waits */
+    bool plm_prep;          /* NDWIN: collect up to plm_lines */
+    bool plm_stalled;       /* the last preparation step freed no line */
+    int plm_lines;          /* plm_ndwin_lines */
+    uint64_t plm_steps;     /* preparation steps run */
+    uint64_t plm_trim_pages; /* pages that a deallocate unmapped */
+    /* host pages taken; precon and a give-back never lower it */
+    uint64_t plm_wr_total;
+    uint64_t plm_stall_mark; /* plm_wr_total and trimmed pages at the stall */
     struct line_mgmt lm;
 
     /* lockless ring for communication with NVMe IO thread */
@@ -1091,6 +1105,9 @@ uint64_t ssd_media_seal_read(struct ssd *ssd, struct ppa *ppa);
 bool ssd_gc_idle_due(struct ssd *ssd, uint64_t now);
 SsdGcIdleOutcome ssd_gc_idle_step(struct ssd *ssd, uint64_t now);
 void ssd_gc_idle_note(struct ssd *ssd, uint64_t req_end);
+bool ssd_plm_prep_due(struct ssd *ssd, uint64_t now);
+void ssd_plm_prep_step(struct ssd *ssd);
+void bb_plm_idle(FemuCtrl *n);
 /* raw bit error model of host reads (ftl-rber.c) */
 int bb_check_rber(FemuCtrl *n, const char *mode, Error **errp);
 void ftl_rber_init_tables(void);

@@ -2864,6 +2864,7 @@ typedef struct FemuPlm {
     uint64_t        dtwin_reads;    /* DTWRT, 4 KiB reads */
     uint32_t        ndwin_ms;       /* NTWTMH */
     uint32_t        ndwin_min_ms;   /* NTWTML */
+    uint32_t        ndwin_lines;    /* NDWIN free line target; 0: derived */
     uint64_t        dtwwt;          /* DTWWT, in @unit */
     uint64_t        unit;           /* OWS bytes, or one flash page */
     uint64_t        page_bytes;

@@ -353,7 +353,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "Mode (Base 2.3 3.2.2), one set (NVMSETID 1) in Endurance Group 1 "
       "over one namespace; CNS 04h lists it, and Feature 12h takes "
       "NVMSETID 1 only; Features 13h and 14h and logs 0Ah and 0Bh give "
-      "host-selected windows; needs femu_mode=1 and mapping=page; not with "
+      "host-selected windows; in a Deterministic Window the FTL holds "
+      "background work (forced GC still runs), and in a Non-Deterministic "
+      "Window it collects up to plm_ndwin_lines; needs femu_mode=1 and "
+      "mapping=page; not with "
       "namespace_modes, FDP, ocp, gc_pace, streams, tier_mode, cxl_ssd, "
       "power_loss, persist_file or ns_mgmt; "
       "off (default)" },
@@ -369,6 +372,12 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "plm_ndwin_min_ms",
       "plm: NDWIN Time Minimum Low (NTWTML) of log 0Ah, in ms, 0 to "
       "plm_ndwin_ms; 0 (default)" },
+    { "plm_ndwin_lines",
+      "plm: free lines that the NDWIN preparation GC collects up to, from "
+      "one above the gc_thres_pcent_high lines to what the user data "
+      "leaves free; DTWWT follows it; realize refuses a value out of that "
+      "range, or plm when no value fits; 0 (default): gc_thres_lines, kept "
+      "in that range" },
     { "sanitize_ns",
       "bbssd, NoSSD with sanitize_ops: Sanitize Namespace (8Ch, Base 2.3 "
       "5.2.23), a crypto erase of one namespace while other namespaces keep "
