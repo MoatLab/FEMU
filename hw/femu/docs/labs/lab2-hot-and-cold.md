@@ -51,16 +51,16 @@ The workloads, each 4 KiB random writes:
 Start QEMU with the command line of
 [tutorial 01, step 2](../tutorials/01-first-ssd.md#2-start-the-guest-on-the-host),
 with one of these `-device` lines in place of its own. All three keep
-`op_pcent=25` and `gc_thres_pcent=95`, so GC runs in the background
-regime of lab 1.
+`op_pcent=25`, `gc_thres_pcent=95` and `gc_thres_base=raw`, so GC runs in
+the background regime of lab 1.
 
 <!-- femu-example: lab2-devices -->
 ```
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,hot_cold_sep=on
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,hot_cold_sep=on,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=cost-benefit,hot_cold_sep=on
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=cost-benefit,hot_cold_sep=on,gc_thres_base=raw
 ```
 
 The runs, one QEMU start each:

@@ -116,6 +116,7 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     uint64_t reserve_lines, usable_pgs, exposed_pgs;
     uint64_t tier_lines;
     int tp_lines;
+    BbGcLevels lv;
 
     /*
      * The free lines GC insists on, plus one for every write pointer this
@@ -123,10 +124,9 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
      * leaves a device that hot/cold separation or a log-block scheme can run
      * out of lines on, which used to be fatal and is now a refused write.
      */
-    reserve_lines = bb_gc_forced_lines(n);
-    reserve_lines += 1;                      /* the data write pointer */
+    bb_gc_levels(n, ns, &lv);
+    reserve_lines = lv.hi + lv.open;
     if (n->streams) {
-        reserve_lines += n->streams_max + 1;
         if (pgs_per_line > UINT16_MAX) {
             error_setg(errp, "Streams SGS exceeds the 16-bit field");
             return -1;
@@ -135,15 +135,6 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
             error_setg(errp, "Streams requires page or dftl mapping");
             return -1;
         }
-    }
-    if (p->hot_cold_sep) {
-        reserve_lines += 1;                  /* the hot write pointer */
-    }
-    if (p->gc_frontier) {
-        reserve_lines += 1;                  /* the collection write pointer */
-    }
-    if (femu_mapping_name_uses_log_class(p->mapping_scheme)) {
-        reserve_lines += 1;                  /* the log write pointer */
     }
     /* the admission counts pages in 31 bits of one word */
     if (reserve_eol >= (1ULL << 31) / bb_eol_line_pgs(p)) {
@@ -280,6 +271,22 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
             return -1;
         }
         return 0;
+    }
+
+    /*
+     * With the spare base, forced collection keeps lv.hi lines and the open
+     * pointers hold lv.open. Two more lines must be left for invalid pages:
+     * with one, each victim is nearly all valid and the WAF nears the pages
+     * of a line.
+     */
+    if (lv.spare && lv.avail < (int64_t)lv.hi + lv.open + 2) {
+        error_setg(errp, "FEMU bbssd: namespace %u leaves %" PRId64 " spare "
+                   "lines, and gc_thres_base=spare needs %d: %d free for "
+                   "forced collection, %d for open write pointers and 2 for "
+                   "invalid pages; raise op_pcent or blks_per_pl, lower "
+                   "devsz_mb, or set gc_thres_base=raw", ns->id,
+                   MAX(lv.avail, 0), lv.hi + lv.open + 2, lv.hi, lv.open);
+        return -1;
     }
 
     usable_pgs = (tt_lines - reserve_lines) * data_pgs;
@@ -655,6 +662,37 @@ int bb_init_fdp(FemuCtrl *n, NvmeNamespace *ns, const char *mode,
     return 0;
 }
 
+/*
+ * The raw levels with op_pcent may take nearly all of the spare. The device
+ * still runs, so say what it costs, once per namespace at realize.
+ */
+void bb_warn_gc_levels(FemuCtrl *n, NvmeNamespace *ns)
+{
+    BbGcLevels lv;
+    int64_t room;
+
+    /* FDP collects reclaim units; bb_check_capacity() sizes those */
+    if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        return;
+    }
+    bb_gc_levels(n, ns, &lv);
+    if (lv.fallback) {
+        warn_report("FEMU bbssd: namespace %u leaves %" PRId64 " spare "
+                    "lines and the spare GC levels need %d, so "
+                    "gc_thres_base=auto kept the raw levels; victims are "
+                    "nearly full and the WAF is high", ns->id,
+                    MAX(lv.avail, 0), lv.need);
+        return;
+    }
+    room = lv.avail - lv.hi - lv.open;
+    if (!lv.spare && n->op_pcent && room < 2) {
+        warn_report("FEMU bbssd: gc_thres_base=raw leaves %" PRId64 " of the "
+                    "%" PRId64 " spare lines of namespace %u for invalid "
+                    "pages; victims are nearly full and the WAF is high",
+                    MAX(room, 0), MAX(lv.avail, 0), ns->id);
+    }
+}
+
 /* bb <=> black-box */
 static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
 {
@@ -708,6 +746,7 @@ static void bb_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     if (bb_check_capacity(n, ns, errp)) {
         return;
     }
+    bb_warn_gc_levels(n, ns);
 
     if (bb_init_fdp(n, ns, "bbssd", errp)) {
         return;

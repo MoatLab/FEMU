@@ -15,8 +15,9 @@ in tutorial 02, and do [Before the first lab](README.md#before-the-first-lab).
 ## 1. Background: three operating regions
 
 The device has 128 lines. A line is one block on each of the 16 LUNs:
-16 x 256 pages of 4 KiB, or 16 MiB. The FTL turns the two thresholds
-into counts of free lines:
+16 x 256 pages of 4 KiB, or 16 MiB. Each device line of this lab sets
+`gc_thres_base=raw`, so the FTL turns the two thresholds into counts of
+free lines of the whole NAND:
 
 ```
  bg_free     = int((1 - gc_thres_pcent / 100)      x 128)   background GC
@@ -71,24 +72,24 @@ Part A, the background threshold:
 
 <!-- femu-example: lab1-threshold -->
 ```
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=90
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=90,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_thres_base=raw
 ```
 
 Part B, the spare capacity, with `gc_thres_pcent=90`:
 
-<!-- femu-example: lab1-spare -->
+<!-- femu-example: lab1-spare; allow-warning: gc_thres_base=raw leaves -->
 ```
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=7,gc_thres_pcent=90
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=7,gc_thres_pcent=90,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=15,gc_thres_pcent=90
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=15,gc_thres_pcent=90,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=50,gc_thres_pcent=90
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=50,gc_thres_pcent=90,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=100,gc_thres_pcent=90
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=100,gc_thres_pcent=90,gc_thres_base=raw
 ```
 
 Part B also uses the `op_pcent=25,gc_thres_pcent=90` run of part A.

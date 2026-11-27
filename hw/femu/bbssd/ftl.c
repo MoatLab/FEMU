@@ -151,7 +151,7 @@ int ssd_wear_floor(struct ssd *ssd, int nfail)
                (ssd_rain_members(spp, nfail) - 1);
     }
     return DIV_ROUND_UP(DIV_ROUND_UP(bb_ftl_bytes(ssd->n, ssd->ns), page),
-                        data) + bb_gc_forced_lines(ssd->n) + 2 +
+                        data) + spp->gc_thres_lines_high + 2 +
            (spp->gc_frontier ? 1 : 0) + bb_tp_reserve_lines(ssd->n, ssd->ns);
 }
 
@@ -530,6 +530,17 @@ bool ssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     exp_load_cfg();
 
     ssd_init_params(spp, n);
+    /* gc_thres_base=spare: bbssd and CSD lines; KV keeps the raw levels */
+    if (bb_gc_base_spare(n) && (NS_BBSSD(ns) || NS_CSD(ns))) {
+        BbGcLevels lv;
+
+        bb_gc_levels(n, ns, &lv);
+        if (lv.spare) {
+            spp->gc_thres_lines = lv.bg;
+            spp->gc_thres_lines_high = lv.hi;
+            spp->gc_idle_lines = lv.idle;
+        }
+    }
     if (!ssd_rain_init(ssd)) {
         return ssd_init_fail(ssd, errp);
     }

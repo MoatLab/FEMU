@@ -37,6 +37,146 @@ int bb_gc_forced_lines(FemuCtrl *n)
     return lines;
 }
 
+/* gc_thres_base takes unset, auto, raw or spare */
+bool bb_gc_base_valid(const char *base)
+{
+    return !base || !*base || !strcmp(base, "auto") || !strcmp(base, "raw") ||
+           !strcmp(base, "spare");
+}
+
+/*
+ * Whether the GC percentages count spare lines. raw counts every line, as
+ * FEMU always did; auto takes spare once op_pcent sizes the spare.
+ */
+bool bb_gc_base_spare(FemuCtrl *n)
+{
+    const char *base = n->bb_params.gc_thres_base;
+
+    if (base && !strcmp(base, "spare")) {
+        return true;
+    }
+    if (base && !strcmp(base, "raw")) {
+        return false;
+    }
+    return (BBSSD(n) || CSD(n)) && n->op_pcent;
+}
+
+/* gc_thres_base=spare set by name: such a device refuses a small spare */
+static bool bb_gc_base_named_spare(FemuCtrl *n)
+{
+    const char *base = n->bb_params.gc_thres_base;
+
+    return base && !strcmp(base, "spare");
+}
+
+/* write pointers that can each hold a line open at once */
+int bb_gc_open_lines(FemuCtrl *n)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    int open = 1;                       /* the data pointer */
+
+    if (n->streams) {
+        open += n->streams_max + 1;     /* a pointer per stream, and GC's */
+    }
+    if (p->hot_cold_sep) {
+        open += 1;
+    }
+    if (p->gc_frontier) {
+        open += 1;
+    }
+    if (femu_mapping_name_uses_log_class(p->mapping_scheme)) {
+        open += 1;
+    }
+    return open;
+}
+
+/* @pcent of @avail spare units, counted as free units: (100 - pcent) % */
+static int64_t bb_gc_spare_share(int64_t avail, int pcent)
+{
+    return avail > 0 ? avail * (100 - pcent) / 100 : 0;
+}
+
+/*
+ * bb_gc_levels - the GC levels of the FTL of @ns, in free lines
+ *
+ * The raw base keeps the expressions ssd_init_params() always used. The
+ * spare base takes the percentages of the lines left once every namespace
+ * of the FTL is full, as SSD models such as MQSim size the free pool. A
+ * pool sized from all the NAND can take nearly the whole spare of a small
+ * op_pcent, and every victim is then nearly full. The forced level keeps
+ * at least one line per open pointer, so each can roll over once.
+ */
+void bb_gc_levels(FemuCtrl *n, NvmeNamespace *ns, BbGcLevels *lv)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    uint64_t page = (uint64_t)p->secs_per_pg * p->secsz;
+    uint64_t data = bb_line_data_pgs(p);
+    int64_t lines = (int64_t)p->blks_per_pl -
+                    (n->blk_pe_limit ? n->spare_lines : 0);
+    int64_t user = 0;
+    int64_t hi = 0;
+    int64_t bg;
+    int64_t idle;
+
+    lines -= (int64_t)bb_eol_reserve_lines(n) + bb_tp_reserve_lines(n, ns) +
+             (int64_t)bb_tier_pool_lines(n);
+    if (page && data) {
+        user = DIV_ROUND_UP(DIV_ROUND_UP(bb_ftl_bytes(n, ns), page), data);
+    }
+    /* under FDP the reclaim units are the pool: bb_fdp_gc_levels() */
+    lv->spare = bb_gc_base_spare(n) &&
+                !(n->subsys && n->subsys->endgrp.fdp.enabled);
+    lv->fallback = false;
+    lv->need = 0;
+    lv->open = bb_gc_open_lines(n);
+    lv->avail = lines - user;
+    if (lv->spare) {
+        hi = MAX(bb_gc_spare_share(lv->avail, p->gc_thres_pcent_high),
+                 lv->open);
+        /* TP lines: the floor bb_gc_forced_lines() keeps (ftl-map-tp.c) */
+        if (bb_tp_physical(n)) {
+            hi = MAX(hi, 2);
+        }
+        lv->need = hi + lv->open + 2;
+        /*
+         * auto must not refuse a device the raw levels accept, so a spare
+         * too small for the spare levels keeps the raw ones.
+         */
+        if (lv->avail < lv->need && !bb_gc_base_named_spare(n)) {
+            lv->spare = false;
+            lv->fallback = true;
+        }
+    }
+    if (!lv->spare) {
+        lv->hi = bb_gc_forced_lines(n);
+        lv->bg = (int)((1 - p->gc_thres_pcent / 100.0) * p->blks_per_pl);
+        lv->idle = p->gc_idle_pcent ?
+            (int)((1 - p->gc_idle_pcent / 100.0) * p->blks_per_pl) : lv->bg;
+        return;
+    }
+    bg = MAX(bb_gc_spare_share(lv->avail, p->gc_thres_pcent), hi + 1);
+    idle = p->gc_idle_pcent ?
+           MAX(bb_gc_spare_share(lv->avail, p->gc_idle_pcent), hi + 1) : bg;
+    lv->hi = hi;
+    lv->bg = bg;
+    lv->idle = idle;
+}
+
+/*
+ * "base hi bg avail open": the levels the FTL applies, with the spare and
+ * the open pointers they were derived from (x-gc-lines).
+ */
+char *ssd_gc_levels_report(struct ssd *ssd)
+{
+    BbGcLevels lv;
+
+    bb_gc_levels(ssd->n, ssd->ns, &lv);
+    return g_strdup_printf("%s %d %d %" PRId64 " %d",
+                           lv.spare ? "spare" : "raw",
+                           ssd->sp.gc_thres_lines_high,
+                           ssd->sp.gc_thres_lines, lv.avail, lv.open);
+}
+
 /*
  * Lines held erased for read-only end of life: enough for the most pages
  * the admitted writes may hold at once, which is at least the largest write

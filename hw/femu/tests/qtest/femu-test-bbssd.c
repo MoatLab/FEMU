@@ -29540,3 +29540,265 @@ void femu_test_io_causes_refused(void *obj, void *data,
     }
     qos_invalidate_command_line();
 }
+
+/*
+ * gc_thres_base. The devices have 64 lines of 32 pages (2 x 2 LUNs, 8 pages
+ * a block). op_pcent=7 exposes 1914 pages, which fill 60 lines and leave 4
+ * spare. x-gc-lines gives "base hi bg avail open": the forced and the
+ * background levels the FTL applies, in free lines, the spare lines and the
+ * open write pointers.
+ *
+ *   device                       expect           why
+ *   op_pcent=7                   spare 1 2 4 1    5 % and 25 % of 4 lines
+ *                                                 round to 0 and 1; the
+ *                                                 floors are 1 and hi + 1
+ *   op_pcent=7, raw              raw 3 16 4 1     5 % and 25 % of 64 lines
+ *   devsz_mb=4                   raw 3 16 32 1    auto without op_pcent
+ *   devsz_mb=4, spare            spare 1 8 32 1   25 % of 32 lines is 8
+ *   op_pcent=11, hot_cold_sep    spare 2 3 6 2    two open pointers: hi 2
+ *   op_pcent=10, hot_cold_sep    raw 3 16 5 2     5 spare lines, the spare
+ *                                                 levels need 2 + 2 + 2:
+ *                                                 auto keeps raw
+ *   CSD, devsz_mb=4, op_pcent=7  spare 1 8 32 1   auto covers CSD; op_pcent
+ *                                                 does not size a CSD
+ *   CSD, devsz_mb=4              raw 3 16 32 1    auto without op_pcent
+ */
+void femu_test_gc_lines(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-test',"
+                           "'property':'x-gc-lines'}}");
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-gc-lines: %s", qdict_get_str(rsp, "return"));
+    g_assert_cmpstr(qdict_get_str(rsp, "return"), ==, data);
+    qobject_unref(rsp);
+    qos_invalidate_command_line();
+}
+
+/*
+ * auto with too little spare keeps the raw levels and says so once at
+ * realize. @data is the x-gc-lines report; QEMU's stderr goes to
+ * femu_csd_warn_log.
+ */
+void femu_test_gc_lines_warned(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const char *needle = "gc_thres_base=auto kept the raw levels";
+    g_autofree char *text = NULL;
+    const char *p;
+    int count = 0;
+
+    femu_test_gc_lines(obj, data, alloc);
+    g_assert_true(g_file_get_contents(femu_csd_warn_log, &text, NULL, NULL));
+    for (p = strstr(text, needle); p; p = strstr(p + 1, needle)) {
+        count++;
+    }
+    g_assert_cmpint(count, ==, 1);
+    unlink(femu_csd_warn_log);
+}
+
+/*
+ * gc_thres_base=spare keeps two spare lines for invalid pages beyond the
+ * forced level and the open pointers. auto keeps the raw levels instead,
+ * so the old rule decides. On the geometry above:
+ *
+ *   op_pcent  hot_cold_sep  base   avail  hi + open + 2  result
+ *   6         off           spare  3      4              refused
+ *   7         off           spare  4      4              accepted
+ *   10        on            spare  5      6              refused
+ *   11        on            spare  6      6              accepted
+ *   10        on            raw    5      -              accepted (old rule)
+ *   7         on            raw    4      -              refused (old rule)
+ *   10        on            auto   5      6              accepted (old rule)
+ *   6         off           auto   3      4              refused (old rule)
+ *
+ * The old rule accepts op_pcent=10 with hot_cold_sep: its forced level of
+ * 3 lines and the two pointers leave no line for invalid pages. At
+ * op_pcent=7 they take 5 lines and the namespace needs 60 of 64. At
+ * op_pcent=6 the namespace needs 61 lines and the old rule keeps 4.
+ */
+void femu_test_gc_lines_refused(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        int op;
+        const char *extra;
+        const char *want;
+    } cases[] = {
+        { 6, ",'gc_thres_base':'spare'",
+          "leaves 3 spare lines, and gc_thres_base=spare needs 4" },
+        { 7, ",'gc_thres_base':'spare'", NULL },
+        { 10, ",'hot_cold_sep':true,'gc_thres_base':'spare'",
+          "leaves 5 spare lines, and gc_thres_base=spare needs 6" },
+        { 11, ",'hot_cold_sep':true,'gc_thres_base':'spare'", NULL },
+        { 10, ",'hot_cold_sep':true,'gc_thres_base':'raw'", NULL },
+        { 7, ",'hot_cold_sep':true,'gc_thres_base':'raw'",
+          "leaving garbage collection no room" },
+        { 10, ",'hot_cold_sep':true", NULL },
+        { 6, "", "leaving garbage collection no room" },
+        { 7, ",'gc_thres_base':'free'",
+          "gc_thres_base must be auto, raw or spare, got free" },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'gclr','addr':'5','femu_mode':1,'secsz':512,"
+            "'secs_per_pg':8,'pgs_per_blk':8,'blks_per_pl':64,"
+            "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,'op_pcent':%d%s}}",
+            cases[i].op, cases[i].extra);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+
+        if (cases[i].want) {
+            const char *desc;
+
+            g_assert_true(qdict_haskey(rsp, "error"));
+            desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+            g_test_message("op_pcent=%d%s: %s", cases[i].op, cases[i].extra,
+                           desc);
+            g_assert_nonnull(strstr(desc, cases[i].want));
+            qobject_unref(rsp);
+            continue;
+        }
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+        qpci_unplug_acpi_device_test(qts, "gclr", 5);
+    }
+}
+
+/* host pages and GC copies so far, from C0h */
+static void femu_gc_counts(FemuCtrlState *c, uint64_t log, uint64_t *host,
+                           uint64_t *gc)
+{
+    QTestState *qts = c->pdev->bus->qts;
+
+    g_assert_cmpint(FEMU_SC(femu_get_log(c, FEMU_LOG_FEMU_STATS, log, 512, 0)),
+                    ==, NVME_SUCCESS);
+    *host = qtest_readq(qts, log + 8);
+    *gc = qtest_readq(qts, log + 16);
+}
+
+/*
+ * The WAF of uniform random 4 KiB writes on op_pcent=7 (1914 pages, 60 of
+ * the 64 lines). One sequential pass fills the namespace, 1914 random
+ * writes age it, and C0h counts the next 1914. A line-level model of the
+ * greedy FTL gives a WAF of 9.9 to 10.5 with the spare levels (hi 1, bg 2)
+ * and 29.1 to 29.7 with the raw ones (hi 3, bg 16), over six seeds.
+ *
+ * @data: "spare" (expect 7 to 14) or "raw", the control (expect 22 or more)
+ */
+void femu_test_gc_spare_waf(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const uint32_t pages = 1914;
+    bool spare = !strcmp(data, "spare");
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 32 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t host0, gc0, host1, gc1;
+    uint64_t mapped, lost, orphans;
+    uint32_t seed = 11;
+    double waf;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x47, 32 * 4096);
+    for (uint32_t p = 0; p < pages; p += 32) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, p, MIN(32, pages - p),
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (int round = 0; round < 2; round++) {
+        if (round) {
+            femu_gc_counts(&c, log, &host0, &gc0);
+        }
+        for (uint32_t i = 0; i < pages; i++) {
+            seed = seed * 1103515245 + 12345;
+            g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (seed >> 8) % pages,
+                                                     1, buf, list)), ==,
+                            NVME_SUCCESS);
+        }
+    }
+    femu_gc_counts(&c, log, &host1, &gc1);
+    g_assert_cmpuint(host1 - host0, ==, pages);
+    waf = (double)(host1 - host0 + gc1 - gc0) / (host1 - host0);
+    g_test_message("gc-spare-waf %s: %" PRIu64 " host pages, %" PRIu64
+                   " copies, WAF %.2f", (const char *)data, host1 - host0,
+                   gc1 - gc0, waf);
+    if (spare) {
+        g_assert_cmpfloat(waf, >=, 7.0);
+        g_assert_cmpfloat(waf, <=, 14.0);
+    } else {
+        g_assert_cmpfloat(waf, >=, 22.0);
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, pages);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * hot_cold_sep at the smallest spare the spare levels accept: op_pcent=11
+ * exposes 1845 pages and leaves 6 lines, with hi 2 for the data and the hot
+ * pointer. A first write goes to the data pointer and an overwrite to the
+ * hot one, and GC copies go to the data pointer. Half the writes go to the
+ * first quarter of the namespace, half anywhere, so both classes take
+ * overwrites and both pointers roll over many times. No write may fail for
+ * want of a line, and every page must stay mapped.
+ */
+void femu_test_gc_spare_hotcold(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const uint32_t pages = 1845;
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 32 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans, host, gc;
+    uint32_t seed = 5;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3d, 32 * 4096);
+    for (uint32_t p = 0; p < pages; p += 32) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, p, MIN(32, pages - p),
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (uint32_t i = 0; i < 3 * pages; i++) {
+        uint32_t span = i & 1 ? pages : pages / 4;
+
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, (seed >> 8) % span, 1,
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_gc_counts(&c, log, &host, &gc);
+    g_test_message("gc-spare-hotcold: %" PRIu64 " host pages, %" PRIu64
+                   " copies", host, gc);
+    g_assert_cmpuint(gc, >, 0);
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, pages);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}

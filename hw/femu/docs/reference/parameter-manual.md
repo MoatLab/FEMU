@@ -386,6 +386,7 @@ Design: [garbage collection](../design/ftl.md#garbage-collection).
 | --- | --- | --- | --- |
 | `gc_thres_pcent` | percent of lines in use | 1 to 100 | background GC starts; KV: share of the NAND usable for values |
 | `gc_thres_pcent_high` | percent of lines in use | `gc_thres_pcent` to 100 | forced GC inside writes; also sizes the reserve |
+| `gc_thres_base` | name | `auto` (unset), `raw`, `spare` | the lines the two percentages count: `raw` all, `spare` the lines left once the namespaces are full; `auto` is `spare` with `op_pcent` and enough spare, else `raw` |
 | `gc_bg_invalid_pcent` | percent of the pages of a victim | 0 to 100; 0 keeps the 1/8 rule | least invalid share of a background victim; for FDP reclaim units, unwritten pages count as invalid |
 | `gc_policy` | name | `greedy`, `random`, `cost-benefit`, `fifo`, `d-choice`; under FDP a name other than `greedy` needs `gc_strategy=0` | victim line policy; under FDP the reclaim unit policy |
 | `gc_strategy` | number | 0 greedy, 1 cost-benefit, 2 random, 4 per-handle; FDP only | victim reclaim unit policy |
@@ -395,6 +396,10 @@ Interactions:
 
 - Background GC takes only a line with at least 1/8 of its pages invalid;
   forced GC takes the best line whatever it holds.
+- With the spare levels the forced level is at least one line per open
+  write pointer. `gc_thres_base=spare` refuses a namespace that leaves
+  fewer than 2 spare lines beyond it and the open pointers. `auto` keeps
+  the raw levels then, and warns once per namespace.
 - `gc_bg_invalid_pcent` sets another share than 1/8. A value of 50 holds
   background reclaim at 2 or fewer pages programmed for each page freed.
 - Set `gc_thres_pcent` above the share of the NAND the namespace fills.

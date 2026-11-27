@@ -533,6 +533,34 @@ The two watermarks are stored as free-line counts:
                         or fast mapping (bb_gc_forced_lines())
 ```
 
+These are the levels of `gc_thres_base=raw`. With `spare` (the default
+when `op_pcent` is set), `bb_gc_levels()` in `hw/femu/bbssd/ftl-geom.c`
+takes the percentages of the spare lines instead:
+
+```text
+  T     = blks_per_pl - spare_lines (blk_pe_limit) - eol, TP and pSLC lines
+  U     = ceil(exposed pages of the FTL's namespaces / data pages of a line)
+  avail = T - U                                        spare lines
+  open  = 1 + hot_cold_sep + gc_frontier + log class + (streams_max + 1)
+  hi    = max(avail x (100 - gc_thres_pcent_high) / 100, open), 2 with dftl TPs
+  bg    = max(avail x (100 - gc_thres_pcent) / 100, hi + 1)
+  idle  = bg, or the same rule for gc_idle_pcent
+  need  = hi + open + 2
+  avail < need, gc_thres_base=spare   realize refuses the namespace
+  avail < need, auto                  raw levels, one warning per namespace
+```
+
+`auto` thus never refuses a device that the raw levels accept. The
+capacity check then decides with the raw levels, as before
+`gc_thres_base` existed.
+
+The forced level keeps a line for each open pointer, so each pointer can
+roll over once while the forced loop runs. The two extra lines hold
+invalid pages: with one, every victim is nearly all valid. KV namespaces
+keep the raw levels. The background pass keeps its 1/8 filter, so a
+background level inside the spare does not make it collect a near-full
+line. Idle collection (`gc_idle_ms`) uses the same filter.
+
 The floor matters below 20 lines, where the default high watermark rounds to
 zero. A second write pointer can then take the last free line while the data
 pointer, which GC writes into, is nearly full, and GC would have nowhere to
@@ -1771,6 +1799,21 @@ leave GC no room. The reserve, in lines:
 Each namespace has its own FTL built from the whole geometry, so the check
 applies per namespace.
 
+With the spare levels the forced level in the reserve is the one
+`bb_gc_levels()` gives. With `gc_thres_base=spare` the namespace must also
+leave `hi + open + 2` spare lines; `auto` keeps the raw levels instead ([triggers](#triggers-and-watermarks)). The
+spare is the room for invalid pages, so it sets the WAF a greedy victim
+choice can reach:
+
+```text
+  spare lines   after the forced pool and the open pointers
+  +----------------------------+---------+------------------------+
+  | hi free lines (forced)     | open    | room: invalid pages    |
+  +----------------------------+---------+------------------------+
+  raw,   op_pcent=7, 64 lines:  3          1         0     WAF 162 (model)
+  spare, op_pcent=7, 64 lines:  1          1         2     WAF 14.6 (model)
+```
+
 ### Sizing the namespace
 
 Without `op_pcent`, the backend is `devsz_mb` MiB, split across the
@@ -1924,6 +1967,7 @@ does inside the FTL and what it interacts with.
 | --- | --- | --- |
 | `gc_thres_pcent` | background GC watermark: one attempt after each command, for a victim with 1/8 or more of its pages invalid ([triggers](#triggers-and-watermarks)) | must not exceed `gc_thres_pcent_high` |
 | `gc_thres_pcent_high` | forced GC watermark, with no 1/8 filter; sizes the reserve | lower values cost exposed capacity |
+| `gc_thres_base` | the lines both watermarks count: all (`raw`) or the spare (`spare`) ([triggers](#triggers-and-watermarks)) | `auto` is `spare` with `op_pcent` and enough spare, else `raw` with a warning; `spare` refuses less than `hi + open + 2` spare lines |
 | `gc_bg_invalid_pcent` | least invalid share of a background victim, in place of 1/8 ([triggers](#triggers-and-watermarks)) | lines and FDP reclaim units; also the victim choice of `gc_pace` and `gc_idle_ms`; forced GC does not use it |
 | `gc_policy` | line victim selection | under FDP, the reclaim unit strategy; needs `gc_strategy=0` |
 | `gc_seed` | seed for the `random` and `d-choice` policies and FDP random reclaim | no effect on the other policies |

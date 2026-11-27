@@ -39,8 +39,25 @@ in 128 lines of 16 MiB, and changes one or two options:
 
 <!-- femu-example: tut02-base -->
 ```
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_base=raw
 ```
+
+Each line sets `gc_thres_base=raw`. The two GC percentages then count
+every line of the NAND, as when the numbers in this tutorial were
+measured. Without it, a device with `op_pcent` counts only its spare
+lines: the lines left once the namespace is full. The forced level is
+then about one line and the background level a few more, as SSD models
+such as MQSim set them. The WAF numbers then move:
+
+```
+ op_pcent=25, gc_thres_pcent=75 (step 2)    25 spare lines of 128
+ base    forced level   background level
+ raw     6 free lines   32 free lines        measured WAF 8.017
+ spare   1 free line    6 free lines         not measured here
+```
+
+[Garbage collection](../modes/blackbox.md#garbage-collection) shows both
+bases.
 
 Start QEMU with the command line of
 [tutorial 01, step 2](01-first-ssd.md#2-start-the-guest-on-the-host),
@@ -123,9 +140,9 @@ then run `bash waf-run.sh`:
 
 <!-- femu-example: tut02-threshold -->
 ```
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=90
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=90,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_thres_base=raw
 ```
 
 | `gc_thres_pcent` | WAF |
@@ -144,15 +161,15 @@ measure.
 
 Keep `gc_thres_pcent=90` and change `op_pcent`:
 
-<!-- femu-example: tut02-op -->
+<!-- femu-example: tut02-op; allow-warning: gc_thres_base=raw leaves -->
 ```
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=7,gc_thres_pcent=90
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=7,gc_thres_pcent=90,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=15,gc_thres_pcent=90
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=15,gc_thres_pcent=90,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=50,gc_thres_pcent=90
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=50,gc_thres_pcent=90,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=100,gc_thres_pcent=90
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=100,gc_thres_pcent=90,gc_thres_base=raw
 ```
 
 | `op_pcent` | Share of NAND exposed | WAF |
@@ -186,15 +203,15 @@ Go back to `op_pcent=25` with `gc_thres_pcent=95`, and try each
 
 <!-- femu-example: tut02-policy -->
 ```
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=greedy
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=greedy,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=fifo
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=fifo,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=random
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=random,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=cost-benefit
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=cost-benefit,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=d-choice
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=d-choice,gc_thres_base=raw
 ```
 
 Run the uniform workload (`bash waf-run.sh`) and a skewed one, where a few
@@ -228,9 +245,9 @@ together ([hot/cold separation](../design/ftl.md#hotcold-separation)):
 
 <!-- femu-example: tut02-hotcold -->
 ```
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,hot_cold_sep=on
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,hot_cold_sep=on,gc_thres_base=raw
 
--device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=cost-benefit,hot_cold_sep=on
+-device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_pcent=95,gc_policy=cost-benefit,hot_cold_sep=on,gc_thres_base=raw
 ```
 
 | Configuration, zipf 1.2 | WAF |

@@ -43,7 +43,7 @@ From `build-femu/`:
     -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
     -drive file=$OSIMGF,if=none,cache=none,format=qcow2,id=hd0 \
     -net user,hostfwd=tcp::$SSH_PORT-:22 -net nic,model=virtio \
-    -device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25 \
+    -device femu,femu_mode=1,nchs=4,luns_per_ch=4,blks_per_pl=128,op_pcent=25,gc_thres_base=raw \
     -nographic
 ```
 
@@ -59,6 +59,7 @@ needs. The FEMU device:
 | `femu_mode=1` | BlackBox mode: the device runs its own FTL, GC and NAND timing |
 | `nchs=4,luns_per_ch=4,blks_per_pl=128` | the geometry from step 1; the page size and pages per block keep their defaults |
 | `op_pcent=25` | 25% over-provisioning |
+| `gc_thres_base=raw` | GC levels count every line, as when the numbers below were measured; see [tutorial 02](02-gc-and-waf.md#1-the-device) |
 
 Wait for the `femu-guest login:` prompt, about 30 seconds. Leave this
 terminal running. To stop QEMU, press `Ctrl-a` then `x`.

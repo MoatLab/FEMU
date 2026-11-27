@@ -441,6 +441,11 @@
     "kind": "static",
     "type": "int32"
    },
+   "gc_thres_base": {
+    "default": null,
+    "kind": "static",
+    "type": "str"
+   },
    "gc_thres_pcent": {
     "default": 75,
     "kind": "static",

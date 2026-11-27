@@ -1105,6 +1105,29 @@ struct ssd {
 int bb_check_geometry(FemuCtrl *n, Error **errp);
 int bb_pd_wl_pages(FemuCtrl *n);
 int bb_gc_forced_lines(FemuCtrl *n);
+
+/*
+ * GC levels in free lines (or FDP reclaim units of one group). avail is the
+ * spare: units left once every namespace of the FTL is full.
+ */
+typedef struct BbGcLevels {
+    bool spare;     /* the percentages count spare units (gc_thres_base) */
+    bool fallback;  /* auto found too few spare units: raw levels kept */
+    int need;       /* spare units the spare levels need: hi + open + 2 */
+    int hi;         /* forced: collect while free units <= hi */
+    int bg;         /* background: one pass while free units <= bg */
+    int idle;       /* idle collection while free units < idle */
+    int open;       /* write pointers that can each hold a unit open */
+    int64_t avail;  /* spare units */
+} BbGcLevels;
+
+bool bb_gc_base_valid(const char *base);
+bool bb_gc_base_spare(FemuCtrl *n);
+int bb_gc_open_lines(FemuCtrl *n);
+void bb_gc_levels(FemuCtrl *n, NvmeNamespace *ns, BbGcLevels *lv);
+void bb_warn_gc_levels(FemuCtrl *n, NvmeNamespace *ns);
+/* "base hi bg avail open" of namespace 1 (x-gc-lines) */
+char *ssd_gc_levels_report(struct ssd *ssd);
 uint64_t bb_line_data_pgs(const BbCtrlParams *p);
 uint64_t bb_eol_line_pgs(const BbCtrlParams *p);
 uint8_t bb_rain_spare(int64_t lines, int64_t rows, int dies, int nfail,

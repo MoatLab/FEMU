@@ -969,6 +969,11 @@ void femu_test_power_states_off(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_identify_fmt_off(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_gc_frontier_skew(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_gc_bg_invalid(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_gc_lines(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_gc_lines_warned(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_gc_lines_refused(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_gc_spare_waf(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_gc_spare_hotcold(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_atomic_identify(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_tier_refused(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_dma_target_compare_status(void *obj, void *data,

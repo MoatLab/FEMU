@@ -1804,6 +1804,11 @@ static bool nvme_check_constraints(FemuCtrl *n, Error **errp)
                    n->bb_params.gc_bg_invalid_pcent);
         return false;
     }
+    if (!bb_gc_base_valid(n->bb_params.gc_thres_base)) {
+        error_setg(errp, "gc_thres_base must be auto, raw or spare, got %s",
+                   n->bb_params.gc_thres_base);
+        return false;
+    }
     /* bb_init() refuses the media timing settings it cannot count yet */
     if (n->die_stats && (n->femu_mode != FEMU_BBSSD_MODE ||
                          n->namespace_modes || n->subsys || n->cxl_dev)) {
@@ -6394,6 +6399,7 @@ static const Property femu_props[] = {
     DEFINE_PROP_INT32("ch_xfer_lat", FemuCtrl, bb_params.ch_xfer_lat, 0),
     DEFINE_PROP_INT32("gc_thres_pcent", FemuCtrl, bb_params.gc_thres_pcent, 75),
     DEFINE_PROP_INT32("gc_thres_pcent_high", FemuCtrl, bb_params.gc_thres_pcent_high, 95),
+    DEFINE_PROP_STRING("gc_thres_base", FemuCtrl, bb_params.gc_thres_base),
     DEFINE_PROP_INT32("gc_strategy", FemuCtrl, bb_params.gc_strategy, 0),
     DEFINE_PROP_STRING("gc_policy", FemuCtrl, bb_params.gc_policy),
     DEFINE_PROP_UINT64("gc_seed", FemuCtrl, gc_seed, 0),
@@ -6895,6 +6901,24 @@ static char *femu_test_gc_order(Object *obj, Error **errp)
     }
     resume = nvme_pause_pollers(n);
     report = ssd_gc_order_report(ns->ssd);
+    nvme_resume_pollers(n, resume);
+    return report;
+}
+
+/* qtest only: the GC levels of namespace 1 (ssd_gc_levels_report()) */
+static char *femu_test_gc_lines(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    char *report;
+    bool resume;
+
+    if (!ns || !(NS_BBSSD(ns) || NS_CSD(ns)) || !ns->ssd) {
+        error_setg(errp, "the GC levels require a bbssd or CSD namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    report = ssd_gc_levels_report(ns->ssd);
     nvme_resume_pollers(n, resume);
     return report;
 }
@@ -7859,6 +7883,7 @@ static void femu_instance_init(Object *obj)
                                 NULL);
         object_property_add_str(obj, "x-gc-order", femu_test_gc_order, NULL);
         object_property_add_str(obj, "x-gc-clock", femu_test_gc_clock, NULL);
+        object_property_add_str(obj, "x-gc-lines", femu_test_gc_lines, NULL);
         femu_test_add_u32(obj, "x-gc-hold-us",
                           &FEMU(obj)->test_gc_hold_us, true);
         femu_test_add_u32(obj, "x-gc-pass-off",

@@ -178,7 +178,7 @@ static inline int ssd_rain_usable_lines(struct ssd *ssd)
     int open = 1 + (spp->hot_cold_sep ? 1 : 0) + (spp->gc_frontier ? 1 : 0);
 
     /* spare pool lines only replace worn-out blocks: no data */
-    return spp->tt_lines - ssd->spare_lines - bb_gc_forced_lines(ssd->n) -
+    return spp->tt_lines - ssd->spare_lines - spp->gc_thres_lines_high -
            open - ssd->eol_reserve_lines - ssd->lm.retired_line_cnt;
 }
 

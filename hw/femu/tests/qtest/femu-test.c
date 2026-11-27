@@ -377,6 +377,13 @@ static void *femu_ocp_before(GString *cmd_line, void *arg)
 #define FEMU_PLM_HOLD \
     "id=plmh,femu_mode=1,rrl=on,plm=on,subsys=plmsub,plm_ndwin_ms=3000," \
     "plm_ndwin_min_ms=2000,plm_ndwin_gc_us=0," FEMU_CAPS_GEO
+/* gc_thres_base: 64 lines of 32 pages; op_pcent=7 leaves 4 spare lines */
+#define GC_LINES_DEV "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8," \
+    "pgs_per_blk=8,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+/* the same lines on CSD; op_pcent does not size a CSD namespace: 32 lines */
+#define GC_LINES_CSD "id=gc-test,femu_mode=4,devsz_mb=4,secsz=512," \
+    "secs_per_pg=8,pgs_per_blk=8,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2," \
+    "nchs=2,fdm_size=16"
 #define FEMU_ONCS_DEFAULT   0x19d   /* the oncs property's default */
 #define FEMU_ONCS_OCSSD     0x10    /* Save/Select only: no generic command */
 
@@ -2049,6 +2056,78 @@ static void femu_register_nodes(void)
     }
     qos_add_test("gc-bg-invalid-refused", "femu",
                  femu_test_gc_bg_invalid_refused, NULL);
+    {
+        static const char *const gcl[][3] = {
+            { "op7", "op_pcent=7", "spare 1 2 4 1" },
+            { "op7-auto", "op_pcent=7,gc_thres_base=auto", "spare 1 2 4 1" },
+            { "op7-raw", "op_pcent=7,gc_thres_base=raw", "raw 3 16 4 1" },
+            { "stock", "devsz_mb=4", "raw 3 16 32 1" },
+            { "spare", "devsz_mb=4,gc_thres_base=spare", "spare 1 8 32 1" },
+            { "hotcold", "op_pcent=11,hot_cold_sep=on", "spare 2 3 6 2" },
+        };
+
+        for (size_t i = 0; i < ARRAY_SIZE(gcl); i++) {
+            g_autofree char *name = g_strdup_printf("gc-lines-%s",
+                                                    gcl[i][0]);
+            g_autofree char *dev_opts = g_strdup_printf(GC_LINES_DEV "%s",
+                                                        gcl[i][1]);
+
+            qos_add_test(name, "femu", femu_test_gc_lines,
+                         &(QOSGraphTestOptions) {
+                .edge.extra_device_opts = dev_opts,
+                .arg = (void *)gcl[i][2],
+            });
+        }
+        /* 5 spare lines; the spare levels need 2 + 2 + 2: auto keeps raw */
+        qos_add_test("gc-lines-auto-raw", "femu", femu_test_gc_lines_warned,
+                     &(QOSGraphTestOptions) {
+            .edge.extra_device_opts =
+                GC_LINES_DEV "op_pcent=10,hot_cold_sep=on",
+            .before = femu_csd_warn_before,
+            .arg = (void *)"raw 3 16 5 2",
+        });
+        /* CSD runs the same line FTL: auto takes spare with op_pcent */
+        qos_add_test("gc-lines-csd", "femu", femu_test_gc_lines,
+                     &(QOSGraphTestOptions) {
+            .edge.extra_device_opts = GC_LINES_CSD ",op_pcent=7",
+            .arg = (void *)"spare 1 8 32 1",
+        });
+        qos_add_test("gc-lines-csd-stock", "femu", femu_test_gc_lines,
+                     &(QOSGraphTestOptions) {
+            .edge.extra_device_opts = GC_LINES_CSD,
+            .arg = (void *)"raw 3 16 32 1",
+        });
+        qos_add_test("gc-spare-waf", "femu", femu_test_gc_spare_waf,
+                     &(QOSGraphTestOptions) {
+            .edge.extra_device_opts = GC_LINES_DEV "op_pcent=7",
+            .arg = (void *)"spare",
+        });
+        qos_add_test("gc-spare-waf-raw", "femu", femu_test_gc_spare_waf,
+                     &(QOSGraphTestOptions) {
+            .edge.extra_device_opts =
+                GC_LINES_DEV "op_pcent=7,gc_thres_base=raw",
+            .arg = (void *)"raw",
+        });
+        qos_add_test("gc-spare-hotcold", "femu", femu_test_gc_spare_hotcold,
+                     &(QOSGraphTestOptions) {
+            .edge.extra_device_opts =
+                GC_LINES_DEV "op_pcent=11,hot_cold_sep=on",
+        });
+    }
+    /*
+     * raw keeps the double arithmetic of old: (1 - 0.90) * 70 is 6.9999,
+     * so the background level is 6 lines where 70 * 10 / 100 gives 7
+     */
+    qos_add_test("gc-lines-raw-round", "femu", femu_test_gc_lines,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8,pgs_per_blk=8,"
+            "blks_per_pl=70,pls_per_lun=1,luns_per_ch=2,nchs=2,devsz_mb=4,"
+            "gc_thres_pcent=90",
+        .arg = (void *)"raw 3 6 38 1",
+    });
+    qos_add_test("gc-lines-refused", "femu", femu_test_gc_lines_refused,
+                 NULL);
     qos_add_test("rber-retry", "femu", femu_test_rber_scripted,
                  &(QOSGraphTestOptions) { .arg = (void *)"retry",
         .edge.extra_device_opts =

@@ -136,6 +136,7 @@ static void csd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
         bb_check_capacity(n, ns, errp)) {
         return;
     }
+    bb_warn_gc_levels(n, ns);
 
     /* It also takes the black-box FDP write path, so the same refusals. */
     if (bb_init_fdp(n, ns, "csd", errp)) {

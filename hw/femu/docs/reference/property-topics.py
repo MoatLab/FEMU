@@ -31,7 +31,8 @@ DEVICES = [
                       "x-gc-clock", "x-gc-frontier", "x-gc-hold-us",
                       "x-gc-idle",
                       "x-gc-idle-hold", "x-gc-idle-kick", "x-gc-idle-latch",
-                      "x-gc-idle-order", "x-gc-order", "x-gc-pass-off",
+                      "x-gc-idle-order", "x-gc-lines", "x-gc-order",
+                      "x-gc-pass-off",
                       "x-maint-idle",
                       "x-ns-test", "x-oc12-clock", "x-opal-gkey",
                       "x-opal-power-cycle",
@@ -178,7 +179,7 @@ DEVICES = [
                 "kind": "static",
                 "props": [
                     "gc_thres_pcent", "gc_thres_pcent_high",
-                    "gc_bg_invalid_pcent", "gc_policy",
+                    "gc_thres_base", "gc_bg_invalid_pcent", "gc_policy",
                     "gc_seed", "gc_strategy", "wl_spread", "gc_pace",
                     "precon_fill_pct", "precon_overwrite_pct",
                     "precon_pattern", "precon_seed",

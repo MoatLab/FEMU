@@ -383,6 +383,10 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU %s: set gc_policy or gc_strategy under FDP, not both
 - FEMU bbssd: gc_strategy must be %d (greedy), %d (cost-benefit), %d (random) or %d (per-handle)
 
+## `gc_thres_base`
+
+- gc_thres_base must be auto, raw or spare, got %s
+
 ## `gc_thres_pcent`
 
 - FEMU bbssd: gc_thres_pcent and gc_thres_pcent_high must be in [1, 100], got %d and %d

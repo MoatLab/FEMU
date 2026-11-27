@@ -139,6 +139,47 @@ Two rules start GC. Each rule compares the free lines with a threshold.
 - With FDP the two rules are the same. They count free reclaim units in
   each reclaim group.
 
+`gc_thres_base` sets the lines that the two percentages count:
+
+- `raw` counts every line of the NAND, as FEMU always did.
+- `spare` counts the spare lines: the lines left once the namespace is
+  full. The forced level is at least one line per open write pointer.
+- `auto` (the default) is `spare` with `op_pcent` and `raw` without it.
+  When the spare is too small for the spare levels, `auto` keeps `raw`.
+
+A device with little spare shows the difference. With `raw`, the forced
+level can take nearly all of the spare, and each victim is then nearly
+full:
+
+```
+ op_pcent=7: 64 lines of 64 MiB, the namespace fills 60, 4 spare lines
+ base    forced level            background level        lines for invalid pages
+ raw     5 % of 64 = 3           25 % of 64 = 16         4 - 3 - 1 open = 0
+ spare   5 % of 4 = 0, floor 1   25 % of 4 = 1, floor 2  4 - 1 - 1 open = 2
+
+ line-level model, uniform 4 KiB random writes:   raw WAF 162   spare WAF 14.6
+```
+
+With `gc_thres_base=spare`, realize refuses a namespace that leaves fewer
+than 2 spare lines beyond the forced level and the open pointers. `auto`
+does not refuse such a namespace. It keeps the raw levels and prints one
+warning per namespace with the spare lines and the need. So a device that
+realized before `gc_thres_base` existed still realizes. `raw` keeps the
+old levels, and with `op_pcent` it warns when fewer than 2 such lines are
+left.
+
+```
+ auto, op_pcent > 0
+   avail >= hi + open + 2 ? --yes--> spare levels
+                          \--no---> raw levels + warning --> raw capacity check
+ spare: avail < hi + open + 2 --> refused
+```
+
+<!-- femu-example: blackbox-gc-thres-base -->
+```
+-device femu,femu_mode=1,nchs=2,luns_per_ch=4,blks_per_pl=64,op_pcent=25,gc_thres_base=raw
+```
+
 The 1/8 test permits a victim that is 7/8 valid. Such a victim costs 7
 copies for each page that it frees. Let the data pages of a line be a
 multiple of 8. Background reclaim then programs at most 8 pages for each
