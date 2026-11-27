@@ -8,6 +8,7 @@
   plm-guest.py tail     [--ctrl CTRL] [--dev DEV] [--cycles N]
                         [--dtwin-ms MS] [--ndwin-ms MS] [--wrate-mib R]
                         [--riops N] [--unit-bytes B] [--guard-ms MS]
+                        [--hold-cap-ms MS] [--stall-ms MS]
                         [--phantom] [--out DIR]
   plm-guest.py dmesg
   plm-guest.py --self-test
@@ -40,15 +41,32 @@ selects the windows through the NVMe ioctl, so no process start adds
 time to a window edge:
 
   NDWIN (ndwin-ms) --> Set 14h DTWIN (may be held) --> log 0Ah: DTWWE
+  --> log C0h: the GC record of this NDWIN (FGC nd_* fields)
   --> poll log 0Ah (RAE) every 100 ms for dtwin-ms --> Set 14h NDWIN
   --> log 0Ah (no RAE): ETYP of this cycle --> next cycle
 
 Each read goes to the window of its submit time (completion time less
-latency). A guard of guard-ms at each window edge is left out. A cycle
-is valid when its DTWIN started with DTWWE at least the planned writes
-and had no DEAT. Only the reads of valid cycles count. With --phantom
-(plm=off) no command is sent, and the same time slots split the reads:
-that is the control of the split.
+latency). The NDWIN runs from its Set 14h NDWIN to the end of the held
+Set 14h DTWIN, so the hold counts as NDWIN. A guard of guard-ms at each
+window edge is left out. A cycle is valid when its DTWIN started with
+DTWWE at least the planned writes and had no DEAT. Only the reads of
+valid cycles count. With --phantom (plm=off) no command is sent, and the
+same time slots split the reads: that is the control of the split.
+
+  t:  nd0 ....... req ......... dt0 ......... dt_end
+      | NDWIN     | Set 14h held | DTWIN        |
+      |<--- NDWIN span: nd0+guard .. dt0-guard ->|<- DTWIN span ->
+
+Besides the percentiles, the NDWIN has a time share: the part of the
+NDWIN spans in which some read has waited over stall-ms (10 ms). With
+QD 1 a stall hides the reads behind it, so the share shows the stall
+time that counts of reads hide. One "FGN" line per cycle gives its NDWIN
+reads, longest read and stall time.
+
+fio runs open-ended: its runtime allows hold-cap-ms per cycle on top of
+the windows. After the last cycle this program stops it with SIGTERM, so
+every cycle carries load. fio must still run then, and its terse output
+must show no job error.
 """
 import argparse
 import contextlib
@@ -60,6 +78,7 @@ import mmap
 import os
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -75,6 +94,7 @@ FID_CFG = 0x13
 FID_WIN = 0x14
 LID_SET = 0x0A
 LID_AGG = 0x0B
+LID_FEMU = 0xC0
 PLMW_OFF, PLMW_DT, PLMW_ND = 0, 1, 2
 MVEAT = 1 << 14
 DEAT = 1 << 15
@@ -282,6 +302,13 @@ class Ioctl:
             raise StepError("log-0a-status-%#x" % st)
         return parse_log0a(d)
 
+    def log_c0(self):
+        cdw10, cdw11 = get_log_dw(LID_FEMU, 512)
+        st, _, d = self.call(OPC_GET_LOG, cdw10, cdw11, length=512)
+        if st:
+            raise StepError("log-c0-status-%#x" % st)
+        return parse_c0_plm(d)
+
     def window(self, wsel, timeout_ms=60000):
         st, _, _ = self.call(OPC_SET_FEAT, FID_WIN, 1, wsel,
                              timeout_ms=timeout_ms)
@@ -325,6 +352,37 @@ def parse_log0a(d):
             "ntwtmh": le(d, 56, 8), "ntwtml": le(d, 64, 8),
             "dtwre": le(d, 128, 8), "dtwwe": le(d, 136, 8),
             "dtwte": le(d, 144, 8)}
+
+
+# the plm NDWIN record of log C0h: (name, byte offset), each 8 bytes
+C0_PLM = (("ndwins", 352), ("nd_seq", 360), ("nd_ms", 368),
+          ("nd_target", 376), ("nd_free0", 384), ("nd_free1", 392),
+          ("nd_victims0", 400), ("nd_ahead0_ns", 408),
+          ("nd_ahead_max_ns", 416), ("nd_copies", 424), ("nd_erases", 432),
+          ("nd_gc_lun_ns", 440), ("nd_bg", 448), ("nd_prep", 456),
+          ("nd_forced", 464), ("nd_wall_ns", 472), ("gc_lun_ns", 480),
+          ("luns", 488))
+
+
+def parse_c0_plm(d):
+    """The plm NDWIN record of log C0h (bytes 352 to 495)."""
+    return {k: le(d, off, 8) for k, off in C0_PLM}
+
+
+def nd_fields(r):
+    """The FGC fields of one NDWIN record: times in us, the LUN time as
+    the mean of one LUN."""
+    luns = max(r["luns"], 1)
+    return {"nd_seq": r["nd_seq"], "nd_ms": r["nd_ms"],
+            "nd_target": r["nd_target"], "nd_free0": r["nd_free0"],
+            "nd_free1": r["nd_free1"], "nd_victims0": r["nd_victims0"],
+            "nd_ahead0_us": r["nd_ahead0_ns"] // 1000,
+            "nd_ahead_max_us": r["nd_ahead_max_ns"] // 1000,
+            "nd_copies": r["nd_copies"], "nd_erases": r["nd_erases"],
+            "nd_lun_gc_us": r["nd_gc_lun_ns"] // 1000 // luns,
+            "nd_bg": r["nd_bg"], "nd_prep": r["nd_prep"],
+            "nd_forced": r["nd_forced"], "nd_wall_us": r["nd_wall_ns"] // 1000,
+            "luns": r["luns"]}
 
 
 def parse_set_list(d):
@@ -588,10 +646,18 @@ def read_lat_log(path):
     return out
 
 
+def nd_span(c, guard_ms):
+    """The NDWIN span (ms) of cycle C: from its start to the DTWIN entry,
+    so the held Set 14h counts as NDWIN; None when the guards meet."""
+    lo, hi = c["nd0"] + guard_ms, c["dt0"] - guard_ms
+    return (lo, hi) if hi > lo else None
+
+
 def spans(cycles, guard_ms):
     """The DTWIN and NDWIN spans (ms) whose reads count. Only valid
     cycles count. A DTWIN runs up to its end or the last poll before an
-    exit. An NDWIN runs from its start to the next Set 14h DTWIN."""
+    exit. An NDWIN runs from its start to the end of the held Set 14h
+    DTWIN."""
     dt, nd = [], []
     for c in cycles:
         if not c["valid"]:
@@ -599,10 +665,34 @@ def spans(cycles, guard_ms):
         lo, hi = c["dt0"] + guard_ms, c["dt_end"] - guard_ms
         if hi > lo:
             dt.append((lo, hi))
-        lo, hi = c["nd0"] + guard_ms, c["req"] - guard_ms
-        if hi > lo:
-            nd.append((lo, hi))
+        sp = nd_span(c, guard_ms)
+        if sp:
+            nd.append(sp)
     return dt, nd
+
+
+def stall_time(reads, sp, stall_ms):
+    """The ms of span SP in which some read has waited over STALL_MS: the
+    union of [submit + STALL_MS, completion] of each such read, cut to
+    SP."""
+    lo, hi = sp
+    iv = sorted((max(s + stall_ms, lo), min(s + l / 1000.0, hi))
+                for s, l in reads if l / 1000.0 > stall_ms)
+    total, end = 0.0, lo
+    for a, b in iv:
+        a = max(a, end)
+        if b > a:
+            total += b - a
+            end = b
+    return total
+
+
+def nd_share(reads, nd, stall_ms):
+    """The share of the NDWIN spans ND in which a read waited over
+    STALL_MS, and that time in ms."""
+    span = sum(hi - lo for lo, hi in nd)
+    t = sum(stall_time(reads, sp, stall_ms) for sp in nd)
+    return (t / span if span > 0 else 0.0), t
 
 
 def judge_cycle(c, planned, phantom):
@@ -665,6 +755,7 @@ def one_cycle(io, i, a, planned):
     if not a.phantom:
         v = io.log0a(True)
         c["entry_plmw"], c["dtwwe"] = v["plmw"], v["dtwwe"]
+        c.update(nd_fields(io.log_c0()))
         last = now_ms()
         while now_ms() < end:
             time.sleep(min(0.1, max(0.0, (end - now_ms()) / 1000.0)))
@@ -686,6 +777,95 @@ def one_cycle(io, i, a, planned):
         time.sleep(max(0.0, (end - now_ms()) / 1000.0))
         c["dt_end"] = now_ms()
     return judge_cycle(c, planned, a.phantom)
+
+
+# how long fio may take to stop and write its logs after SIGTERM
+FIO_STOP_S = 120
+
+
+def fio_stop(p):
+    """Stop fio with SIGTERM and return its output. A fio that does not
+    stop in time is a StepError, so main still prints FG_DONE."""
+    p.send_signal(signal.SIGTERM)
+    try:
+        out, _ = p.communicate(timeout=FIO_STOP_S)
+    except subprocess.TimeoutExpired:
+        raise StepError("fio-no-stop")
+    return out
+
+
+def fio_kill(p):
+    """Kill fio and reap it; a fio that does not end is a StepError."""
+    p.kill()
+    try:
+        p.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        raise StepError("fio-no-stop")
+
+
+def fio_runtime(warm, a):
+    """fio's runtime in s: each cycle may take hold-cap-ms more than its
+    windows, plus a margin. The run stops fio after the last cycle."""
+    return int(warm + a.cycles * (a.dtwin_ms + a.ndwin_ms + a.hold_cap_ms)
+               / 1000.0 + 10)
+
+
+def fio_end_bad(rc, text):
+    """Why fio did not end well, or None. fio stops on SIGTERM; its exit
+    status then varies (its signal handler sets 128), so the terse lines
+    decide: one per job (rd, wr), each with error field 0."""
+    jobs = [l.split(";") for l in text.splitlines() if l.startswith("3;")]
+    if rc not in (0, 1, 128, -signal.SIGTERM, 128 + signal.SIGTERM):
+        return "fio-rc%d" % rc
+    if len(jobs) != 2 or any(len(j) < 5 or j[4] != "0" for j in jobs):
+        return "fio-rc%d-terse-%d-jobs" % (rc, len(jobs))
+    return None
+
+
+def mark_rec(c, prev):
+    """rec_ok of cycle C: its log C0h record is the NDWIN of this cycle,
+    the one after the record of the cycle before (PREV). Returns the
+    record number for the next cycle."""
+    if "nd_seq" not in c:
+        return prev
+    c["rec_ok"] = int(c["nd_seq"] > 0 and
+                      (prev is None or c["nd_seq"] == prev + 1))
+    return c["nd_seq"]
+
+
+def cycle_nd(c, reads, guard_ms, stall_ms):
+    """The NDWIN reads of cycle C: count, longest, and stall time."""
+    sp = nd_span(c, guard_ms)
+    out = {"i": c["i"], "nd_n": 0, "nd_max_us": -1, "nd_stall_ms": 0,
+           "nd_span_ms": 0}
+    if not sp:
+        return out
+    lat = [l for s, l in reads if sp[0] <= s <= sp[1]]
+    out.update(nd_n=len(lat), nd_max_us=int(max(lat or [-1])),
+               nd_stall_ms=int(stall_time(reads, sp, stall_ms)),
+               nd_span_ms=int(sp[1] - sp[0]))
+    c["nd_max_read_us"] = out["nd_max_us"]
+    return out
+
+
+def med(vals):
+    vals = sorted(vals)
+    return vals[len(vals) // 2] if vals else -1
+
+
+def gc_medians(cycles, reads, guard_ms):
+    """The medians over the loaded cycles (records that match their
+    cycle) of the GC record, and of the longest NDWIN read. They are the
+    facts of the cause check of plm-verdict.py."""
+    rec = [c for c in cycles if c.get("rec_ok")]
+    out = {"rec_ok": len(rec)}
+    for k in ("nd_lun_gc_us", "nd_ahead0_us", "nd_ahead_max_us",
+              "nd_copies", "nd_erases", "nd_free0", "nd_victims0",
+              "nd_wall_us", "nd_bg", "nd_prep", "nd_forced", "nd_ms"):
+        out[k + "_med"] = med(c[k] for c in rec)
+    out["nd_max_read_us_med"] = med(c.get("nd_max_read_us", -1)
+                                    for c in rec)
+    return out
 
 
 def cmd_tail(a):
@@ -710,8 +890,7 @@ def cmd_tail(a):
     wbytes = a.wrate_mib << 20
     planned = math.ceil(wbytes * a.dtwin_ms / 1000.0 / unit)
     warm = 3.0
-    runtime = int(warm + a.cycles * (a.dtwin_ms + a.ndwin_ms) / 1000.0
-                  + 10)
+    runtime = fio_runtime(warm, a)
     pfx = os.path.join(a.out, "rd")
     fio = ["fio", "--filename=" + a.dev, "--direct=1", "--ioengine=libaio",
            "--time_based", "--runtime=%d" % runtime, "--log_unix_epoch=1",
@@ -729,22 +908,30 @@ def cmd_tail(a):
         time.sleep(warm)
         if p.poll() is not None:
             raise StepError("fio-ended-rc%d" % p.returncode)
+        prev = None
         for i in range(a.cycles):
             c = one_cycle(io, i, a, planned)
+            prev = mark_rec(c, prev)
             cycles.append(c)
             print("FGC " + " ".join("%s=%s" % (k, int(v))
                                     for k, v in c.items()), flush=True)
-        out, _ = p.communicate(timeout=runtime + 120)
+        # every cycle must carry load: fio runs past the last one
+        if p.poll() is not None:
+            raise StepError("fio-ended-before-the-last-cycle-rc%d" %
+                            p.returncode)
+        out = fio_stop(p)
     except BaseException:
-        p.kill()
-        p.communicate()
-        if io and not a.phantom:
-            io.window(PLMW_ND)
+        try:
+            fio_kill(p)
+        finally:
+            if io and not a.phantom:
+                io.window(PLMW_ND)
         raise
-    if p.returncode != 0:
-        tail = out.decode(errors="replace").strip().splitlines()[-1:]
-        raise StepError("fio-rc%d %s" % (p.returncode,
-                                         (tail or [""])[0][:80]))
+    text = out.decode(errors="replace")
+    why = fio_end_bad(p.returncode, text)
+    if why:
+        tail = text.strip().splitlines()[-1:]
+        raise StepError("%s %s" % (why, (tail or [""])[0][:80]))
     if io:
         io.call(OPC_SET_FEAT, FID_CFG, 1, 0, data=cfg_bytes(0))
     logs = sorted(glob.glob(pfx + "_lat*.log"))
@@ -756,14 +943,22 @@ def cmd_tail(a):
     dt, nd = spans(cycles, a.guard_ms)
     dtv, ndv = split(reads, dt, nd)
     allv = sorted(l for _, l in reads)
+    for c in cycles:
+        print("FGN " + " ".join("%s=%s" % kv for kv in
+                                cycle_nd(c, reads, a.guard_ms,
+                                         a.stall_ms).items()), flush=True)
+    share, stall = nd_share(reads, nd, a.stall_ms)
     res = {"tail_mode": "phantom" if a.phantom else "plm"}
     res.update(cycle_totals(cycles))
     res.update({"planned": planned, "unit": unit,
                 "hold_ms_max": max([c["hold_ms"] for c in cycles] or [0]),
-                "reads": len(reads)})
+                "reads": len(reads), "fio_runtime_s": runtime,
+                "fio_rc": p.returncode, "stall_ms": a.stall_ms,
+                "nd_share": "%.4f" % share, "nd_stall_ms": "%.1f" % stall})
     res.update(summary("dt", dtv))
     res.update(summary("nd", ndv))
     res.update(summary("all", allv))
+    res.update(gc_medians(cycles, reads, a.guard_ms))
     fact(**res)
 
 
@@ -955,11 +1150,85 @@ def self_test():
             "dt_end": 4000}]
     dt, nd = spans(cyc, 20)
     want(dt, [(1030, 1980)], "spans: DTWIN of a valid cycle only")
-    want(nd, [(20, 980)], "spans: NDWIN of a valid cycle only")
-    reads = [(500, 10.0), (1500, 1.0), (990, 99.0), (3500, 50.0),
+    want(nd, [(20, 990)], "spans: NDWIN of a valid cycle only, hold "
+         "included")
+    reads = [(500, 10.0), (1500, 1.0), (985, 99.0), (3500, 50.0),
              (2500, 20.0), (1005, 7.0)]
     a, b = split(reads, dt, nd)
-    want((a, b), ([1.0], [10.0]), "split by submit time")
+    want((a, b), ([1.0], [10.0, 99.0]), "split by submit time; a read "
+         "in the hold is an NDWIN read")
+    # the span plant: an NDWIN that ends at the Set 14h leaves the hold out
+    want(nd_span({"nd0": 0, "req": 1000, "dt0": 3500}, 20), (20, 3480),
+         "NDWIN span ends at the DTWIN entry, not at the request")
+    want(nd_span({"nd0": 0, "req": 10, "dt0": 30}, 20), None,
+         "NDWIN span inside the guards")
+    # stall time: reads over 10 ms, from submit + 10 ms to completion
+    sp = (0, 1000)
+    want(stall_time([(100, 50000.0)], sp, 10), 40.0,
+         "stall time of one read")
+    want(stall_time([(100, 50000.0), (120, 50000.0)], sp, 10), 60.0,
+         "stall time of two reads that overlap counts once")
+    want(stall_time([(100, 9000.0), (200, 10000.0)], sp, 10), 0.0,
+         "stall time: reads of at most 10 ms do not count")
+    want(stall_time([(980, 100000.0), (-50, 100000.0)], sp, 10), 10.0 + 50.0,
+         "stall time is cut to the span")
+    want(nd_share([(100, 50000.0)], [(0, 1000), (2000, 3000)], 10),
+         (0.02, 40.0), "NDWIN time share over two spans")
+    want(nd_share([], [], 10), (0.0, 0), "NDWIN time share of no span")
+    c0 = bytearray(512)
+    for k, off in C0_PLM:
+        c0[off:off + 8] = (off * 1000).to_bytes(8, "little")
+    c0[488:496] = (32).to_bytes(8, "little")
+    c0[350:352] = b"\xff\xff"
+    r = parse_c0_plm(bytes(c0))
+    want((r["ndwins"], r["nd_seq"], r["nd_gc_lun_ns"], r["luns"],
+          len(r)), (352000, 360000, 440000, 32, 18), "log C0h plm record")
+    f = nd_fields(r)
+    want((f["nd_lun_gc_us"], f["nd_ahead0_us"], f["nd_wall_us"],
+          f["nd_copies"]), (440000 // 1000 // 32, 408, 472, 424000),
+         "FGC fields: LUN time per LUN, times in us")
+    seq = []
+    prev = None
+    for n in (5, 6, 8, 9):
+        cy = {"nd_seq": n}
+        prev = mark_rec(cy, prev)
+        seq.append(cy["rec_ok"])
+    want(seq, [1, 1, 0, 1], "record check: a skipped NDWIN is not this "
+         "cycle's")
+    cy = {"nd_seq": 0}
+    mark_rec(cy, None)
+    want(cy["rec_ok"], 0, "record check: no NDWIN ended yet")
+    ta = argparse.Namespace(cycles=60, dtwin_ms=1000, ndwin_ms=1000,
+                            hold_cap_ms=30000)
+    want(fio_runtime(3.0, ta), 1933, "fio runtime allows the hold cap")
+    ta.hold_cap_ms = 0
+    want(fio_runtime(3.0, ta), 133, "fio runtime without a cap: the run "
+         "of 2026-11-26")
+    ok2 = "3;fio-3.36;rd;0;0;1\n3;fio-3.36;wr;0;0;1\n"
+    want([fio_end_bad(rc, ok2) for rc in (0, 1, 128, -15, 143)],
+         [None] * 5, "fio stopped by SIGTERM with no job error")
+    want(fio_end_bad(128, "3;fio-3.41;rd;0;0;1\n"),
+         "fio-rc128-terse-1-jobs", "fio 3.41 stopped, but lost a job")
+    want(fio_end_bad(2, ok2), "fio-rc2", "fio exit status 2")
+    want(fio_end_bad(0, "3;fio-3.36;rd;0;5;1\n3;fio-3.36;wr;0;0;1\n"),
+         "fio-rc0-terse-2-jobs", "fio job error")
+    want(fio_end_bad(-15, "3;fio-3.36;rd;0;0;1\n"), "fio-rc-15-terse-1-jobs",
+         "fio lost a job")
+    cy = {"i": 3, "nd0": 0, "req": 1000, "dt0": 3000, "nd_seq": 4,
+          "rec_ok": 1}
+    rd = [(100, 2400000.0), (2500, 45.0), (3100, 45.0)]
+    want(cycle_nd(cy, rd, 20, 10),
+         {"i": 3, "nd_n": 2, "nd_max_us": 2400000, "nd_stall_ms": 2390,
+          "nd_span_ms": 2960}, "FGN line of a cycle with a 2.4 s stall")
+    cys = [dict(cy, nd_lun_gc_us=v, nd_ahead0_us=0, nd_ahead_max_us=v,
+                nd_copies=10, nd_erases=1, nd_free0=44, nd_victims0=9,
+                nd_wall_us=5, nd_bg=0, nd_prep=9, nd_forced=0, nd_ms=3000,
+                nd_max_read_us=v) for v in (100, 300, 200)]
+    cys.append(dict(cys[0], rec_ok=0, nd_lun_gc_us=9999))
+    g = gc_medians(cys, rd, 20)
+    want((g["rec_ok"], g["nd_lun_gc_us_med"], g["nd_max_read_us_med"],
+          g["nd_prep_med"]), (3, 200, 200, 9),
+         "GC medians use the cycles whose record matches")
     # each plant breaks one condition of a valid cycle
     good = {"entry_plmw": PLMW_DT, "dtwwe": 64, "deat": 0}
     plants = [("good", {}, (1, 1)),
@@ -991,6 +1260,36 @@ def self_test():
     want([(round(t, 2), l) for t, l in r],
          [(1700000000498.0, 2000.0), (1700000000699.91, 90.0)],
          "fio latency log, reads only")
+    # fio stop: a fio that ignores SIGTERM or SIGKILL is a StepError
+    class FakeFio:
+        def __init__(self, stops):
+            self.stops = stops
+            self.sent = []
+
+        def send_signal(self, sig):
+            self.sent.append(sig)
+
+        def kill(self):
+            self.sent.append(signal.SIGKILL)
+
+        def communicate(self, timeout=None):
+            if not self.stops.pop(0):
+                raise subprocess.TimeoutExpired("fio", timeout)
+            return b"fio out", b""
+
+    def stop_err(fn, p):
+        try:
+            return fn(p)
+        except StepError as e:
+            return "StepError " + str(e)
+
+    want(stop_err(fio_stop, FakeFio([True])), b"fio out",
+         "fio stop on SIGTERM")
+    want(stop_err(fio_stop, FakeFio([False])), "StepError fio-no-stop",
+         "fio stop: SIGTERM ignored")
+    want(stop_err(fio_kill, FakeFio([True])), None, "fio kill")
+    want(stop_err(fio_kill, FakeFio([False])), "StepError fio-no-stop",
+         "fio kill: SIGKILL does not reap it")
     print("plm-guest self-test: %s (%d ok, %d failed)" %
           ("PASS" if not bad else "FAIL", ok, len(bad)))
     return 0 if not bad else 1
@@ -1015,12 +1314,15 @@ def parse(argv):
     p.add_argument("--riops", type=int, default=2000)
     p.add_argument("--unit-bytes", type=int, default=4096)
     p.add_argument("--guard-ms", type=int, default=20)
+    p.add_argument("--hold-cap-ms", type=int, default=30000)
+    p.add_argument("--stall-ms", type=int, default=10)
     p.add_argument("--enev", type=lambda x: int(x, 0), default=0)
     p.add_argument("--phantom", action="store_true")
     p.add_argument("--out", default="/tmp/plm")
     a = p.parse_args(argv)
     if min(a.passes, a.cycles, a.dtwin_ms, a.ndwin_ms, a.wrate_mib,
-           a.riops, a.unit_bytes, a.limit) < 1 or a.guard_ms < 0:
+           a.riops, a.unit_bytes, a.limit, a.stall_ms) < 1 or \
+            a.guard_ms < 0 or a.hold_cap_ms < 0:
         p.error("a count or time below its minimum")
     if a.unit_bytes % 512:
         p.error("--unit-bytes must be a multiple of 512")

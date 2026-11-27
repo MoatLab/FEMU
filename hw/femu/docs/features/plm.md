@@ -253,32 +253,56 @@ the NVM Set List, the refusals and the log reads that clear the events.
 `plm-guest.py tail` runs one repeat of the read tail experiment. It
 issues 4 KiB random reads at QD 1 next to a write stream of fixed rate.
 Meanwhile it switches the windows, and it reports p50, p99 and p99.9 of
-the reads in each window. `plm-verdict.py tail` then sets these pass
-rules:
+the reads in each window. The NDWIN runs up to the end of the held Set
+14h DTWIN, so reads in the hold count as NDWIN reads:
+
+```
+ nd0 .......... Set 14h DTWIN sent ...... CQE (DTWIN entry) ...... end
+ |<------------- NDWIN, hold included ------->|<------ DTWIN ------>|
+```
+
+fio runs open-ended, and the script stops it after the last cycle. So
+every cycle carries load, however long the holds are. After each DTWIN
+entry the script reads the [GC record](#what-gc-did-in-an-ndwin) of log
+C0h. It prints the record in the cycle line (`FGC`). After the run it
+prints the NDWIN reads of each cycle (`FGN`).
+
+`plm-verdict.py tail` then sets these pass rules:
 
 - Only the reads of valid cycles count. A valid cycle starts its DTWIN
   with enough write room and has no DEAT.
-- Each repeat has at least 1000 DTWIN reads. Each control repeat has at
-  least 1000 reads in each set of slots.
+- Each repeat has at least 1000 DTWIN reads and 1000 NDWIN reads. Each
+  control repeat has at least 1000 reads in each set of slots.
 - The median DTWIN p99 is at least 20 % below the median NDWIN p99.
 - In each repeat, the DTWIN p99.9 is below the NDWIN p99.9.
 - In each repeat, the DTWIN p99.9 is at least 20 % below the control
   p99.9.
 - No DEAT occurs in a cycle that started with enough write room.
+- In each repeat, a read waits over 10 ms in at most 5 % of the NDWIN
+  time. This is the main NDWIN rule.
+- In each repeat, the NDWIN p99.9 is at most 20 ms.
+- At least 90 % of the cycles read the GC record of their own NDWIN.
 - A plm=off run with the same time slots (`--phantom`) is the control.
   Its two sets of slots must agree.
 
-The NDWIN needs no minimum of reads. The held background work runs in
-one block when the NDWIN starts, and a QD 1 read waits for all of it. So
-an NDWIN can complete only a few reads, each of which waits seconds. The
-NDWIN rules use the reads that exist. With no NDWIN read at all, only
-the rule against the control applies. For each repeat the verdict
-reports the NDWIN reads, their p50 and longest latency, and the longest
-Set 14h hold:
+The time share counts the stall time that the read count hides. At QD 1
+one read that waits 2 seconds blocks all reads behind it. It is one read
+in the count, but 2 seconds of the time:
 
 ```
- DTWIN  many short reads  --> p99, p99.9 vs NDWIN and vs the control
- NDWIN  held work runs    --> few reads, each waits for it --> reported
+ read   R1 waits 2.4 s ---------------------->|R2 R3 R4 ...
+ count  1 read of many                --> p99.9 can stay low
+ time   2.39 s over 10 ms of a 3.5 s NDWIN --> share 68 %
+```
+
+With `--nd-rules report` the verdict prints the NDWIN rules and does not
+apply them. A run of a build that collects in bursts uses it. The
+verdict also gives the cause check. It compares the longest NDWIN read
+of a cycle with the GC time of one LUN in that NDWIN:
+
+```
+ ratio = longest NDWIN read / (LUN GC time + work booked ahead at entry)
+ 0.5 <= ratio <= 2 and FTL thread time <= 0.1 x LUN GC time --> CAUSE yes
 ```
 
 `plm-guest.py gplm1` sends every admin command that it checks through

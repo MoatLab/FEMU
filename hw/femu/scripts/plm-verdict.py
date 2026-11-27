@@ -5,6 +5,8 @@
   plm-verdict.py gplm1 --guest FILE
   plm-verdict.py tail --guest FILE... --control FILE... [--repeats N]
                  [--margin M] [--min-valid V] [--min-reads N]
+                 [--nd-rules enforce|report] [--nd-share S]
+                 [--nd-p999-ms MS]
   plm-verdict.py --self-test
 
 The inputs are the output of plm-guest.py: "FG key=value ..." facts,
@@ -41,26 +43,43 @@ repeats with plm=off, whose reads the same time slots split:
   7. each plm repeat: DTWIN p99.9 < NDWIN p99.9
   8. each plm repeat: DTWIN p99.9 <= (1 - M) x the control p99.9 (the
      median over the control repeats of the DTWIN slots)
+  9. each plm repeat: the NDWIN time share in which a read waited over
+     10 ms (nd_share) is at most S (0.05); the primary NDWIN rule
+ 10. each plm repeat: NDWIN p99.9 <= MS (20 ms)
+ 11. each plm repeat has at least N NDWIN reads and an nd_share fact
+ 12. each plm repeat with GC records (rec_ok): at least V of its cycles
+     have the log C0h record of their own NDWIN
 
-Rules 1, 5 and 6 make a run INVALID, rules 2, 3, 4, 7 and 8 make it FAIL.
+Rules 1, 5, 6, 11 and 12 make a run INVALID, rules 2, 3, 4, 7, 8, 9 and
+10 make it FAIL. With --nd-rules report, rules 9, 10 and 11 only print
+what they find: the burst build stalls NDWIN reads by design, and its
+run measures the cause.
 
-The NDWIN may have few reads. The held background work runs in one
-block when the NDWIN starts, and a read at QD 1 waits for all of it. So
-the read stall is the result, and the NDWIN needs no minimum of reads.
-Rules 3, 4 and 7 use the NDWIN reads that exist: rules 3 and 4 the
+The NDWIN runs from its Set 14h NDWIN to the end of the held Set 14h
+DTWIN (plm-guest.py), so reads in the hold count. Rules 3 and 4 use the
 repeats with an NDWIN read, rule 7 each such repeat. With no NDWIN read
-in any repeat, rules 3, 4 and 7 do not apply and rule 8 decides. The
-NDWIN p99 of one repeat with few stalled reads can be low, so rules 3
-and 4 use medians, and the spread of rule 4 is that of the DTWIN p99.
+in any repeat, rules 3, 4 and 7 do not apply. The NDWIN p99 of one
+repeat with few stalled reads can be low, so rules 3 and 4 use medians,
+and the spread of rule 4 is that of the DTWIN p99.
 
   DTWIN reads >= N --> p99, p99.9 --> rules 3, 4, 7 (vs NDWIN), 8 (vs control)
-  NDWIN reads >= 0 --> reported: reads, stall p50 and max, Set 14h hold
+  NDWIN reads >= N --> time share over 10 ms (9), p99.9 (10)
+  log C0h records  --> the cause check (reported, no verdict)
+
+The cause check (design S7a) compares the longest NDWIN read of a cycle
+with the GC booked on one LUN for that NDWIN (LUN time / LUNs, plus the
+work booked ahead at the entry). Medians over the cycles:
+
+  ratio = longest NDWIN read / (LUN GC time + work ahead at entry)
+  wall  = FTL thread time in GC / LUN GC time
+  CAUSE yes:  0.5 <= ratio <= 2 and wall <= 0.1 in every repeat
+  CAUSE no:   a repeat outside that; S7b waits for a new diagnosis
+  CAUSE unknown: no repeat has the record facts
 
 For each plm repeat the output gives the NDWIN reads, the NDWIN read
-stall (p50 and max) and the longest Set 14h hold (hold_ms_max), which is
-the time the held background work ran. Without an nd_max_us fact, the
-max is the NDWIN p99.9, which equals it below 1000 reads. The table also
-gives p50, and the plm=off p99 over the NDWIN p99.
+stall (p50 and max), the longest Set 14h hold (hold_ms_max) and the GC
+record medians. Without an nd_max_us fact, the max is the NDWIN p99.9,
+which equals it below 1000 reads.
 """
 import argparse
 import contextlib
@@ -255,6 +274,20 @@ def v_tail(a):
                 or not g.get("cycles"):
             return INVALID, "plm-%d: %s of %s cycles valid (rule 1)" % (
                 i + 1, g.get("valid"), g.get("cycles"))
+    for i, g in enumerate(plm):
+        if g.get("rec_ok") is not None and \
+                g["rec_ok"] < a.min_valid * (g.get("cycles") or 0):
+            return INVALID, ("plm-%d: %s of %s cycles have the GC record "
+                             "of their NDWIN (rule 12)" %
+                             (i + 1, g["rec_ok"], g.get("cycles")))
+    enforce = a.nd_rules == "enforce"
+    for i, g in enumerate(plm):
+        if enforce and ((g.get("nd_n") or 0) < a.min_reads or
+                        g.get("nd_share") is None):
+            return INVALID, ("plm-%d has %s NDWIN reads (at least %d) and "
+                             "nd_share %s (rule 11)" %
+                             (i + 1, g.get("nd_n"), a.min_reads,
+                              g.get("nd_share")))
     cdt = statistics.median(g["dt_p99_us"] for g in ctl)
     cnd = statistics.median(g["nd_p99_us"] for g in ctl)
     c999 = statistics.median(g["dt_p999_us"] for g in ctl)
@@ -298,13 +331,89 @@ def v_tail(a):
             return FAIL, ("plm-%d: DTWIN p99.9 %.1f us is not %d%% below "
                           "the control p99.9 %.1f us (rule 8)" %
                           (i + 1, g["dt_p999_us"], round(m * 100), c999))
+    for i, g in enumerate(plm):
+        nd_rule = nd_rules(g, a)
+        if nd_rule and enforce:
+            return FAIL, "plm-%d: %s" % (i + 1, nd_rule)
+        if nd_rule:
+            print("report only: plm-%d: %s" % (i + 1, nd_rule))
     worst = max(stall_max(g)[0] for g in plm)
     return PASS, ("DTWIN p99 %.1f us, p99.9 at most %.1f us vs control "
                   "p99.9 %.1f us over %d repeats, no reachable DEAT; "
-                  "NDWIN reads %d, longest NDWIN read %.1f us" % (
+                  "NDWIN reads %d, longest NDWIN read %.1f us, largest "
+                  "NDWIN stall share %s; cause %s" % (
                       mdt, max(g["dt_p999_us"] for g in plm), c999,
                       len(plm), sum(g.get("nd_n") or 0 for g in plm),
-                      worst))
+                      worst, max_share(plm), cause(plm)[0]))
+
+
+def nd_rules(g, a):
+    """The NDWIN rule (9, then 10) that repeat G breaks, or None."""
+    share = g.get("nd_share")
+    if share is not None and share > a.nd_share:
+        return ("NDWIN reads waited over %s ms in %.1f%% of the NDWIN "
+                "time, more than %.1f%% (rule 9)" %
+                (g.get("stall_ms", 10), share * 100, a.nd_share * 100))
+    p999 = g.get("nd_p999_us")
+    if p999 is not None and p999 > a.nd_p999_ms * 1000:
+        return ("NDWIN p99.9 %.1f us is over %d ms (rule 10)" %
+                (p999, a.nd_p999_ms))
+    return None
+
+
+def max_share(plm):
+    v = [g["nd_share"] for g in plm if g.get("nd_share") is not None]
+    return "%.4f" % max(v) if v else "-"
+
+
+def cause_one(g):
+    """(yes|no|None, ratio, wall) of one repeat; None without a record.
+
+    A read stall over stall_ms with no LUN GC booked is "no": GC
+    cannot explain it.  A repeat with neither has nothing to explain.
+    """
+    gc = g.get("nd_lun_gc_us_med")
+    rd = g.get("nd_max_read_us_med")
+    if gc is None or rd is None or rd < 0:
+        return None, None, None
+    if gc <= 0:
+        if rd > (g.get("stall_ms") or 10) * 1000:
+            return "no", None, None
+        return None, None, None
+    ratio = rd / (gc + max(g.get("nd_ahead0_us_med") or 0, 0))
+    wall = (g.get("nd_wall_us_med") or 0) / gc
+    return ("yes" if 0.5 <= ratio <= 2.0 and wall <= 0.1 else "no"), \
+        ratio, wall
+
+
+def cause(plm):
+    """The cause check over all repeats: (yes|no|unknown, lines)."""
+    lines, got = [], []
+    for i, g in enumerate(plm):
+        c, ratio, wall = cause_one(g)
+        if c is None:
+            continue
+        got.append(c)
+        if ratio is None:
+            lines.append("GC plm-%d: no LUN GC booked; longest NDWIN read "
+                         "%s us --> %s" %
+                         (i + 1, g.get("nd_max_read_us_med"), c))
+            continue
+        lines.append("GC plm-%d: LUN GC %s us, ahead at entry %s us, most "
+                     "ahead %s us, copies %s, erases %s, free at entry %s, "
+                     "victims %s (bg %s, prep %s, forced %s), FTL time %s "
+                     "us; longest NDWIN read %s us; ratio %.2f, wall %.3f "
+                     "--> %s" %
+                     (i + 1, g.get("nd_lun_gc_us_med"),
+                      g.get("nd_ahead0_us_med"), g.get("nd_ahead_max_us_med"),
+                      g.get("nd_copies_med"), g.get("nd_erases_med"),
+                      g.get("nd_free0_med"), g.get("nd_victims0_med"),
+                      g.get("nd_bg_med"), g.get("nd_prep_med"),
+                      g.get("nd_forced_med"), g.get("nd_wall_us_med"),
+                      g.get("nd_max_read_us_med"), ratio, wall, c))
+    if not got:
+        return "unknown", lines
+    return ("yes" if all(c == "yes" for c in got) else "no"), lines
 
 
 def stall_max(g):
@@ -317,13 +426,18 @@ def stall_max(g):
 
 
 def stalls(plm):
-    """The NDWIN read stall and the Set 14h hold of each plm repeat."""
+    """The NDWIN read stall, the Set 14h hold and the GC records of each
+    plm repeat, then the cause check."""
     for i, g in enumerate(plm):
         mx, how = stall_max(g)
         print("NDWIN plm-%d: %s reads, read p50 %s us, %s %.1f us; longest "
-              "Set 14h hold (held background work) %s ms" %
+              "Set 14h hold (held background work) %s ms; stall share %s" %
               (i + 1, g.get("nd_n"), g.get("nd_p50_us"), how, mx,
-               g.get("hold_ms_max")))
+               g.get("hold_ms_max"), g.get("nd_share", "-")))
+    verdict, lines = cause(plm)
+    for line in lines:
+        print(line)
+    print("CAUSE %s" % verdict)
 
 
 # ---- self-test ------------------------------------------------------------
@@ -438,20 +552,30 @@ REAL_OFF = [
 ]
 
 
+# GC record medians of a burst NDWIN: one LUN carries 2.4 s of GC
+BURST = {"rec_ok": 60, "nd_lun_gc_us_med": 2400000, "nd_ahead0_us_med": 0,
+         "nd_ahead_max_us_med": 3400000, "nd_copies_med": 300000,
+         "nd_erases_med": 1200, "nd_free0_med": 44, "nd_victims0_med": 200,
+         "nd_bg_med": 0, "nd_prep_med": 40, "nd_forced_med": 0,
+         "nd_wall_us_med": 9000, "nd_max_read_us_med": 2300000}
+
+
 def tail_line(mode="plm", cycles=60, valid=60, deat=0, deat_reach=0,
               dt=(60.0, 100.0, 200.0), nd=(70.0, 400.0, 900.0), n=5000,
-              allp=None, nd_n=None):
+              allp=None, nd_n=None, share=0.01, gc=None):
     allp = allp or nd
     nd_n = n if nd_n is None else nd_n
+    extra = "" if share is None else "stall_ms=10 nd_share=%.4f " % share
+    extra += "".join("%s=%s " % kv for kv in (gc or {}).items())
     return ("FG tail_mode=%s cycles=%d valid=%d reach=%d mveat=0 deat=%d "
             "deat_reach=%d exits=0 planned=8192 unit=4096 hold_ms_max=2 "
             "reads=240000 dt_n=%d dt_p50_us=%.1f dt_p99_us=%.1f "
             "dt_p999_us=%.1f nd_n=%d nd_p50_us=%.1f nd_p99_us=%.1f "
             "nd_p999_us=%.1f all_n=%d all_p50_us=%.1f all_p99_us=%.1f "
-            "all_p999_us=%.1f\n" %
+            "all_p999_us=%.1f %s\n" %
             (mode, cycles, valid, valid, deat, deat_reach, n, dt[0], dt[1],
              dt[2], nd_n, nd[0], nd[1], nd[2], n + nd_n, allp[0], allp[1],
-             allp[2]))
+             allp[2], extra.strip()))
 
 
 class Args:
@@ -463,6 +587,9 @@ class Args:
         self.margin = 0.2
         self.min_valid = 0.9
         self.min_reads = 1000
+        self.nd_rules = "enforce"
+        self.nd_share = 0.05
+        self.nd_p999_ms = 20
 
 
 def self_test():
@@ -591,11 +718,33 @@ def self_test():
         tl(good, [tail_line("phantom", nd_n=500)] * 3,
            "tail few reads in a control slot", INVALID, rule=6)
         tl(good[:2] + [tail_line(nd_n=3, nd=(2.2e6, 2.3e6, 2.3e6))], ctl,
-           "tail few NDWIN reads", PASS)
+           "tail few NDWIN reads", INVALID, rule=11)
+        tl(good[:2] + [tail_line(share=None)], ctl,
+           "tail no NDWIN time share fact", INVALID, rule=11)
+        tl(good[:2] + [tail_line(nd_n=3, nd=(2.2e6, 2.3e6, 2.3e6))], ctl,
+           "tail few NDWIN reads, report only", PASS, nd_rules="report")
         tl([tail_line(nd_n=0, nd=(-1, -1, -1))] * 3, ctl,
-           "tail no NDWIN read: rule 8 decides", PASS)
+           "tail no NDWIN read, report only: rule 8 decides", PASS,
+           nd_rules="report")
         tl(good[:2] + [tail_line(nd_n=0, nd=(-1, -1, -1))], ctl,
-           "tail one repeat with no NDWIN read", PASS)
+           "tail one repeat with no NDWIN read, report only", PASS,
+           nd_rules="report")
+        tl(good[:2] + [tail_line(share=0.06)], ctl,
+           "tail NDWIN stall share over 5 %", FAIL, rule=9)
+        tl(good[:2] + [tail_line(share=0.05)], ctl,
+           "tail NDWIN stall share of exactly 5 %", PASS)
+        tl(good[:2] + [tail_line(share=0.06)], ctl,
+           "tail NDWIN stall share, report only", PASS, nd_rules="report")
+        tl(good[:2] + [tail_line(share=0.06)], ctl,
+           "tail NDWIN stall share, a wider limit", PASS, nd_share=0.1)
+        tl(good[:2] + [tail_line(nd=(70, 400, 25000))], ctl,
+           "tail NDWIN p99.9 over 20 ms", FAIL, rule=10)
+        tl(good[:2] + [tail_line(nd=(70, 400, 20000))], ctl,
+           "tail NDWIN p99.9 of exactly 20 ms", PASS)
+        tl(good[:2] + [tail_line(gc=dict(BURST, rec_ok=50))], ctl,
+           "tail GC records of too few cycles", INVALID, rule=12)
+        tl(good[:2] + [tail_line(gc=dict(BURST, rec_ok=54))], ctl,
+           "tail GC records of 90 % of the cycles", PASS)
         tl(good, [tail_line("phantom", dt=(70, 200, 880),
                             nd=(70, 400, 900))] * 3,
            "tail control shows a gap", INVALID, rule=5)
@@ -611,8 +760,41 @@ def self_test():
            ctl, "tail one repeat with an equal p99.9", FAIL, rule=7)
         tl(good[:2] + [tail_line(dt=(60, 100, 750), nd=(70, 400, 900))],
            ctl, "tail DTWIN p99.9 near the control p99.9", FAIL, rule=8)
-        want((sorted(set(range(1, 9)) - hit), ""), [],
+        want((sorted(set(range(1, 13)) - hit), ""), [],
              "tail every rule has a plant")
+        # the cause check: each plant breaks one of its conditions
+        want((cause([row(dict(BURST))])[0], ""), "yes",
+             "cause: the burst fits")
+        want((cause([])[0], ""), "unknown", "cause: no record")
+        want((cause([row({"nd_lun_gc_us_med": "0",
+                         "nd_max_read_us_med": "10"})])[0], ""), "unknown",
+             "cause: no GC booked and no stall")
+        want((cause([row(dict(BURST, nd_lun_gc_us_med=0))])[0], ""), "no",
+             "cause plant: a stall with no GC booked")
+        want((cause([row(dict(BURST)),
+                     row(dict(BURST, nd_lun_gc_us_med=0))])[0], ""), "no",
+             "cause plant: one repeat stalls with no GC booked")
+        want((cause([row(dict(BURST, nd_lun_gc_us_med=0,
+                             nd_max_read_us_med=9000, stall_ms=5))])[0],
+              ""), "no", "cause plant: stall_ms of the record sets the bar")
+        want((cause([row({"nd_max_read_us_med": 2300000})])[0], ""),
+             "unknown", "cause: GC fact missing")
+        want((cause([row({"nd_lun_gc_us_med": 0})])[0], ""), "unknown",
+             "cause: read fact missing")
+        for label, kv in (("read far longer than the LUN GC",
+                           {"nd_max_read_us_med": 5000000}),
+                          ("read far shorter than the LUN GC",
+                           {"nd_max_read_us_med": 1000000}),
+                          ("FTL thread time is the stall",
+                           {"nd_wall_us_med": 300000})):
+            want((cause([row(dict(BURST, **kv))])[0], ""), "no",
+                 "cause plant: " + label)
+        want((cause([row(dict(BURST, nd_ahead0_us_med=2400000,
+                             nd_max_read_us_med=4600000))])[0], ""), "yes",
+             "cause: work booked before the NDWIN counts")
+        want((cause([row(dict(BURST)),
+                     row(dict(BURST, nd_max_read_us_med=9000000))])[0], ""),
+             "no", "cause: every repeat must fit")
         # the d760 run: the DTWIN rules hold, the NDWIN stall is reported
         rp = [put("rp%d" % i, ln + "\nFG_DONE ok\n")
               for i, ln in enumerate(REAL_PLM)]
@@ -620,10 +802,15 @@ def self_test():
               for i, ln in enumerate(REAL_OFF)]
         a = Args("tail", rp, rc)
         a.repeats = 5
+        with contextlib.redirect_stdout(io.StringIO()):
+            got = v_tail(a)
+        want(got, INVALID, "tail d760 run, NDWIN rules enforced: no "
+             "time share fact (rule 11)")
+        a.nd_rules = "report"
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             got = v_tail(a)
-        want(got, PASS, "tail d760 run")
+        want(got, PASS, "tail d760 run, NDWIN rules reported")
         log = buf.getvalue()
         want((all(("NDWIN reads 649" in got[1],
                    "longest NDWIN read 2658669.8 us" in got[1],
@@ -645,6 +832,10 @@ def parse(argv):
     p.add_argument("--margin", type=float, default=0.2)
     p.add_argument("--min-valid", type=float, default=0.9)
     p.add_argument("--min-reads", type=int, default=1000)
+    p.add_argument("--nd-rules", choices=("enforce", "report"),
+                   default="enforce")
+    p.add_argument("--nd-share", type=float, default=0.05)
+    p.add_argument("--nd-p999-ms", type=int, default=20)
     a = p.parse_args(argv)
     if a.test == "gplm1" and len(a.guest) != 1:
         p.error("gplm1 takes one --guest file")
@@ -652,6 +843,8 @@ def parse(argv):
         a.guest = a.guest[0]
     if not (0 < a.margin < 1 and 0 < a.min_valid <= 1 and a.repeats > 0):
         p.error("--margin and --min-valid must be in (0, 1]")
+    if not (0 <= a.nd_share < 1 and a.nd_p999_ms > 0):
+        p.error("--nd-share must be in [0, 1), --nd-p999-ms above 0")
     return a
 
 
