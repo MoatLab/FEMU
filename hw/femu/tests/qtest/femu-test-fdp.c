@@ -4827,6 +4827,7 @@ static uint64_t femu_fdpt_check(QTestState *qts)
  * unit: handle 0 goes on in a dense unit, and the request folds the full
  * pSLC unit into handle 0's collection unit, which frees it. Handle 1
  * then fills its unit and takes the freed one, and its old one folds.
+ * @data "gc-fw": with fw_gc_page_ns, each moved page also takes one slot.
  */
 void femu_test_fdp_tier(void *obj, void *data, QGuestAllocator *alloc)
 {
@@ -4835,6 +4836,7 @@ void femu_test_fdp_tier(void *obj, void *data, QGuestAllocator *alloc)
     FemuCtrlState c = { 0 };
     uint64_t buf = guest_alloc(alloc, 4 * 4096);
     uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
     uint64_t v[8];
 
     femu_enable(&c, &femu->dev, alloc);
@@ -4865,8 +4867,12 @@ void femu_test_fdp_tier(void *obj, void *data, QGuestAllocator *alloc)
     g_assert_cmpuint(v[3], ==, 2);
     g_assert_cmpuint(v[5], ==, 1);          /* handle 1 took the freed unit */
     g_assert_cmpuint(femu_fdpt_check(qts), ==, 0);
+    if (data && !strcmp(data, "gc-fw")) {
+        femu_gc_fw_assert(&c, log, "fdpt", femu_gc_fw_ns(qts, "fdpt"), 0, 0);
+    }
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
+    guest_free(alloc, log);
     guest_free(alloc, list);
     guest_free(alloc, buf);
 }

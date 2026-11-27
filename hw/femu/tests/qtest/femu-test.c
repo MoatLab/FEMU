@@ -2272,6 +2272,48 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             FEMU_GC_FW_GEO ",mapping=fast,fw_gc_page_ns=1000000"
     });
+    /* one LUN of TLC: pool lines of 16 pSLC pages; 10 ms slots */
+#define FEMU_GC_FW_TIER_GEO \
+    "id=gc-fw,devsz_mb=16,femu_mode=1,secsz=512,secs_per_pg=8," \
+    "pgs_per_blk=48,blks_per_pl=128,pls_per_lun=1,luns_per_ch=1,nchs=1," \
+    "nand_cell_type=3"
+    qos_add_test("gc-fw-tier", "femu", femu_test_gc_fw_tier,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"static",
+        .edge.extra_device_opts = FEMU_GC_FW_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,fw_gc_page_ns=10000000"
+    });
+    qos_add_test("gc-fw-tier-dyn", "femu", femu_test_gc_fw_tier,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"dyn",
+        .edge.extra_device_opts = FEMU_GC_FW_TIER_GEO
+            ",tier_mode=dynamic,tier_max_mb=1,fw_gc_page_ns=10000000"
+    });
+    qos_add_test("gc-fw-tier-idle", "femu", femu_test_gc_fw_tier,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"idle",
+        .edge.extra_device_opts = FEMU_GC_FW_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,tier_idle_ms=20,"
+            "fw_gc_page_ns=10000000"
+    });
+    qos_add_test("gc-fw-tier-stop", "femu", femu_test_gc_fw_tier,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"stop",
+        .edge.extra_device_opts = FEMU_GC_FW_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,fw_gc_page_ns=10000000"
+    });
+    qos_add_test("gc-fw-tier-hold", "femu", femu_test_gc_fw_tier,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"hold",
+        .edge.extra_device_opts = FEMU_GC_FW_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1,fw_gc_page_ns=10000000"
+    });
+    qos_add_test("gc-fw-tier-off", "femu", femu_test_gc_fw_tier,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts = FEMU_GC_FW_TIER_GEO
+            ",tier_mode=static,tier_static_mb=1"
+    });
     qos_add_test("gc-fw-refused", "femu", femu_test_gc_fw_refused, NULL);
     qos_add_test("rrl", "femu", femu_test_rrl,
                  &(QOSGraphTestOptions) {
@@ -4435,6 +4477,16 @@ static void femu_register_nodes(void)
             "pgs_per_blk=48,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,"
             "nchs=2,nand_cell_type=3,tier_mode=static,tier_static_mb=1,"
             "subsys=fdpsub"
+    });
+    /* the fold of FDP pSLC units takes a slot per page */
+    qos_add_test("gc-fw-tier-fdp", "femu", femu_test_fdp_tier,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"gc-fw",
+        .edge.extra_device_opts =
+            "id=fdpt,devsz_mb=8,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=48,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,nand_cell_type=3,tier_mode=static,tier_static_mb=1,"
+            "subsys=fdpsub,fw_gc_page_ns=1000000"
     });
     qos_add_test("fdp-tier-timing", "femu", femu_test_fdp_tier_timing,
                  &(QOSGraphTestOptions) {

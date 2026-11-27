@@ -20353,7 +20353,7 @@ void femu_test_gc_fw_path(void *obj, void *data, QGuestAllocator *alloc)
      */
     femu_gc_fw_check(qts, "gc-fw", w);
     g_assert_cmpuint(w[FEMU_GC_FW_GAP_MAX], >, 0);
-    femu_gc_fw_assert(&c, log, "gc-fw", f, FEMU_GC_FW_TP);
+    femu_gc_fw_assert(&c, log, "gc-fw", f, FEMU_GC_FW_TP, FEMU_GC_FW_TP);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
     guest_free(alloc, log);
@@ -20415,7 +20415,7 @@ void femu_test_gc_fw_merge(void *obj, void *data, QGuestAllocator *alloc)
     } else {
         g_assert_cmpuint(lat, <, copies / 2);
     }
-    femu_gc_fw_assert(&c, log, "gc-fw", f, FEMU_GC_FW_TP);
+    femu_gc_fw_assert(&c, log, "gc-fw", f, FEMU_GC_FW_TP, FEMU_GC_FW_TP);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
     guest_free(alloc, log);
@@ -29161,6 +29161,138 @@ void femu_test_tier_fold_stop(void *obj, void *data,
     guest_free(alloc, buf);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/* set the u32 test property @prop of device gc-fw to @val */
+static void femu_gc_fw_set(QTestState *qts, const char *prop, uint32_t val)
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                           "'path':'/machine/peripheral/gc-fw',"
+                           "'property':%s,'value':%u}}", prop, val);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* x-tier-check of device gc-fw into @v, with no rule check */
+static void femu_gc_fw_tier(QTestState *qts, uint64_t v[TIER_FIELDS])
+{
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':'/machine/peripheral/gc-fw',"
+                           "'property':'x-tier-check'}}");
+    g_auto(GStrv) f = NULL;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-tier-check %s", qdict_get_str(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    qobject_unref(rsp);
+    g_assert_cmpuint(g_strv_length(f), ==, TIER_FIELDS);
+    for (int i = 0; i < TIER_FIELDS; i++) {
+        v[i] = g_ascii_strtoull(f[i], NULL, 10);
+    }
+}
+
+/* the pSLC read time and the TLC program times the tier tests use */
+#define FEMU_GC_FW_TIER_RS      25000ULL
+#define FEMU_GC_FW_TIER_TP_LO   820500ULL
+#define FEMU_GC_FW_TIER_TP_HI   5734000ULL
+/* the slot of the tier tests, 10 ms: far above the TLC program times */
+#define FEMU_GC_FW_TIER_NS      10000000ULL
+
+/*
+ * fw_gc_page_ns on the pSLC tier fold, on one LUN of TLC. @data names the
+ * case:
+ *
+ *   static   folds of a static pool
+ *   dyn      folds of a dynamic pool capped at 1 MiB
+ *   idle     idle folds (tier_idle_ms)
+ *   stop     a fold stopped after 5 pages and retried (x-tier-fold-stop)
+ *   hold     a 20 ms host stall after each fold read (x-gc-hold-us); a
+ *            slot on host time would end far after F + tP
+ *   off      the control: no slot
+ *
+ * Each fold moves k pages, read, slot, program, on one LUN, so the last
+ * fold programs for at least k (tRs + F + tP):
+ *
+ *   LUN    [Rs][ F idle ][ P   ][Rs][ F idle ][ P   ] ... [erase]
+ *   GC fw      [ slot   ]           [ slot   ]
+ *
+ * The TLC program time depends on the page, so the gap of each move is
+ * F plus a program time from the lowest to the highest TLC one.
+ */
+void femu_test_gc_fw_tier(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool on = strcmp(mode, "off") != 0;
+    bool idle = !strcmp(mode, "idle");
+    bool hold = !strcmp(mode, "hold");
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t f = femu_gc_fw_ns(qts, "gc-fw");
+    uint32_t pages = hold ? 320 : idle ? 240 : 512;
+    uint64_t v[TIER_FIELDS];
+    uint64_t move;
+    int i;
+
+    g_assert_cmpuint(f, ==, on ? FEMU_GC_FW_TIER_NS : 0);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x6c, 16 * 4096);
+    if (hold) {
+        femu_gc_fw_set(qts, "x-gc-hold-us", 20000);
+    }
+    if (!strcmp(mode, "stop")) {
+        femu_gc_fw_set(qts, "x-tier-fold-stop", 5);
+    }
+    /* distinct pages, so each fold moves the k pages of its pool line */
+    femu_tier_write(&c, 0, pages, 16, buf, list);
+    if (idle) {
+        uint64_t last = UINT64_MAX;
+
+        /*
+         * Idle folds run until the pool is empty, at F + tP or more a page.
+         * Wait until no idle page moved for 100 ms, so the counters are
+         * quiet when they are read.
+         */
+        for (i = 0; i < 300; i++) {
+            femu_gc_fw_tier(qts, v);
+            if (v[TIER_IDLE_PAGES] > 0 && v[TIER_IDLE_PAGES] == last) {
+                break;
+            }
+            last = v[TIER_IDLE_PAGES];
+            g_usleep(100000);
+        }
+        g_assert_cmpuint(v[TIER_IDLE_PAGES], >, 0);
+    }
+    if (hold) {
+        femu_gc_fw_set(qts, "x-gc-hold-us", 0);
+    }
+    femu_gc_fw_tier(qts, v);
+    g_assert_cmpuint(v[TIER_FOLD_PAGES], >, 0);
+    if (!idle) {
+        g_assert_cmpuint(v[TIER_FOLDS], >, 0);
+    }
+    femu_gc_fw_assert(&c, log, "gc-fw", f,
+                      FEMU_GC_FW_TIER_TP_LO, FEMU_GC_FW_TIER_TP_HI);
+    move = FEMU_GC_FW_TIER_RS + FEMU_GC_FW_TIER_NS + FEMU_GC_FW_TIER_TP_LO;
+    g_test_message("tier %s: k %" PRIu64 ", last fold programs %" PRIu64
+                   " ns", mode, v[TIER_LINE_PGS], v[TIER_FOLD_PROG_NS]);
+    if (!strcmp(mode, "static")) {
+        g_assert_cmpuint(v[TIER_FOLD_PROG_NS], >=, v[TIER_LINE_PGS] * move);
+    } else if (!on) {
+        g_assert_cmpuint(v[TIER_FOLD_PROG_NS], <,
+                         v[TIER_LINE_PGS] * move / 2);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
     qos_invalidate_command_line();
 }
 

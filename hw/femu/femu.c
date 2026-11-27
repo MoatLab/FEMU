@@ -4974,16 +4974,15 @@ static bool femu_check_copyback_props(FemuCtrl *n, Error **errp)
 }
 
 /*
- * fw_gc_page_ns runs where line and reclaim unit collection and the merges
- * of the hybrid and FAST mappings move pages, in the bbssd and CSD FTL
- * this controller builds. The refused settings move pages some other way
- * (tier folds), use an FTL another device made, or let a read suspend a
- * program whose firmware slot has not ended.
+ * fw_gc_page_ns runs where line and reclaim unit collection, the merges of
+ * the hybrid and FAST mappings and the pSLC tier folds move pages, in the
+ * bbssd and CSD FTL this controller builds. The refused settings use an
+ * FTL another device made, or let a read suspend a program whose firmware
+ * slot has not ended.
  */
 static bool femu_check_gc_fw_props(FemuCtrl *n, Error **errp)
 {
     const BbCtrlParams *bp = &n->bb_params;
-    const char *tier = bp->tier_mode;
     const char *why = NULL;
 
     if (bp->fw_gc_page_ns < 0) {
@@ -5007,9 +5006,6 @@ static bool femu_check_gc_fw_props(FemuCtrl *n, Error **errp)
         why = "cxl_ssd";
     } else if (bp->pe_suspend) {
         why = "pe_suspend";
-    } else if (tier && (!strcmp(tier, "static") ||
-                        !strcmp(tier, "dynamic"))) {
-        why = "the pSLC tier";
     }
     if (why) {
         error_setg(errp, "femu: fw_gc_page_ns is not supported with %s", why);

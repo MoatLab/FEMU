@@ -20,8 +20,10 @@
  *   dense free --borrow--> open --> closed (FIFO) --fold--> dense free
  *
  * A fold charges each move as a pSLC read, then a dense program that starts
- * when the read data is ready. The erase of the pool line waits for the last
- * program. Folds charge their time with or without enable_gc_delay.
+ * when the read data is ready. With fw_gc_page_ns the program starts when
+ * the firmware slot of the move ends, as in line collection. The erase of
+ * the pool line waits for the last program. Folds charge their time with
+ * or without enable_gc_delay.
  *
  * With pe_suspend a read could move a booked program or erase, and so
  * break that order. A fold seals each LUN it uses: no read moves the work
@@ -752,7 +754,17 @@ static bool ftl_tier_fold_page(struct ssd *ssd, struct ppa *src, uint64_t now,
     ready = rd.stime + lat;
     t->fold_susp += ssd->sp.pe_suspend && ready < ahead;
     wr.stime = ready;
+    if (ssd->sp.fw_gc_page_ns) {
+        /* the slot runs on the fold's model time, not on host time */
+        ssd_gc_test_hold(ssd);
+        wr.stime = ssd_gc_fw_slot_after(ssd, ready);
+    }
     lat = ssd_advance_status(ssd, &dst, &wr);
+    if (ssd->sp.fw_gc_page_ns) {
+        ssd_gc_fw_take(ssd, wr.stime);
+        ssd_gc_fw_check(ssd, ready, wr.stime, wr.at, wr.at + lat);
+    }
+    ssd_gc_copy_seen(ssd, get_line(ssd, src), &dst);
     *fence = MAX(*fence, wr.stime + lat);
     sealed = ftl_tier_seal(ssd, &dst);
     t->seal_short += ssd->sp.pe_suspend && sealed < wr.stime + lat;
@@ -889,6 +901,7 @@ static uint64_t ftl_tier_fold_n(struct ssd *ssd, struct line *victim,
      */
     start = fence;
     done = fence;
+    ssd_gc_erase_check(ssd, victim, start);
     for (int ch = 0; ch < spp->nchs; ch++) {
         for (int lun = 0; lun < spp->luns_per_ch; lun++) {
             uint64_t lat = ssd_erase_lun_block(ssd, ch, lun, victim->id, true,

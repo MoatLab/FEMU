@@ -1149,11 +1149,12 @@ uint64_t femu_gc_fw_ns(QTestState *qts, const char *id)
  * no slot cost, no move takes a slot. With one, every GC page takes one
  * slot of @f ns (C0h 16, 336 and 344), no program asks to start before
  * its slot or read end and no erase starts before a copy of its line
- * ends. With @prog_ns, each move of the path ends exactly @f + @prog_ns
- * after its read: one quiet LUN and the plain channel.
+ * ends. With @prog_hi, each move of the path ends @f + tP after its read,
+ * with tP from @prog_lo to @prog_hi: one quiet LUN and the plain channel.
+ * Flat timing has one tP, so the gap is exact there.
  */
 void femu_gc_fw_assert(FemuCtrlState *c, uint64_t log, const char *id,
-                       uint64_t f, uint64_t prog_ns)
+                       uint64_t f, uint64_t prog_lo, uint64_t prog_hi)
 {
     uint64_t v[4];
     uint64_t w[FEMU_GC_FW_FIELDS];
@@ -1173,9 +1174,10 @@ void femu_gc_fw_assert(FemuCtrlState *c, uint64_t log, const char *id,
     g_assert_cmpuint(w[FEMU_GC_FW_PAGES], ==, v[1]);
     g_assert_cmpuint(w[FEMU_GC_FW_SHORT], ==, 0);
     g_assert_cmpuint(w[FEMU_GC_FW_UNSAFE], ==, 0);
-    if (prog_ns) {
-        g_assert_cmpuint(w[FEMU_GC_FW_GAP_MIN], ==, f + prog_ns);
-        g_assert_cmpuint(w[FEMU_GC_FW_GAP_MAX], ==, f + prog_ns);
+    if (prog_hi) {
+        g_assert_cmpuint(w[FEMU_GC_FW_GAP_MIN], >=, f + prog_lo);
+        g_assert_cmpuint(w[FEMU_GC_FW_GAP_MAX], <=, f + prog_hi);
+        g_assert_cmpuint(w[FEMU_GC_FW_GAP_MIN], <=, w[FEMU_GC_FW_GAP_MAX]);
     }
 }
 

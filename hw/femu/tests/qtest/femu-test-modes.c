@@ -4630,6 +4630,11 @@ void femu_test_gc_idle_refused(void *obj, void *data,
     }
 }
 
+/* the pSLC tier geometry of the tier tests (FEMU_TIER_GEO), for QMP */
+#define FEMU_GC_FW_TIER_QMP \
+    "'secsz':512,'secs_per_pg':8,'pgs_per_blk':48,'blks_per_pl':32," \
+    "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,'nand_cell_type':3"
+
 /* fw_gc_page_ns refuses a negative time and the settings it cannot time */
 void femu_test_gc_fw_refused(void *obj, void *data,
                              QGuestAllocator *alloc)
@@ -4645,7 +4650,6 @@ void femu_test_gc_fw_refused(void *obj, void *data,
         { 1000, "'femu_mode':1,'gc_erase_order':false",
           "gc_erase_order=off" },
         { 1000, "'femu_mode':1,'pe_suspend':1", "with pe_suspend" },
-        { 1000, "'femu_mode':1,'tier_mode':'static'", "the pSLC tier" },
         { 1000, "'femu_mode':0", "a mode other than bbssd or CSD" },
         { 1000, "'femu_mode':3", "a mode other than bbssd or CSD" },
     };
@@ -4653,6 +4657,9 @@ void femu_test_gc_fw_refused(void *obj, void *data,
         "'femu_mode':1,'namespace_modes':''",
         "'femu_mode':1,'mapping':'hybrid'",
         "'femu_mode':1,'mapping':'fast'",
+        "'femu_mode':1," FEMU_GC_FW_TIER_QMP ",'tier_mode':'static',"
+        "'tier_static_mb':1",
+        "'femu_mode':1," FEMU_GC_FW_TIER_QMP ",'tier_mode':'dynamic'",
     };
     int i;
 
