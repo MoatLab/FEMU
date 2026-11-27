@@ -639,6 +639,7 @@ own description allows. A message keeps its format directives (`%s`,
 - %s is at most 60000 ms
 - a time in ms
 - a window is <ms>+<window>~<seed>, window > 0
+- x-plm-hold-cap takes 1 or more ms with plm=on
 
 ## `multipoller_enabled`
 
@@ -978,7 +979,10 @@ own description allows. A message keeps its format directives (`%s`,
 - x-plm-dtwwt takes 1 or more with plm=on
 - x-plm-event takes ETYP bits 0 to 2, 14 and 15 with plm=on
 - x-plm-ftl needs plm=on
+- x-plm-gc-us takes 0 to 1000000 with plm=on and no held Set 14h
+- x-plm-hold-cap takes 1 or more ms with plm=on
 - x-plm-lines takes 1 to the line count with plm=on
+- x-plm-pace needs plm=on
 
 ## `plm_dtwin_writes`
 

@@ -528,24 +528,26 @@ void bb_gc_idle(FemuCtrl *n)
 /*
  * bb_plm_idle - the plm pass of the idle FTL thread
  *
- * In NDWIN, one step toward plm_ndwin_lines when one is due. In DTWIN,
- * the exit when the time limit passes with no request. As in
- * bb_gc_idle(), the work runs inside ftl_in_sweep, so a Set 14h that
- * pauses the controller waits for it, and the due checks run again
- * inside the sweep.
+ * In NDWIN, one paced GC pass or one step toward plm_ndwin_lines when
+ * one is due. In DTWIN, the exit when the time limit passes with no
+ * request. As in bb_gc_idle(), the work runs inside ftl_in_sweep, so a
+ * Set 14h that pauses the controller waits for it, and the due checks
+ * run again inside the sweep.
  */
 void bb_plm_idle(FemuCtrl *n)
 {
     struct ssd *ssd = n->ssd;
 
-    if (!ssd || (!femu_plm_idle_due(n) &&
+    if (!ssd || (!femu_plm_idle_due(n) && !ssd_plm_pace_due(ssd) &&
                  !ssd_plm_prep_due(ssd, ssd_now(ssd)))) {
         return;
     }
     n->ftl_in_sweep = true;
     smp_mb();   /* publish the flag before re-reading the pause state */
     if (n->dataplane_started) {
-        if (ssd_plm_prep_due(ssd, ssd_now(ssd))) {
+        if (ssd_plm_pace_due(ssd)) {
+            ssd_plm_pace_step(ssd);
+        } else if (ssd_plm_prep_due(ssd, ssd_now(ssd))) {
             ssd_plm_prep_step(ssd);
         }
         femu_plm_step(n);

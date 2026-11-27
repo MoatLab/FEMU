@@ -2635,8 +2635,18 @@ static int do_gc_pass(struct ssd *ssd, bool force)
 
     /* a forced pass first finishes the line paced collection holds */
     if (ssd->pace_line) {
-        if (!force || pace_finish(ssd)) {
+        if (!force) {
             return -1;
+        }
+        /* plm: a paced victim open in DTWIN makes this an excursion too */
+        if (unlikely(ssd->plm_hold)) {
+            femu_plm_excursion(ssd->n);
+        }
+        if (pace_finish(ssd)) {
+            return -1;
+        }
+        if (unlikely(ssd->plm)) {
+            ssd->plm_forced_victims++;
         }
         if (ssd->sp.enable_gc_delay) {
             note_forced_end(ssd);
@@ -2996,12 +3006,14 @@ uint64_t ssd_media_last_end(struct ssd *ssd)
  * The host and the media were quiet for gc_idle_ns, and the work of the
  * last step ended. It reads only timestamps this thread alone writes, so it
  * runs outside ftl_in_sweep. ssd_gc_idle_step() checks the line rule. A
- * plm DTWIN holds every step, maint_idle work too.
+ * plm DTWIN holds every step, maint_idle work too. In a paced plm NDWIN
+ * only the maint_idle work runs: paced GC replaces idle collection.
  */
 bool ssd_gc_idle_due(struct ssd *ssd, uint64_t now)
 {
     return ssd->gc_idle_ns && now >= ssd->gc_idle_busy + ssd->gc_idle_ns &&
-           now >= ssd->gc_idle_fence && !qatomic_read(&ssd->plm_hold);
+           now >= ssd->gc_idle_fence && !qatomic_read(&ssd->plm_hold) &&
+           (ssd->maint_idle || !ssd_plm_paced(ssd));
 }
 
 /*
@@ -3089,7 +3101,9 @@ static bool maint_idle_work(struct ssd *ssd, uint64_t now)
             }
             return false;
         }
-        if (turn == 2 && ssd->lm.free_line_cnt < ssd->sp.gc_idle_lines) {
+        /* whole victims would break the read bound of paced GC */
+        if (turn == 2 && ssd->lm.free_line_cnt < ssd->sp.gc_idle_lines &&
+            !ssd_plm_paced(ssd)) {
             do_gc(ssd, false);
             ssd->gc_idle_steps++;
             return true;
@@ -3169,6 +3183,7 @@ void ssd_gc_idle_note(struct ssd *ssd, uint64_t req_end)
  * @ssd: the FTL of NVM Set 1
  * @now: ssd_now()
  *
+ * With plm_ndwin_gc_us 0 only: ssd_plm_pace_step() replaces it else.
  * In NDWIN, while fewer lines than plm_ndwin_lines are free, the last
  * step did not stall, and the media work of the last step (and of idle
  * collection, which shares the fence) has ended. The cheap tests go
@@ -3181,7 +3196,7 @@ void ssd_gc_idle_note(struct ssd *ssd, uint64_t req_end)
 bool ssd_plm_prep_due(struct ssd *ssd, uint64_t now)
 {
     /* precon_break: the background GC of the request path skips too */
-    return qatomic_read(&ssd->plm_prep) &&
+    return !ssd->plm_pace_ns && qatomic_read(&ssd->plm_prep) &&
            !qatomic_read(&ssd->plm_stalled) &&
            ssd->lm.free_line_cnt < ssd->plm_lines && !ssd->media_ro &&
            !ssd->precon_break &&
@@ -3496,6 +3511,297 @@ void ssd_pace_tick(struct ssd *ssd)
     opened = ssd_gc_pass_begin(ssd);
     pace_settle(ssd);
     ssd_gc_pass_end(ssd, opened);
+}
+
+/*
+ * plm paced GC (plm_ndwin_gc_us, H below). In NDWIN and in the hold of a
+ * Set 14h DTWIN it takes the place of background GC and the preparation.
+ * A copy is booked only while its source LUN and the LUN that the GC
+ * write pointer programs next both end within H of now. So a host read
+ * waits for at most H of GC, one copy, and the erase of the victim:
+ *
+ *   LUN 0  [rd][prog][rd]|         end > now + H: LUN 0 gives its turn
+ *   LUN 1  [prog]|                 room: the visit copies from LUN 1
+ *   read   waits <= H + tR + tPROG + tBERS (behind an erase), then tR
+ *
+ * Each source LUN has a cursor into the victim and the visits go to the
+ * LUNs in turn, so every LUN with room gets work. A full destination
+ * LUN ends the pass. A forced GC at gc_thres_lines_high stays unpaced
+ * and finishes the open victim (do_gc_pass()).
+ */
+#define PLM_PACE_COPIES 64
+
+/* page @i of LUN @l of @line: the planes of the LUN, page by page */
+static void plm_pace_ppa(struct ssd *ssd, struct line *line, int l, int i,
+                         struct ppa *ppa)
+{
+    struct ssdparams *spp = &ssd->sp;
+
+    ppa->ppa = 0;
+    ppa->g.blk = line->id;
+    ppa->g.ch = l / spp->luns_per_ch;
+    ppa->g.lun = l % spp->luns_per_ch;
+    ppa->g.pl = i / spp->pgs_per_blk;
+    ppa->g.pg = i % spp->pgs_per_blk;
+}
+
+/* the next valid page of the paced line on LUN @l; false: none is left */
+static bool plm_pace_next(struct ssd *ssd, int l, struct ppa *ppa)
+{
+    int rows = ssd->sp.pls_per_lun * ssd->sp.pgs_per_blk;
+
+    while (ssd->plm_pace_cur[l] < rows) {
+        plm_pace_ppa(ssd, ssd->pace_line, l, ssd->plm_pace_cur[l], ppa);
+        if (get_pg(ssd, ppa)->status == PG_VALID) {
+            return true;
+        }
+        ssd->plm_pace_cur[l]++;
+    }
+    return false;
+}
+
+/* every cursor passed the end of the paced line */
+static bool plm_pace_empty(struct ssd *ssd)
+{
+    int nl = ssd->sp.nchs * ssd->sp.luns_per_ch;
+    int rows = ssd->sp.pls_per_lun * ssd->sp.pgs_per_blk;
+
+    for (int l = 0; l < nl; l++) {
+        if (ssd->plm_pace_cur[l] < rows) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/*
+ * Paced GC takes the place of background GC, so it also runs where
+ * background GC would: below the NDWIN target, or at gc_thres_lines and
+ * under when the target is lower. Else no GC would run in that band
+ * until forced GC.
+ */
+static bool plm_pace_short(struct ssd *ssd)
+{
+    return ssd->lm.free_line_cnt < ssd->plm_lines || should_gc(ssd);
+}
+
+/*
+ * No paced step can gain a line now. The hold of a Set 14h ends, and the
+ * pacing waits as a stalled preparation does (ssd_plm_after_req()).
+ */
+static void plm_pace_stall(struct ssd *ssd)
+{
+    qatomic_set(&ssd->plm_stalled, true);
+    ssd->plm_stall_mark = ssd->plm_wr_total + ssd->plm_trim_pages;
+    ssd->plm_pace_marked = false;
+}
+
+/* the point that later victims must gain a line from */
+static void plm_pace_mark(struct ssd *ssd)
+{
+    ssd->plm_pace_marked = true;
+    ssd->plm_pace_f0 = ssd->lm.free_line_cnt;
+    ssd->plm_pace_w0 = ssd->plm_wr_total;
+    ssd->plm_pace_v0 = ssd->plm_pace_victims;
+}
+
+/* open a victim as a forced pass takes one; false when there is none */
+static bool plm_pace_open(struct ssd *ssd)
+{
+    int nl = ssd->sp.nchs * ssd->sp.luns_per_ch;
+    struct line *victim = ssd->policy->select_victim_line(ssd, true);
+
+    if (!victim) {
+        return false;
+    }
+    victim = ssd_rain_fit_victim(ssd, victim);
+    trace_femu_gc_victim(victim->id, victim->vpc, victim->ipc);
+    ftl_note_victim(ssd, victim->id);
+    victim->reclaiming = true;
+    ssd->pace_line = victim;
+    /* a forced pass that takes the victim over scans it from the start */
+    ssd->pace_cursor = 0;
+    ssd->pace_v0 = victim->vpc;
+    ssd->pace_acc = 0;
+    memset(ssd->plm_pace_cur, 0, sizeof(*ssd->plm_pace_cur) * nl);
+    ssd->plm_pace_c0 = ssd->gc_write_pages;
+    if (!ssd->plm_pace_marked) {
+        plm_pace_mark(ssd);
+    }
+    return true;
+}
+
+/*
+ * The paced victim is empty: erase it. The progress rule is the one of
+ * ssd_plm_prep_step(): no line gained after pgs_per_line victims, or
+ * after a victim that copied a whole line, is a stall. Lines the host
+ * took since the mark count as gained.
+ */
+static void plm_pace_done(struct ssd *ssd)
+{
+    struct line *open = ssd->wp.curline;
+    uint64_t whole = open ? ssd_line_data_pgs(ssd, open) :
+                            ssd->sp.line_data_pgs;
+    uint64_t host = (ssd->plm_wr_total - ssd->plm_pace_w0) /
+                    MAX(ssd->sp.line_data_pgs, 1);
+
+    pace_done(ssd);
+    ssd->plm_prep_victims++;
+    ssd->plm_pace_victims++;
+    if (ssd->lm.free_line_cnt + (int64_t)host > ssd->plm_pace_f0) {
+        plm_pace_mark(ssd);
+    } else if (ssd->plm_pace_victims - ssd->plm_pace_v0 >=
+               (uint64_t)ssd->sp.pgs_per_line ||
+               ssd->gc_write_pages - ssd->plm_pace_c0 >= whole) {
+        plm_pace_stall(ssd);
+    }
+    if (!plm_pace_short(ssd)) {
+        ssd->plm_pace_marked = false;
+    }
+}
+
+/**
+ * ssd_plm_pace_due - whether a paced GC step has work
+ * @ssd: the FTL of NVM Set 1
+ *
+ * In NDWIN or the hold, with plm_ndwin_gc_us set and no stall: a victim
+ * is open and some LUN may have room now, or plm_pace_short() is true.
+ * bb_plm_idle() asks outside the sweep too; the step inside it decides.
+ */
+bool ssd_plm_pace_due(struct ssd *ssd)
+{
+    if (!ssd_plm_paced(ssd) || qatomic_read(&ssd->plm_stalled)) {
+        return false;
+    }
+    if (ssd->pace_line) {
+        /* no LUN comes within the horizon before plm_pace_wake */
+        return ssd_now(ssd) >= ssd->plm_pace_wake;
+    }
+    return plm_pace_short(ssd);
+}
+
+/**
+ * ssd_plm_pace_step - one pass of paced GC, inside ftl_in_sweep
+ * @ssd: the FTL of NVM Set 1
+ *
+ * Opens a victim when none is open, then books up to PLM_PACE_COPIES
+ * copies under the horizon rule, and erases the victim once it is empty.
+ * Read-only media, no victim, a copy with no room, or no progress sets
+ * plm_stalled.
+ *
+ *   visit LUN l (the turn moves on at each visit):
+ *     no valid page of the victim on l, or l ends past now + H --> next
+ *     destination LUN ends past now + H --------------------------> end
+ *     else copy one page --> next
+ *   a full turn with no copy, or 64 copies ---------------------> end
+ *   no copy, victim open --> no step before the first LUN it waited
+ *                            for ends within H (plm_pace_wake)
+ */
+void ssd_plm_pace_step(struct ssd *ssd)
+{
+    int nl = ssd->sp.nchs * ssd->sp.luns_per_ch;
+    bool failed = false;
+    uint64_t wake = UINT64_MAX;
+    int booked = 0;
+    int idle = 0;
+    uint64_t end;
+    uint64_t lim;
+    int64_t t0;
+    bool opened;
+
+    if (ssd->media_ro || ssd->precon_break) {
+        plm_pace_stall(ssd);
+        return;
+    }
+    if (!ssd->pace_line) {
+        if (!plm_pace_short(ssd)) {
+            return;
+        }
+        if (!plm_pace_open(ssd)) {
+            plm_pace_stall(ssd);
+            return;
+        }
+    }
+    t0 = get_clock();
+    lim = ssd_now(ssd) + ssd->plm_pace_ns;
+    opened = ssd_gc_pass_begin(ssd);
+    while (ssd->pace_line->vpc && booked < PLM_PACE_COPIES && idle < nl) {
+        int l = ssd->plm_pace_turn;
+        struct write_pointer *wp;
+        struct ppa src;
+        struct ppa dst;
+
+        ssd->plm_pace_turn = (l + 1) % nl;
+        if (!plm_pace_next(ssd, l, &src)) {
+            idle++;
+            continue;
+        }
+        end = nand_lun_end(get_lun(ssd, &src));
+        if (end > lim) {
+            wake = MIN(wake, end);
+            idle++;
+            continue;
+        }
+        dst = gc_dest_page(ssd, ssd->pace_line->stream_tag, &wp);
+        if (!mapped_ppa(&dst)) {
+            failed = true;
+            break;
+        }
+        end = nand_lun_end(get_lun(ssd, &dst));
+        if (end > lim) {
+            wake = MIN(wake, end);
+            break;
+        }
+        if (!gc_relocate(ssd, &src)) {
+            failed = true;
+            break;
+        }
+        booked++;
+        idle = 0;
+    }
+    if (!failed && ssd->pace_line->vpc && plm_pace_empty(ssd)) {
+        ftl_err("line %d counts %d valid pages it does not hold\n",
+                ssd->pace_line->id, ssd->pace_line->vpc);
+        failed = true;
+    }
+    if (failed) {
+        /* the copies made stay; the line goes back as its counts say */
+        requeue_line(ssd, pace_release(ssd));
+        plm_pace_stall(ssd);
+    } else if (!ssd->pace_line->vpc) {
+        plm_pace_done(ssd);
+        booked++;
+    }
+    /* the idle FTL thread would else call a step with no copy each pass */
+    ssd->plm_pace_wake = 0;
+    if (!booked && ssd->pace_line && wake != UINT64_MAX) {
+        ssd->plm_pace_wake = wake - ssd->plm_pace_ns;
+        ssd->plm_pace_waits++;
+    }
+    ssd_gc_pass_end(ssd, opened);
+    if (booked) {
+        ssd_plm_gc_note(ssd, t0);
+    }
+}
+
+/**
+ * ssd_plm_pace_release - give the open paced victim back to the queue
+ * @ssd: the FTL, or NULL
+ *
+ * Its moved pages stay where they went and its valid pages stay mapped,
+ * so no page is lost; a later GC takes the line again. Format, a reset,
+ * LPE=0 and a change of plm_ndwin_gc_us call it, with the FTL paused.
+ */
+void ssd_plm_pace_release(struct ssd *ssd)
+{
+    if (!ssd || !ssd->plm) {
+        return;
+    }
+    if (ssd->pace_line) {
+        requeue_line(ssd, pace_release(ssd));
+    }
+    ssd->plm_pace_marked = false;
+    ssd->plm_pace_wake = 0;
 }
 
 void ssd_free_lines(struct ssd *ssd)

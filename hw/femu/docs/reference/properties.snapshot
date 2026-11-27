@@ -1011,6 +1011,11 @@
     "kind": "static",
     "type": "uint64"
    },
+   "plm_ndwin_gc_us": {
+    "default": 1000,
+    "kind": "static",
+    "type": "uint32"
+   },
    "plm_ndwin_lines": {
     "default": 0,
     "kind": "static",

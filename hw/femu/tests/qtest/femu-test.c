@@ -353,17 +353,30 @@ static void *femu_ocp_before(GString *cmd_line, void *arg)
 #define FEMU_CAPS_GEO \
     "secsz=512,secs_per_pg=8,pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1," \
     "luns_per_ch=4,nchs=4"
-/* plm with GC: 80 lines of 16 pages, 48 of them user data */
+/*
+ * plm with GC: 80 lines of 16 pages, 48 of them user data. The tests of
+ * the burst preparation set plm_ndwin_gc_us=0; the paced tests use
+ * FEMU_PLM_PACE_GEO.
+ */
 #define FEMU_PLM_GC_GEO \
     "femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,pgs_per_blk=16," \
     "blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,nchs=1,gc_thres_pcent=90," \
-    "gc_thres_pcent_high=95,rrl=on,plm=on,subsys=plmsub"
+    "gc_thres_pcent_high=95,rrl=on,plm=on,subsys=plmsub,plm_ndwin_gc_us=0"
 /* ... with a DTWIN that no test outlasts (DTWTM one hour) */
 #define FEMU_PLM_GC_LONG FEMU_PLM_GC_GEO ",plm_dtwin_ms=3600000"
+/*
+ * paced GC: 2 x 2 LUNs, 32 lines of 256 pages, 16 of them user data;
+ * gc_thres_lines 3, gc_thres_lines_high 1, NDWIN target 10
+ */
+#define FEMU_PLM_PACE_GEO \
+    "femu_mode=1,devsz_mb=16,secsz=512,secs_per_pg=8,pgs_per_blk=64," \
+    "blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,nchs=2,gc_thres_pcent=90," \
+    "gc_thres_pcent_high=95,rrl=on,plm=on,subsys=plmsub," \
+    "plm_dtwin_ms=3600000,plm_ndwin_lines=10"
 /* a Set 14h DTWIN waits 2 s in NDWIN (NTWTML) */
 #define FEMU_PLM_HOLD \
     "id=plmh,femu_mode=1,rrl=on,plm=on,subsys=plmsub,plm_ndwin_ms=3000," \
-    "plm_ndwin_min_ms=2000," FEMU_CAPS_GEO
+    "plm_ndwin_min_ms=2000,plm_ndwin_gc_us=0," FEMU_CAPS_GEO
 #define FEMU_ONCS_DEFAULT   0x19d   /* the oncs property's default */
 #define FEMU_ONCS_OCSSD     0x10    /* Save/Select only: no generic command */
 
@@ -2226,7 +2239,8 @@ static void femu_register_nodes(void)
             "id=gc-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
             "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95"
-            ",gc_idle_ms=1,gc_idle_pcent=50,rrl=on,plm=on,subsys=plmsub",
+            ",gc_idle_ms=1,gc_idle_pcent=50,rrl=on,plm=on,subsys=plmsub"
+            ",plm_ndwin_gc_us=0",
         .before = femu_plm_before,
     });
     qos_add_test("plm-defer", "femu", femu_test_plm_defer,
@@ -2284,7 +2298,7 @@ static void femu_register_nodes(void)
             "id=gc-test,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=8,luns_per_ch=2,nchs=2,rain_parity=1,"
             "blks_per_pl=40,pls_per_lun=1,rrl=on,plm=on,subsys=plmsub,"
-            "plm_dtwin_ms=3600000",
+            "plm_dtwin_ms=3600000,plm_ndwin_gc_us=0",
         .before = femu_plm_before,
     });
     qos_add_test("plm-limits", "femu", femu_test_plm_limits,
@@ -2378,7 +2392,7 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts =
             "id=plmt,femu_mode=1,rrl=on,plm=on,subsys=plmsub,"
             "plm_ndwin_min_ms=1000,plm_dtwin_ms=3600000,"
-            "pg_wr_lat=1500000000," FEMU_CAPS_GEO,
+            "pg_wr_lat=1500000000,plm_ndwin_gc_us=0," FEMU_CAPS_GEO,
         .before = femu_plm_before,
     });
     qos_add_test("plm-hold-reset", "femu", femu_test_plm_hold_reset,
@@ -2452,6 +2466,137 @@ static void femu_register_nodes(void)
     qos_add_test("plm-hold-unplug", "femu", femu_test_plm_hold_unplug,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts = FEMU_PLM_HOLD,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-wait", "femu", femu_test_plm_pace_wait,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=plmp," FEMU_PLM_PACE_GEO
+            ",pg_rd_lat=200000,pg_wr_lat=1000000,blk_er_lat=10000000,"
+            "plm_ndwin_gc_us=5000",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-rate", "femu", femu_test_plm_pace_rate,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmp,femu_mode=1,devsz_mb=64,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=64,blks_per_pl=32,pls_per_lun=1,luns_per_ch=4,"
+            "nchs=4,gc_thres_pcent=90,gc_thres_pcent_high=95,rrl=on,"
+            "plm=on,subsys=plmsub,plm_dtwin_ms=3600000,plm_ndwin_lines=10,"
+            "pg_rd_lat=400000,pg_wr_lat=2000000,blk_er_lat=20000000,"
+            "plm_ndwin_gc_us=10000",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-hold", "femu", femu_test_plm_pace_hold,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmp," FEMU_PLM_PACE_GEO ",plm_ndwin_min_ms=1000",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-io-hold", "femu", femu_test_plm_pace_io_hold,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmq,femu_mode=1,rrl=on,plm=on,subsys=plmsub,"
+            "plm_ndwin_min_ms=1000,plm_dtwin_ms=3600000,"
+            "pg_wr_lat=1500000000," FEMU_CAPS_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-stall", "femu", femu_test_plm_pace_stall,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=plmp," FEMU_PLM_PACE_GEO,
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-cap", "femu", femu_test_plm_pace_cap,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmp," FEMU_PLM_PACE_GEO ",blk_er_lat=2000000000",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-forced", "femu", femu_test_plm_pace_forced,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmp," FEMU_PLM_PACE_GEO ",blk_er_lat=500000000",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-zero", "femu", femu_test_plm_pace_zero,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=plmz," FEMU_PLM_PACE_GEO
+            ",plm_ndwin_gc_us=0,plm_ndwin_min_ms=1000",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-off", "femu", femu_test_plm_pace_off,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmn,femu_mode=1,devsz_mb=16,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=64,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=90,gc_thres_pcent_high=95",
+    });
+    qos_add_test("plm-pace-reset", "femu", femu_test_plm_pace_reset,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmr," FEMU_PLM_PACE_GEO ",blk_er_lat=500000000",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-churn", "femu", femu_test_plm_pace_churn,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmc," FEMU_PLM_PACE_GEO ",blk_er_lat=500000000",
+        .before = femu_plm_before,
+    });
+    {
+        static const char *const rel[] = { "lpe", "format", "gcus" };
+
+        for (size_t i = 0; i < ARRAY_SIZE(rel); i++) {
+            g_autofree char *name = g_strdup_printf("plm-pace-release-%s",
+                                                    rel[i]);
+
+            qos_add_test(name, "femu", femu_test_plm_pace_release,
+                         &(QOSGraphTestOptions) {
+                .edge.extra_device_opts =
+                    "id=plmx," FEMU_PLM_PACE_GEO ",blk_er_lat=500000000",
+                .before = femu_plm_before,
+                .arg = (void *)rel[i],
+            });
+        }
+    }
+    qos_add_test("plm-pace-maint", "femu", femu_test_plm_pace_maint,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=80,pls_per_lun=1,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95,gc_idle_ms=5,"
+            "read_reclaim_limit=4,maint_idle=on,rrl=on,plm=on,"
+            "subsys=plmsub,plm_dtwin_ms=3600000",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-cap-min", "femu", femu_test_plm_pace_cap_min,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts = "id=plmm," FEMU_PLM_PACE_GEO
+            ",plm_ndwin_ms=10000,plm_ndwin_min_ms=8000",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-spin", "femu", femu_test_plm_pace_spin,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plms," FEMU_PLM_PACE_GEO ",blk_er_lat=500000000",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-pace-band", "femu", femu_test_plm_pace_band,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmb,femu_mode=1,devsz_mb=16,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=64,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=90,gc_thres_pcent_high=95,rrl=on,"
+            "plm=on,subsys=plmsub,plm_dtwin_ms=3600000,plm_ndwin_lines=2",
+        .before = femu_plm_before,
+    });
+    qos_add_test("plm-gc-record-2pl", "femu", femu_test_plm_gc_record_2pl,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmg2,femu_mode=1,devsz_mb=3,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=16,blks_per_pl=40,pls_per_lun=2,luns_per_ch=1,"
+            "nchs=1,gc_thres_pcent=90,gc_thres_pcent_high=95,rrl=on,"
+            "plm=on,subsys=plmsub,plm_dtwin_ms=3600000,plm_ndwin_lines=8,"
+            "plm_ndwin_gc_us=0",
         .before = femu_plm_before,
     });
     qos_add_test("plm-golden-off", "femu", femu_test_plm_golden_off,

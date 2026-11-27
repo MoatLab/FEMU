@@ -1577,7 +1577,8 @@ static void ssd_wait_take(struct ssd *ssd, NvmeRequest *req)
  * plm_wr_total, since precon resets host_write_pages and a failed write
  * lowers it. Fewer pages cannot give a forced pass a line to free, and
  * a retry on each write would copy whole lines for nothing. In NDWIN a
- * preparation step runs here when one is due, as background GC does.
+ * paced or preparation step runs here when one is due, as background GC
+ * does.
  */
 static void ssd_plm_after_req(struct ssd *ssd)
 {
@@ -1586,7 +1587,9 @@ static void ssd_plm_after_req(struct ssd *ssd)
         ssd->plm_stall_mark + ssd->sp.pgs_per_line) {
         qatomic_set(&ssd->plm_stalled, false);
     }
-    if (ssd_plm_prep_due(ssd, ssd_now(ssd))) {
+    if (ssd_plm_pace_due(ssd)) {
+        ssd_plm_pace_step(ssd);
+    } else if (ssd_plm_prep_due(ssd, ssd_now(ssd))) {
         ssd_plm_prep_step(ssd);
     }
 }
@@ -1804,8 +1807,12 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         fdp_slc_tick(ssd);
     } else if (ssd->sp.gc_pace) {
         ssd_pace_tick(ssd);
-    } else if (should_gc(ssd) && likely(!ssd->plm_hold)) {
-        /* a plm DTWIN holds it; a forced GC ends the DTWIN first (DEAT) */
+    } else if (should_gc(ssd) && likely(!ssd->plm_hold) &&
+               !ssd_plm_paced(ssd)) {
+        /*
+         * A plm DTWIN holds it; a forced GC ends the DTWIN first (DEAT).
+         * Paced GC takes its place in a plm NDWIN.
+         */
         if (unlikely(ssd->precon_break)) {
             ssd->precon_skipped++;
         } else {
@@ -1813,6 +1820,10 @@ uint64_t bb_ftl_process_req(FemuCtrl *n, NvmeNamespace *ns, NvmeRequest *req)
         }
     }
     if (unlikely(ssd->plm)) {
+        /* x-plm-pace: the longest read, its wait on the LUN included */
+        if (req->cmd.opcode == NVME_CMD_READ && lat > ssd->plm_rd_max) {
+            ssd->plm_rd_max = lat;
+        }
         /* the DTWIN amounts: femu_plm_step() checks their limits */
         femu_plm_count(n, req);
         ssd_plm_after_req(ssd);
@@ -1908,6 +1919,7 @@ void ssd_free(struct ssd *ssd)
     cmt_destroy(ssd);
     ftl_tier_free(ssd);
     ssd_free_lines(ssd);
+    g_clear_pointer(&ssd->plm_pace_cur, g_free);
     ssd_free_write_buffer(ssd);
 
     ssd_release_lazy(ssd, FEMU_MEM_MAPPING, ssd->rmap, spp->tt_pgs,

@@ -1305,6 +1305,27 @@ void femu_test_plm_hold_format(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_hold_small(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_hold_room(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_hold_unplug(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_wait(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_rate(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_hold(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_io_hold(void *obj, void *data,
+                                QGuestAllocator *alloc);
+void femu_test_plm_pace_stall(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_cap(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_forced(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_zero(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_off(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_reset(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_churn(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_release(void *obj, void *data,
+                                QGuestAllocator *alloc);
+void femu_test_plm_pace_maint(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_cap_min(void *obj, void *data,
+                                QGuestAllocator *alloc);
+void femu_test_plm_pace_spin(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_band(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_gc_record_2pl(void *obj, void *data,
+                                 QGuestAllocator *alloc);
 void femu_test_rber_disturb(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rber_off(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rber_age(void *obj, void *data, QGuestAllocator *alloc);

@@ -1243,11 +1243,11 @@ are atomics. Only Set 13h, Set 14h and a reset pause the data plane.
 
 #### The held Set 14h
 
-A Set 14h DTWIN from NDWIN completes at a deadline (design 5.2). The
-deadline is `plm_ndwin_min_ms` (NTWTML) after the NDWIN entry, or the end
-of the media work booked when the command came, whichever is later.
-Host I/O after the command does not move it. So the DTWIN starts with no
-GC work still on the dies.
+A Set 14h DTWIN from NDWIN completes at a deadline (design 5.2). With
+`plm_ndwin_gc_us=0`, the deadline is the later of two times. One is
+`plm_ndwin_min_ms` (NTWTML) after the NDWIN entry. The other is the end
+of the media work booked when the command came. Host I/O after the command does not move it.
+So the DTWIN starts with no GC work still on the dies.
 
 ```text
  Set 14h DTWIN --> deadline = MAX(NDWIN entry + NTWTML, media end now)
@@ -1256,6 +1256,38 @@ GC work still on the dies.
                    DTWIN, CQE   NO_COMPLETE: cid, sqid, cqid kept; timer
                                 NDWIN stays; the FTL starts no background work
                                 timer at the deadline, CQ has room --> CQE, DTWIN
+```
+
+With paced GC (`plm_ndwin_gc_us` above 0) the hold has no fixed end.
+Paced GC goes on in the hold. The timer looks at the FTL once per
+millisecond. The main loop reads only values that the FTL thread publishes, with no
+pause:
+
+```
+ now >= Set 14h arrival + 30 s (hold_cap_ms) -----------> end (cap)
+ now < NDWIN entry + NTWTML ----------------------------> wait
+ plm_stalled -------------------------------------------> end (stall)
+ plm_ready (free >= target, no paced victim) and
+   plm_gc_end <= now -----------------------------------> end (done)
+ else --------------------------------------------------> wait 1 ms
+ end: latched; a later host write cannot undo it
+ timer: MIN(MAX(now + 1 ms, NTWTML end), cap)
+```
+
+The cap counts from the Set 14h, so it can end the hold before NTWTML
+ends. NTWTML stays a separate rule for the other ends.
+
+Only GC bookings set `plm_gc_end` (`ssd_plm_gc_time()`). A host booking
+does not end or extend the hold by itself. A GC booking that waits
+behind host work on its LUN ends later, and so extends the hold, up to
+the cap. `femu_plm_snap()` publishes `plm_ready` with release order
+after the GC bookings of the same step.
+
+```
+ state   plm_hold   plm_prep
+ NDWIN   0          1
+ hold    1          1 with paced GC, 0 with plm_ndwin_gc_us=0
+ DTWIN   1          0
 ```
 
 Unlike a held cache disable, the hold does not stop the admin queue: an
@@ -1339,7 +1371,7 @@ reclaim line or the wear levelling credit, and runs in the next NDWIN.
 | idle write-back (`buffer_low_pcent`) | hold | run |
 | read reclaim, retention refresh, wear levelling | hold | run |
 | RAIN rebuild, pad and close of aged open lines | hold | run |
-| preparation GC up to `plm_ndwin_lines` | hold | run |
+| paced GC, or with `plm_ndwin_gc_us=0` the preparation GC, up to `plm_ndwin_lines` | hold | run |
 
 A forced GC pass in DTWIN is a Deterministic Excursion (DEAT). The
 check sits in `do_gc_pass()` for a forced pass, after the victim choice,
@@ -1379,8 +1411,36 @@ alone is no excursion, since no GC can run there. After a DEAT, DTWTE
 in NDWIN keeps the time the aborted DTWIN had left, so the host can line
 the set up with other sets again (8.1.20.1).
 
-In NDWIN a preparation GC raises the free lines to `plm_ndwin_lines`. It
-runs after a request and in the idle pass of the FTL thread. A step
+With `plm_ndwin_gc_us` above 0, paced GC (`ssd_plm_pace_step()`) takes
+the place of background GC, idle GC and the preparation in NDWIN and in
+the hold. It runs while fewer free lines than the target are left, or
+while `should_gc()` is true, so no band of free lines runs no GC. Idle
+collection waits, but the other `maint_idle` work runs. It reuses the victim slot of `gc_pace` (`pace_line`), which
+`plm` refuses, so the two never share it. A forced pass finishes that
+victim first (`pace_finish()`), which counts as a forced victim:
+
+```
+ open a victim (forced choice) if none --> visit LUN l = turn, turn = l + 1
+   cursor of l at the end, or LUN l ends past now + H --> idle + 1, next
+   the LUN the GC pointer programs next ends past now + H --> pass ends
+   else copy one page, idle = 0 --> next
+ pass ends: 64 copies, or idle = LUN count
+ no copy, victim open --> plm_pace_wake = first LUN end it waited for - H
+ victim empty --> erase; no line gained after pgs_per_line victims, or
+                  after a victim that copied a whole line --> stalled
+```
+
+`ssd_plm_pace_due()` is false before `plm_pace_wake`, so the idle FTL
+thread does not call a step that cannot copy on each pass.
+
+A stall also comes from no victim, read-only media, precon break, or a
+copy with no room; that victim goes back to the queue. Format,
+Sanitize, a reset and Set 13h LPE=0 give the open victim back the same
+way (`ssd_plm_pace_release()`).
+
+With `plm_ndwin_gc_us=0`, a preparation GC raises the free lines to
+`plm_ndwin_lines` in NDWIN. It runs after a request and in the idle
+pass of the FTL thread. A step
 starts when the media work of the last step, and of idle GC, has ended;
 both share one fence. It uses forced passes, since a background pass
 skips a victim with few invalid pages:
@@ -1558,6 +1618,23 @@ registers with no guest. Cases that target this chapter include:
 | `plm-hold-small-abort`, `plm-hold-small-seq`, `plm-hold-small-full` | admin CQ of 2 entries: an Abort ends the hold, its CQE first, then 07h; a second 14h gets 0Ch and the hold stays to its deadline; a held CQE waits while the CQ is full and posts once the host takes a CQE |
 | `plm-hold-room` | admin CQ of 4 with one free slot: an Abort waits in the SQ; once the host takes a CQE, 07h comes first, then the Abort |
 | `plm-hold-unplug` | unplug while a 14h waits: QEMU answers past the deadline (liveness only; the sanitizer run checks the timer leak) |
+| `plm-pace-wait` | paced GC with H 5 ms: no host read in the NDWIN waits past H + 2 tR + tPROG + tBERS |
+| `plm-pace-rate` | 4 x 4 LUNs: paced GC reaches the target within 1.5 times the media time of its copies and erases; every page then reads back, and x-ftl-check finds no lost mapping |
+| `plm-pace-hold` | the hold runs paced GC (hold 1, prep 1); its CQE comes with the target met, no open victim and no GC lead; DTWIN writes run no GC |
+| `plm-pace-io-hold` | a 1.5 s host program in the hold does not move its end past NTWTML |
+| `plm-pace-stall` | no victim: paced GC stalls with no copy, and a Set 14h DTWIN completes at once |
+| `plm-pace-cap` | default cap 30 s; with a 1.5 s cap and slow erases the DTWIN starts at the cap, DTWWE below DTWWT |
+| `plm-pace-forced` | forced GC finishes the paced victim (a takeover in log C0h) and counts forced victims; every write succeeds, and every page reads back |
+| `plm-pace-zero` | `plm_ndwin_gc_us=0`: preparation steps, a lead of 3 ms or more, and prep 0 in the hold |
+| `plm-pace-off` | `plm=off`: x-plm-pace refuses, background GC copies at `gc_thres_lines`, the NDWIN record stays zero |
+| `plm-pace-reset` | CC.EN 0 with a paced victim open: the victim goes back, and every page reads its last value |
+| `plm-pace-churn` | the host writes and deallocates pages under and ahead of the cursors of an open paced victim; GC reaches the target with no stall and no lost mapping |
+| `plm-pace-release-lpe`, `-format`, `-gcus` | Set 13h LPE=0, Format NVM or x-plm-gc-us 0 with a paced victim open and the FTL held: no open victim after the command, and every page reads back |
+| `plm-pace-maint` | in a paced NDWIN, an idle step still runs the queued read reclaim |
+| `plm-pace-cap-min` | `plm_ndwin_min_ms` 8000 and a 1 second cap: the held Set 14h completes at the cap |
+| `plm-pace-spin` | while an erase blocks every LUN, steps that copy nothing stay few |
+| `plm-pace-band` | `plm_ndwin_lines` 2 under `gc_thres_lines` 3: paced GC raises the free lines past `gc_thres_lines` |
+| `plm-gc-record-2pl` | two planes: erases = 2 x victims, and the LUN time counts each multi-plane erase once |
 | `plm-aen-race` | 64 log 0Bh reads race an MVEAT exit: each time the log data or the AEN shows the entry (timing dependent) |
 | `features-reset`, `features-reset-vwc` | features return to defaults on reset |
 | `admin-fuzz`, `io-fuzz` and its variants | structured fuzzing of admin and I/O commands |
@@ -1642,7 +1719,7 @@ The documentation example above (`frontend-sharded-pollers`) is started by
 | `hw/femu/lib/rte_ring.c`, `hw/femu/lib/pqueue.c` | the rings and the completion heap |
 | `hw/femu/nvme.h` | `NvmeSQueue`, `NvmeCQueue`, `NvmeRequest`, `FemuCtrl`, `FemuPollerCtr`, register layout |
 | `hw/femu/femu-plm.c` | `femu_plm_check()`, `femu_plm_nvmset_list()` (CNS 04h), features 13h and 14h, logs 0Ah and 0Bh, the FTL snapshot, the NDWIN target in `femu_plm_init()`, the DTWIN amounts, limits and warnings in `femu_plm_count()` and `femu_plm_step()`, the AEN in `femu_plm_event()`, the NDWIN of Format and Sanitize in `femu_plm_format()`, the held Set 14h and its drop paths in `femu_plm_hold_post()`, `femu_plm_abort()` and `femu_plm_drop()` |
-| `hw/femu/bbssd/ftl-line-gc.c`, `hw/femu/bbssd/bb.c` | `ssd_plm_prep_due()`, `ssd_plm_prep_step()`, `bb_plm_idle()`: the NDWIN preparation GC; the DEAT check in `do_gc_pass()` |
+| `hw/femu/bbssd/ftl-line-gc.c`, `hw/femu/bbssd/bb.c` | `ssd_plm_prep_due()`, `ssd_plm_prep_step()`, `bb_plm_idle()`: the NDWIN preparation GC; `ssd_plm_pace_step()`, `ssd_plm_pace_release()`: paced GC; the DEAT check in `do_gc_pass()` |
 | `hw/femu/femu-ext-ops.h` | `FemuExtCtrlOps`, the mode handler table, and its rules |
 
 ## Related pages

@@ -19263,6 +19263,8 @@ void femu_test_plm_refused(void *obj, void *data, QGuestAllocator *alloc)
           "plm_ndwin_min_ms must be 0 to plm_ndwin_ms" },
         { FEMU_PLM_OK ",'plm_dtwin_writes':1000000000",
           "plm_dtwin_writes must be 0 to" },
+        { FEMU_PLM_OK ",'plm_ndwin_gc_us':1000001",
+          "plm_ndwin_gc_us must be 0 to 1000000" },
         /* 74 of 80 lines hold data: no line is left above the high mark */
         { "'devsz_mb':74,'femu_mode':1,'rrl':true,'subsys':'plmsub-r',"
           "'secsz':512,'secs_per_pg':8,'pgs_per_blk':16,'blks_per_pl':80,"
@@ -19281,7 +19283,7 @@ void femu_test_plm_refused(void *obj, void *data, QGuestAllocator *alloc)
     static const char *const unset[] = {
         "'plm_dtwin_ms':999", "'plm_dtwin_reads':7", "'plm_ndwin_ms':0",
         "'plm_ndwin_min_ms':1", "'plm_ndwin_lines':5",
-        "'plm_dtwin_writes':7",
+        "'plm_dtwin_writes':7", "'plm_ndwin_gc_us':0",
     };
 
     for (int i = 0; i < ARRAY_SIZE(cases); i++) {
@@ -22189,6 +22191,1225 @@ void femu_test_plm_hold_unplug(void *obj, void *data, QGuestAllocator *alloc)
     g_free(pdev);
     guest_free(alloc, lbuf);
     qos_invalidate_command_line();
+}
+
+/*
+ * The paced GC tests (plm_ndwin_gc_us). Unless a test says other, the
+ * device has 2 channels of 2 LUNs, lines of 4 blocks of 64 pages (256
+ * pages), 32 lines and 16 lines of user data (4096 pages).
+ * gc_thres_lines is 3, gc_thres_lines_high 1 and the NDWIN target 10.
+ */
+#define FEMU_PACE_CMD       32      /* pages of one write command */
+
+/* fields of x-plm-pace */
+enum {
+    FEMU_PACE_NS,
+    FEMU_PACE_OPEN,
+    FEMU_PACE_READY,
+    FEMU_PACE_STALLED,
+    FEMU_PACE_GC_LEAD,
+    FEMU_PACE_MEDIA_LEAD,
+    FEMU_PACE_CAP,
+    FEMU_PACE_RD_MAX,
+    FEMU_PACE_WAITS,
+    FEMU_PACE_N,
+};
+
+/* x-plm-pace of device @id; the read clears FEMU_PACE_RD_MAX */
+static void femu_pace_get(QTestState *qts, const char *id, int64_t *v)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-plm-pace'}}", path);
+    g_auto(GStrv) f = NULL;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    f = g_strsplit(qdict_get_str(rsp, "return"), " ", 0);
+    g_assert_cmpuint(g_strv_length(f), ==, FEMU_PACE_N);
+    for (int i = 0; i < FEMU_PACE_N; i++) {
+        v[i] = g_ascii_strtoll(f[i], NULL, 10);
+    }
+    qobject_unref(rsp);
+}
+
+/* qtest property @prop of device @id to @val */
+static void femu_pace_set(QTestState *qts, const char *id, const char *prop,
+                          int64_t val)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+
+    qtest_qmp_assert_success(qts, "{'execute':'qom-set','arguments':{"
+                             "'path':%s,'property':%s,'value':%" PRId64
+                             "}}", path, prop, val);
+}
+
+/* write command chunk @k (FEMU_PACE_CMD pages); every page holds @val */
+static void femu_pace_write(FemuCtrlState *c, uint64_t data, uint64_t list,
+                            uint32_t k, uint32_t val, uint32_t *vals)
+{
+    qtest_writel(c->pdev->bus->qts, data, val);
+    g_assert_cmphex(femu_plm_pages(c, NVME_CMD_WRITE,
+                                   (uint64_t)k * FEMU_PACE_CMD,
+                                   FEMU_PACE_CMD, data, list), ==,
+                    NVME_SUCCESS);
+    if (vals) {
+        vals[k] = val;
+    }
+}
+
+/*
+ * GC debt: write all @user pages once, then overwrite the first @band
+ * pages of each user line in turn until at most @lines lines are free.
+ * A victim then holds @line - @band valid pages, spread over every LUN.
+ * @vals, when set, records the value of each chunk. Run it in DTWIN with
+ * a large DTWWT, so no GC runs and no MVEAT ends the DTWIN.
+ */
+static void femu_pace_debt(FemuCtrlState *c, const char *id, uint64_t data,
+                           uint64_t list, uint32_t user, uint32_t line,
+                           uint32_t band, int64_t lines, uint32_t *vals)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint32_t per = band / FEMU_PACE_CMD;
+    uint32_t nl = user / line;
+    int64_t v[FEMU_PLMF_N];
+    uint32_t val = 1;
+
+    qtest_memset(qts, data, 0x3c, FEMU_DATA_SIZE);
+    for (uint32_t k = 0; k < user / FEMU_PACE_CMD; k++) {
+        femu_pace_write(c, data, list, k, val++, vals);
+    }
+    for (uint32_t i = 0; ; i++) {
+        uint32_t ln = (i / per) % nl;
+
+        femu_plm_ftl(qts, id, v);
+        if (v[FEMU_PLMF_FREE] <= lines) {
+            return;
+        }
+        g_assert_cmpuint(i, <, 4 * user / FEMU_PACE_CMD);
+        femu_pace_write(c, data, list,
+                        (ln * line) / FEMU_PACE_CMD + i % per, val++,
+                        vals);
+    }
+}
+
+/* poll for up to @ms until the target is met and no victim is open */
+static bool femu_pace_done(QTestState *qts, const char *id, int ms,
+                           int64_t *rd_max)
+{
+    int64_t end = g_get_monotonic_time() + (int64_t)ms * 1000;
+    int64_t v[FEMU_PLMF_N];
+    int64_t p[FEMU_PACE_N];
+
+    for (;;) {
+        femu_plm_ftl(qts, id, v);
+        femu_pace_get(qts, id, p);
+        if (rd_max) {
+            *rd_max = MAX(*rd_max, p[FEMU_PACE_RD_MAX]);
+        }
+        if (v[FEMU_PLMF_FREE] >= v[FEMU_PLMF_TARGET] &&
+            !p[FEMU_PACE_OPEN]) {
+            return true;
+        }
+        if (g_get_monotonic_time() > end) {
+            return false;
+        }
+        g_usleep(20 * 1000);
+    }
+}
+
+/* LPE=1, DTWIN, and a debt down to 4 free lines on the 2 x 2 device */
+static void femu_pace_start(FemuCtrlState *c, const char *id, uint64_t buf,
+                            uint64_t list, uint32_t *vals)
+{
+    femu_plm_dtwwt(c->pdev->bus->qts, id, 1000000);
+    femu_plm_start(c, buf, 1);
+    femu_pace_debt(c, id, buf, list, 4096, 256, 160, 4, vals);
+}
+
+/* the value of each page from the values of its write chunk */
+static void femu_pace_expand(const uint32_t *vals, uint32_t *want,
+                             uint32_t pages)
+{
+    for (uint32_t pg = 0; pg < pages; pg++) {
+        want[pg] = vals[pg / FEMU_PACE_CMD];
+    }
+}
+
+/* x-ftl-check of device @id: mapped, lost and orphan pages */
+static void femu_pace_mapping(QTestState *qts, const char *id, uint64_t *v)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-ftl-check'}}", path);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64,
+                           &v[0], &v[1], &v[2]), ==, 3);
+    qobject_unref(rsp);
+}
+
+/*
+ * Read pages [0, @pages) in commands of FEMU_PACE_CMD pages into @big,
+ * one PRP entry per page, and check that page p reads @want[p]; 0 is a
+ * deallocated page. The data store is indexed by LBA, so these reads
+ * cannot see an FTL fault. x-ftl-check can: @mapped mappings, none of
+ * them to a page that does not hold it, and no valid page without one.
+ */
+static void femu_pace_verify(FemuCtrlState *c, const char *id, uint64_t big,
+                             uint64_t list, const uint32_t *want,
+                             uint32_t pages, uint64_t mapped)
+{
+    QTestState *qts = c->pdev->bus->qts;
+    uint32_t lbas = 4096 / c->lba_size;
+    uint64_t v[3];
+    NvmeRwCmd rw;
+
+    for (uint32_t i = 1; i < FEMU_PACE_CMD; i++) {
+        qtest_writeq(qts, list + (i - 1) * 8, big + (uint64_t)i * 4096);
+    }
+    for (uint32_t k = 0; k < pages / FEMU_PACE_CMD; k++) {
+        for (uint32_t i = 0; i < FEMU_PACE_CMD; i++) {
+            qtest_writel(qts, big + (uint64_t)i * 4096, 0xffffffff);
+        }
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_READ;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(big);
+        rw.dptr.prp2 = cpu_to_le64(list);
+        rw.slba = cpu_to_le64((uint64_t)k * FEMU_PACE_CMD * lbas);
+        rw.nlb = cpu_to_le16(FEMU_PACE_CMD * lbas - 1);
+        g_assert_cmphex(FEMU_SC(femu_io(c, (NvmeCmd *)&rw)), ==,
+                        NVME_SUCCESS);
+        for (uint32_t i = 0; i < FEMU_PACE_CMD; i++) {
+            g_assert_cmphex(qtest_readl(qts, big + (uint64_t)i * 4096), ==,
+                            want[k * FEMU_PACE_CMD + i]);
+        }
+    }
+    femu_pace_mapping(qts, id, v);
+    g_test_message("x-ftl-check: %" PRIu64 " mapped, %" PRIu64 " lost, %"
+                   PRIu64 " orphans", v[0], v[1], v[2]);
+    g_assert_cmpuint(v[0], ==, mapped);
+    g_assert_cmpuint(v[1], ==, 0);
+    g_assert_cmpuint(v[2], ==, 0);
+}
+
+/* poll x-plm-pace of @id for up to @ms until a paced victim is open */
+static void femu_pace_wait_open(QTestState *qts, const char *id, int ms)
+{
+    int64_t end = g_get_monotonic_time() + (int64_t)ms * 1000;
+    int64_t p[FEMU_PACE_N];
+
+    do {
+        g_usleep(10 * 1000);
+        femu_pace_get(qts, id, p);
+    } while (!p[FEMU_PACE_OPEN] && g_get_monotonic_time() < end);
+    g_assert_cmpint(p[FEMU_PACE_OPEN], ==, 1);
+}
+
+/*
+ * The read bound of paced GC, with tR 200 us, tPROG 1 ms,
+ * tBERS 10 ms and plm_ndwin_gc_us 5000. A copy books only while its
+ * LUNs end within H of now; the copy itself and an erase can add to that:
+ *
+ *   read wait + tR <= H + tR (copy read) + tPROG + tBERS + tR (own read)
+ *                   = 5 + 0.2 + 1 + 10 + 0.2 = 16.4 ms
+ *
+ * Back-to-back reads run through the whole NDWIN. The longest read the
+ * FTL saw must stay under the bound. A burst of one victim keeps a LUN
+ * busy for 24 copies (28.8 ms) and its erase. It catches GC that books
+ * past the horizon.
+ */
+void femu_test_plm_pace_wait(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    const int64_t bound = 5000000 + 2 * 200000 + 1000000 + 10000000;
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+    int64_t p[FEMU_PACE_N];
+    int64_t rd_max = 0;
+    int64_t end;
+    bool done = false;
+    uint32_t reads = 0;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_pace_start(&c, "plmp", buf, list, NULL);
+    /* the host programs end first, then the maximum starts at zero */
+    end = g_get_monotonic_time() + 5000 * 1000;
+    do {
+        g_usleep(20 * 1000);
+        femu_pace_get(qts, "plmp", p);
+    } while (p[FEMU_PACE_MEDIA_LEAD] && g_get_monotonic_time() < end);
+    g_assert_cmpint(p[FEMU_PACE_MEDIA_LEAD], ==, 0);
+    g_assert_cmpint(p[FEMU_PACE_NS], ==, 5000000);
+    femu_plm_ftl(qts, "plmp", v0);
+
+    femu_plm_win(&c, list, 2);
+    end = g_get_monotonic_time() + 20000 * 1000;
+    while (!done && g_get_monotonic_time() < end) {
+        for (int i = 0; i < 64; i++, reads++) {
+            g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ,
+                                            (reads * 37 % 4096) * 8ull,
+                                            buf)), ==, NVME_SUCCESS);
+        }
+        done = femu_pace_done(qts, "plmp", 0, &rd_max);
+    }
+    femu_plm_ftl(qts, "plmp", v);
+    g_test_message("%u reads, longest %" PRId64 " us (bound %" PRId64
+                   " us), %" PRId64 " copies", reads, rd_max / 1000,
+                   bound / 1000, v[FEMU_PLMF_COPIES] - v0[FEMU_PLMF_COPIES]);
+    g_assert_true(done);
+    g_assert_cmpint(v[FEMU_PLMF_COPIES], >, v0[FEMU_PLMF_COPIES]);
+    g_assert_cmpint(rd_max, >, 0);
+    g_assert_cmpint(rd_max, <=, bound);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Paced GC keeps every LUN at work. On 4 x 4 LUNs with tR 400 us, tPROG
+ * 2 ms, tBERS 20 ms and H 10 ms, each victim holds 384 valid pages, 24
+ * on each LUN. Each copy reads one LUN and programs one, so the media
+ * needs about
+ *
+ *   model = copies x (tR + tPROG) / 16 + victims x tBERS
+ *
+ * The NDWIN must reach its target within 1.5 x model + 50 ms. GC that
+ * takes its copies from one LUN at a time reads at 1 page per tR: about
+ * 2.3 x model. It catches a visit order that starves the other LUNs.
+ * Then every page reads its last value, and no mapping is lost.
+ */
+void femu_test_plm_pace_rate(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t big = guest_alloc(alloc, FEMU_PACE_CMD * 4096);
+    g_autofree uint32_t *vals = g_new0(uint32_t, 16384 / FEMU_PACE_CMD);
+    g_autofree uint32_t *want = g_new0(uint32_t, 16384);
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+    int64_t copies;
+    int64_t victims;
+    int64_t model;
+    int64_t t0;
+    int64_t ns;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmp", 1000000);
+    femu_plm_start(&c, list, 1);
+    femu_pace_debt(&c, "plmp", buf, list, 16384, 1024, 640, 4, vals);
+    g_usleep(500 * 1000);
+    femu_plm_ftl(qts, "plmp", v0);
+
+    t0 = g_get_monotonic_time();
+    femu_plm_win(&c, list, 2);
+    g_assert_true(femu_pace_done(qts, "plmp", 20000, NULL));
+    ns = (g_get_monotonic_time() - t0) * 1000;
+    femu_plm_ftl(qts, "plmp", v);
+    copies = v[FEMU_PLMF_COPIES] - v0[FEMU_PLMF_COPIES];
+    victims = (v[FEMU_PLMF_ERASES] - v0[FEMU_PLMF_ERASES]) / 16;
+    model = copies * (400000 + 2000000) / 16 + victims * 20000000;
+    g_test_message("%" PRId64 " copies, %" PRId64 " victims in %" PRId64
+                   " ms; model %" PRId64 " ms", copies, victims,
+                   ns / 1000000, model / 1000000);
+    g_assert_cmpint(copies, >=, 384);
+    g_assert_cmpint(ns, <=, model * 3 / 2 + 50000000);
+    femu_pace_expand(vals, want, 16384);
+    femu_pace_verify(&c, "plmp", big, list, want, 16384, 16384);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, big);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The hold of a Set 14h DTWIN with paced GC, with
+ * plm_ndwin_min_ms 1000:
+ *
+ *   debt to 4 free lines --> NDWIN --> Set 14h DTWIN at once: held
+ *   in the hold: NDWIN, FTL hold 1 and prep 1 (paced GC goes on)
+ *   CQE: success after NTWTML, with the target met, no open victim,
+ *        and no GC booked past now
+ *   DTWIN: 500 ms of writes run no copy and no erase
+ *
+ * It catches a hold that stops paced GC, or a DTWIN that runs it.
+ */
+void femu_test_plm_pace_hold(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+    int64_t p[FEMU_PACE_N];
+    int64_t t0;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_pace_start(&c, "plmp", buf, list, NULL);
+    femu_plm_win(&c, list, 2);
+    t0 = g_get_monotonic_time();
+    cid = femu_plm_send(&c, NVME_ADM_CMD_SET_FEATURES, 0, 0x14, 1, 1, list);
+    femu_plm_hold_check(&c, list, "plmp", 2, 1, 1);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_SUCCESS);
+    g_test_message("hold %" PRId64 " ms",
+                   (g_get_monotonic_time() - t0) / 1000);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 900 * 1000);
+    femu_plm_ftl(qts, "plmp", v0);
+    femu_pace_get(qts, "plmp", p);
+    g_assert_cmpint(v0[FEMU_PLMF_FREE], >=, 10);
+    g_assert_cmpint(p[FEMU_PACE_OPEN], ==, 0);
+    g_assert_cmpint(p[FEMU_PACE_READY], ==, 1);
+    g_assert_cmpint(p[FEMU_PACE_GC_LEAD], ==, 0);
+    femu_plm_hold_check(&c, list, "plmp", 1, 1, 0);
+
+    for (int k = 0; k < 20; k++) {
+        femu_pace_write(&c, buf, list, k, 7, NULL);
+        g_usleep(25 * 1000);
+    }
+    femu_plm_ftl(qts, "plmp", v);
+    g_assert_cmpint(v[FEMU_PLMF_COPIES], ==, v0[FEMU_PLMF_COPIES]);
+    g_assert_cmpint(v[FEMU_PLMF_ERASES], ==, v0[FEMU_PLMF_ERASES]);
+    femu_plm_hold_check(&c, list, "plmp", 1, 1, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Host I/O in the hold does not move its end. With
+ * plm_ndwin_min_ms 1000 and 1.5 s programs, a write right after the
+ * Set 14h DTWIN books 1.5 s of host work. No GC is due, so the hold
+ * ends at NTWTML, before that program ends. It catches a hold that
+ * waits for all media work.
+ */
+void femu_test_plm_pace_io_hold(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t lbuf = guest_alloc(alloc, 4096);
+    NvmeRwCmd rw = { 0 };
+    int64_t t0;
+    int64_t ms;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x4e, FEMU_DATA_SIZE);
+    t0 = g_get_monotonic_time();
+    cid = femu_plm_hold_start(&c, lbuf);
+    rw.opcode = NVME_CMD_WRITE;
+    rw.nsid = cpu_to_le32(1);
+    rw.dptr.prp1 = cpu_to_le64(buf);
+    rw.nlb = cpu_to_le16(4096 / c.lba_size - 1);
+    femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    femu_plm_hold_check(&c, lbuf, "plmq", 2, 1, 1);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_SUCCESS);
+    ms = (g_get_monotonic_time() - t0) / 1000;
+    g_test_message("hold %" PRId64 " ms", ms);
+    g_assert_cmpint(ms, >=, 1000);
+    g_assert_cmpint(ms, <, 1400);
+    g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(g_get_monotonic_time() - t0, >=, 1400 * 1000);
+    femu_plm_hold_check(&c, lbuf, "plmq", 1, 1, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, lbuf);
+    guest_free(alloc, buf);
+}
+
+/*
+ * A stall ends the hold. Sequential writes leave no
+ * victim. x-plm-lines asks for 20 free lines: the paced step finds no
+ * victim and stalls, with no copy. A Set 14h DTWIN then completes at
+ * once, though the target is not met; the hold cap is 3 s. It catches
+ * a hold that waits through a stall.
+ */
+void femu_test_plm_pace_stall(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int64_t v[FEMU_PLMF_N];
+    int64_t p[FEMU_PACE_N];
+    int64_t end;
+    int64_t t0;
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_start(&c, list, 2);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (uint32_t k = 0; k < 4096 / FEMU_PACE_CMD; k++) {
+        femu_pace_write(&c, buf, list, k, k, NULL);
+    }
+    femu_plm_ftl(qts, "plmp", v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], >=, 10);
+    g_assert_cmpint(v[FEMU_PLMF_COPIES], ==, 0);
+    femu_pace_set(qts, "plmp", "x-plm-hold-cap", 3000);
+    femu_pace_set(qts, "plmp", "x-plm-lines", 20);
+    end = g_get_monotonic_time() + 2000 * 1000;
+    do {
+        g_usleep(20 * 1000);
+        femu_pace_get(qts, "plmp", p);
+    } while (!p[FEMU_PACE_STALLED] && g_get_monotonic_time() < end);
+    g_assert_cmpint(p[FEMU_PACE_STALLED], ==, 1);
+    g_assert_cmpint(p[FEMU_PACE_OPEN], ==, 0);
+    g_assert_cmpint(p[FEMU_PACE_CAP], ==, 3000);
+
+    t0 = g_get_monotonic_time();
+    femu_plm_win(&c, list, 1);
+    g_assert_cmpint(g_get_monotonic_time() - t0, <, 1000 * 1000);
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, list, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 1);
+    femu_plm_ftl(qts, "plmp", v);
+    g_assert_cmpint(v[FEMU_PLMF_COPIES], ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * The hold cap. With tBERS 2 s, paced GC needs many
+ * seconds to reach the target. The default cap is 30 s; x-plm-hold-cap
+ * sets 1.5 s. The Set 14h DTWIN then completes at the cap, below the
+ * target, and log 0Ah says so: DTWWE is below DTWWT. It catches a hold
+ * with no cap.
+ */
+void femu_test_plm_pace_cap(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int64_t v[FEMU_PLMF_N];
+    int64_t p[FEMU_PACE_N];
+    uint8_t log[512];
+    uint64_t dtwwt;
+    int64_t ms;
+    int64_t t0;
+    uint32_t res;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_log0a(&c, true, list, log);
+    dtwwt = ldq_le_p(log + 40);
+    femu_pace_start(&c, "plmp", buf, list, NULL);
+    femu_plm_dtwwt(qts, "plmp", (int)dtwwt);
+    femu_pace_get(qts, "plmp", p);
+    g_assert_cmpint(p[FEMU_PACE_CAP], ==, 30000);
+    femu_pace_set(qts, "plmp", "x-plm-hold-cap", 1500);
+
+    femu_plm_win(&c, list, 2);
+    t0 = g_get_monotonic_time();
+    femu_plm_win(&c, list, 1);
+    ms = (g_get_monotonic_time() - t0) / 1000;
+    g_test_message("hold %" PRId64 " ms", ms);
+    g_assert_cmpint(ms, >=, 1400);
+    g_assert_cmpint(ms, <, 3000);
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, list, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 1);
+    femu_plm_ftl(qts, "plmp", v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], <, 10);
+    femu_plm_log0a(&c, true, list, log);
+    g_assert_cmpuint(ldq_le_p(log + 40), ==, dtwwt);
+    g_assert_cmpuint(ldq_le_p(log + 136), <, dtwwt);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Forced GC stays unpaced. tBERS is 500 ms, and
+ * x-plm-gc-us sets H to 1 us, so paced GC holds a victim open most of
+ * the NDWIN and gains little. Overwrites then take the free lines to
+ * gc_thres_lines_high: five line writes go out together.
+ *
+ *   write   1 2 3 4 5 (queued)  -->  complete 1 to 5
+ *   free    5 4 3 2 [forced]        paced GC: LUN end > now + H
+ *
+ * The forced pass finishes the open victim and
+ * collects past the high mark: every write succeeds, the NDWIN record
+ * counts forced victims, and log C0h counts a takeover. A new NDWIN
+ * then reaches the target, and every page reads its last value. It
+ * catches a forced pass that waits for the paced victim, or one that
+ * starts the paced victim at the wrong page.
+ */
+void femu_test_plm_pace_forced(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t big = guest_alloc(alloc, FEMU_PACE_CMD * 4096);
+    g_autofree uint32_t *vals = g_new0(uint32_t, 4096 / FEMU_PACE_CMD);
+    g_autofree uint32_t *want = g_new0(uint32_t, 4096);
+    int64_t v[FEMU_PLMF_N];
+    int64_t p[FEMU_PACE_N];
+    uint8_t log[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_pace_start(&c, "plmp", buf, list, vals);
+    femu_pace_set(qts, "plmp", "x-plm-gc-us", 1);
+    femu_pace_set(qts, "plmp", "x-plm-hold-cap", 1000);
+    femu_plm_win(&c, list, 2);
+    g_usleep(100 * 1000);
+    femu_pace_get(qts, "plmp", p);
+    g_assert_cmpint(p[FEMU_PACE_NS], ==, 1000);
+    g_assert_cmpint(p[FEMU_PACE_OPEN], ==, 1);
+    /*
+     * 5 line overwrites in flight: the FTL books them before any ends, so
+     * the LUNs stay past now + H and the free lines reach the high mark.
+     * One write at a time does not: the LUNs drain while the host waits,
+     * and paced GC keeps up.
+     */
+    qtest_writel(qts, buf, 0x40000);
+    for (uint32_t i = 0; i + 1 < 256; i++) {
+        qtest_writeq(qts, list + i * 8, buf);
+    }
+    for (uint32_t i = 0; i < 5; i++) {
+        NvmeRwCmd rw;
+
+        memset(&rw, 0, sizeof(rw));
+        rw.opcode = NVME_CMD_WRITE;
+        rw.nsid = cpu_to_le32(1);
+        rw.dptr.prp1 = cpu_to_le64(buf);
+        rw.dptr.prp2 = cpu_to_le64(list);
+        rw.slba = cpu_to_le64((uint64_t)i * 256 * (4096 / c.lba_size));
+        rw.nlb = cpu_to_le16(256 * (4096 / c.lba_size) - 1);
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw);
+    }
+    for (uint32_t i = 0; i < 5; i++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+    for (uint32_t k = 0; k < 5 * 256 / FEMU_PACE_CMD; k++) {
+        vals[k] = 0x40000;
+    }
+    femu_plm_ftl(qts, "plmp", v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], >, 1);
+    femu_plm_win(&c, list, 1);
+    femu_plm_c0(&c, list, log);
+    g_test_message("forced %" PRIu64 ", paced %" PRIu64 ", takeovers %"
+                   PRIu64, femu_plmr(log, FEMU_PLMR_FORCED),
+                   femu_plmr(log, FEMU_PLMR_PREP),
+                   femu_c0h_field(&c, list, 240));
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_FORCED), >=, 1);
+    /* pace_takeovers: pace_finish() emptied the open paced victim */
+    g_assert_cmpuint(femu_c0h_field(&c, list, 240), >=, 1);
+
+    /* the next NDWIN finishes the paced victims; then read every page */
+    femu_plm_win(&c, list, 2);
+    g_assert_true(femu_pace_done(qts, "plmp", 30000, NULL));
+    femu_pace_expand(vals, want, 4096);
+    femu_pace_verify(&c, "plmp", big, list, want, 4096, 4096);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, big);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * plm_ndwin_gc_us=0 keeps the burst preparation of S7a: x-plm-pace
+ * reports no horizon, preparation steps run, one pass books 3 ms or
+ * more ahead, and the hold (plm_ndwin_min_ms 1000) stops the
+ * preparation (prep 0). It catches a 0 that still paces.
+ */
+void femu_test_plm_pace_zero(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+    int64_t p[FEMU_PACE_N];
+    uint8_t log[512];
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_pace_start(&c, "plmz", buf, list, NULL);
+    femu_pace_get(qts, "plmz", p);
+    g_assert_cmpint(p[FEMU_PACE_NS], ==, 0);
+    femu_plm_ftl(qts, "plmz", v0);
+    femu_plm_win(&c, list, 2);
+    femu_plm_wait(qts, "plmz", FEMU_PLMF_FREE, 10, 10000, v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], >=, 10);
+    g_assert_cmpint(v[FEMU_PLMF_STEPS], >, v0[FEMU_PLMF_STEPS]);
+    cid = femu_plm_send(&c, NVME_ADM_CMD_SET_FEATURES, 0, 0x14, 1, 1, list);
+    femu_plm_hold_check(&c, list, "plmz", 2, 1, 0);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_SUCCESS);
+    femu_plm_c0(&c, list, log);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_AHEAD_MAX), >=, 3000000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * plm=off keeps the old FTL: x-plm-pace refuses, and background GC
+ * collects once gc_thres_lines (3) lines are free. A fill and 12.5
+ * lines of overwrites take the free lines from 15 to 3, above the high
+ * mark (1), so only background GC can copy. The overwrites touch 7 of
+ * the 8 chunks of each line once, so each victim holds valid pages.
+ * The NDWIN record stays zero. It catches paced GC that holds
+ * background GC with plm=off.
+ */
+void femu_test_plm_pace_off(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint8_t log[512];
+    QDict *rsp;
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/plmn',"
+                    "'property':'x-plm-pace'}}");
+    g_assert_true(qdict_haskey(rsp, "error"));
+    qobject_unref(rsp);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (uint32_t k = 0; k < 4096 / FEMU_PACE_CMD; k++) {
+        femu_pace_write(&c, buf, list, k, k, NULL);
+    }
+    for (uint32_t i = 0; i < 100; i++) {
+        femu_pace_write(&c, buf, list, (i / 7 % 16) * 8 + i % 7, i, NULL);
+    }
+    femu_plm_c0(&c, list, log);
+    g_test_message("GC pages %" PRIu64, ldq_le_p(log + 16));
+    g_assert_cmpuint(ldq_le_p(log + 16), >, 0);
+    g_assert_true(femu_plm_zero(log + 352, 496 - 352));
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * CC.EN 0 with a paced victim open (tBERS 500 ms keeps one open). The
+ * reset ends the window and gives the victim back to the queue: after
+ * the next enable no victim is open, and every page reads the value of
+ * its last write. It catches a reset that keeps or loses the victim.
+ */
+void femu_test_plm_pace_reset(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    g_autofree uint32_t *vals = g_new0(uint32_t, 4096 / FEMU_PACE_CMD);
+    int64_t p[FEMU_PACE_N];
+    int64_t end;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_pace_start(&c, "plmr", buf, list, vals);
+    femu_plm_win(&c, list, 2);
+    end = g_get_monotonic_time() + 2000 * 1000;
+    do {
+        g_usleep(10 * 1000);
+        femu_pace_get(qts, "plmr", p);
+    } while (!p[FEMU_PACE_OPEN] && g_get_monotonic_time() < end);
+    g_assert_cmpint(p[FEMU_PACE_OPEN], ==, 1);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    femu_pace_get(qts, "plmr", p);
+    g_assert_cmpint(p[FEMU_PACE_OPEN], ==, 0);
+
+    memset(&c, 0, sizeof(c));
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    for (uint32_t pg = 0; pg < 4096; pg++) {
+        g_assert_cmphex(FEMU_SC(femu_rw(&c, NVME_CMD_READ, pg * 8ull, buf)),
+                        ==, NVME_SUCCESS);
+        g_assert_cmphex(qtest_readl(qts, buf), ==, vals[pg / FEMU_PACE_CMD]);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+}
+
+/*
+ * Host writes and deallocates under and ahead of the cursor of an open
+ * paced victim. tBERS is 500 ms and x-plm-gc-us sets H to 1 us, so a new
+ * victim waits behind the erase of the last one with no copy made. Each
+ * LUN cursor then rests on the first valid page of the victim there:
+ *
+ *   user line L (pages L x 256 + i); i < 160 was overwritten, so the
+ *   victim holds i = 160 to 255, and i = 160 to 163 sit under cursors
+ *   deallocate i = 160, 161 (under)   write i = 162, 163 (under)
+ *   write i = 200 to 207 (ahead)      deallocate i = 240 to 243 (ahead)
+ *
+ * GC must skip what the host took, reach the target with no stall, and
+ * keep every mapping. It catches a cursor that skips a page, and a copy
+ * of a page that the host made invalid.
+ */
+void femu_test_plm_pace_churn(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t big = guest_alloc(alloc, FEMU_PACE_CMD * 4096);
+    g_autofree uint32_t *vals = g_new0(uint32_t, 4096 / FEMU_PACE_CMD);
+    g_autofree uint32_t *want = g_new0(uint32_t, 4096);
+    const uint32_t newval = 0x7a0000;
+    int64_t p[FEMU_PACE_N];
+    int64_t v[FEMU_PLMF_N];
+    NvmeRwCmd rw[2];
+    uint64_t base;
+    uint64_t vpc = 0;
+    int64_t end;
+    int line = -1;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_pace_start(&c, "plmc", buf, list, vals);
+    femu_pace_expand(vals, want, 4096);
+    femu_pace_set(qts, "plmc", "x-plm-gc-us", 1);
+    femu_plm_win(&c, list, 2);
+
+    /* an open victim of user line 0 to 15, behind 200 ms or more of erase */
+    end = g_get_monotonic_time() + 10000 * 1000;
+    while (line < 0 && g_get_monotonic_time() < end) {
+        g_usleep(5 * 1000);
+        femu_pace_get(qts, "plmc", p);
+        if (!p[FEMU_PACE_OPEN] || p[FEMU_PACE_GC_LEAD] < 200000000) {
+            continue;
+        }
+        for (int id = 0; id < 16 && line < 0; id++) {
+            g_autofree char *st = femu_line_state(qts,
+                                                  "/machine/peripheral/plmc",
+                                                  id, &vpc);
+
+            if (!strcmp(st, "reclaiming") && vpc) {
+                line = id;
+            }
+        }
+    }
+    g_assert_cmpint(line, >=, 0);
+    g_test_message("victim line %d, %" PRIu64 " valid pages", line, vpc);
+    base = (uint64_t)line * 256;
+
+    g_assert_cmphex(femu_plm_trim(&c, list, base + 160, 2), ==, NVME_SUCCESS);
+    g_assert_cmphex(femu_plm_trim(&c, list, base + 240, 4), ==, NVME_SUCCESS);
+    want[base + 160] = 0;
+    want[base + 161] = 0;
+    for (int i = 240; i < 244; i++) {
+        want[base + i] = 0;
+    }
+    /* both writes reach the FTL before the erase ends: one doorbell each */
+    qtest_writel(qts, buf, newval);
+    for (int i = 0; i < 7; i++) {
+        qtest_writeq(qts, list + i * 8, buf);
+    }
+    memset(rw, 0, sizeof(rw));
+    for (int k = 0; k < 2; k++) {
+        uint64_t pg = base + (k ? 200 : 162);
+        uint32_t n = k ? 8 : 2;
+
+        rw[k].opcode = NVME_CMD_WRITE;
+        rw[k].nsid = cpu_to_le32(1);
+        rw[k].dptr.prp1 = cpu_to_le64(buf);
+        rw[k].dptr.prp2 = cpu_to_le64(n > 2 ? list : buf);
+        rw[k].slba = cpu_to_le64(pg * (4096 / c.lba_size));
+        rw[k].nlb = cpu_to_le16(n * (4096 / c.lba_size) - 1);
+        for (uint32_t i = 0; i < n; i++) {
+            want[pg + i] = newval;
+        }
+        femu_submit(&c, &c.io, (NvmeCmd *)&rw[k]);
+    }
+    for (int k = 0; k < 2; k++) {
+        g_assert_cmphex(FEMU_SC(femu_complete(&c, &c.io, NULL, NULL)), ==,
+                        NVME_SUCCESS);
+    }
+
+    g_assert_true(femu_pace_done(qts, "plmc", 20000, NULL));
+    femu_plm_ftl(qts, "plmc", v);
+    femu_pace_get(qts, "plmc", p);
+    g_assert_cmpint(v[FEMU_PLMF_STALLED], ==, 0);
+    g_assert_cmpint(p[FEMU_PACE_OPEN], ==, 0);
+    femu_pace_verify(&c, "plmc", big, list, want, 4096, 4096 - 6);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, big);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The release paths of an open paced victim (tBERS 500 ms keeps one
+ * open). The FTL thread is held across the command, so no paced step
+ * can finish the victim first; the victim must be back in the queue
+ * when the command returns:
+ *
+ *   "lpe":    Set 13h LPE=0 (the window ends)
+ *   "format": Format NVM (every page then reads 0, none is mapped)
+ *   "gcus":   x-plm-gc-us 0 (the burst preparation does not know it)
+ *
+ * Then every page reads back and x-ftl-check finds no lost mapping.
+ * Format and "gcus" then reach the target with no open victim. It
+ * catches a path that keeps the victim.
+ */
+void femu_test_plm_pace_release(void *obj, void *data, QGuestAllocator *alloc)
+{
+    const char *mode = data;
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t big = guest_alloc(alloc, FEMU_PACE_CMD * 4096);
+    g_autofree uint32_t *vals = g_new0(uint32_t, 4096 / FEMU_PACE_CMD);
+    g_autofree uint32_t *want = g_new0(uint32_t, 4096);
+    bool format = !strcmp(mode, "format");
+    int64_t p[FEMU_PACE_N];
+    int64_t v[FEMU_PLMF_N];
+    uint8_t cfg[512];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_pace_start(&c, "plmx", buf, list, vals);
+    femu_pace_expand(vals, want, 4096);
+    femu_plm_win(&c, list, 2);
+    femu_pace_wait_open(qts, "plmx", 2000);
+
+    femu_pace_set(qts, "plmx", "x-ftl-hold", 1);
+    if (!strcmp(mode, "lpe")) {
+        femu_plm_cfg(cfg, 0, 0, 0, 0);
+        g_assert_cmphex(femu_plm_set13(&c, 0, cfg, list), ==, NVME_SUCCESS);
+    } else if (format) {
+        g_assert_cmphex(FEMU_SC(femu_format(&c, 1, 0, 0)), ==, NVME_SUCCESS);
+        memset(want, 0, 4096 * sizeof(*want));
+    } else {
+        femu_pace_set(qts, "plmx", "x-plm-gc-us", 0);
+    }
+    femu_pace_get(qts, "plmx", p);
+    g_test_message("%s: open %" PRId64, mode, p[FEMU_PACE_OPEN]);
+    g_assert_cmpint(p[FEMU_PACE_OPEN], ==, 0);
+    femu_pace_set(qts, "plmx", "x-ftl-hold", 0);
+
+    femu_pace_verify(&c, "plmx", big, list, want, 4096, format ? 0 : 4096);
+    if (strcmp(mode, "lpe")) {
+        femu_plm_wait(qts, "plmx", FEMU_PLMF_FREE, 10, 20000, v);
+        g_assert_cmpint(v[FEMU_PLMF_FREE], >=, 10);
+        femu_pace_get(qts, "plmx", p);
+        g_assert_cmpint(p[FEMU_PACE_OPEN], ==, 0);
+        femu_pace_verify(&c, "plmx", big, list, want, 4096,
+                         format ? 0 : 4096);
+    }
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, big);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * maint_idle work runs in a paced NDWIN; only idle collection waits
+ * there. One LUN, 80 lines of 16 pages, gc_idle_ms 5, read limit 4.
+ * Idle steps on the FTL thread are held, so only the kicks run one:
+ *
+ *   NDWIN, paced (prep 1) --> fill line 0 --> 4 reads of LPN 0 queue it
+ *   kick --> the idle step rewrites line 0 (one idle read reclaim)
+ *
+ * It catches an idle check that holds all idle work in a paced NDWIN.
+ */
+void femu_test_plm_pace_maint(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    g_autofree char *what = NULL;
+    int64_t v[FEMU_PLMF_N];
+    int64_t p[FEMU_PACE_N];
+    uint64_t m[6];
+
+    femu_gci_hold(qts, true);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_start(&c, buf, 2);
+    femu_pace_get(qts, "gc-test", p);
+    g_assert_cmpint(p[FEMU_PACE_NS], ==, 1000000);
+    qtest_memset(qts, buf, 0x3c, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < 16; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE, lpn * 8, buf)),
+                        ==, NVME_SUCCESS);
+    }
+    for (int i = 0; i < 4; i++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 0, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_usleep(50 * 1000);
+    femu_plm_ftl(qts, "gc-test", v);
+    g_assert_cmpint(v[FEMU_PLMF_HOLD], ==, 0);
+    g_assert_cmpint(v[FEMU_PLMF_PREP], ==, 1);
+    femu_maint_state(qts, m);
+    g_assert_cmpuint(m[0], ==, 0);
+    g_assert_cmpuint(m[4], ==, 0);
+
+    what = femu_maint_kick_work(qts);
+    g_test_message("paced NDWIN: kick %s", what);
+    femu_maint_state(qts, m);
+    g_assert_cmpuint(m[0], ==, 1);
+    g_assert_cmpuint(m[2], ==, 1);
+    g_assert_cmpuint(m[4], ==, 16);
+    femu_plm_ftl(qts, "gc-test", v);
+    g_assert_cmpint(v[FEMU_PLMF_PREP], ==, 1);
+    g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_READ, 15 * 8, buf)), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpint(qtest_readb(qts, buf), ==, 0x3c);
+    femu_gci_hold(qts, false);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The hold cap counts from the Set 14h, also before NTWTML ends. With
+ * plm_ndwin_min_ms 8000 and a cap of 1 s (x-plm-hold-cap), a Set 14h
+ * DTWIN right after the NDWIN starts completes at the cap:
+ *
+ *   NDWIN at 0 --> Set 14h at 0: held --> CQE at 1 s, DTWIN (not 8 s)
+ *
+ * No GC is due, so only the cap or NTWTML can end the hold. It catches
+ * a cap that waits for NTWTML.
+ */
+void femu_test_plm_pace_cap_min(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t list = guest_alloc(alloc, 4096);
+    int64_t t0;
+    int64_t ms;
+    uint32_t res;
+    uint16_t cid;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_pace_set(qts, "plmm", "x-plm-hold-cap", 1000);
+    femu_plm_start(&c, list, 2);
+    t0 = g_get_monotonic_time();
+    cid = femu_plm_send(&c, NVME_ADM_CMD_SET_FEATURES, 0, 0x14, 1, 1, list);
+    femu_plm_hold_check(&c, list, "plmm", 2, 1, 1);
+    g_assert_cmphex(femu_plm_next(&c, cid, NULL), ==, NVME_SUCCESS);
+    ms = (g_get_monotonic_time() - t0) / 1000;
+    g_test_message("hold %" PRId64 " ms", ms);
+    g_assert_cmpint(ms, >=, 900);
+    g_assert_cmpint(ms, <, 3000);
+    g_assert_cmphex(femu_plm_get(&c, 0x14, 0, 0, 1, list, &res), ==,
+                    NVME_SUCCESS);
+    g_assert_cmpuint(res, ==, 1);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    qos_invalidate_command_line();
+}
+
+/*
+ * No step runs before a LUN can take a copy. tBERS is 500 ms; once a
+ * victim erase is booked, every LUN ends past now + H until it ends.
+ * Over 300 ms of that time, the steps that copy nothing (x-plm-pace
+ * waits) stay few: one at the wake time, not one per pass of the idle
+ * FTL thread. It catches a step due on each idle pass.
+ */
+void femu_test_plm_pace_spin(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int64_t p0[FEMU_PACE_N];
+    int64_t p[FEMU_PACE_N];
+    int64_t end;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_pace_start(&c, "plms", buf, list, NULL);
+    femu_plm_win(&c, list, 2);
+    end = g_get_monotonic_time() + 10000 * 1000;
+    do {
+        g_usleep(5 * 1000);
+        femu_pace_get(qts, "plms", p0);
+    } while ((!p0[FEMU_PACE_OPEN] || p0[FEMU_PACE_GC_LEAD] < 400000000) &&
+             g_get_monotonic_time() < end);
+    g_assert_cmpint(p0[FEMU_PACE_OPEN], ==, 1);
+    g_assert_cmpint(p0[FEMU_PACE_GC_LEAD], >=, 400000000);
+    g_usleep(300 * 1000);
+    femu_pace_get(qts, "plms", p);
+    g_test_message("%" PRId64 " steps with no copy in 300 ms",
+                   p[FEMU_PACE_WAITS] - p0[FEMU_PACE_WAITS]);
+    g_assert_cmpint(p[FEMU_PACE_OPEN], ==, 1);
+    g_assert_cmpint(p[FEMU_PACE_WAITS] - p0[FEMU_PACE_WAITS], <, 100);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * Paced GC also runs where background GC would. plm_ndwin_lines is 2,
+ * below gc_thres_lines (3). A debt to 3 free lines leaves the target
+ * met, but background GC would collect there. Paced GC must raise the
+ * free lines to 4, past gc_thres_lines. It catches a band of free lines
+ * where no GC runs until forced GC.
+ *
+ * The debt overwrites 7 of the 8 chunks of each user line, once. With 5
+ * chunks, the debt to 3 free lines starts a second pass, and the first
+ * overwrite lines become empty. GC then frees an empty line with no copy.
+ *
+ *   band 160: 16 x 5 writes = 10 lines, free 16 --> 6 --> second pass
+ *             --> overwrite line 0 has 0 valid pages --> 0 copies
+ *   band 224: 16 x 7 writes = 14 lines, free 16 --> 3 in one pass
+ *             --> each victim has 32 valid pages --> copies > 0
+ */
+void femu_test_plm_pace_band(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmb", 1000000);
+    femu_plm_start(&c, list, 1);
+    femu_pace_debt(&c, "plmb", buf, list, 4096, 256, 224, 3, NULL);
+    femu_plm_ftl(qts, "plmb", v0);
+    g_assert_cmpint(v0[FEMU_PLMF_TARGET], ==, 2);
+    g_assert_cmpint(v0[FEMU_PLMF_FREE], <=, 3);
+    g_assert_cmpint(v0[FEMU_PLMF_FREE], >=, 2);
+    femu_plm_win(&c, list, 2);
+    femu_plm_wait(qts, "plmb", FEMU_PLMF_FREE, 4, 10000, v);
+    g_test_message("free %" PRId64 " --> %" PRId64 ", %" PRId64 " copies",
+                   v0[FEMU_PLMF_FREE], v[FEMU_PLMF_FREE],
+                   v[FEMU_PLMF_COPIES] - v0[FEMU_PLMF_COPIES]);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], >=, 4);
+    g_assert_cmpint(v[FEMU_PLMF_COPIES], >, v0[FEMU_PLMF_COPIES]);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * The NDWIN record with two planes per LUN (pls_per_lun 2, 40 lines of
+ * 32 pages, 24 of them user data, target 8, plm_ndwin_gc_us 0). The
+ * victim erase is one multi-plane operation of tBERS on the LUN:
+ *
+ *   ERASES = 2 x PREP (one block on each plane per victim)
+ *   GC_LUN = copies x 240 us + PREP x 2 ms, plus at most 100 us per
+ *            erase for the plane busy time of the media layer
+ *
+ * It catches a multi-plane GC booking that the record misses.
+ */
+void femu_test_plm_gc_record_2pl(void *obj, void *data,
+                                 QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    int64_t v[FEMU_PLMF_N];
+    uint8_t log[512];
+    uint64_t copies;
+    uint64_t erases;
+    uint64_t prep;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmg2", 1000000);
+    femu_plm_start(&c, buf, 1);
+    qtest_memset(qts, buf, 0x6d, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < FEMU_PLM_USER_PGS; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    for (int k = 0; ; k++) {
+        if (k % 16 == 0) {
+            femu_plm_ftl(qts, "plmg2", v);
+            if (v[FEMU_PLMF_FREE] <= 4) {
+                break;
+            }
+        }
+        g_assert_cmpint(k, <, FEMU_PLM_USER_PGS);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)(2 * k) * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_usleep(300 * 1000);
+    femu_plm_win(&c, buf, 2);
+    femu_plm_wait(qts, "plmg2", FEMU_PLMF_FREE, 8, 10000, v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], >=, 8);
+    g_usleep(300 * 1000);
+    femu_plm_win(&c, buf, 1);
+    femu_plm_c0(&c, buf, log);
+    copies = femu_plmr(log, FEMU_PLMR_COPIES);
+    erases = femu_plmr(log, FEMU_PLMR_ERASES);
+    prep = femu_plmr(log, FEMU_PLMR_PREP);
+    g_test_message("%" PRIu64 " copies, %" PRIu64 " erases, %" PRIu64
+                   " victims, LUN time %" PRIu64 " ns", copies, erases, prep,
+                   femu_plmr(log, FEMU_PLMR_GC_LUN));
+    g_assert_cmpuint(prep, >=, 4);
+    g_assert_cmpuint(erases, ==, 2 * prep);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_GC_LUN), >=,
+                     copies * (40000 + 200000) + prep * 2000000);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_GC_LUN), <=,
+                     copies * (40000 + 200000) + prep * 2100000);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
 }
 
 /*

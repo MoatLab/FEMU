@@ -137,6 +137,8 @@ bool femu_plm_check(FemuCtrl *n, Error **errp)
             why = "plm_ndwin_lines";
         } else if (pl->dtwin_writes) {
             why = "plm_dtwin_writes";
+        } else if (pl->ndwin_gc_us != FEMU_PLM_NDWIN_GC_US) {
+            why = "plm_ndwin_gc_us";
         }
         if (why) {
             error_setg(errp, "femu: %s needs plm=on", why);
@@ -152,6 +154,8 @@ bool femu_plm_check(FemuCtrl *n, Error **errp)
         why = "plm_ndwin_ms must be 0 to 3600000";
     } else if (pl->ndwin_min_ms > pl->ndwin_ms) {
         why = "plm_ndwin_min_ms must be 0 to plm_ndwin_ms";
+    } else if (pl->ndwin_gc_us > FEMU_PLM_NDWIN_GC_MAX) {
+        why = "plm_ndwin_gc_us must be 0 to 1000000";
     }
     if (why) {
         error_setg(errp, "femu: %s", why);
@@ -319,6 +323,10 @@ static void femu_plm_snap(FemuCtrl *n, bool entry)
     seqlock_write_begin(&pl->seq);
     pl->snap = s;
     seqlock_write_end(&pl->seq);
+    /* for the hold: the GC bookings, and plm_gc_end, came before this */
+    qatomic_store_release(&ssd->plm_ready,
+                          ssd->lm.free_line_cnt >= ssd->plm_lines &&
+                          !ssd->pace_line);
 }
 
 void femu_plm_publish(FemuCtrl *n)
@@ -417,6 +425,9 @@ bool femu_plm_init(FemuCtrl *n, Error **errp)
     }
     ssd->plm = true;
     ssd->plm_lines = target;
+    ssd->plm_pace_ns = (uint64_t)pl->ndwin_gc_us * SCALE_US;
+    ssd->plm_pace_cur = g_new0(int, ssd->sp.nchs * ssd->sp.luns_per_ch);
+    pl->hold_cap_ms = FEMU_PLM_HOLD_CAP_MS;
     femu_plm_snap(n, false);
     /* the held Set 14h; its deadline is on the clock of femu_dev_now() */
     pl->hold_timer = timer_new_ns(QEMU_CLOCK_REALTIME, femu_plm_timer_cb, n);
@@ -462,7 +473,7 @@ static void femu_plm_estimates(FemuPlm *pl, const FemuPlmSnap *s,
 
 /*
  * The FTL work of window @w: background work holds in DTWIN, and the
- * preparation runs in NDWIN. A held Set 14h holds as DTWIN does.
+ * preparation or paced GC runs in NDWIN.
  */
 static void femu_plm_flags(FemuCtrl *n, uint8_t w)
 {
@@ -471,6 +482,26 @@ static void femu_plm_flags(FemuCtrl *n, uint8_t w)
     if (ssd && ssd->plm) {
         qatomic_set(&ssd->plm_hold, w == FEMU_PLMW_DTWIN);
         qatomic_set(&ssd->plm_prep, w == FEMU_PLMW_NDWIN);
+    }
+}
+
+/*
+ * The FTL work of the hold of a Set 14h DTWIN. Other
+ * background work holds as in DTWIN. Paced GC goes on, so the hold can
+ * reach its target; the burst preparation holds, as it always did.
+ *
+ *   state   window   plm_hold   plm_prep
+ *   NDWIN   NDWIN    0          1
+ *   hold    NDWIN    1          1 (paced), 0 (plm_ndwin_gc_us=0)
+ *   DTWIN   DTWIN    1          0
+ */
+static void femu_plm_hold_flags(FemuCtrl *n)
+{
+    struct ssd *ssd = n->ssd;
+
+    if (ssd && ssd->plm) {
+        qatomic_set(&ssd->plm_hold, true);
+        qatomic_set(&ssd->plm_prep, ssd->plm_pace_ns != 0);
     }
 }
 
@@ -604,6 +635,10 @@ static void femu_plm_window(FemuCtrl *n, uint8_t w)
 
     femu_plm_nd_edge(n, qatomic_read(&pl->window), w);
     femu_plm_flags(n, w);
+    /* no window runs paced GC now: an open victim goes back */
+    if (w == FEMU_PLMW_OFF) {
+        ssd_plm_pace_release(n->ssd);
+    }
     qatomic_set(&pl->ndwin_dtwte, pl->dtwin_ms);
     pl->rd_bytes = 0;
     pl->wr_bytes = 0;
@@ -633,26 +668,91 @@ void femu_plm_reset(FemuCtrl *n)
     femu_plm_window(n, FEMU_PLMW_OFF);
 }
 
+/* the end of NTWTML in this NDWIN, 0 for none */
+static int64_t femu_plm_min_end(FemuCtrl *n)
+{
+    FemuPlm *pl = &n->plm_st;
+
+    if (!pl->ndwin_min_ms) {
+        return 0;
+    }
+    /* start_ms rounds down: one more ms keeps at least NTWTML */
+    return (qatomic_read(&pl->start_ms) + 1 + pl->ndwin_min_ms) * SCALE_MS;
+}
+
 /*
- * When a held Set 14h DTWIN may complete (design 5.2): NTWTML after the
- * NDWIN entry, and the end of the media work booked when it came. So the
- * DTWIN starts with no GC work on the dies, and later host I/O does not
- * move the deadline. The caller holds the pause, so the FTL is idle.
+ * When a held Set 14h DTWIN may complete with plm_ndwin_gc_us=0 (design
+ * 5.2): NTWTML after the NDWIN entry, and the end of the media work
+ * booked when it came. So the DTWIN starts with no GC work on the dies,
+ * and later host I/O does not move the deadline. The caller holds the
+ * pause, so the FTL is idle.
  */
 static int64_t femu_plm_hold_end(FemuCtrl *n)
 {
-    FemuPlm *pl = &n->plm_st;
-    int64_t end = 0;
+    int64_t end = femu_plm_min_end(n);
 
-    /* start_ms rounds down: one more ms keeps at least NTWTML */
-    if (pl->ndwin_min_ms) {
-        end = (qatomic_read(&pl->start_ms) + 1 + pl->ndwin_min_ms) *
-              SCALE_MS;
-    }
     if (n->ssd) {
         end = MAX(end, (int64_t)ssd_media_last_end(n->ssd));
     }
     return end;
+}
+
+/* GC in NDWIN is paced, and the hold follows the paced GC */
+static bool femu_plm_paced(FemuCtrl *n)
+{
+    return n->ssd && n->ssd->plm && n->ssd->plm_pace_ns;
+}
+
+/*
+ * With paced GC: whether the held Set 14h may complete at @now. The
+ * main loop reads only what the FTL thread publishes, with no pause.
+ * The cap ends the hold at any time, also before NTWTML ends. Past
+ * NTWTML, ready or stalled ends it too:
+ *
+ *   cap      hold_cap_ms after the Set 14h arrived
+ *   ready    free >= plm_ndwin_lines, no paced victim, GC end <= now
+ *   stalled  plm_stalled: no victim, no gain, no room, read-only media
+ *
+ * Host bookings never move the GC end, but a GC booking behind host
+ * work on its LUN ends later. The end latches: a later host write that
+ * takes a line cannot undo it.
+ */
+static bool femu_plm_hold_ready(FemuCtrl *n, int64_t now)
+{
+    FemuPlm *pl = &n->plm_st;
+    struct ssd *ssd = n->ssd;
+
+    if (pl->hold_latched) {
+        return true;
+    }
+    if (now >= pl->hold_cap ||
+        (now >= pl->hold_end &&
+         (qatomic_read(&ssd->plm_stalled) ||
+          (qatomic_load_acquire(&ssd->plm_ready) &&
+           (int64_t)qatomic_read(&ssd->plm_gc_end) <= now)))) {
+        pl->hold_latched = true;
+    }
+    return pl->hold_latched;
+}
+
+/* whether the held Set 14h may complete at @now */
+static bool femu_plm_hold_due(FemuCtrl *n, int64_t now)
+{
+    if (femu_plm_paced(n)) {
+        return femu_plm_hold_ready(n, now);
+    }
+    return now >= n->plm_st.hold_end;
+}
+
+/* the next time to look at the hold: paced GC ends at no fixed time */
+static int64_t femu_plm_hold_next(FemuCtrl *n, int64_t now)
+{
+    FemuPlm *pl = &n->plm_st;
+
+    if (femu_plm_paced(n)) {
+        return MIN(MAX(now + SCALE_MS, pl->hold_end), pl->hold_cap);
+    }
+    return pl->hold_end;
 }
 
 /* the admin CQ of the held Set 14h has room for @need more CQEs */
@@ -678,13 +778,15 @@ static bool femu_plm_hold_post(FemuCtrl *n, uint32_t need)
 {
     FemuPlm *pl = &n->plm_st;
     NvmeAerResult res = { 0 };
+    int64_t now;
     bool resume;
 
     if (!pl->held) {
         return true;
     }
-    if (pl->hold_sc == NVME_SUCCESS && femu_dev_now(n) < pl->hold_end) {
-        timer_mod(pl->hold_timer, pl->hold_end);
+    now = femu_dev_now(n);
+    if (pl->hold_sc == NVME_SUCCESS && !femu_plm_hold_due(n, now)) {
+        timer_mod(pl->hold_timer, femu_plm_hold_next(n, now));
         return false;
     }
     if (!femu_plm_hold_room(n, need)) {
@@ -803,6 +905,8 @@ void femu_plm_format(FemuCtrl *n)
     }
     femu_plm_hold_drop(n, NVME_CMD_SEQ_ERROR, true);
     resume = nvme_pause_pollers(n);
+    /* the drain and the deallocation see the whole victim in the queue */
+    ssd_plm_pace_release(n->ssd);
     if (qatomic_read(&n->plm_st.window) == FEMU_PLMW_DTWIN) {
         femu_plm_window(n, FEMU_PLMW_NDWIN);
     }
@@ -1083,8 +1187,8 @@ static bool femu_plm_cfg_ok(const uint8_t *cfg)
  *
  * 13h stores the thresholds; LPE=1 enters NDWIN (5.2.26.1.12), also from
  * DTWIN, and LPE=0 disables PLM. Events stay until log 0Ah is read. 14h
- * NDWIN takes effect at once. 14h DTWIN from NDWIN is held to the
- * deadline of femu_plm_hold_end() and returns NVME_NO_COMPLETE. A DTWIN
+ * NDWIN takes effect at once. 14h DTWIN from NDWIN is held until
+ * femu_plm_hold_due() and returns NVME_NO_COMPLETE. A DTWIN
  * while in DTWIN keeps its amounts, so a host cannot renew the budget
  * without an NDWIN. A held 14h ends before either command runs (design
  * 5.3). Both change state that the FTL thread reads, so they pause the
@@ -1099,7 +1203,8 @@ uint16_t femu_plm_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     uint8_t cfg[FEMU_PLM_CFG_SIZE];
     uint8_t wsel = dw12 & 0x7;
     uint16_t status;
-    int64_t end;
+    int64_t now;
+    bool wait;
     bool resume;
 
     if (!femu_plm_set_ok(dw11)) {
@@ -1149,15 +1254,23 @@ uint16_t femu_plm_set_feature(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
     resume = nvme_pause_pollers(n);
     if (wsel == FEMU_PLMW_DTWIN &&
         qatomic_read(&pl->window) == FEMU_PLMW_NDWIN) {
-        end = femu_plm_hold_end(n);
-        if (end > femu_dev_now(n)) {
-            /* NDWIN stays, with no new background work until the end */
+        now = femu_dev_now(n);
+        pl->hold_latched = false;
+        pl->hold_cap = now + (int64_t)pl->hold_cap_ms * SCALE_MS;
+        if (femu_plm_paced(n)) {
+            pl->hold_end = femu_plm_min_end(n);
+            wait = !femu_plm_hold_ready(n, now);
+        } else {
+            pl->hold_end = femu_plm_hold_end(n);
+            wait = pl->hold_end > now;
+        }
+        if (wait) {
+            /* NDWIN stays, with no new background work but paced GC */
             pl->held = true;
             pl->hold_sc = NVME_SUCCESS;
-            pl->hold_end = end;
-            femu_plm_flags(n, FEMU_PLMW_DTWIN);
+            femu_plm_hold_flags(n);
             nvme_resume_pollers(n, resume);
-            timer_mod(pl->hold_timer, end);
+            timer_mod(pl->hold_timer, femu_plm_hold_next(n, now));
             return NVME_NO_COMPLETE;
         }
     }
@@ -1375,7 +1488,98 @@ static void femu_plm_test_lines(Object *obj, Visitor *v, const char *name,
     ssd->plm_lines = lines;
     /* a new target may be in reach: try again */
     qatomic_set(&ssd->plm_stalled, false);
+    femu_plm_snap(n, false);
     nvme_resume_pollers(n, resume);
+}
+
+/*
+ * qtest only: the paced GC, "pace_ns open ready stalled gc_lead_ns
+ * media_lead_ns hold_cap_ms read_max_ns waits", read with the controller
+ * paused. The leads are the GC end and the media end past now. The read
+ * clears read_max_ns, the longest host read since the last one. waits
+ * counts the steps that copied nothing.
+ */
+static char *femu_plm_test_pace(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    struct ssd *ssd = n->plm ? n->ssd : NULL;
+    uint64_t now;
+    uint64_t gc;
+    uint64_t media;
+    char *out;
+    bool resume;
+
+    if (!ssd || !ssd->plm) {
+        error_setg(errp, "x-plm-pace needs plm=on");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    now = ssd_now(ssd);
+    gc = qatomic_read(&ssd->plm_gc_end);
+    media = ssd_media_last_end(ssd);
+    out = g_strdup_printf("%" PRIu64 " %d %d %d %" PRIu64 " %" PRIu64
+                          " %u %" PRIu64 " %" PRIu64,
+                          ssd->plm_pace_ns, ssd->pace_line != NULL,
+                          qatomic_read(&ssd->plm_ready),
+                          qatomic_read(&ssd->plm_stalled),
+                          gc > now ? gc - now : 0,
+                          media > now ? media - now : 0,
+                          n->plm_st.hold_cap_ms, ssd->plm_rd_max,
+                          ssd->plm_pace_waits);
+    ssd->plm_rd_max = 0;
+    nvme_resume_pollers(n, resume);
+    return out;
+}
+
+/*
+ * qtest only: set plm_ndwin_gc_us while the device runs. 0 gives the
+ * open victim back first, as burst GC does not know it.
+ */
+static void femu_plm_test_gc_us(Object *obj, Visitor *v, const char *name,
+                                void *opaque, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    struct ssd *ssd = n->plm ? n->ssd : NULL;
+    uint32_t us;
+    bool resume;
+
+    if (!visit_type_uint32(v, name, &us, errp)) {
+        return;
+    }
+    if (!ssd || !ssd->plm || n->plm_st.held ||
+        us > FEMU_PLM_NDWIN_GC_MAX) {
+        error_setg(errp, "x-plm-gc-us takes 0 to 1000000 with plm=on and "
+                   "no held Set 14h");
+        return;
+    }
+    resume = nvme_pause_pollers(n);
+    if (!us) {
+        ssd_plm_pace_release(ssd);
+    }
+    n->plm_st.ndwin_gc_us = us;
+    ssd->plm_pace_ns = (uint64_t)us * SCALE_US;
+    ssd->plm_pace_wake = 0;
+    qatomic_set(&ssd->plm_stalled, false);
+    femu_plm_snap(n, false);
+    nvme_resume_pollers(n, resume);
+}
+
+/* qtest only: the longest hold of a later Set 14h DTWIN, in ms */
+static void femu_plm_test_hold_cap(Object *obj, Visitor *v,
+                                   const char *name, void *opaque,
+                                   Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    uint32_t ms;
+
+    if (!visit_type_uint32(v, name, &ms, errp)) {
+        return;
+    }
+    if (!n->plm || !ms) {
+        error_setg(errp, "x-plm-hold-cap takes 1 or more ms with plm=on");
+        return;
+    }
+    n->plm_st.hold_cap_ms = ms;
 }
 
 /*
@@ -1412,6 +1616,11 @@ void femu_plm_add_props(Object *obj)
     object_property_add(obj, "x-plm-event", "uint32", NULL,
                         femu_plm_test_event, NULL, NULL);
     object_property_add_str(obj, "x-plm-ftl", femu_plm_test_ftl, NULL);
+    object_property_add(obj, "x-plm-gc-us", "uint32", NULL,
+                        femu_plm_test_gc_us, NULL, NULL);
+    object_property_add(obj, "x-plm-hold-cap", "uint32", NULL,
+                        femu_plm_test_hold_cap, NULL, NULL);
     object_property_add(obj, "x-plm-lines", "uint32", NULL,
                         femu_plm_test_lines, NULL, NULL);
+    object_property_add_str(obj, "x-plm-pace", femu_plm_test_pace, NULL);
 }

@@ -783,6 +783,13 @@ static void ssd_plm_gc_time(struct ssd *ssd, struct nand_lun *lun,
     if (end > from) {
         ssd->plm_gc_lun_ns += end - from;
     }
+    /*
+     * The hold of a Set 14h waits for this end. Host bookings never set
+     * it, but this end includes host work queued ahead on the LUN.
+     */
+    if (end > ssd->plm_gc_end) {
+        qatomic_set(&ssd->plm_gc_end, end);
+    }
 }
 
 uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,

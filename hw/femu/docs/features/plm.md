@@ -55,8 +55,9 @@ writes of one flash page each, or after 2 s:
 | `plm_dtwin_reads` | DTWRT | `1048576` | the reads of a DTWIN, in 4 KiB units |
 | `plm_dtwin_writes` | DTWWT | `0` | the writes of a DTWIN, in OWS units; 0 is the room of a full NDWIN |
 | `plm_ndwin_ms` | NTWTMH | `1000` | the NDWIN time that log 0Ah reports, in ms |
-| `plm_ndwin_min_ms` | NTWTML | `0` | the shortest NDWIN before a Set 14h DTWIN completes, in ms |
+| `plm_ndwin_min_ms` | NTWTML | `0` | the shortest NDWIN before a Set 14h DTWIN completes, in ms; with paced GC the 30 second hold cap can end the wait first |
 | `plm_ndwin_lines` | none | `0` | the free lines that the NDWIN GC collects up to; 0 is `gc_thres_lines`, kept in range |
+| `plm_ndwin_gc_us` | none | `1000` | the GC horizon of an NDWIN in us, 0 to 1000000; 0 is one burst per line freed |
 
 OWS is the Optimal Write Size of the NVM Set. With `perf_hints=on` it is
 one stripe (NOWS + 1 blocks). Without it, CNS 04h reports 0, and FEMU
@@ -76,8 +77,8 @@ with Set Features 14h. The device also leaves a DTWIN on its own:
    +-----------+   Set 13h LPE=0, reset        +-----------+             |
         ^                                        |      ^                |
         |                                        |      | Set 14h NDWIN, |
-        |           Set 14h DTWIN (held until    |      | Format,        |
-        |           NTWTML and the media end)    |      | Sanitize       |
+        |           Set 14h DTWIN (held: see     |      | Format,        |
+        |           "The hold of a Set 14h")     |      | Sanitize       |
         |                                        v      | (no event)     |
         |                                      +-----------+             |
         +------------------------------------- |   DTWIN   | ------------+
@@ -86,9 +87,8 @@ with Set Features 14h. The device also leaves a DTWIN on its own:
 ```
 
 - Set 13h LPE=1 always starts an NDWIN, also from a DTWIN.
-- A Set 14h DTWIN from NDWIN waits until `plm_ndwin_min_ms` has passed in
-  the NDWIN, and the media work booked at its arrival has ended. Other
-  admin commands still run meanwhile.
+- A Set 14h DTWIN from NDWIN waits in a hold. The next sections give
+  when the hold ends. Other admin commands still run meanwhile.
 - A Set 14h DTWIN while in DTWIN keeps the counts of the window. So a host
   cannot get a new budget without an NDWIN.
 - A reset, a power cycle or Set 13h LPE=0 disables PLM. Features 13h and
@@ -107,11 +107,83 @@ held item keeps its state and runs in the next NDWIN:
 | idle write-back (`buffer_low_pcent`) | hold | run |
 | read reclaim, retention refresh, wear levelling | hold | run |
 | RAIN rebuild, pad of aged open lines | hold | run |
-| preparation GC up to `plm_ndwin_lines` | hold | run |
+| paced GC up to `plm_ndwin_lines` | hold | run |
 
-In an NDWIN, a preparation GC raises the free lines to the target of
-`plm_ndwin_lines`. It stops when a step frees no line. It starts again
-when the host writes or deallocates more pages.
+In an NDWIN, GC raises the free lines to the target of `plm_ndwin_lines`.
+It stops when it can free no line, which is a stall. It starts again when
+the host writes or deallocates a line of pages.
+
+## Paced GC in an NDWIN
+
+With `plm_ndwin_gc_us` above 0 (H below), GC in an NDWIN is paced. It
+takes the place of background GC, idle GC and the burst preparation.
+Each GC copy reads a page on its source LUN and programs it on the LUN
+that the GC write pointer programs next. A copy starts only while both
+LUNs end their work within H of now:
+
+```
+ now                     now + H
+  |------------------------|
+ LUN 0  [rd][prog][rd][prog]|[prog]     ends past now + H: no copy from LUN 0
+ LUN 1  [prog]                         room: the next copy reads LUN 1
+ LUN 2  [erase of the victim.......]   an erase may pass the horizon
+ host read on LUN 0 waits at most H + tR + tPROG + tBERS, then tR
+```
+
+- Each source LUN has its own place in the victim. The visits go to the
+  LUNs in turn, so every LUN with room gets work.
+- Paced GC also runs while the free lines are at or below
+  `gc_thres_lines`, as background GC would. So a target below that level
+  leaves no band of free lines with no GC.
+- Forced GC at `gc_thres_pcent_high` is not paced. It finishes the paced
+  victim first, then collects as before.
+- Idle collection (`gc_idle_ms`) waits in a paced NDWIN, because it
+  collects whole victims. The other `maint_idle` work still runs: the
+  queued read reclaim, the retention scan and the aged refresh.
+- With `plm_ndwin_gc_us=0` the NDWIN runs the burst preparation of
+  earlier FEMU versions: forced GC passes until a line is free.
+- A reset, Set 13h LPE=0, Format NVM and Sanitize give the open victim
+  back to the GC queue. Its moved pages and its valid pages stay mapped.
+
+## The hold of a Set 14h DTWIN
+
+A Set 14h DTWIN from NDWIN does not complete at once. The set stays in
+NDWIN, in a hold. The FTL holds background work as in DTWIN:
+
+```
+ state   window (Get 14h)   background work   paced GC   burst preparation
+ NDWIN   NDWIN              run               run        run (H = 0)
+ hold    NDWIN              hold              run        hold
+ DTWIN   DTWIN              hold              hold       hold
+```
+
+The hold ends at the first of these events:
+
+1. 30 seconds have passed since the Set 14h came. This cap applies also
+   when `plm_ndwin_min_ms` has not passed yet.
+2. Past `plm_ndwin_min_ms`, paced GC has reached `plm_ndwin_lines` with
+   no open victim, and its media work has ended.
+3. Past `plm_ndwin_min_ms`, GC has stalled: no victim, no gain, no room,
+   or read-only media.
+
+```
+ Set 14h at t0     NTWTML end      GC ready (or stall)
+   |-------------------|-----------------|
+ hold end = MIN(t0 + 30 s, MAX(NTWTML end, GC ready or stall))
+```
+
+The cap counts from the Set 14h. The NDWIN minimum time of the NVMe
+specification is a separate rule. The cap can end the hold first.
+
+Host I/O does not end or extend the hold by itself. GC that waits
+behind host work on a die ends later, so that GC extends the hold. A real
+drive behaves the same way: GC cannot use a busy die. The cap limits
+that wait. Once true, the end stays true, also when a later host write
+takes a line. With rule 1 the DTWIN can start below the target, and
+DTWWE in log 0Ah shows the smaller room.
+
+With `plm_ndwin_gc_us=0` the hold ends when `plm_ndwin_min_ms` has
+passed and the media work booked at its arrival has ended.
 
 ## The exits: MVEAT and DEAT
 

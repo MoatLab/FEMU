@@ -2915,6 +2915,7 @@ typedef struct FemuPlm {
     uint32_t        ndwin_ms;       /* NTWTMH */
     uint32_t        ndwin_min_ms;   /* NTWTML */
     uint32_t        ndwin_lines;    /* NDWIN free line target; 0: derived */
+    uint32_t        ndwin_gc_us;    /* paced GC horizon; 0: burst GC */
     uint64_t        dtwin_writes;   /* DTWWT as set; 0: derived */
     uint64_t        dtwwt;          /* DTWWT, in @unit */
     uint64_t        unit;           /* OWS bytes, or one flash page */
@@ -2949,6 +2950,14 @@ typedef struct FemuPlm {
     uint16_t        hold_sc;
     NvmeAerHold     hold;
     int64_t         hold_end;
+    /*
+     * With paced GC, @hold_end is only the NTWTML floor. The hold ends
+     * once the GC is done or stalled, or at @hold_cap; @hold_latched
+     * keeps that end.
+     */
+    int64_t         hold_cap;
+    bool            hold_latched;
+    uint32_t        hold_cap_ms;    /* FEMU_PLM_HOLD_CAP_MS; qtest sets it */
     QEMUTimer       *hold_timer;
     QemuSeqLock     seq;
     FemuPlmSnap     snap;
@@ -4228,6 +4237,10 @@ bool femu_wp_check(FemuCtrl *n, Error **errp);
 #define FEMU_PLM_DTWIN_MS       1000
 #define FEMU_PLM_DTWIN_READS    1048576
 #define FEMU_PLM_NDWIN_MS       1000
+/* the GC horizon of an NDWIN, and the longest hold of a Set 14h DTWIN */
+#define FEMU_PLM_NDWIN_GC_US    1000
+#define FEMU_PLM_NDWIN_GC_MAX   1000000
+#define FEMU_PLM_HOLD_CAP_MS    30000
 bool femu_plm_check(FemuCtrl *n, Error **errp);
 bool femu_plm_init(FemuCtrl *n, Error **errp);
 uint16_t femu_plm_nvmset_list(FemuCtrl *n, NvmeCmd *cmd);

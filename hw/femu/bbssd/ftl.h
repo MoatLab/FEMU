@@ -719,6 +719,31 @@ struct ssd {
     uint64_t plm_forced_victims; /* victims of other forced passes */
     uint64_t plm_gc_wall_ns; /* FTL thread time inside GC passes */
     uint64_t plm_ahead_max; /* most media work ahead of now after a pass */
+    /*
+     * plm paced GC (plm_ndwin_gc_us): in NDWIN each source LUN copies at
+     * most this far ahead of now. The open victim is pace_line, which
+     * gc_pace never uses with plm. 0 keeps the burst preparation.
+     */
+    uint64_t plm_pace_ns;
+    int *plm_pace_cur;      /* per source LUN: next page of pace_line there */
+    int plm_pace_turn;      /* the LUN the next visit starts from */
+    bool plm_pace_marked;   /* a progress mark below is set */
+    int plm_pace_f0;        /* free lines at the mark */
+    uint64_t plm_pace_w0;   /* plm_wr_total at the mark */
+    uint64_t plm_pace_v0;   /* paced victims done at the mark */
+    uint64_t plm_pace_victims; /* paced victims done */
+    uint64_t plm_pace_c0;   /* gc_write_pages when the open victim opened */
+    uint64_t plm_pace_wake; /* no step before this: no LUN has room */
+    uint64_t plm_pace_waits; /* qtest: steps that copied nothing */
+    /*
+     * The hold of a Set 14h reads these from the main loop with no pause:
+     * the target is met with no paced victim open, and the latest end of
+     * any GC booking. A host booking never sets plm_gc_end, but a GC
+     * booking that waits behind host work on its LUN ends later.
+     */
+    bool plm_ready;
+    uint64_t plm_gc_end;
+    uint64_t plm_rd_max;    /* qtest: longest host read in ns, x-plm-pace */
     struct line_mgmt lm;
 
     /* lockless ring for communication with NVMe IO thread */
@@ -1119,7 +1144,16 @@ SsdGcIdleOutcome ssd_gc_idle_step(struct ssd *ssd, uint64_t now);
 void ssd_gc_idle_note(struct ssd *ssd, uint64_t req_end);
 bool ssd_plm_prep_due(struct ssd *ssd, uint64_t now);
 void ssd_plm_prep_step(struct ssd *ssd);
+bool ssd_plm_pace_due(struct ssd *ssd);
+void ssd_plm_pace_step(struct ssd *ssd);
+void ssd_plm_pace_release(struct ssd *ssd);
 void bb_plm_idle(FemuCtrl *n);
+
+/* plm: NDWIN or its hold, with paced GC in place of the burst */
+static inline bool ssd_plm_paced(struct ssd *ssd)
+{
+    return ssd->plm_pace_ns && qatomic_read(&ssd->plm_prep);
+}
 /* raw bit error model of host reads (ftl-rber.c) */
 int bb_check_rber(FemuCtrl *n, const char *mode, Error **errp);
 void ftl_rber_init_tables(void);

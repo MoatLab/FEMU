@@ -6497,6 +6497,8 @@ static const Property femu_props[] = {
     DEFINE_PROP_UINT32("plm_ndwin_min_ms", FemuCtrl, plm_st.ndwin_min_ms, 0),
     DEFINE_PROP_UINT32("plm_ndwin_lines", FemuCtrl, plm_st.ndwin_lines, 0),
     DEFINE_PROP_UINT64("plm_dtwin_writes", FemuCtrl, plm_st.dtwin_writes, 0),
+    DEFINE_PROP_UINT32("plm_ndwin_gc_us", FemuCtrl, plm_st.ndwin_gc_us,
+                       FEMU_PLM_NDWIN_GC_US),
     DEFINE_PROP_BOOL("sanitize_ns", FemuCtrl, sanitize_ns, false),
     DEFINE_PROP_BOOL("cancel", FemuCtrl, cancel, false),
     DEFINE_PROP_BOOL("fused_cw", FemuCtrl, fused_cw, false),

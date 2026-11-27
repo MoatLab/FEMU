@@ -377,14 +377,23 @@ static const FemuPropDesc femu_ctrl_descs[] = {
     { "plm_ndwin_min_ms",
       "plm: NDWIN Time Minimum Low (NTWTML) of log 0Ah, in ms, 0 to "
       "plm_ndwin_ms; a Set Features 14h DTWIN completes no earlier than "
-      "this after the NDWIN starts, and not before the media work booked "
-      "at its arrival ends; 0 (default)" },
+      "this after the NDWIN starts, but with plm_ndwin_gc_us above 0 the "
+      "30 s hold cap ends the wait first; 0 (default)" },
     { "plm_ndwin_lines",
       "plm: free lines that the NDWIN preparation GC collects up to, from "
       "one above the gc_thres_pcent_high lines to what the user data "
       "leaves free; DTWWT follows it; realize refuses a value out of that "
       "range, or plm when no value fits; 0 (default): gc_thres_lines, kept "
       "in that range" },
+    { "plm_ndwin_gc_us",
+      "plm: the GC horizon of an NDWIN, in us, 0 to 1000000; GC copies a "
+      "page only while its LUNs end within this time of now, so a read "
+      "waits for this, a copy and an erase at most; a Set Features 14h "
+      "DTWIN then waits for the later of the plm_ndwin_min_ms end and that "
+      "GC to reach plm_ndwin_lines and end, or to stall, but never more "
+      "than 30 s after the Set 14h; 0: one burst per line freed, and the "
+      "Set 14h waits for all media work booked at its arrival; 1000 "
+      "(default)" },
     { "sanitize_ns",
       "bbssd, NoSSD with sanitize_ops: Sanitize Namespace (8Ch, Base 2.3 "
       "5.2.23), a crypto erase of one namespace while other namespaces keep "
