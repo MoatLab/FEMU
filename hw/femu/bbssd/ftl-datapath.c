@@ -8,6 +8,7 @@
 #include "qemu/osdep.h"
 #include "ftl.h"
 #include "ftl-internal.h"
+#include "ftl-gc-fw-math.h"
 #include "../femu-fsched.h"
 
 /*
@@ -1180,12 +1181,22 @@ static uint64_t ssd_map_and_program(struct ssd *ssd, uint64_t lpn,
                                     uint64_t stime, int stream, bool *placed);
 static uint64_t ssd_gc_until_clear(struct ssd *ssd);
 
-/* one merge of a log-block mapping, as one collection pass */
+/*
+ * One merge of a log-block mapping, as one collection pass. With
+ * fw_gc_page_ns the copies return 0 and the pass returns its latest copy
+ * program end, if that is later than its switch merge erases.
+ */
 static uint64_t ssd_map_reclaim(struct ssd *ssd)
 {
     bool opened = ssd_gc_pass_begin(ssd);
-    uint64_t lat = ssd->mapping->reclaim(ssd, 1);
+    uint64_t p0 = ssd->sp.fw_gc_page_ns ? gc_clock(ssd) : 0;
+    uint64_t lat;
 
+    ssd->merge_end = 0;
+    lat = ssd->mapping->reclaim(ssd, 1);
+    if (ssd->sp.fw_gc_page_ns && ssd->merge_end) {
+        lat = MAX(lat, gc_fw_merge_lat(ssd->merge_end, p0));
+    }
     ssd_gc_pass_end(ssd, opened);
     return lat;
 }

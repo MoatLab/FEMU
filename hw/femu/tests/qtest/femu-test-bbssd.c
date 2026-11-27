@@ -20286,6 +20286,144 @@ void femu_test_gc_fw(void *obj, void *data, QGuestAllocator *alloc)
     guest_free(alloc, buf);
 }
 
+/* the NAND times of FEMU_GC_FW_GEO */
+#define FEMU_GC_FW_TR   10000ULL
+#define FEMU_GC_FW_TP   10000ULL
+/* the slot of the path tests, 1 ms */
+#define FEMU_GC_FW_PATH_NS 1000000ULL
+
+/* fill the first @pages pages, then overwrite 600 random ones */
+static void femu_gc_fw_workload(FemuCtrlState *c, uint64_t buf, uint64_t list,
+                                uint32_t pages)
+{
+    uint32_t seed = 11;
+    uint32_t i;
+
+    for (i = 0; i < pages; i += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, i, 16, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    for (i = 0; i < 600; i++) {
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages(c, (seed >> 8) % pages, 1,
+                                                 buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+}
+
+/*
+ * fw_gc_page_ns on the paths outside line collection, on one LUN. @data
+ * names the case:
+ *
+ *   hybrid        hybrid full merges and line collection
+ *   hybrid-small  the same with a slot below tR: a slot from the pass
+ *                 start would end before the read
+ *   fast          FAST random merges
+ *
+ * Every move takes one slot (P == G, N == P F). The x-gc-fw checks read
+ * the media bookings: no program asks to start before its slot or read
+ * end, no erase starts before a copy ends, and each merge copy ends
+ * exactly F + tP after its read.
+ */
+void femu_test_gc_fw_path(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t f = femu_gc_fw_ns(qts, "gc-fw");
+    uint64_t w[FEMU_GC_FW_FIELDS];
+
+    g_assert_cmpuint(f, >, 0);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x47, 16 * 4096);
+    femu_gc_fw_workload(&c, buf, list, 768);
+    g_assert_cmphex(femu_rw(&c, NVME_CMD_READ, 0, buf), ==, NVME_SUCCESS);
+    if (!strncmp(mode, "hybrid", 6)) {
+        /* C0h 96: hybrid full merges */
+        g_assert_cmpuint(femu_c0h_field(&c, log, 96), >, 0);
+    }
+    /*
+     * Line collection takes slots but adds no gap; only a merge copy does.
+     * So a gap above 0 shows that a merge copied a page.
+     */
+    femu_gc_fw_check(qts, "gc-fw", w);
+    g_assert_cmpuint(w[FEMU_GC_FW_GAP_MAX], >, 0);
+    femu_gc_fw_assert(&c, log, "gc-fw", f, FEMU_GC_FW_TP);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
+ * One hybrid full merge of 16 copies on one LUN, timed. The 16 pages of
+ * logical block 0 are written in reverse order, so the log is not in
+ * order, and the last write fills it and merges it. L is the modelled
+ * time of that write (x-ftl-trace field 1).
+ *
+ *   on   each copy reads, waits for its slot, programs: L is the merge
+ *        end, 16 (tR + F + tP), plus at most the host program and delay
+ *   off  the control: no slot; L stays below half of that with F = 1 ms
+ *
+ *   LUN    [R1]     [P1 ][R2]     [P2 ] ... [P16]
+ *   GC fw      [ F ]          [ F ]
+ */
+void femu_test_gc_fw_merge(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    bool on = strcmp(data, "off") != 0;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t f = femu_gc_fw_ns(qts, "gc-fw");
+    uint64_t copies = 16 * (FEMU_GC_FW_TR + FEMU_GC_FW_PATH_NS +
+                            FEMU_GC_FW_TP);
+    uint64_t before;
+    uint64_t lat;
+    int i;
+
+    g_assert_cmpuint(f, ==, on ? FEMU_GC_FW_PATH_NS : 0);
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x5a, 4096);
+    for (i = 15; i > 0; i--) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages(&c, i, 1, buf, list)), ==,
+                        NVME_SUCCESS);
+    }
+    g_assert_cmpuint(femu_c0h_field(&c, log, 96), ==, 0);
+    /* let the media go idle, so the first read does not queue */
+    g_usleep(50000);
+    before = femu_ftl_trace_id(qts, "gc-fw", 1);
+    g_assert_cmphex(FEMU_SC(femu_write_pages(&c, 0, 1, buf, list)), ==,
+                    NVME_SUCCESS);
+    lat = femu_ftl_trace_id(qts, "gc-fw", 1) - before;
+    g_test_message("merge write: %" PRIu64 " ns, 16 copies %" PRIu64 " ns",
+                   lat, copies);
+    g_assert_cmpuint(femu_c0h_field(&c, log, 96), ==, 1);
+    if (on) {
+        g_assert_cmpuint(lat, >=, copies);
+        g_assert_cmpuint(lat, <=, copies + 5000000);
+    } else {
+        g_assert_cmpuint(lat, <, copies / 2);
+    }
+    femu_gc_fw_assert(&c, log, "gc-fw", f, FEMU_GC_FW_TP);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
 /* Set Features 12h (Read Recovery Level): @sv, @nsid, CDW11, CDW12 */
 static uint16_t femu_rrl_set_full(FemuCtrlState *c, bool sv, uint32_t nsid,
                                   uint32_t dw11, uint32_t dw12)

@@ -549,6 +549,17 @@ uint16_t femu_write_8k(FemuCtrlState *c, uint64_t buf, uint64_t slba,
 void femu_tp_check(QTestState *qts, const char *id, uint64_t v[7]);
 void femu_gc_fw_counts(FemuCtrlState *c, uint64_t log, const char *id,
                        uint64_t v[4]);
+/* x-gc-fw: pages ns short gap_min gap_max unsafe */
+#define FEMU_GC_FW_FIELDS 6
+enum {
+    FEMU_GC_FW_PAGES, FEMU_GC_FW_TIME, FEMU_GC_FW_SHORT, FEMU_GC_FW_GAP_MIN,
+    FEMU_GC_FW_GAP_MAX, FEMU_GC_FW_UNSAFE,
+};
+void femu_gc_fw_check(QTestState *qts, const char *id,
+                      uint64_t v[FEMU_GC_FW_FIELDS]);
+uint64_t femu_gc_fw_ns(QTestState *qts, const char *id);
+void femu_gc_fw_assert(FemuCtrlState *c, uint64_t log, const char *id,
+                       uint64_t f, uint64_t prog_ns);
 void femu_zap_create_queue(FemuCtrlState *c, FemuQueue *q, uint16_t qid);
 uint16_t femu_zap_complete(FemuCtrlState *c, FemuQueue *q, uint32_t *result);
 void femu_zap_queue(FemuCtrlState *c, FemuQueue *q, NvmeCmd *cmd);
@@ -1347,6 +1358,8 @@ void femu_test_rber_scripted(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_err_inject(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_dram_hit(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_gc_fw(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_gc_fw_path(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_gc_fw_merge(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rrl(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rrl_no_rber(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rrl_subsys(void *obj, void *data, QGuestAllocator *alloc);

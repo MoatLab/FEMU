@@ -1109,6 +1109,77 @@ void femu_tp_check(QTestState *qts, const char *id, uint64_t v[7])
 }
 
 /*
+ * x-gc-fw of the device with id @id, in @v: the moves with a slot, their
+ * time, the programs asked to start before their slot or read end, the
+ * least and the most gap from read end to program end, and the erases
+ * that started before a copy of their line ended.
+ */
+void femu_gc_fw_check(QTestState *qts, const char *id,
+                      uint64_t v[FEMU_GC_FW_FIELDS])
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'x-gc-fw'}}", path);
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_assert_cmpint(sscanf(qdict_get_str(rsp, "return"),
+                           "%" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64
+                           " %" SCNu64 " %" SCNu64, &v[0], &v[1], &v[2],
+                           &v[3], &v[4], &v[5]), ==, FEMU_GC_FW_FIELDS);
+    g_test_message("x-gc-fw %s", qdict_get_str(rsp, "return"));
+    qobject_unref(rsp);
+}
+
+/* fw_gc_page_ns of the device with id @id */
+uint64_t femu_gc_fw_ns(QTestState *qts, const char *id)
+{
+    g_autofree char *path = g_strdup_printf("/machine/peripheral/%s", id);
+    QDict *rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                           "'path':%s,'property':'fw_gc_page_ns'}}", path);
+    uint64_t f;
+
+    g_assert_true(qdict_haskey(rsp, "return"));
+    f = qdict_get_int(rsp, "return");
+    qobject_unref(rsp);
+    return f;
+}
+
+/*
+ * The fw_gc_page_ns checks of a path test, once collection is quiet. With
+ * no slot cost, no move takes a slot. With one, every GC page takes one
+ * slot of @f ns (C0h 16, 336 and 344), no program asks to start before
+ * its slot or read end and no erase starts before a copy of its line
+ * ends. With @prog_ns, each move of the path ends exactly @f + @prog_ns
+ * after its read: one quiet LUN and the plain channel.
+ */
+void femu_gc_fw_assert(FemuCtrlState *c, uint64_t log, const char *id,
+                       uint64_t f, uint64_t prog_ns)
+{
+    uint64_t v[4];
+    uint64_t w[FEMU_GC_FW_FIELDS];
+
+    femu_gc_fw_counts(c, log, NULL, v);
+    femu_gc_fw_check(c->pdev->bus->qts, id, w);
+    g_test_message("gc_fw: %" PRIu64 " GC pages, %" PRIu64 " slots, %" PRIu64
+                   " ns", v[0], v[1], v[2]);
+    if (!f) {
+        g_assert_cmpuint(v[1], ==, 0);
+        g_assert_cmpuint(v[2], ==, 0);
+        return;
+    }
+    g_assert_cmpuint(v[0], >, 0);
+    g_assert_cmpuint(v[1], ==, v[0]);
+    g_assert_cmpuint(v[2], ==, v[1] * f);
+    g_assert_cmpuint(w[FEMU_GC_FW_PAGES], ==, v[1]);
+    g_assert_cmpuint(w[FEMU_GC_FW_SHORT], ==, 0);
+    g_assert_cmpuint(w[FEMU_GC_FW_UNSAFE], ==, 0);
+    if (prog_ns) {
+        g_assert_cmpuint(w[FEMU_GC_FW_GAP_MIN], ==, f + prog_ns);
+        g_assert_cmpuint(w[FEMU_GC_FW_GAP_MAX], ==, f + prog_ns);
+    }
+}
+
+/*
  * fw_gc_page_ns counters once collection is quiet: in @v the C0h GC pages
  * (offset 16), the moves with a firmware slot (336), their time (344) and,
  * with the device path @id, the TP moves of x-ftl-check. A background pass

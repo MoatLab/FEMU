@@ -4645,13 +4645,14 @@ void femu_test_gc_fw_refused(void *obj, void *data,
         { 1000, "'femu_mode':1,'gc_erase_order':false",
           "gc_erase_order=off" },
         { 1000, "'femu_mode':1,'pe_suspend':1", "with pe_suspend" },
-        { 1000, "'femu_mode':1,'mapping':'hybrid'",
-          "a mapping other than page or dftl" },
-        { 1000, "'femu_mode':1,'mapping':'fast'",
-          "a mapping other than page or dftl" },
         { 1000, "'femu_mode':1,'tier_mode':'static'", "the pSLC tier" },
         { 1000, "'femu_mode':0", "a mode other than bbssd or CSD" },
         { 1000, "'femu_mode':3", "a mode other than bbssd or CSD" },
+    };
+    static const char *const allowed[] = {
+        "'femu_mode':1,'namespace_modes':''",
+        "'femu_mode':1,'mapping':'hybrid'",
+        "'femu_mode':1,'mapping':'fast'",
     };
     int i;
 
@@ -4670,15 +4671,25 @@ void femu_test_gc_fw_refused(void *obj, void *data,
         g_assert_nonnull(strstr(desc, cases[i].why));
         qobject_unref(rsp);
     }
-    /* an empty namespace_modes is the default, so the slot is allowed */
-    {
-        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':{"
-                               "'driver':'femu','id':'fw-ok','addr':'5',"
-                               "'devsz_mb':16,'femu_mode':1,"
-                               "'namespace_modes':'','fw_gc_page_ns':1000}}");
+    /*
+     * Allowed: an empty namespace_modes (the default) and the paths that
+     * take slots outside line collection.
+     */
+    for (i = 0; i < ARRAY_SIZE(allowed); i++) {
+        g_autofree char *args = g_strdup_printf(
+            "{'driver':'femu','id':'fw-ok','addr':'5','devsz_mb':16,"
+            "'fw_gc_page_ns':1000,%s}", allowed[i]);
+        QDict *rsp = qtest_qmp(qts, "{'execute':'device_add','arguments':%p}",
+                               qobject_from_json(args, &error_abort));
 
+        if (qdict_haskey(rsp, "error")) {
+            g_test_message("%s refused: %s", allowed[i],
+                           qdict_get_str(qdict_get_qdict(rsp, "error"),
+                                         "desc"));
+        }
         g_assert_false(qdict_haskey(rsp, "error"));
         qobject_unref(rsp);
+        qpci_unplug_acpi_device_test(qts, "fw-ok", 5);
     }
     qos_invalidate_command_line();
 }

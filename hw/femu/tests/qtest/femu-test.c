@@ -856,6 +856,19 @@ static void femu_register_nodes(void)
             "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
             "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2"
     });
+    /*
+     * fw_gc_page_ns of 1 ns: merge copies wait for a slot, which changes no
+     * count of the oracle
+     */
+    qos_add_test("ftl-trace-hybrid-gc-fw", "femu", femu_test_hybrid_trace,
+                 &(QOSGraphTestOptions) {
+        .arg = GUINT_TO_POINTER(1),
+        .edge.extra_device_opts =
+            "serial=hybrid-oracle-gc-fw,"
+            "devsz_mb=4,femu_mode=1,mapping=hybrid,secs_per_pg=8,pgs_per_blk=4,"
+            "blks_per_pl=128,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "fw_gc_page_ns=1"
+    });
     qos_add_test("hybrid-batch-occupancy", "femu", femu_test_hybrid_batch,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
@@ -2228,6 +2241,36 @@ static void femu_register_nodes(void)
             "id=gc-fw,devsz_mb=1,femu_mode=1,secsz=512,secs_per_pg=8,"
             "pgs_per_blk=4,blks_per_pl=25,pls_per_lun=1,luns_per_ch=2,nchs=2,"
             "subsys=fdpsub,fw_gc_page_ns=1000",
+    });
+    qos_add_test("gc-fw-hybrid", "femu", femu_test_gc_fw_path,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"hybrid",
+        .edge.extra_device_opts =
+            FEMU_GC_FW_GEO ",mapping=hybrid,fw_gc_page_ns=1000000"
+    });
+    qos_add_test("gc-fw-hybrid-merge", "femu", femu_test_gc_fw_merge,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"on",
+        .edge.extra_device_opts =
+            FEMU_GC_FW_GEO ",mapping=hybrid,fw_gc_page_ns=1000000"
+    });
+    qos_add_test("gc-fw-hybrid-off", "femu", femu_test_gc_fw_merge,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts = FEMU_GC_FW_GEO ",mapping=hybrid"
+    });
+    /* a slot below tR: one taken from the pass start ends before the read */
+    qos_add_test("gc-fw-hybrid-small", "femu", femu_test_gc_fw_path,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"hybrid-small",
+        .edge.extra_device_opts =
+            FEMU_GC_FW_GEO ",mapping=hybrid,fw_gc_page_ns=2000"
+    });
+    qos_add_test("gc-fw-fast", "femu", femu_test_gc_fw_path,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"fast",
+        .edge.extra_device_opts =
+            FEMU_GC_FW_GEO ",mapping=fast,fw_gc_page_ns=1000000"
     });
     qos_add_test("gc-fw-refused", "femu", femu_test_gc_fw_refused, NULL);
     qos_add_test("rrl", "femu", femu_test_rrl,

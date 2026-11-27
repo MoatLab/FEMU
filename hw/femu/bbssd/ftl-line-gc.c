@@ -1666,21 +1666,41 @@ void ssd_gc_charge_move(struct ssd *ssd, struct ppa *old_ppa,
  * waits for the program (ssd_gc_fence()). Without gc_erase_order both
  * start now, as before. Returns the read latency plus the program latency,
  * the cost the merge adds to its request.
+ *
+ * With fw_gc_page_ns the program starts when the firmware slot of the copy
+ * ends. The copy then returns 0 and raises merge_end to its program end:
+ * the pass returns its latest end (ssd_map_reclaim()), as the slots of
+ * its copies overlap the NAND work.
  */
 uint64_t ssd_merge_copy(struct ssd *ssd, struct ppa *old_ppa,
                         struct ppa *new_ppa)
 {
+    uint64_t fw = ssd->sp.fw_gc_page_ns;
     uint64_t rlat;
     uint64_t plat;
     uint64_t ready;
+    uint64_t start;
     uint64_t done;
 
     if (ssd->sp.gc_erase_order && ssd_media_seal_read(ssd, old_ppa)) {
         ssd->gc_order_src_seals++;
     }
     ready = gc_book(ssd, old_ppa, NAND_READ, gc_clock(ssd), &rlat);
-    done = gc_book(ssd, new_ppa, NAND_WRITE, MAX(ready, gc_clock(ssd)), &plat);
+    start = MAX(ready, gc_clock(ssd));
+    if (fw) {
+        start = ssd_gc_fw_slot(ssd, ready);
+    }
+    done = gc_book(ssd, new_ppa, NAND_WRITE, start, &plat);
+    if (fw) {
+        ssd_gc_fw_take(ssd, start);
+        ssd_gc_fw_check(ssd, ready, start, done - plat, done);
+    }
+    ssd_gc_copy_seen(ssd, get_line(ssd, old_ppa), new_ppa);
     ssd_gc_fence(ssd, old_ppa, new_ppa, done);
+    if (fw) {
+        ssd->merge_end = MAX(ssd->merge_end, done);
+        return 0;
+    }
     return rlat + plat;
 }
 
