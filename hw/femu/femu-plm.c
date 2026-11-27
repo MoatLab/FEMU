@@ -474,6 +474,125 @@ static void femu_plm_flags(FemuCtrl *n, uint8_t w)
     }
 }
 
+/* the GC counters whose differences make an NDWIN record */
+static void femu_plm_gc_base(struct ssd *ssd, FemuPlmNd *g)
+{
+    g->copies = ssd->gc_write_pages;
+    g->erases = ssd->total_erases;
+    g->gc_lun_ns = ssd->plm_gc_lun_ns;
+    g->bg = ssd->plm_bg_victims;
+    g->prep = ssd->plm_prep_victims;
+    g->forced = ssd->plm_forced_victims;
+    g->wall_ns = ssd->plm_gc_wall_ns;
+}
+
+/* @a - @b; a precon reset of a counter in the NDWIN gives 0, not a wrap */
+static uint64_t femu_plm_sub(uint64_t a, uint64_t b)
+{
+    return a > b ? a - b : 0;
+}
+
+/*
+ * The NDWIN record of log C0h, at a change from window @from to @to. An
+ * exit from NDWIN publishes what GC did since the entry; an entry takes
+ * the base and the debt it starts with. LPE=1 in NDWIN does both. The
+ * caller owns the FTL, as for femu_plm_window().
+ *
+ *   entry: seq, free0, victims0, ahead0 = media end - now, counters
+ *   exit:  ms, free1, ahead_max, counters now - counters at entry
+ */
+static void femu_plm_nd_edge(FemuCtrl *n, uint8_t from, uint8_t to)
+{
+    FemuPlm *pl = &n->plm_st;
+    struct ssd *ssd = n->ssd;
+    FemuPlmNd *o = &pl->nd_open;
+    uint64_t now = femu_dev_now(n);
+    uint64_t end;
+    FemuPlmNd g;
+    FemuPlmNd d;
+
+    if (!ssd || !ssd->plm) {
+        return;
+    }
+    if (from == FEMU_PLMW_NDWIN && o->seq) {
+        femu_plm_gc_base(ssd, &g);
+        d = *o;
+        d.ms = MAX((int64_t)(now / SCALE_MS) - o->start_ms, 0);
+        d.free1 = MAX(ssd->lm.free_line_cnt, 0);
+        d.ahead_max_ns = ssd->plm_ahead_max;
+        d.copies = femu_plm_sub(g.copies, o->copies);
+        d.erases = femu_plm_sub(g.erases, o->erases);
+        d.gc_lun_ns = femu_plm_sub(g.gc_lun_ns, o->gc_lun_ns);
+        d.bg = femu_plm_sub(g.bg, o->bg);
+        d.prep = femu_plm_sub(g.prep, o->prep);
+        d.forced = femu_plm_sub(g.forced, o->forced);
+        d.wall_ns = femu_plm_sub(g.wall_ns, o->wall_ns);
+        seqlock_write_begin(&pl->seq);
+        pl->nd = d;
+        seqlock_write_end(&pl->seq);
+    }
+    if (to != FEMU_PLMW_NDWIN) {
+        return;
+    }
+    end = ssd_media_last_end(ssd);
+    femu_plm_gc_base(ssd, o);
+    o->start_ms = now / SCALE_MS;
+    o->target = MAX(ssd->plm_lines, 0);
+    o->free0 = MAX(ssd->lm.free_line_cnt, 0);
+    o->victims0 = pqueue_size(ssd->lm.victim_line_pq);
+    o->ahead0_ns = end > now ? end - now : 0;
+    ssd->plm_ahead_max = 0;
+    seqlock_write_begin(&pl->seq);
+    o->seq = ++pl->ndwins;
+    seqlock_write_end(&pl->seq);
+}
+
+/**
+ * femu_plm_stats - the plm part of log C0h
+ * @n: the controller
+ * @log: the page; bytes 352 to 495 are written
+ *
+ * The record of the last NDWIN that ended, from the seqlock, with no
+ * pause: a host reads it once per cycle, after its Set 14h DTWIN.
+ */
+void femu_plm_stats(FemuCtrl *n, FemuStatsLog *log)
+{
+    FemuPlm *pl = &n->plm_st;
+    struct ssd *ssd = n->ssd;
+    unsigned int seq;
+    uint64_t ndwins;
+    FemuPlmNd d;
+
+    if (!n->plm || !ssd || !ssd->plm) {
+        return;
+    }
+    do {
+        seq = seqlock_read_begin(&pl->seq);
+        ndwins = pl->ndwins;
+        d = pl->nd;
+    } while (seqlock_read_retry(&pl->seq, seq));
+    log->plm_ndwins = cpu_to_le64(ndwins);
+    log->plm_nd_seq = cpu_to_le64(d.seq);
+    log->plm_nd_ms = cpu_to_le64(d.ms);
+    log->plm_nd_target = cpu_to_le64(d.target);
+    log->plm_nd_free0 = cpu_to_le64(d.free0);
+    log->plm_nd_free1 = cpu_to_le64(d.free1);
+    log->plm_nd_victims0 = cpu_to_le64(d.victims0);
+    log->plm_nd_ahead0_ns = cpu_to_le64(d.ahead0_ns);
+    log->plm_nd_ahead_max_ns = cpu_to_le64(d.ahead_max_ns);
+    log->plm_nd_copies = cpu_to_le64(d.copies);
+    log->plm_nd_erases = cpu_to_le64(d.erases);
+    log->plm_nd_gc_lun_ns = cpu_to_le64(d.gc_lun_ns);
+    log->plm_nd_bg_victims = cpu_to_le64(d.bg);
+    log->plm_nd_prep_victims = cpu_to_le64(d.prep);
+    log->plm_nd_forced_victims = cpu_to_le64(d.forced);
+    log->plm_nd_gc_wall_ns = cpu_to_le64(d.wall_ns);
+    /* a 64-bit counter of the FTL thread, read live as the others */
+    log->plm_gc_lun_ns = cpu_to_le64(qatomic_read(&ssd->plm_gc_lun_ns));
+    log->plm_luns = cpu_to_le64((uint64_t)ssd->sp.nchs *
+                                ssd->sp.luns_per_ch);
+}
+
 /*
  * Enter window @w: the DTWIN amounts count from now. The caller is the
  * main loop with the data plane paused, realize and reset, or the FTL
@@ -483,6 +602,7 @@ static void femu_plm_window(FemuCtrl *n, uint8_t w)
 {
     FemuPlm *pl = &n->plm_st;
 
+    femu_plm_nd_edge(n, qatomic_read(&pl->window), w);
     femu_plm_flags(n, w);
     qatomic_set(&pl->ndwin_dtwte, pl->dtwin_ms);
     pl->rd_bytes = 0;

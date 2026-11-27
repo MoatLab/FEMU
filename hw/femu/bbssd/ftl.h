@@ -707,6 +707,18 @@ struct ssd {
     /* host pages taken; precon and a give-back never lower it */
     uint64_t plm_wr_total;
     uint64_t plm_stall_mark; /* plm_wr_total and trimmed pages at the stall */
+    /*
+     * plm: what GC did, for the NDWIN record of log C0h. The FTL thread
+     * writes them; a window change reads them under a pause or in the
+     * sweep.
+     */
+    bool plm_in_prep;       /* a preparation step runs */
+    uint64_t plm_gc_lun_ns; /* LUN time GC bookings added, all LUNs */
+    uint64_t plm_bg_victims; /* victims of background and idle passes */
+    uint64_t plm_prep_victims; /* victims of preparation steps */
+    uint64_t plm_forced_victims; /* victims of other forced passes */
+    uint64_t plm_gc_wall_ns; /* FTL thread time inside GC passes */
+    uint64_t plm_ahead_max; /* most media work ahead of now after a pass */
     struct line_mgmt lm;
 
     /* lockless ring for communication with NVMe IO thread */

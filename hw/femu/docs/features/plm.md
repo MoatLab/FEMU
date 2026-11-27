@@ -149,6 +149,32 @@ of Set 13h (Figure 423). Linux leaves AEC bit 12 clear, so it gets no
 AEN. A host that sets the bit must read log 0Bh, or the Notice type stays
 masked.
 
+### What GC did in an NDWIN
+
+Log C0h, the FEMU counter page, also records the GC of the last NDWIN
+that ended. The record runs from the NDWIN entry to its exit, a held Set
+14h included. Read it after each Set 14h DTWIN:
+
+```sh
+nvme get-log /dev/nvme0 --log-id=0xc0 --log-len=512 -b | xxd -s 352 -l 144
+```
+
+```
+ NDWIN entry: seq, free lines, victim lines, media work booked ahead
+      |
+      |  GC passes: copies, erases, LUN time booked, victims by kind
+      v
+ NDWIN exit (DTWIN or LPE=0): length, free lines, most work ahead
+      --> log C0h bytes 352 to 495 (one record, the last NDWIN)
+```
+
+The LUN time is the time each GC booking adds to the busy-until time of
+its LUN, summed over all LUNs. Divide it by the LUN count (byte 488) for
+the mean GC time of a LUN. A host read on a LUN waits for the work booked
+ahead of it, so this mean shows the read stall of the NDWIN. The fields
+are in [log page C0h](../reference/log-pages-and-counters.md#vendor-log-page-c0h).
+With plm=off the bytes stay zero.
+
 ## Refusals
 
 Realize refuses `plm=on` with an error that names the cause:

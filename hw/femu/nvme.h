@@ -1412,7 +1412,29 @@ typedef struct FemuStatsLog {
     uint64_t    erase_failures;   /* blocks an erase failure killed */
     uint64_t    gc_fw_pages;      /* GC moves with a firmware slot */
     uint64_t    gc_fw_ns;         /* firmware time of those slots, ns */
-    uint8_t     rsvd352[160];
+    /*
+     * plm=on: the GC of the last NDWIN that ended, from its entry to its
+     * exit, Set 14h hold included (femu_plm_stats()). Zero with plm=off.
+     */
+    uint64_t    plm_ndwins;       /* NDWIN entries since realize */
+    uint64_t    plm_nd_seq;       /* the entry the fields below cover */
+    uint64_t    plm_nd_ms;        /* its length */
+    uint64_t    plm_nd_target;    /* free line target (plm_ndwin_lines) */
+    uint64_t    plm_nd_free0;     /* free lines at its start */
+    uint64_t    plm_nd_free1;     /* free lines at its end */
+    uint64_t    plm_nd_victims0;  /* lines in the victim queue at its start */
+    uint64_t    plm_nd_ahead0_ns; /* media work booked ahead at its start */
+    uint64_t    plm_nd_ahead_max_ns; /* most of it after a GC pass */
+    uint64_t    plm_nd_copies;    /* pages GC moved */
+    uint64_t    plm_nd_erases;    /* blocks erased */
+    uint64_t    plm_nd_gc_lun_ns; /* LUN time GC booked, all LUNs */
+    uint64_t    plm_nd_bg_victims; /* victims of background passes */
+    uint64_t    plm_nd_prep_victims; /* of preparation steps */
+    uint64_t    plm_nd_forced_victims; /* of other forced passes */
+    uint64_t    plm_nd_gc_wall_ns; /* FTL thread time in GC passes */
+    uint64_t    plm_gc_lun_ns;    /* LUN time GC booked since realize */
+    uint64_t    plm_luns;         /* LUNs of NVM Set 1 */
+    uint8_t     rsvd496[16];
 } FemuStatsLog;
 
 /*
@@ -1875,6 +1897,8 @@ static inline void nvme_check_size(void)
     QEMU_BUILD_BUG_ON(offsetof(FemuStatsLog, rber_retry_reads) != 296);
     QEMU_BUILD_BUG_ON(offsetof(FemuStatsLog, rber_limit_reads) != 320);
     QEMU_BUILD_BUG_ON(offsetof(FemuStatsLog, erase_failures) != 328);
+    QEMU_BUILD_BUG_ON(offsetof(FemuStatsLog, plm_ndwins) != 352);
+    QEMU_BUILD_BUG_ON(offsetof(FemuStatsLog, plm_luns) != 488);
     QEMU_BUILD_BUG_ON(sizeof(NvmeTelemetryLog) != 512);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdCtrl) != 4096);
     QEMU_BUILD_BUG_ON(sizeof(NvmeIdNs) != 4096);
@@ -2861,6 +2885,29 @@ typedef struct FemuPlmSnap {
     uint64_t        dtwwe_min;      /* DTWWE low point since DTWIN entry */
 } FemuPlmSnap;
 
+/*
+ * What GC did in one NDWIN (log C0h). At entry the counters are the base;
+ * at exit the fields are the differences.
+ */
+typedef struct FemuPlmNd {
+    uint64_t        seq;            /* NDWIN entry number, from 1 */
+    int64_t         start_ms;
+    uint64_t        ms;
+    uint64_t        target;
+    uint64_t        free0;
+    uint64_t        free1;
+    uint64_t        victims0;
+    uint64_t        ahead0_ns;
+    uint64_t        ahead_max_ns;
+    uint64_t        copies;
+    uint64_t        erases;
+    uint64_t        gc_lun_ns;
+    uint64_t        bg;
+    uint64_t        prep;
+    uint64_t        forced;
+    uint64_t        wall_ns;
+} FemuPlmNd;
+
 typedef struct FemuPlm {
     /* properties, and what realize derives from them */
     uint32_t        dtwin_ms;       /* DTWTM */
@@ -2905,6 +2952,10 @@ typedef struct FemuPlm {
     QEMUTimer       *hold_timer;
     QemuSeqLock     seq;
     FemuPlmSnap     snap;
+    /* the open NDWIN (base) and the last one that ended, under @seq */
+    uint64_t        ndwins;
+    FemuPlmNd       nd_open;
+    FemuPlmNd       nd;
 } FemuPlm;
 
 typedef struct FemuCtrl {
@@ -4188,6 +4239,7 @@ uint16_t femu_plm_event_log(FemuCtrl *n, NvmeCmd *cmd, uint32_t len,
                             uint64_t off, bool rae);
 void femu_plm_event(FemuCtrl *n, uint32_t etyp);
 void femu_plm_publish(FemuCtrl *n);
+void femu_plm_stats(FemuCtrl *n, FemuStatsLog *log);
 void femu_plm_count(FemuCtrl *n, NvmeRequest *req);
 void femu_plm_step(FemuCtrl *n);
 void femu_plm_excursion(FemuCtrl *n);

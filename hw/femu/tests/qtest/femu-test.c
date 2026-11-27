@@ -2246,6 +2246,12 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = "id=plmg," FEMU_PLM_GC_LONG,
         .before = femu_plm_before,
     });
+    qos_add_test("plm-gc-record", "femu", femu_test_plm_gc_record,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmg," FEMU_PLM_GC_LONG ",plm_ndwin_lines=12",
+        .before = femu_plm_before,
+    });
     qos_add_test("plm-fence", "femu", femu_test_plm_fence,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

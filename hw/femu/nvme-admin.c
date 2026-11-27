@@ -3343,7 +3343,8 @@ static void nvme_collect_media_stats_ns(FemuCtrl *n, FemuMediaStats *st,
  * line GC is excluded. Other mappings leave these formerly reserved bytes
  * zero; existing fields and the 512-byte size are unchanged. Bytes 280 and
  * 288 hold the translation page programs and reads of mapping=dftl, which
- * the amplification at byte 0 includes.
+ * the amplification at byte 0 includes. Bytes 352 to 495 hold the GC of
+ * the last plm NDWIN, and stay zero with plm=off.
  */
 static void nvme_femu_stats_fill_ns(FemuCtrl *n, FemuStatsLog *log, int only)
 {
@@ -3410,6 +3411,10 @@ static void nvme_femu_stats_fill_ns(FemuCtrl *n, FemuStatsLog *log, int only)
     stats.erase_failures = cpu_to_le64(st.erase_fails);
     stats.gc_fw_pages = cpu_to_le64(st.gc_fw[0]);
     stats.gc_fw_ns = cpu_to_le64(st.gc_fw[1]);
+    /* plm=on: the GC of the last NDWIN; namespace 1 is NVM Set 1 */
+    if (n->plm && only <= 0) {
+        femu_plm_stats(n, &stats);
+    }
     *log = stats;
 }
 

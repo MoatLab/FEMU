@@ -645,8 +645,8 @@ void ssd_wait_note(FemuWaitParts *p, const NandOpCause *w)
     p->ns[FEMU_WAIT_ECC] += w->ecc_ns;
 }
 
-uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
-                            struct nand_cmd *ncmd)
+static uint64_t ssd_advance_one(struct ssd *ssd, struct ppa *ppa,
+                                struct nand_cmd *ncmd)
 {
     uint64_t stime = (ncmd->stime == 0) ?
         ssd_now(ssd) : ncmd->stime;
@@ -768,6 +768,40 @@ uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
     return c.latency_ns;
 }
 
+/*
+ * plm: the LUN time one GC booking added, as the move of the LUN's
+ * busy-until time past the later of @before (its end before the
+ * booking) and @stime. A booking behind queued work adds its own time
+ * only, so the sum over an NDWIN is the GC time the LUNs carry.
+ */
+static void ssd_plm_gc_time(struct ssd *ssd, struct nand_lun *lun,
+                            uint64_t before, uint64_t stime)
+{
+    uint64_t end = nand_lun_end(lun);
+    uint64_t from = MAX(before, stime);
+
+    if (end > from) {
+        ssd->plm_gc_lun_ns += end - from;
+    }
+}
+
+uint64_t ssd_advance_status(struct ssd *ssd, struct ppa *ppa,
+                            struct nand_cmd *ncmd)
+{
+    struct nand_lun *lun;
+    uint64_t before;
+    uint64_t lat;
+
+    if (likely(!ssd->plm) || ncmd->type != GC_IO) {
+        return ssd_advance_one(ssd, ppa, ncmd);
+    }
+    lun = get_lun(ssd, ppa);
+    before = nand_lun_end(lun);
+    lat = ssd_advance_one(ssd, ppa, ncmd);
+    ssd_plm_gc_time(ssd, lun, before, ncmd->at);
+    return lat;
+}
+
 /**
  * ssd_media_seal - keep the work booked on the LUN of @ppa where it is
  * @ssd: the device
@@ -887,7 +921,10 @@ uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
                                        int nppas, struct nand_cmd *ncmd)
 {
     NandLoc locs[1 << PL_BITS];
+    struct nand_lun *lun = NULL;
+    uint64_t before = 0;
     uint64_t stime;
+    uint64_t lat;
     NandMediaOp op;
     int i;
 
@@ -907,6 +944,10 @@ uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
 
     stime = (ncmd->stime == 0) ?
         ssd_now(ssd) : ncmd->stime;
+    if (unlikely(ssd->plm) && ncmd->type == GC_IO) {
+        lun = get_lun(ssd, &ppas[0]);
+        before = nand_lun_end(lun);
+    }
 
     for (i = 0; i < nppas; i++) {
         if (op == NAND_MEDIA_READ) {
@@ -919,7 +960,13 @@ uint64_t ssd_advance_status_multiplane(struct ssd *ssd, struct ppa *ppas,
     ssd->media_ops[op]++;
     qatomic_set(&ssd->media_plane_ops[op],
                 qatomic_read(&ssd->media_plane_ops[op]) + nppas);
-    return nand_media_multiplane(&ssd->media, locs, nppas, op, stime).latency_ns;
+    lat = nand_media_multiplane(&ssd->media, locs, nppas, op,
+                                stime).latency_ns;
+    /* the planes of one multi-plane command share one LUN */
+    if (lun) {
+        ssd_plm_gc_time(ssd, lun, before, stime);
+    }
+    return lat;
 }
 
 /**

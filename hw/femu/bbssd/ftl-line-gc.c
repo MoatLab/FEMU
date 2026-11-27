@@ -8,6 +8,7 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
+#include "qemu/timer.h"
 #include "ftl.h"
 #include "ftl-internal.h"
 #include "ftl-gc-fw-math.h"
@@ -2672,6 +2673,15 @@ static int do_gc_pass(struct ssd *ssd, bool force)
     if (!reclaim_line(ssd, victim_line, ssd->sp.gc_copyback)) {
         return -1;
     }
+    if (unlikely(ssd->plm)) {
+        if (!force) {
+            ssd->plm_bg_victims++;
+        } else if (ssd->plm_in_prep) {
+            ssd->plm_prep_victims++;
+        } else {
+            ssd->plm_forced_victims++;
+        }
+    }
     if (force && ssd->sp.enable_gc_delay) {
         note_forced_end(ssd);
     }
@@ -2683,13 +2693,33 @@ static int do_gc_pass(struct ssd *ssd, bool force)
     return 0;
 }
 
+/*
+ * plm: after a GC pass, the FTL thread time it took, and the media work
+ * booked ahead of now. A large lead after a pass is the block a host
+ * read waits for.
+ */
+static void ssd_plm_gc_note(struct ssd *ssd, int64_t t0)
+{
+    uint64_t now = ssd_now(ssd);
+    uint64_t end = ssd_media_last_end(ssd);
+
+    ssd->plm_gc_wall_ns += MAX(get_clock() - t0, 0);
+    if (end > now) {
+        ssd->plm_ahead_max = MAX(ssd->plm_ahead_max, end - now);
+    }
+}
+
 /* one pass, which may finish the paced line first, on the pass clock */
 int do_gc(struct ssd *ssd, bool force)
 {
+    int64_t t0 = unlikely(ssd->plm) ? get_clock() : 0;
     bool opened = ssd_gc_pass_begin(ssd);
     int ret = do_gc_pass(ssd, force);
 
     ssd_gc_pass_end(ssd, opened);
+    if (unlikely(ssd->plm)) {
+        ssd_plm_gc_note(ssd, t0);
+    }
     return ret;
 }
 
@@ -3193,6 +3223,7 @@ void ssd_plm_prep_step(struct ssd *ssd)
     /* one clock for the step: host time between victims adds nothing */
     bool opened = ssd_gc_pass_begin(ssd);
 
+    ssd->plm_in_prep = true;
     for (int i = 0; i < ssd->sp.pgs_per_line &&
                     ssd->lm.free_line_cnt <= f0; i++) {
         uint64_t c0 = ssd->gc_write_pages;
@@ -3205,6 +3236,7 @@ void ssd_plm_prep_step(struct ssd *ssd)
             break;
         }
     }
+    ssd->plm_in_prep = false;
     ssd_gc_pass_end(ssd, opened);
     ssd->plm_steps++;
     if (ssd->lm.free_line_cnt <= f0) {

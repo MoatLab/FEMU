@@ -1273,6 +1273,7 @@ void femu_test_plm_no_pause(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_defer(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_ndwin_prep(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_prep_steady(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_gc_record(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_fence(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_reclaim(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_buffer(void *obj, void *data, QGuestAllocator *alloc);

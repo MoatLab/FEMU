@@ -56,8 +56,26 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 328 | 8 | Blocks an erase failure killed (`erase_fail_ppm`); each one also counts as a grown bad block when it leaves service |
 | 336 | 8 | Page moves that took a GC firmware slot (`fw_gc_page_ns`): GC, read reclaim, refresh, wear levelling and translation page moves |
 | 344 | 8 | Firmware time of those slots in ns: core time, not the host wait (`fw_gc_page_ns`). Offsets 336 and 344 are read live and count from realize; `persist_ftl` does not keep them |
+| 352 | 8 | `plm=on`: NDWIN entries since realize. Offsets 360 to 472 describe the last NDWIN that ended, from its entry to its exit, a held Set 14h included ([PLM](../features/plm.md#what-gc-did-in-an-ndwin)). With `plm=off`, bytes 352-495 read as zero |
+| 360 | 8 | The entry number of that NDWIN, from 1; 0 before the first NDWIN ends |
+| 368 | 8 | Its length in ms |
+| 376 | 8 | Its free line target (`plm_ndwin_lines`) |
+| 384 | 8 | Free lines at its entry |
+| 392 | 8 | Free lines at its exit |
+| 400 | 8 | Lines in the victim queue at its entry |
+| 408 | 8 | Media work booked ahead of now at its entry, in ns: the latest LUN, channel or window end less now |
+| 416 | 8 | The most media work booked ahead of now after a GC pass in it, in ns |
+| 424 | 8 | Pages GC, read reclaim and wear levelling moved in it (as offset 16) |
+| 432 | 8 | Blocks erased in it |
+| 440 | 8 | LUN time GC bookings added in it, in ns, summed over all LUNs: each booking adds the time it moves the busy-until time of its LUN |
+| 448 | 8 | Victims of background and idle GC passes in it |
+| 456 | 8 | Victims of preparation steps in it (toward offset 376) |
+| 464 | 8 | Victims of other forced passes in it: the write path and maintenance |
+| 472 | 8 | FTL thread time inside GC passes in it, in ns (host time, not media time) |
+| 480 | 8 | `plm=on`: LUN time GC bookings added since realize, in ns, as offset 440 |
+| 488 | 8 | `plm=on`: LUNs of NVM Set 1, to turn offset 440 into the mean of one LUN |
 
-Bytes 4-7 and 352-511 are reserved and read as zero. The counters are summed
+Bytes 4-7 and 496-511 are reserved and read as zero. The counters are summed
 over the controller's bbssd, CSD and KV namespaces (the block read count is the
 largest of them); other modes leave them zero. The write amplification factor
 stays zero until the host has written a page.

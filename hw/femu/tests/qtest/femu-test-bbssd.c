@@ -19163,6 +19163,15 @@ void femu_test_plm_golden_off(void *obj, void *data, QGuestAllocator *alloc)
         }
     }
 
+    /* plm=off: the plm bytes of log C0h stay zero */
+    qtest_memset(qts, buf, 0xa5, 4096);
+    g_assert_cmphex(FEMU_SC(femu_get_log(&c, FEMU_LOG_FEMU_STATS, buf, 512,
+                                         0)), ==, NVME_SUCCESS);
+    qtest_memread(qts, buf, data4k[2], 512);
+    for (int i = 352; i < 512; i++) {
+        g_assert_cmpuint(data4k[2][i], ==, 0);
+    }
+
     /* as on master: no PLM features or logs */
     for (uint8_t fid = 0x13; fid <= 0x14; fid++) {
         NvmeCmd cmd = { 0 };
@@ -20257,6 +20266,189 @@ void femu_test_plm_prep_steady(void *obj, void *data, QGuestAllocator *alloc)
     g_test_message("Format: %" PRId64 " steps, %" PRId64 " free lines",
                    v[FEMU_PLMF_STEPS] - steps, v[FEMU_PLMF_FREE]);
     g_assert_cmpint(v[FEMU_PLMF_STEPS], >, steps);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, buf);
+}
+
+/* offsets of the plm NDWIN record in log C0h */
+enum {
+    FEMU_PLMR_NDWINS = 352,
+    FEMU_PLMR_SEQ = 360,
+    FEMU_PLMR_MS = 368,
+    FEMU_PLMR_TARGET = 376,
+    FEMU_PLMR_FREE0 = 384,
+    FEMU_PLMR_FREE1 = 392,
+    FEMU_PLMR_VICTIMS0 = 400,
+    FEMU_PLMR_AHEAD0 = 408,
+    FEMU_PLMR_AHEAD_MAX = 416,
+    FEMU_PLMR_COPIES = 424,
+    FEMU_PLMR_ERASES = 432,
+    FEMU_PLMR_GC_LUN = 440,
+    FEMU_PLMR_BG = 448,
+    FEMU_PLMR_PREP = 456,
+    FEMU_PLMR_FORCED = 464,
+    FEMU_PLMR_WALL = 472,
+    FEMU_PLMR_GC_TOTAL = 480,
+    FEMU_PLMR_LUNS = 488,
+};
+
+/* log C0h into @log */
+static void femu_plm_c0(FemuCtrlState *c, uint64_t buf, uint8_t *log)
+{
+    g_assert_cmphex(FEMU_SC(femu_get_log(c, FEMU_LOG_FEMU_STATS, buf, 512,
+                                         0)), ==, NVME_SUCCESS);
+    qtest_memread(c->pdev->bus->qts, buf, log, 512);
+}
+
+static uint64_t femu_plmr(const uint8_t *log, int off)
+{
+    return ldq_le_p(log + off);
+}
+
+/*
+ * The NDWIN record of log C0h (design S7a), on one LUN with flat timing:
+ * a copy books tR + tPROG = 240 us and an erase tBERS = 2 ms.
+ *
+ *   NDWIN 1 (LPE=1 to Set 14h DTWIN): no GC, every counter 0
+ *   DTWIN:   all pages once, then even pages only: every data line holds
+ *            8 of 16 valid pages; down to 6 free lines; 300 ms idle
+ *   NDWIN 2: preparation to 12 free lines, then 300 ms idle; Set 14h
+ *            DTWIN closes the record:
+ *              free 6 --> 12, target 12, nothing booked ahead at entry
+ *              copies, erases = the x-plm-ftl differences; >= 48 copies
+ *              every victim a preparation victim; 1 erase per victim
+ *              LUN time = copies x 240 us + erases x 2 ms, exactly
+ *              most booked ahead after a pass: >= 3 ms (8 copies and an
+ *              erase from one clock), at most the LUN time
+ *   NDWIN 3: target already met: no GC, and the lead of NDWIN 2 is gone
+ *
+ * It catches a record that counts host work, mixes the victim kinds,
+ * takes its debt as an absolute time, or keeps the lead of an old NDWIN.
+ */
+void femu_test_plm_gc_record(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    const uint64_t copy_ns = 40000 + 200000;
+    const uint64_t erase_ns = 2000000;
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+    uint8_t log[512];
+    int64_t t0;
+    int64_t t1;
+    uint64_t copies;
+    uint64_t erases;
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmg", 1000000);
+    femu_plm_start(&c, buf, 1);
+    femu_plm_c0(&c, buf, log);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_NDWINS), ==, 1);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_SEQ), ==, 1);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_TARGET), ==, 12);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_LUNS), ==, 1);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_FREE0), >=, 12);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_FREE1), ==,
+                     femu_plmr(log, FEMU_PLMR_FREE0));
+    for (int off = FEMU_PLMR_AHEAD_MAX; off <= FEMU_PLMR_GC_TOTAL;
+         off += 8) {
+        g_assert_cmpuint(femu_plmr(log, off), ==, 0);
+    }
+
+    qtest_memset(qts, buf, 0x6d, FEMU_DATA_SIZE);
+    for (int lpn = 0; lpn < FEMU_PLM_USER_PGS; lpn++) {
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    for (int k = 0; ; k++) {
+        int lpn = (2 * k) % FEMU_PLM_USER_PGS;
+
+        if (k % 16 == 0) {
+            femu_plm_ftl(qts, "plmg", v);
+            if (v[FEMU_PLMF_FREE] <= 6) {
+                break;
+            }
+        }
+        g_assert_cmpint(k, <, FEMU_PLM_USER_PGS);
+        g_assert_cmpint(FEMU_SC(femu_rw(&c, NVME_CMD_WRITE,
+                                        (uint64_t)lpn * 8, buf)), ==,
+                        NVME_SUCCESS);
+    }
+    g_usleep(300 * 1000);
+    femu_plm_ftl(qts, "plmg", v0);
+    g_assert_cmpint(v0[FEMU_PLMF_FREE], ==, 6);
+
+    t0 = g_get_monotonic_time();
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 2, buf), ==,
+                    NVME_SUCCESS);
+    femu_plm_wait(qts, "plmg", FEMU_PLMF_FREE, 12, 10000, v);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], ==, 12);
+    g_usleep(300 * 1000);
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 1, buf), ==,
+                    NVME_SUCCESS);
+    t1 = g_get_monotonic_time();
+    femu_plm_ftl(qts, "plmg", v);
+    femu_plm_c0(&c, buf, log);
+    copies = femu_plmr(log, FEMU_PLMR_COPIES);
+    erases = femu_plmr(log, FEMU_PLMR_ERASES);
+    g_test_message("NDWIN 2: %" PRIu64 " ms, free %" PRIu64 " --> %" PRIu64
+                   ", %" PRIu64 " victims at entry, %" PRIu64 " copies, %"
+                   PRIu64 " erases, LUN time %" PRIu64 " ns, most ahead %"
+                   PRIu64 " ns, FTL time %" PRIu64 " ns",
+                   femu_plmr(log, FEMU_PLMR_MS),
+                   femu_plmr(log, FEMU_PLMR_FREE0),
+                   femu_plmr(log, FEMU_PLMR_FREE1),
+                   femu_plmr(log, FEMU_PLMR_VICTIMS0), copies, erases,
+                   femu_plmr(log, FEMU_PLMR_GC_LUN),
+                   femu_plmr(log, FEMU_PLMR_AHEAD_MAX),
+                   femu_plmr(log, FEMU_PLMR_WALL));
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_NDWINS), ==, 2);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_SEQ), ==, 2);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_MS), >=, 300);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_MS), <=, (t1 - t0) / 1000 + 2);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_TARGET), ==, 12);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_FREE0), ==, 6);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_FREE1), ==, 12);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_VICTIMS0), >=, 6);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_AHEAD0), ==, 0);
+    g_assert_cmpuint(copies, ==, v[FEMU_PLMF_COPIES] - v0[FEMU_PLMF_COPIES]);
+    g_assert_cmpuint(erases, ==, v[FEMU_PLMF_ERASES] - v0[FEMU_PLMF_ERASES]);
+    g_assert_cmpuint(copies, >=, 48);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_PREP), ==, erases);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_BG), ==, 0);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_FORCED), ==, 0);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_GC_LUN), ==,
+                     copies * copy_ns + erases * erase_ns);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_GC_TOTAL), ==,
+                     femu_plmr(log, FEMU_PLMR_GC_LUN));
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_AHEAD_MAX), >=, 3000000);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_AHEAD_MAX), <=,
+                     femu_plmr(log, FEMU_PLMR_GC_LUN));
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_WALL), >, 0);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_WALL), <, 1000000000);
+
+    /* a later read in DTWIN gives the same record */
+    femu_plm_c0(&c, buf, log);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_SEQ), ==, 2);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_COPIES), ==, copies);
+
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 2, buf), ==,
+                    NVME_SUCCESS);
+    g_usleep(100 * 1000);
+    g_assert_cmphex(femu_plm_set(&c, 0x14, false, 0, 1, 1, buf), ==,
+                    NVME_SUCCESS);
+    femu_plm_c0(&c, buf, log);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_SEQ), ==, 3);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_FREE0), ==, 12);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_COPIES), ==, 0);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_ERASES), ==, 0);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_GC_LUN), ==, 0);
+    g_assert_cmpuint(femu_plmr(log, FEMU_PLMR_AHEAD_MAX), ==, 0);
     femu_queue_free(&c, &c.io);
     femu_disable(&c);
     guest_free(alloc, buf);
