@@ -38,4 +38,17 @@ static inline uint64_t gc_fw_slot_end(uint64_t ready, uint64_t now,
     return start + cost;
 }
 
+/**
+ * gc_fw_merge_lat - what a merge pass with slots adds to its request
+ * @end_max: the latest copy program end of the pass, 0 for no copy
+ * @p0: the start of the pass
+ *
+ * The copies of one merge overlap their slots, so the request waits for
+ * the last program end, not for the sum of each copy.
+ */
+static inline uint64_t gc_fw_merge_lat(uint64_t end_max, uint64_t p0)
+{
+    return end_max > p0 ? end_max - p0 : 0;
+}
+
 #endif

@@ -1334,6 +1334,20 @@ static uint64_t gc_book(struct ssd *ssd, struct ppa *ppa, int cmd,
     return c.at + *lat;
 }
 
+/**
+ * ssd_gc_test_hold - stall the host after a collection read (x-gc-hold-us)
+ * @ssd: the device
+ *
+ * A qtest stands for a slow host with it. A booking on model time does
+ * not move.
+ */
+void ssd_gc_test_hold(struct ssd *ssd)
+{
+    if (unlikely(ssd->n && qatomic_read(&ssd->n->test_gc_hold_us))) {
+        g_usleep(qatomic_read(&ssd->n->test_gc_hold_us));
+    }
+}
+
 /*
  * Read a valid page for collection, from now. Returns when its data is in
  * controller DRAM, or 0 when collection is not timed.
@@ -1348,10 +1362,7 @@ uint64_t gc_read_page(struct ssd *ssd, struct ppa *ppa)
     if (ssd->sp.enable_gc_delay) {
         uint64_t lat;
 
-        /* x-gc-hold-us: a slow host, which must not move the booking */
-        if (unlikely(ssd->n && qatomic_read(&ssd->n->test_gc_hold_us))) {
-            g_usleep(qatomic_read(&ssd->n->test_gc_hold_us));
-        }
+        ssd_gc_test_hold(ssd);
         if (ssd->sp.gc_erase_order && ssd_media_seal_read(ssd, ppa)) {
             ssd->gc_order_src_seals++;
         }
@@ -1378,12 +1389,112 @@ uint64_t ssd_gc_fw_slot(struct ssd *ssd, uint64_t ready)
                           ssd->sp.fw_gc_page_ns);
 }
 
-/* take the slot that ends at @end, from ssd_gc_fw_slot(), and count it */
+/**
+ * ssd_gc_fw_slot_after - the firmware slot of a move on the caller's clock
+ * @ssd: the device
+ * @ready: when the read data of the move is in DRAM
+ *
+ * For moves outside a collection pass (tier folds, key-value collection),
+ * which book from their own model time. The read never ends before that
+ * time, so @ready stands for "now" too, and host time does not move the
+ * slot.
+ */
+uint64_t ssd_gc_fw_slot_after(struct ssd *ssd, uint64_t ready)
+{
+    return gc_fw_slot_end(ready, ready, ssd->gc_fw_free,
+                          ssd->sp.fw_gc_page_ns);
+}
+
+/**
+ * ssd_gc_fw_take - take a firmware slot once its move is booked
+ * @ssd: the device
+ * @end: the slot end, from ssd_gc_fw_slot() or ssd_gc_fw_slot_after()
+ *
+ * Key-value commands take slots on the pollers, and the C0h log reads the
+ * counts with no lock, so the counts are written atomically.
+ */
 void ssd_gc_fw_take(struct ssd *ssd, uint64_t end)
 {
     ssd->gc_fw_free = end;
-    ssd->gc_fw_pages++;
-    ssd->gc_fw_ns += ssd->sp.fw_gc_page_ns;
+    qatomic_set(&ssd->gc_fw_pages, ssd->gc_fw_pages + 1);
+    qatomic_set(&ssd->gc_fw_ns, ssd->gc_fw_ns + ssd->sp.fw_gc_page_ns);
+}
+
+/**
+ * ssd_gc_fw_check - check one move with a firmware slot (x-gc-fw)
+ * @ssd: the device
+ * @ready: when its read ends, from the read booking
+ * @end: when its slot ends
+ * @at: the start its program asked for (struct nand_cmd at)
+ * @done: when its program ends, from the program booking
+ *
+ * A program asked to start before its slot or read end counts in
+ * gc_fw_short. The gap of the move, @done - @ready, sets the least and the
+ * most gap: on one quiet LUN it is the slot plus the program time.
+ */
+void ssd_gc_fw_check(struct ssd *ssd, uint64_t ready, uint64_t end,
+                     uint64_t at, uint64_t done)
+{
+    uint64_t gap = done > ready ? done - ready : 0;
+
+    if (at < end || at < ready) {
+        ssd->gc_fw_short++;
+    }
+    if (!ssd->gc_fw_gaps || gap < ssd->gc_fw_gap_min) {
+        ssd->gc_fw_gap_min = gap;
+    }
+    ssd->gc_fw_gap_max = MAX(ssd->gc_fw_gap_max, gap);
+    ssd->gc_fw_gaps++;
+}
+
+/**
+ * ssd_gc_copy_seen - note a copy program for the erase check
+ * @ssd: the device
+ * @line: the line the page moved out of
+ * @dst: the page the copy programmed, booked just now
+ *
+ * Copies book at once, so the LUN end of @dst is the end of that program.
+ * A later erase of @line must not start before it (ssd_gc_erase_check()).
+ */
+void ssd_gc_copy_seen(struct ssd *ssd, struct line *line, struct ppa *dst)
+{
+    line->copy_seen = MAX(line->copy_seen, nand_lun_end(get_lun(ssd, dst)));
+}
+
+/**
+ * ssd_gc_erase_check - count an erase that starts before a copy ends
+ * @ssd: the device
+ * @line: the line to erase
+ * @start: the start the erase asks for, 0 for now
+ *
+ * Adds one to gc_copy_unsafe when @start is before the copy end that
+ * ssd_gc_copy_seen() noted, then clears the note. It changes no booking.
+ */
+void ssd_gc_erase_check(struct ssd *ssd, struct line *line, uint64_t start)
+{
+    if (line->copy_seen) {
+        if ((start ? start : ssd_now(ssd)) < line->copy_seen) {
+            ssd->gc_copy_unsafe++;
+        }
+        line->copy_seen = 0;
+    }
+}
+
+/**
+ * ssd_gc_fw_report - the fw_gc_page_ns checks, for x-gc-fw
+ * @ssd: the device
+ *
+ * Returns "pages ns short gap_min gap_max unsafe", the counts named in
+ * struct ssd. The caller frees it.
+ */
+char *ssd_gc_fw_report(struct ssd *ssd)
+{
+    return g_strdup_printf("%" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64
+                           " %" PRIu64 " %" PRIu64,
+                           qatomic_read(&ssd->gc_fw_pages),
+                           qatomic_read(&ssd->gc_fw_ns), ssd->gc_fw_short,
+                           ssd->gc_fw_gap_min, ssd->gc_fw_gap_max,
+                           ssd->gc_copy_unsafe);
 }
 
 /**
@@ -1436,6 +1547,7 @@ uint64_t ssd_gc_erase_start(struct ssd *ssd, struct line *victim,
     *fence = victim->gc_fence;
     victim->gc_fence = 0;
     if (!*fence) {
+        ssd_gc_erase_check(ssd, victim, ssd->gc_pass_ns);
         return ssd->gc_pass_ns;
     }
     if (ssd->gc_check_ns) {
@@ -1448,12 +1560,15 @@ uint64_t ssd_gc_erase_start(struct ssd *ssd, struct line *victim,
     now = gc_clock(ssd);
     ssd->gc_order_victims++;
     if (*fence <= now) {
+        ssd_gc_erase_check(ssd, victim, ssd->gc_pass_ns);
         return ssd->gc_pass_ns;
     }
     if (ssd->sp.gc_erase_order) {
+        ssd_gc_erase_check(ssd, victim, *fence);
         return *fence;
     }
     ssd->gc_order_early++;
+    ssd_gc_erase_check(ssd, victim, 0);
     return 0;
 }
 
@@ -2301,6 +2416,7 @@ void mark_line_free(struct ssd *ssd, struct ppa *ppa)
     line->stream_tag = 0;
     line->kind = LINE_DATA;
     line->gc_fence = 0;
+    line->copy_seen = 0;
     /* move this line to free line list */
     QTAILQ_INSERT_TAIL(&lm->free_line_list, line, entry);
     lm->free_line_cnt++;

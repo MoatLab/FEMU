@@ -6977,6 +6977,36 @@ static char *femu_test_gc_order(Object *obj, Error **errp)
     return report;
 }
 
+/*
+ * qtest only: the fw_gc_page_ns checks of namespace 1 (ssd_gc_fw_report()).
+ * Key-value commands change them on the pollers under the lock of their
+ * namespace; the other modes change them on the FTL thread.
+ */
+static char *femu_test_gc_fw(Object *obj, Error **errp)
+{
+    FemuCtrl *n = FEMU(obj);
+    NvmeNamespace *ns = nvme_ns(n, 1);
+    FemuKvssdState *kv = ns ? kvssd_ns_state(n, ns) : NULL;
+    char *report;
+    bool resume;
+
+    if (kv && ns->ssd) {
+        qemu_mutex_lock(&kv->lock);
+        report = ssd_gc_fw_report(ns->ssd);
+        qemu_mutex_unlock(&kv->lock);
+        return report;
+    }
+    if (!ns || !(NS_BBSSD(ns) || NS_CSD(ns)) || !ns->ssd) {
+        error_setg(errp, "the GC firmware check requires a bbssd, CSD or "
+                   "key-value namespace 1");
+        return NULL;
+    }
+    resume = nvme_pause_pollers(n);
+    report = ssd_gc_fw_report(ns->ssd);
+    nvme_resume_pollers(n, resume);
+    return report;
+}
+
 /* qtest only: the GC levels of namespace 1 (ssd_gc_levels_report()) */
 static char *femu_test_gc_lines(Object *obj, Error **errp)
 {
@@ -7978,6 +8008,7 @@ static void femu_instance_init(Object *obj)
         object_property_add_str(obj, "x-flush-check", femu_test_flush_check,
                                 NULL);
         object_property_add_str(obj, "x-gc-order", femu_test_gc_order, NULL);
+        object_property_add_str(obj, "x-gc-fw", femu_test_gc_fw, NULL);
         object_property_add_str(obj, "x-gc-clock", femu_test_gc_clock, NULL);
         object_property_add_str(obj, "x-gc-lines", femu_test_gc_lines, NULL);
         femu_test_add_u32(obj, "x-gc-hold-us",

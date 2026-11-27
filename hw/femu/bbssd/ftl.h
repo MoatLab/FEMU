@@ -388,6 +388,12 @@ typedef struct line {
     int kind;
     /* the latest end of a copy program of a page collection moved out */
     uint64_t gc_fence;
+    /*
+     * fw_gc_page_ns check: the latest LUN end seen after a copy program of
+     * a page moved out. An erase of the line that starts before it counts
+     * in gc_copy_unsafe. It changes no booking.
+     */
+    uint64_t copy_seen;
 } line;
 
 /* wp: record next write addr */
@@ -1039,6 +1045,19 @@ struct ssd {
     uint64_t gc_fw_pages;
     uint64_t gc_fw_ns;
     /*
+     * fw_gc_page_ns checks (x-gc-fw), read from the media bookings: the
+     * programs asked to start before their slot or read end, the least and
+     * the most program end minus read end over gc_fw_gaps moves, and the
+     * erases asked to start before a copy program of their line ended.
+     */
+    uint64_t gc_fw_short;
+    uint64_t gc_fw_gap_min;
+    uint64_t gc_fw_gap_max;
+    uint64_t gc_fw_gaps;
+    uint64_t gc_copy_unsafe;
+    /* fw_gc_page_ns: the latest copy program end of the open merge pass */
+    uint64_t merge_end;
+    /*
      * gc_erase_order: the device time at the start of the open collection
      * pass, 0 when no pass is open (ssd_gc_pass_begin(), gc_clock()).
      */
@@ -1260,6 +1279,7 @@ uint64_t ssd_buffer_flush_seal(struct ssd *ssd, uint64_t stime);
 char *ssd_flush_report(struct ssd *ssd);
 char *ssd_gc_order_report(struct ssd *ssd);
 char *ssd_gc_clock_report(struct ssd *ssd);
+char *ssd_gc_fw_report(struct ssd *ssd);
 uint64_t ssd_write_zeroes(struct ssd *ssd, NvmeRequest *req);
 void ssd_release_stream(struct ssd *ssd, unsigned slot);
 void ssd_deallocate_fdp_ns(struct ssd *ssd, NvmeNamespace *ns);

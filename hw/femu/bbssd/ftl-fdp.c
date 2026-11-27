@@ -1251,6 +1251,7 @@ static void fdp_ru_reset(struct ssd *ssd, FemuReclaimUnit *ru)
         ru->lines[i]->open_time = 0;
         /* a reset-all erase skips collection, so no fence outlives it */
         ru->lines[i]->gc_fence = 0;
+        ru->lines[i]->copy_seen = 0;
     }
 
     ru->vpc = 0;

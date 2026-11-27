@@ -648,6 +648,12 @@ bool ssd_init(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
     ssd->gc_fw_free = 0;
     ssd->gc_fw_pages = 0;
     ssd->gc_fw_ns = 0;
+    ssd->gc_fw_short = 0;
+    ssd->gc_fw_gap_min = 0;
+    ssd->gc_fw_gap_max = 0;
+    ssd->gc_fw_gaps = 0;
+    ssd->gc_copy_unsafe = 0;
+    ssd->merge_end = 0;
     ssd->victim_digest = 0;
     ssd->forced_gc_timed = 0;
     ssd->forced_gc_end = 0;
@@ -1196,8 +1202,8 @@ uint64_t ssd_gc_copyback_pages(struct ssd *ssd)
 /* fw_gc_page_ns: the moves that took a firmware slot, and its total time */
 void ssd_gc_fw_stats(struct ssd *ssd, uint64_t *pages, uint64_t *ns)
 {
-    *pages = ssd->gc_fw_pages;
-    *ns = ssd->gc_fw_ns;
+    *pages = qatomic_read(&ssd->gc_fw_pages);
+    *ns = qatomic_read(&ssd->gc_fw_ns);
 }
 
 void ssd_pace_stats(struct ssd *ssd, uint64_t *copies, uint64_t *lines,

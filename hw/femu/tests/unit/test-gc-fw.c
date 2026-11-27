@@ -9,6 +9,10 @@
  *   read on LUN s at now -> slot on the GC firmware line -> program on
  *   LUN d at the slot end; a copyback takes its slot first
  *
+ * Moves outside a collection pass (tier folds, key-value collection) take
+ * the slot from the read end alone, and a merge pass with slots returns
+ * its latest program end (gc_fw_merge_lat()).
+ *
  * Output is TAP, as test-nand-media.c, and it builds the same way.
  */
 #include "qemu/osdep.h"
@@ -20,6 +24,7 @@
 #define TR    10000ULL
 #define TPROG 40000ULL
 #define F     25000ULL
+#define F11   30000ULL
 
 static uint64_t ch_avail[1];
 static uint64_t lun_avail[NLUNS];
@@ -49,6 +54,11 @@ static NandMedia media;
 static bool media_up;
 static uint64_t fw_free;
 static uint64_t fw_cost;
+
+static uint64_t max_u64(uint64_t a, uint64_t b)
+{
+    return a > b ? a : b;
+}
 
 static void check(const char *what, uint64_t got, uint64_t want)
 {
@@ -255,6 +265,219 @@ static void test_slot_math(void)
           (1ULL << 40) + (1ULL << 31));
 }
 
+/*
+ * One merge copy in a pass that starts at @p0, as ssd_merge_copy() books
+ * it. Returns what the copy adds on its own: the read plus the program
+ * latency. *@end_max takes the end of its program.
+ */
+static uint64_t merge_copy(uint32_t src, uint32_t dst, uint64_t p0,
+                           uint64_t *end_max)
+{
+    NandLoc s = on_lun(src);
+    NandLoc d = on_lun(dst);
+    uint64_t ready = nand_media_op(&media, &s, NAND_MEDIA_READ, p0).done_ns;
+    uint64_t start = ready > p0 ? ready : p0;
+    uint64_t done;
+
+    if (fw_cost) {
+        start = gc_fw_slot_end(ready, p0, fw_free, fw_cost);
+        fw_free = start;
+    }
+    done = nand_media_op(&media, &d, NAND_MEDIA_PROGRAM, start).done_ns;
+    *end_max = done > *end_max ? done : *end_max;
+    return (ready - p0) + (done - start);
+}
+
+/*
+ * What a merge of the @n copies in @src and @dst returns: with a cost the
+ * latest program end from the pass start, else the sum of the copies.
+ */
+static uint64_t merge(const uint32_t *src, const uint32_t *dst, int n,
+                      uint64_t *sum)
+{
+    uint64_t end_max = 0;
+
+    *sum = 0;
+    for (int i = 0; i < n; i++) {
+        *sum += merge_copy(src[i], dst[i], T0, &end_max);
+    }
+    return fw_cost ? gc_fw_merge_lat(end_max, T0) : *sum;
+}
+
+/* U10: a merge on one LUN returns its end, not the sum of its copies */
+static void test_merge_one_lun(void)
+{
+    const uint32_t lun0[3] = { 0, 0, 0 };
+    uint64_t end_max = 0;
+    uint64_t sum;
+
+    printf("# merge, one LUN, three copies\n");
+    setup(F);
+    merge_copy(0, 0, T0, &end_max);
+    check("U10 copy 1 ends", end_max - T0, 75000);
+    merge_copy(0, 0, T0, &end_max);
+    check("U10 copy 2 ends", end_max - T0, 150000);
+    merge_copy(0, 0, T0, &end_max);
+    check("U10 copy 3 ends", end_max - T0, 225000);
+    check("U10 merge returns its end", gc_fw_merge_lat(end_max, T0), 225000);
+    setup(0);
+    check("U10 no cost: the sum of the copies", merge(lun0, lun0, 3, &sum),
+          300000);
+}
+
+/* U11: two LUNs; the second copy waits for the line, the return is no sum */
+static void test_merge_two_luns(void)
+{
+    const uint32_t src[2] = { 0, 2 };
+    const uint32_t dst[2] = { 1, 3 };
+    uint64_t sum;
+
+    printf("# merge, two LUNs, line wait\n");
+    /* a slot of 30 us, so the end differs from the copy sum */
+    setup(F11);
+    check("U11 merge returns the latest program end", merge(src, dst, 2, &sum),
+          TR + 2 * F11 + TPROG);
+    /* the read plus program latencies leave out the wait for the line */
+    check("U11 the copy sum hides the slots", sum, 2 * (TR + TPROG));
+    check("U11 the end is not the sum", TR + 2 * F11 + TPROG != sum, 1);
+    setup(0);
+    check("U11 no cost: the sum", merge(src, dst, 2, &sum),
+          2 * (TR + TPROG));
+}
+
+/*
+ * One fold or key-value move from @now, as ftl_tier_fold_page() and
+ * kv_gc_line() book it: the read from @now, with a cost the program at the
+ * end of a slot from the read end, else at the read end. Returns the end
+ * of the program; *@ready takes the read end.
+ */
+static uint64_t move_after(uint32_t src, uint32_t dst, uint64_t now,
+                           uint64_t *ready)
+{
+    NandLoc s = on_lun(src);
+    NandLoc d = on_lun(dst);
+    uint64_t stime;
+
+    *ready = nand_media_op(&media, &s, NAND_MEDIA_READ, now).done_ns;
+    stime = *ready;
+    if (fw_cost) {
+        stime = gc_fw_slot_end(*ready, *ready, fw_free, fw_cost);
+        fw_free = stime;
+    }
+    return nand_media_op(&media, &d, NAND_MEDIA_PROGRAM, stime).done_ns;
+}
+
+/* U12: a fold of two pages on one LUN; the erase fence is the last end */
+static void test_fold(void)
+{
+    uint64_t fence;
+    uint64_t ready;
+
+    printf("# fold, one LUN, two pages\n");
+    setup(F);
+    fence = move_after(0, 0, T0, &ready);
+    fence = max_u64(fence, move_after(0, 0, T0, &ready));
+    check("U12 fence after both slots", fence - T0, 150000);
+    setup(0);
+    fence = move_after(0, 0, T0, &ready);
+    fence = max_u64(fence, move_after(0, 0, T0, &ready));
+    check("U12 no cost: fence", fence - T0, 100000);
+}
+
+/* U13: an unpacked key-value move; tdone is the program end after the slot */
+static void test_kv_unpacked(void)
+{
+    uint64_t ready;
+    uint64_t tdone;
+    uint64_t old;
+
+    printf("# key-value move, one LUN\n");
+    setup(F);
+    tdone = move_after(0, 0, T0, &ready);
+    old = T0 + TR + TPROG;
+    check("U13 tdone is slot end + tP", tdone, T0 + TR + F + TPROG);
+    check("U13 the old sum ends F too soon", tdone - old, F);
+    setup(0);
+    check("U13 no cost: the old sum", move_after(0, 0, T0, &ready),
+          T0 + TR + TPROG);
+}
+
+/*
+ * One packed GC page from two sources read from @now: one slot from the
+ * later read end, then one program. *@slots counts the slots.
+ */
+static uint64_t kv_packed(uint64_t now, int *slots)
+{
+    NandLoc a = on_lun(0);
+    NandLoc b = on_lun(1);
+    NandLoc d = on_lun(2);
+    uint64_t ra = nand_media_op(&media, &a, NAND_MEDIA_READ, now).done_ns;
+    uint64_t rb = nand_media_op(&media, &b, NAND_MEDIA_READ, now).done_ns;
+    uint64_t ready = ra > rb ? ra : rb;
+    uint64_t stime = ready;
+
+    *slots = 0;
+    if (fw_cost) {
+        stime = gc_fw_slot_end(ready, ready, fw_free, fw_cost);
+        fw_free = stime;
+        (*slots)++;
+    }
+    return nand_media_op(&media, &d, NAND_MEDIA_PROGRAM, stime).done_ns;
+}
+
+/* U14: a packed page takes one slot, from the later of its source reads */
+static void test_kv_packed(void)
+{
+    int slots;
+
+    printf("# key-value packed page, two sources\n");
+    setup(F);
+    lun_avail[1] = T0 + 30000;
+    check("U14 one slot from the later read", kv_packed(T0, &slots),
+          T0 + 30000 + TR + F + TPROG);
+    check("U14 one slot", slots, 1);
+    setup(0);
+    lun_avail[1] = T0 + 30000;
+    check("U14 no cost", kv_packed(T0, &slots), T0 + 30000 + TR + TPROG);
+    check("U14 no cost: no slot", slots, 0);
+}
+
+/* U15: a slot on the caller's clock does not take a later host time */
+static void test_slot_after(void)
+{
+    uint64_t ready = T0 + TR;
+    uint64_t host = T0 + 20000000;
+
+    printf("# slot after the read, host time ahead\n");
+    check("U15 slot from the read end", gc_fw_slot_end(ready, ready, 0, F),
+          ready + F);
+    check("U15 a slot on the host clock moves", gc_fw_slot_end(ready, host,
+                                                               0, F),
+          host + F);
+    check("U15 the line still holds it", gc_fw_slot_end(ready, ready,
+                                                        T0 + 50000, F),
+          T0 + 50000 + F);
+}
+
+/* U16: on one LUN each move ends F + tP after its read */
+static void test_gap(void)
+{
+    uint64_t ready;
+    uint64_t done;
+
+    printf("# gap on one LUN\n");
+    setup(F);
+    for (int i = 0; i < 4; i++) {
+        done = move_after(0, 0, T0, &ready);
+        check("U16 gap is F + tP", done - ready, F + TPROG);
+    }
+    setup(0);
+    for (int i = 0; i < 4; i++) {
+        done = move_after(0, 0, T0, &ready);
+        check("U16 no cost: gap is tP", done - ready, TPROG);
+    }
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -271,6 +494,13 @@ int main(int argc, char **argv)
     test_slot_math();
     test_booking_order();
     test_no_cost_cross_lun();
+    test_merge_one_lun();
+    test_merge_two_luns();
+    test_fold();
+    test_kv_unpacked();
+    test_kv_packed();
+    test_slot_after();
+    test_gap();
     if (media_up) {
         nand_media_destroy(&media);
     }

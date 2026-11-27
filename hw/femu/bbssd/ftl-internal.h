@@ -541,7 +541,13 @@ uint64_t ssd_gc_erase_start(struct ssd *ssd, struct line *victim,
 bool ssd_gc_pass_begin(struct ssd *ssd);
 void ssd_gc_pass_end(struct ssd *ssd, bool opened);
 uint64_t ssd_gc_fw_slot(struct ssd *ssd, uint64_t ready);
+uint64_t ssd_gc_fw_slot_after(struct ssd *ssd, uint64_t ready);
 void ssd_gc_fw_take(struct ssd *ssd, uint64_t end);
+void ssd_gc_fw_check(struct ssd *ssd, uint64_t ready, uint64_t end,
+                     uint64_t at, uint64_t done);
+void ssd_gc_copy_seen(struct ssd *ssd, struct line *line, struct ppa *dst);
+void ssd_gc_erase_check(struct ssd *ssd, struct line *line, uint64_t start);
+void ssd_gc_test_hold(struct ssd *ssd);
 /* how a mode marks pages when collection moves one (ssd_gc_move_page) */
 struct ssd_gc_move_ops {
     void (*mark_valid)(struct ssd *ssd, struct ppa *ppa, void *dest);
