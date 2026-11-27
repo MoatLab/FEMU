@@ -1171,12 +1171,13 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "of its pages, and a buffered write pays it once; 0 (default) is "
       "pg_rd_lat / 16 (1 ns at least), or 1000 ns when pg_rd_lat is 0" },
     { "fw_gc_page_ns",
-      "bbssd, CSD: controller firmware time in ns of each page that garbage "
-      "collection, read reclaim, refresh or wear levelling moves, on one GC "
+      "bbssd, CSD, KV: controller firmware time in ns of each page that "
+      "garbage collection, read reclaim, refresh, wear levelling, a hybrid "
+      "or FAST merge, a pSLC tier fold or KV collection moves, on one GC "
       "firmware line per FTL; the program of a move starts after its read "
       "and its slot; 0 or more; needs gc_erase_order; not with pe_suspend, "
-      "hybrid or fast mapping, the pSLC tier, cxl_ssd or shared namespaces; "
-      "0 (default) charges none" },
+      "cxl_ssd, shared namespaces, or read_prio in KV mode; 0 (default) "
+      "charges none" },
     { "iu_pages",
       "bbssd, CSD: the indirection unit in pages, 0 to 64; above 1, a write "
       "that covers part of a unit reads the unit's other mapped pages and "

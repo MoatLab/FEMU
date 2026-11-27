@@ -1361,6 +1361,7 @@ void femu_test_gc_fw(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_gc_fw_path(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_gc_fw_merge(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_gc_fw_tier(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_gc_fw_kv(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rrl(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rrl_no_rber(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_rrl_subsys(void *obj, void *data, QGuestAllocator *alloc);

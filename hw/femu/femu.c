@@ -4975,10 +4975,11 @@ static bool femu_check_copyback_props(FemuCtrl *n, Error **errp)
 
 /*
  * fw_gc_page_ns runs where line and reclaim unit collection, the merges of
- * the hybrid and FAST mappings and the pSLC tier folds move pages, in the
- * bbssd and CSD FTL this controller builds. The refused settings use an
- * FTL another device made, or let a read suspend a program whose firmware
- * slot has not ended.
+ * the hybrid and FAST mappings, the pSLC tier folds and key-value
+ * collection move pages, in the FTL this controller builds. The refused
+ * settings use an FTL another device made, or let a read suspend or pass
+ * a program whose firmware slot has not ended. Key-value collection does
+ * not seal the LUN of a copy, so read_prio is refused there.
  */
 static bool femu_check_gc_fw_props(FemuCtrl *n, Error **errp)
 {
@@ -4992,8 +4993,10 @@ static bool femu_check_gc_fw_props(FemuCtrl *n, Error **errp)
     if (!bp->fw_gc_page_ns) {
         return true;
     }
-    if (!BBSSD(n) && !CSD(n)) {
-        why = "a mode other than bbssd or CSD";
+    if (!BBSSD(n) && !CSD(n) && !KVSSD(n)) {
+        why = "a mode other than bbssd, CSD or key-value";
+    } else if (KVSSD(n) && bp->read_prio) {
+        why = "read_prio in key-value mode";
     } else if (!bp->gc_erase_order) {
         /* a delayed copy program must end before its victim erases */
         why = "gc_erase_order=off";

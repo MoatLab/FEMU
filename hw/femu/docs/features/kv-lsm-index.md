@@ -160,6 +160,13 @@ paper), it collects one victim line at a time:
    memtable. Its merges wait for the moves.
 5. The victim is erased.
 
+With `fw_gc_page_ns` above 0, each moved value page and each moved meta
+page takes one GC firmware slot between its read and its program. LSM
+merges take no slot: a merge reads N pages and writes M new ones, so no
+output page is a copy of one input page. That is index work, as a DFTL
+publish is. The merges of the reinserted keys wait for the moves, so they
+also start after the slots.
+
 A meta line moves its valid meta pages, and the level list follows them.
 The Store that runs the collection waits for it. GC ends when the free
 lines are above the threshold and the Store has room. A victim that gives

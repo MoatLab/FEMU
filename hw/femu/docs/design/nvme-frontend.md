@@ -526,7 +526,7 @@ Things to note:
 | FTL thread (BBSSD, ZNS, CSD NAND time) | before `to_poller[i]` | FTL and NAND properties |
 | host link | in `nvme_process_cq_cpl()`; a per-direction next-free time | `pcie_bandwidth_mbps`, `pcie_prop_delay_ns` |
 | firmware CPU | in `nvme_process_cq_cpl()`; one next-free time per firmware core (`nvme_fw_cost()` picks the time per opcode) | `fw_cpu_ns`, `fw_read_ns`, `fw_write_ns`, `fw_other_ns`, `fw_cores` |
-| GC firmware | on the FTL thread; one next-free time per FTL, one slot per GC page move, between its read and its program; not a host cost | `fw_gc_page_ns` |
+| GC firmware | on the FTL thread, or on the poller for KV; one next-free time per FTL, one slot per GC page move, merge copy, tier fold page or KV GC page, between its read and its program; not a host cost | `fw_gc_page_ns` |
 
 The heap `pq[i]` is a binary heap (`hw/femu/lib/pqueue.c`) keyed on
 `expire_time`. Each sweep pops every request that is due and stops at the

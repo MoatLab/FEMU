@@ -44,6 +44,16 @@ the read speed of data in the cache.
   the read data is ready.
 - The erase of the pool line waits for the last program of the fold. Pages
   that the host deallocated or overwrote before the fold do not move.
+- With `fw_gc_page_ns` above 0, each moved page also takes one GC firmware
+  slot between its read and its program. The slot starts at the read end,
+  on the fold's own time, so host time does not move it. The erase waits
+  for the last program, after the last slot. An idle fold waits for the
+  slots of the fold before it.
+
+```text
+  LUN     [Rs1]          [P1        ][Rs2]          [P2        ][erase ...]
+  GC fw        [ slot 1 ]                 [ slot 2 ]
+```
 - Reads of pool pages take `tier_pslc_read_ns`. Programs take
   `tier_pslc_prog_ns`. The built-in SLC times of `nand_cell_type=1` do not
   change.

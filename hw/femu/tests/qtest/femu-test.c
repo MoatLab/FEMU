@@ -2314,6 +2314,40 @@ static void femu_register_nodes(void)
         .edge.extra_device_opts = FEMU_GC_FW_TIER_GEO
             ",tier_mode=static,tier_static_mb=1"
     });
+    /* key-value collection on one LUN, 1 ms slots */
+#define FEMU_GC_FW_KV_GEO \
+    "id=gc-fw,devsz_mb=1,femu_mode=5,secsz=512,secs_per_pg=8," \
+    "pgs_per_blk=16,blks_per_pl=64,pls_per_lun=1,luns_per_ch=1,nchs=1," \
+    "pg_rd_lat=10000,pg_wr_lat=10000,blk_er_lat=100000"
+    qos_add_test("gc-fw-kv", "femu", femu_test_gc_fw_kv,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"pack",
+        .edge.extra_device_opts = FEMU_GC_FW_KV_GEO ",fw_gc_page_ns=1000000"
+    });
+    qos_add_test("gc-fw-kv-nopack", "femu", femu_test_gc_fw_kv,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"nopack",
+        .edge.extra_device_opts =
+            FEMU_GC_FW_KV_GEO ",kv_pack=off,fw_gc_page_ns=1000000"
+    });
+    qos_add_test("gc-fw-kv-hold", "femu", femu_test_gc_fw_kv,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"hold",
+        .edge.extra_device_opts =
+            FEMU_GC_FW_KV_GEO ",kv_pack=off,fw_gc_page_ns=1000000"
+    });
+    qos_add_test("gc-fw-kv-lsm", "femu", femu_test_gc_fw_kv,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"lsm",
+        .edge.extra_device_opts =
+            FEMU_GC_FW_KV_GEO ",kv_pack=off," FEMU_LSM_KNOBS
+            "fw_gc_page_ns=1000000"
+    });
+    qos_add_test("gc-fw-kv-off", "femu", femu_test_gc_fw_kv,
+                 &(QOSGraphTestOptions) {
+        .arg = (void *)"off",
+        .edge.extra_device_opts = FEMU_GC_FW_KV_GEO ",kv_pack=off"
+    });
     qos_add_test("gc-fw-refused", "femu", femu_test_gc_fw_refused, NULL);
     qos_add_test("rrl", "femu", femu_test_rrl,
                  &(QOSGraphTestOptions) {

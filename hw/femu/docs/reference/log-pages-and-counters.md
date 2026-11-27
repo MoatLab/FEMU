@@ -54,7 +54,7 @@ own media counters, little-endian at these offsets (`FemuStatsLog` in
 | 312 | 8 | Host page reads with a soft decode, passed or failed (`rber_ppb`) |
 | 320 | 8 | Host page reads past the decode limit: soft decode failed, or failed with it off (`rber_ppb`) |
 | 328 | 8 | Blocks an erase failure killed (`erase_fail_ppm`); each one also counts as a grown bad block when it leaves service |
-| 336 | 8 | Page moves that took a GC firmware slot (`fw_gc_page_ns`): GC, read reclaim, refresh, wear levelling and translation page moves |
+| 336 | 8 | Page moves that took a GC firmware slot (`fw_gc_page_ns`): GC, read reclaim, refresh, wear levelling and translation page moves, hybrid and FAST merge copies, pSLC tier folds, and KV value and meta collection (one per packed GC page); KV namespaces count too |
 | 344 | 8 | Firmware time of those slots in ns: core time, not the host wait (`fw_gc_page_ns`). Offsets 336 and 344 are read live and count from realize; `persist_ftl` does not keep them |
 | 352 | 8 | `plm=on`: NDWIN entries since realize. Offsets 360 to 472 describe the last NDWIN that ended, from its entry to its exit, a held Set 14h included ([PLM](../features/plm.md#what-gc-did-in-an-ndwin)). With `plm=off`, bytes 352-495 read as zero |
 | 360 | 8 | The entry number of that NDWIN, from 1; 0 before the first NDWIN ends |

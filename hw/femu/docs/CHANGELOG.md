@@ -257,6 +257,7 @@ listed one by one.
 - `gen-property-docs.py --schema FILE` writes a JSON Schema of the device properties from the binary, for tools that write device lines.
 - `dram_hit_ns` (bbssd, CSD, 0 by default): the controller DRAM time of a page that the write buffer or the read cache answers, in place of `pg_rd_lat / 16`.
 - `fw_gc_page_ns` (bbssd, CSD, 0 by default): the controller firmware time of each page that GC, read reclaim, refresh or wear levelling moves. The moves take turns on one GC firmware line per FTL, and the program of a move starts after its read and its slot. It needs `gc_erase_order`, so the erase of a victim waits for the delayed copies. Log page C0h (offsets 336 and 344) counts the slots and their time; for bbssd, `query-femu` also gives them.
+- `fw_gc_page_ns` also charges hybrid and FAST merge copies, pSLC tier folds and KV value and meta collection, so realize no longer refuses those settings. A merge with slots returns its latest copy program end, not the sum of its copies. KV with `read_prio` is refused. The qtest property `x-gc-fw` checks the slots against the media bookings.
 - CI runs QEMU's checkpatch on each new commit (`check-patches.sh`); `femu-compile.sh --werror` builds with `--enable-werror`.
 - I/O trace export (`io_trace=FILE`, off by default): one CSV line per completed I/O command, with its submit and completion times, range and status, in every mode.
 - `io_trace` gives a Zone Append the LBA where it landed, or its submitted SLBA when it fails. Before, an append line had no range.

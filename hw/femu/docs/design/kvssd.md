@@ -378,6 +378,24 @@ below `gc_thres_lines`, or while a Store has too little room:
 - Each move reads its source page, then programs the copy. The erase waits
   for the last program. The next victim starts when the erase ends. The
   Store waits for all of it.
+- With `fw_gc_page_ns` above 0, each moved page takes one GC firmware slot
+  after its read, and its program starts when the slot ends. A packed GC
+  page is one move: one slot after the last read of its sources. The
+  victim erase starts at `tdone`, the latest end of these programs, so it
+  includes the slots.
+- KV collection runs inside a command, not in a collection pass. So the
+  slot starts at the read end alone, on the command's model time.
+- A victim that keeps a valid page goes back to its list after some
+  copies. With `fw_gc_page_ns` above 0 it keeps the end of those copies
+  (`gc_fence`), and `kv_reclaim_empty_lines()` does not erase it before
+  then. With 0 the timing stays as before.
+- LSM merges take no slot: they are index work, not page moves.
+
+```text
+  LUN    [R][ slot ][ P ]           one unpacked move
+  GC fw     [ slot ]
+  erase                  ^ tdone = slot end + tP
+```
 
 ## Timing
 

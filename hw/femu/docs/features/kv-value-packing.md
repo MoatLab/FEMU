@@ -140,6 +140,10 @@ changes only the NAND load, the space and the counters.
 - A full line can hold dead records. Thus full lines are victims too.
 - The GC page is programmed before the victim is erased. A moved value
   is never only in DRAM.
+- With `fw_gc_page_ns` above 0, each GC page program takes one GC
+  firmware slot, after the reads of all its sources. The firmware work of
+  each value is part of that one slot. A GC page whose values all went
+  stale is still programmed, so it takes a slot too.
 
 ## Counters
 

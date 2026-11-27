@@ -989,6 +989,108 @@ void femu_test_kv_gc_victim(void *obj, void *data,
     guest_free(alloc, raw);
 }
 
+/* the NAND times of the key-value gc-fw tests */
+#define FEMU_KV_GC_FW_TR    10000ULL
+#define FEMU_KV_GC_FW_TP    10000ULL
+#define FEMU_KV_GC_FW_NS    1000000ULL
+
+/*
+ * fw_gc_page_ns on key-value collection, on one LUN, with the workload of
+ * kv-gc-victim: each cold value is followed by three overwrites of a hot
+ * key. With packing, an overwrite in the open DRAM page programs nothing.
+ * So the pack case writes five overwrites, spread over 16 hot keys.
+ * @data names the case:
+ *
+ *   pack    1 KiB values packed into GC pages: one slot per GC page
+ *   nopack  4 KiB values, kv_pack=off: one slot per moved page
+ *   hold    nopack with a 20 ms host stall after each GC read; a slot on
+ *           host time would end far after F + tP
+ *   lsm     kv_index=lsm: value and meta pages take slots, merges none
+ *   off     the control, nopack with no slot
+ *
+ * Each GC move reads, waits for its slot, then programs, on one LUN, so a
+ * Store whose GC made v moves takes at least v (tR + F + tP); v (F + tP)
+ * with packing, where two GC pages can follow one read. An unpacked
+ * move ends exactly F + tP after its read. A packed GC page may wait for
+ * a later source read on its LUN, so only the lower bound holds there.
+ */
+void femu_test_gc_fw_kv(void *obj, void *data, QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    const char *mode = data;
+    bool on = strcmp(mode, "off") != 0;
+    bool pack = !strcmp(mode, "pack");
+    bool lsm = !strcmp(mode, "lsm");
+    uint32_t len = pack ? 1024 : 4096;
+    uint32_t cold = pack ? 800 : 200;
+    int hot = pack ? 6 : 4;
+    FemuCtrlState c = { 0 };
+    uint64_t raw = guest_alloc(alloc, 3 * 4096);
+    uint64_t buf = (raw + 4095) & ~4095ULL;
+    uint64_t log = guest_alloc(alloc, 512);
+    uint64_t f = femu_gc_fw_ns(qts, "gc-fw");
+    /* the last GC page of a victim can program with no read before it */
+    uint64_t move = (pack ? 0 : FEMU_KV_GC_FW_TR) + FEMU_KV_GC_FW_NS +
+                    FEMU_KV_GC_FW_TP;
+    uint64_t g = 0;
+    uint64_t gc_stores = 0;
+
+    g_assert_cmpuint(f, ==, on ? FEMU_KV_GC_FW_NS : 0);
+    femu_enable_csi(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    if (!strcmp(mode, "hold")) {
+        QDict *rsp = qtest_qmp(qts, "{'execute':'qom-set','arguments':{"
+                               "'path':'/machine/peripheral/gc-fw',"
+                               "'property':'x-gc-hold-us','value':20000}}");
+
+        g_assert_true(qdict_haskey(rsp, "return"));
+        qobject_unref(rsp);
+    }
+    for (uint64_t k = 0; k < cold; k++) {
+        for (int h = 0; h < hot; h++) {
+            uint64_t key = !h ? 1000 + k :
+                           pack ? 1 + (k * (hot - 1) + h - 1) % 16 : 1;
+            int64_t start;
+            int64_t took;
+            uint64_t now;
+
+            qtest_memset(qts, buf, (int)(key + k), 4096);
+            start = g_get_monotonic_time();
+            g_assert_cmphex(femu_kv_store(&c, key, buf, len), ==,
+                            NVME_SUCCESS);
+            took = g_get_monotonic_time() - start;
+            if (!on || lsm) {
+                continue;
+            }
+            /* the host waits for the modelled time of the Store */
+            now = femu_c0h_field(&c, log, 16);
+            if (now > g) {
+                g_assert_cmpuint((uint64_t)took * 1000, >=, (now - g) * move);
+                gc_stores++;
+            }
+            g = now;
+        }
+    }
+    g_test_message("gc-fw kv %s: %" PRIu64 " Stores ran GC", mode, gc_stores);
+    if (on && !lsm) {
+        g_assert_cmpuint(gc_stores, >, 0);
+    }
+    if (pack) {
+        femu_gc_fw_assert(&c, log, "gc-fw", f, FEMU_KV_GC_FW_TP,
+                          1000000000ULL);
+    } else if (lsm) {
+        femu_gc_fw_assert(&c, log, "gc-fw", f, 0, 0);
+    } else {
+        femu_gc_fw_assert(&c, log, "gc-fw", f, FEMU_KV_GC_FW_TP,
+                          FEMU_KV_GC_FW_TP);
+    }
+    femu_disable(&c);
+    guest_free(alloc, log);
+    guest_free(alloc, raw);
+    qos_invalidate_command_line();
+}
+
 /*
  * CC.CSS 000b selects the NVM command set for every I/O queue, so a KV
  * namespace answers its commands, Flush among them, with Invalid Command

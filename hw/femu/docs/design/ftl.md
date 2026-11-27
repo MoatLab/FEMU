@@ -102,6 +102,11 @@ Two things follow from this picture.
   `femu-cxl-ssd` runs its requests on its own FTL thread against the
   medium's FTL, under the medium's lock, which also serializes the medium's
   worker.
+- **KV mode has no FTL thread.** Key-value commands run on the pollers.
+  Each command holds the lock of its namespace (`s->lock`), and its
+  collection runs inside it. So `gc_fw_free` and the slot counts of a KV
+  `struct ssd` change under that lock. The slot counts are written
+  atomically, because log page C0h reads them with no lock.
 - **Admin commands that change FTL state pause the dataplane.**
   `nvme_pause_pollers()` waits until the FTL thread is outside a request (the
   `ftl_in_sweep` flag), so the run-time switch (admin opcode 0xEF), the
@@ -390,6 +395,24 @@ block (LBN) is `pgs_per_blk` consecutive LPNs.
 
 Merge reads, programs and erases are charged to the request that triggered
 the merge, and the relocated pages count in the write amplification factor.
+
+With `fw_gc_page_ns` above 0, each merge copy takes one GC firmware slot
+between its read and its program. A switch merge copies nothing, so it
+takes no slot. The merge then returns its latest copy program end from
+the pass start, not the sum of its copies:
+
+```text
+  F = 25 us, tR = 10 us, tP = 40 us, one LUN, 3 copies, pass start 0
+  LUN    [R1]     [P1      ][R2]     [P2      ][R3]     [P3      ]
+  GC fw      [ s1 ]             [ s2 ]             [ s3 ]
+         0   10   35       75  85   110      150 160  185      225
+  the merge returns 225 us
+```
+
+The slots of one merge overlap its NAND work, so a sum would count the
+same time many times. With `fw_gc_page_ns=0` the merge returns the sum, as
+before. So a value above 0 is not a small change of 0 for merge latency:
+with a small slot a merge write can report less time than with no slot.
 
 ### Choosing a scheme
 
@@ -887,10 +910,22 @@ move takes one slot on it, after its read and before its program.
 - A copyback takes its slot first, then the die operation.
 - GC, paced GC, read reclaim, refresh, wear levelling, the RAIN rebuild,
   FDP collection and DFTL translation page moves all take slots on the
-  same line. Merges, tier folds and KV collection are refused.
+  same line.
+- The copies of hybrid full merges and FAST random merges take slots. A
+  merge returns its latest program end (see the log-block mapping
+  section). Switch merges take no slot.
+- pSLC tier folds take one slot per moved page. A fold and KV collection
+  run outside a collection pass, so their slot starts at the read end
+  alone: host time does not move it.
+- KV value collection takes one slot per moved page, or one per packed GC
+  page. KV meta page collection (`kv_index=lsm`) takes slots too. LSM
+  merges are index work and take none. KV with `read_prio` is refused:
+  KV collection does not seal the LUN of a copy.
 - The line is apart from `fw_cores`. The host sees the slot only through
   the LUNs, as all GC time: a busy destination LUN hides it.
-- Untimed GC (admin 0xEF code 2) takes no slot.
+- Untimed GC (admin 0xEF code 2) takes no slot. Merges, folds and KV
+  collection book their NAND work in both cases, so they always take
+  their slots.
 - Log page C0h offsets 336 and 344 count the slots and their time from
   realize. For bbssd, `query-femu` also gives `gc-fw-pages` and
   `gc-fw-ns`.

@@ -375,7 +375,9 @@ static uint64_t kv_wp_remaining(FemuKvssdState *s, struct write_pointer *wpp)
 
 /*
  * Erase every line that holds no valid page, from @stime, and return the
- * time it takes. The erase runs whatever enable_gc_delay says.
+ * time it takes. The erase runs whatever enable_gc_delay says. With
+ * fw_gc_page_ns, a line that GC put back after some copies waits for the
+ * end of those copies (gc_fence).
  */
 static uint64_t kv_reclaim_empty_lines(FemuKvssdState *s, int64_t stime)
 {
@@ -387,17 +389,23 @@ static uint64_t kv_reclaim_empty_lines(FemuKvssdState *s, int64_t stime)
     for (;;) {
         struct line *line = pqueue_peek(lm->victim_line_pq);
         struct ppa ppa = { .ppa = 0 };
+        int64_t start = stime;
 
         if (!line || line->vpc != 0) {
             break;
         }
         line = pqueue_pop(lm->victim_line_pq);
         ppa.g.blk = line->id;
+        if (spp->fw_gc_page_ns && (int64_t)line->gc_fence > start) {
+            start = (int64_t)line->gc_fence;
+        }
+        ssd_gc_erase_check(ssd, line, (uint64_t)start);
 
         for (int ch = 0; ch < spp->nchs; ch++) {
             for (int lun = 0; lun < spp->luns_per_ch; lun++) {
-                lat = MAX(lat, ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk,
-                                                   true, stime));
+                lat = MAX(lat, (uint64_t)(start - stime) +
+                          ssd_erase_lun_block(ssd, ch, lun, ppa.g.blk,
+                                              true, start));
             }
         }
         mark_line_free(ssd, &ppa);
@@ -1254,6 +1262,20 @@ static void kv_gc_requeue(FemuKvssdState *s, struct line *line)
     }
 }
 
+/*
+ * Put back a victim whose copies programmed up to @tdone. With
+ * fw_gc_page_ns a copy ends after its slot, so the line keeps that end:
+ * kv_reclaim_empty_lines() does not erase it before then.
+ */
+static void kv_gc_requeue_fence(FemuKvssdState *s, struct line *line,
+                                int64_t tdone)
+{
+    if (s->ssd->sp.fw_gc_page_ns) {
+        line->gc_fence = MAX(line->gc_fence, (uint64_t)tdone);
+    }
+    kv_gc_requeue(s, line);
+}
+
 /* the owner of the first valid page of @line, or KV_OWNER_NONE */
 static uint64_t kv_line_owner(FemuKvssdState *s, struct line *line)
 {
@@ -1509,6 +1531,7 @@ static bool kv_gc_pack_program(FemuKvssdState *s, KvGcPack *gp,
                            .stime = gp->ready };
     KvPackPage *pg;
     struct ppa np;
+    uint64_t w;
 
     if (!gp->nr) {
         return true;
@@ -1522,8 +1545,23 @@ static bool kv_gc_pack_program(FemuKvssdState *s, KvGcPack *gp,
     pg->id = np.ppa;
     mark_page_valid(ssd, &np);
     set_rmap_ent(ssd, KV_OWNER_PACK, &np);
-    *tdone = MAX(*tdone, gp->ready +
-                 (int64_t)ssd_advance_status(ssd, &np, &wr));
+    /* one GC page program is one move: one slot after its last read */
+    if (ssd->sp.fw_gc_page_ns) {
+        wr.stime = (int64_t)ssd_gc_fw_slot_after(ssd, gp->ready);
+    }
+    w = ssd_advance_status(ssd, &np, &wr);
+    if (ssd->sp.fw_gc_page_ns) {
+        ssd_gc_fw_take(ssd, wr.stime);
+        ssd_gc_fw_check(ssd, gp->ready, wr.stime, wr.at, wr.at + w);
+        *tdone = MAX(*tdone, wr.stime + (int64_t)w);
+    } else {
+        *tdone = MAX(*tdone, gp->ready + (int64_t)w);
+    }
+    for (uint32_t i = 0; i < gp->nr; i++) {
+        struct ppa src = { .ppa = gp->mv[i].src };
+
+        ssd_gc_copy_seen(ssd, get_line(ssd, &src), &np);
+    }
     for (uint32_t i = 0; i < gp->nr; i++) {
         KvGcMove *m = &gp->mv[i];
         FemuKvssdMappingEntry *e = &s->table[m->owner];
@@ -1630,6 +1668,9 @@ static bool kv_gc_packed(FemuKvssdState *s, struct ppa *ppa, int64_t tmove,
         return true;
     }
     ready = tmove + (int64_t)ssd_advance_status(s->ssd, ppa, &rd);
+    if (s->ssd->sp.fw_gc_page_ns) {
+        ssd_gc_test_hold(s->ssd);
+    }
     nr = src->nr;
     items = g_memdup2(src->item, nr * sizeof(*items));
     for (uint32_t i = 0; i < nr; i++) {
@@ -1786,9 +1827,21 @@ static bool kv_gc_line(FemuKvssdState *s, int64_t t0, KvGcFull *f,
         rd.stime = tmove;
         r = ssd_advance_status(ssd, &pg[i].ppa, &rd);
         wr.stime = tmove + (int64_t)r;
+        if (spp->fw_gc_page_ns) {
+            /* the slot runs on the command's model time, not host time */
+            ssd_gc_test_hold(ssd);
+            wr.stime = (int64_t)ssd_gc_fw_slot_after(ssd, tmove + r);
+        }
         kv_page_valid(s, &np, owner);
         w = ssd_advance_status(ssd, &np, &wr);
-        tdone = MAX(tdone, tmove + (int64_t)(r + w));
+        if (spp->fw_gc_page_ns) {
+            ssd_gc_fw_take(ssd, wr.stime);
+            ssd_gc_fw_check(ssd, tmove + r, wr.stime, wr.at, wr.at + w);
+            tdone = MAX(tdone, wr.stime + (int64_t)w);
+        } else {
+            tdone = MAX(tdone, tmove + (int64_t)(r + w));
+        }
+        ssd_gc_copy_seen(ssd, victim, &np);
         if (meta) {
             kv_lsm_relocate(s->lsm, pg[i].ppa.ppa, np.ppa);
             s->gc_meta_pages++;
@@ -1816,12 +1869,13 @@ static bool kv_gc_line(FemuKvssdState *s, int64_t t0, KvGcFull *f,
     }
     /* a page that is still valid holds data: never erase it */
     if (victim->vpc) {
-        kv_gc_requeue(s, victim);
+        kv_gc_requeue_fence(s, victim, tdone);
         *tend = tdone;
         return false;
     }
 
     *tend = tdone;
+    ssd_gc_erase_check(ssd, victim, (uint64_t)tdone);
     ppa.ppa = 0;
     ppa.g.blk = victim->id;
     for (int ch = 0; ch < spp->nchs; ch++) {
@@ -1844,7 +1898,7 @@ abort:
     if (!meta && s->lsm) {
         kv_gc_reinsert_all(s, seen, tdone);
     }
-    kv_gc_requeue(s, victim);
+    kv_gc_requeue_fence(s, victim, tdone);
     *tend = tdone;
     return false;
 }

@@ -4650,8 +4650,9 @@ void femu_test_gc_fw_refused(void *obj, void *data,
         { 1000, "'femu_mode':1,'gc_erase_order':false",
           "gc_erase_order=off" },
         { 1000, "'femu_mode':1,'pe_suspend':1", "with pe_suspend" },
-        { 1000, "'femu_mode':0", "a mode other than bbssd or CSD" },
-        { 1000, "'femu_mode':3", "a mode other than bbssd or CSD" },
+        { 1000, "'femu_mode':0", "a mode other than bbssd, CSD or key-value" },
+        { 1000, "'femu_mode':3", "a mode other than bbssd, CSD or key-value" },
+        { 1000, "'femu_mode':5,'read_prio':1", "read_prio" },
     };
     static const char *const allowed[] = {
         "'femu_mode':1,'namespace_modes':''",
@@ -4660,6 +4661,8 @@ void femu_test_gc_fw_refused(void *obj, void *data,
         "'femu_mode':1," FEMU_GC_FW_TIER_QMP ",'tier_mode':'static',"
         "'tier_static_mb':1",
         "'femu_mode':1," FEMU_GC_FW_TIER_QMP ",'tier_mode':'dynamic'",
+        "'femu_mode':5",
+        "'femu_mode':5,'kv_index':'lsm'",
     };
     int i;
 
