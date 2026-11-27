@@ -5100,3 +5100,123 @@ void femu_test_g1_fdp_handles(void *obj, void *data,
     femu_disable(&c);
     qos_invalidate_command_line();
 }
+
+/*
+ * gc_thres_base under FDP, on fdpsub (four handles, persistently isolated):
+ * 64 units of 16 pages in one group. op_pcent=30 exposes 3226112 bytes:
+ * 787 full pages and part of one more. The FTL counts 788 pages, which
+ * fill 50 units and leave 14 spare. Four handles hold four units open and
+ * four more to collect into, so the spare rule keeps at least four free:
+ *
+ *   base   hi                     bg                       x-gc-lines
+ *   spare  max(5 % of 14, 4) = 4  max(25 % of 14, 5) = 5   spare 4 5 14 8
+ *   raw    5 % of 64 = 3          25 % of 64 = 16          raw 3 16 14 8
+ *
+ * Random writes then go to all four handles. No write may fail for want
+ * of a unit, and every page must stay mapped.
+ */
+void femu_test_fdp_gc_spare(void *obj, void *data, QGuestAllocator *alloc)
+{
+    /* the last page is partial, and a 4 KiB write there is out of range */
+    const uint32_t pages = 787;
+    const int handles = 4;
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, 16 * 4096);
+    uint64_t list = guest_alloc(alloc, 4096);
+    uint64_t mapped, lost, orphans;
+    uint32_t seed = 3;
+    QDict *rsp;
+
+    rsp = qtest_qmp(qts, "{'execute':'qom-get','arguments':{"
+                    "'path':'/machine/peripheral/gc-test',"
+                    "'property':'x-gc-lines'}}");
+    g_assert_true(qdict_haskey(rsp, "return"));
+    g_test_message("x-gc-lines: %s", qdict_get_str(rsp, "return"));
+    g_assert_cmpstr(qdict_get_str(rsp, "return"), ==, data);
+    qobject_unref(rsp);
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    qtest_memset(qts, buf, 0x2e, 16 * 4096);
+    for (uint32_t p = 0; p < pages; p += 16) {
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c, p,
+                                                        MIN(16, pages - p),
+                                                        buf, list,
+                                                        (p / 16) % handles)),
+                        ==, NVME_SUCCESS);
+    }
+    for (uint32_t i = 0; i < 3 * pages; i++) {
+        uint32_t npages = i % 8 == 7 ? 16 : 1;
+
+        seed = seed * 1103515245 + 12345;
+        g_assert_cmphex(FEMU_SC(femu_write_pages_placed(&c,
+                                    (seed >> 8) % (pages - npages + 1),
+                                    npages, buf, list,
+                                    (seed >> 4) % handles)), ==,
+                        NVME_SUCCESS);
+    }
+    femu_ftl_check(qts, &mapped, &lost, &orphans);
+    g_assert_cmpuint(mapped, ==, pages);
+    g_assert_cmpuint(lost, ==, 0);
+    g_assert_cmpuint(orphans, ==, 0);
+
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    qos_invalidate_command_line();
+}
+
+/*
+ * gc_thres_base=spare under FDP refuses op_pcent=25 and 26 on the geometry
+ * above: 820 and 813 pages fill 52 and 51 units and leave 12 and 13, short
+ * of 4 forced, 8 open and 2. The raw rule keeps 8 open and 3 forced units,
+ * so it refuses the 876 pages of op_pcent=17 (848 fit) and takes
+ * op_pcent=25, last, since the subsystem takes one controller. auto at
+ * op_pcent=25 keeps the raw levels: fdp-gc-auto-raw.
+ */
+void femu_test_fdp_gc_spare_refused(void *obj, void *data,
+                                    QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    static const struct {
+        int op;
+        const char *base;
+        const char *want;   /* NULL: accepted */
+    } cases[] = {
+        { 25, "spare", "leave 12 spare reclaim units in a group, and "
+                       "gc_thres_base=spare needs 14" },
+        { 26, "spare", "leave 13 spare reclaim units in a group, and "
+                       "gc_thres_base=spare needs 14" },
+        { 17, "raw", "placement keeps 11 of the 64 reclaim units" },
+        { 25, "raw", NULL },
+    };
+
+    for (size_t i = 0; i < ARRAY_SIZE(cases); i++) {
+        g_autofree char *cmd = g_strdup_printf(
+            "{'execute':'device_add','arguments':{'driver':'femu',"
+            "'id':'fdp-gcs','addr':'5','femu_mode':1,'secsz':512,"
+            "'secs_per_pg':8,'pgs_per_blk':4,'blks_per_pl':64,"
+            "'pls_per_lun':1,'luns_per_ch':2,'nchs':2,'op_pcent':%d,"
+            "'gc_thres_base':'%s','subsys':'fdpsub'}}", cases[i].op,
+            cases[i].base);
+        QDict *rsp = qtest_qmp(qts, "%p", qobject_from_json(cmd, NULL));
+        const char *desc;
+
+        if (!cases[i].want) {
+            g_assert_true(qdict_haskey(rsp, "return"));
+            qobject_unref(rsp);
+            continue;
+        }
+        g_assert_true(qdict_haskey(rsp, "error"));
+        desc = qdict_get_str(qdict_get_qdict(rsp, "error"), "desc");
+        g_test_message("op_pcent=%d %s: %s", cases[i].op, cases[i].base,
+                       desc);
+        g_assert_nonnull(strstr(desc, cases[i].want));
+        qobject_unref(rsp);
+    }
+    qos_invalidate_command_line();
+}

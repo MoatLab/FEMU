@@ -73,7 +73,9 @@ Properties: [Flexible Data Placement](../reference/properties.md#flexible-data-p
   what is left once each handle has a unit open, each Persistently Isolated
   handle one to collect into, and forced GC its free units (at least one
   unless `gc_thres_pcent_high` is 100);
-  a larger `devsz_mb` is refused. See
+  a larger `devsz_mb` is refused. With `op_pcent`, forced GC keeps at
+  least `fdp.nruh` units. With `gc_thres_base=spare` the group must leave
+  2 more spare units; `auto` keeps the raw levels instead and warns. See
   [the reserve](../design/fdp.md#configuration).
 - `fdp.nrg`: reclaim groups (default 1, at most 128). With BlackBox each
   group is a set of dies; see [Reclaim groups](#reclaim-groups).

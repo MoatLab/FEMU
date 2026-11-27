@@ -1064,7 +1064,10 @@ static const FemuPropDesc femu_ctrl_descs[] = {
       "raw: every line. spare: the lines left once the namespaces are "
       "full. The forced level is then at least one line per open write "
       "pointer, and realize refuses fewer than 2 more spare lines. "
-      "auto (unset, the default): spare with op_pcent, else raw" },
+      "Under FDP it counts the reclaim units of each group, and the forced "
+      "level is at least fdp.nruh. "
+      "auto (unset, the default): spare with op_pcent, else raw; where "
+      "spare would refuse, auto keeps raw and warns" },
     { "gc_policy",
       "bbssd, CSD: victim policy, one of greedy, random, cost-benefit, fifo "
       "or d-choice; unset is greedy. Under FDP it picks the reclaim unit "

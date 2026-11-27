@@ -164,12 +164,22 @@ void bb_gc_levels(FemuCtrl *n, NvmeNamespace *ns, BbGcLevels *lv)
 
 /*
  * "base hi bg avail open": the levels the FTL applies, with the spare and
- * the open pointers they were derived from (x-gc-lines).
+ * the open pointers they were derived from (x-gc-lines). Under FDP, the
+ * free units of reclaim group 0.
  */
 char *ssd_gc_levels_report(struct ssd *ssd)
 {
     BbGcLevels lv;
 
+    /* FDP: the units of reclaim group 0 */
+    if (ssd->fdp_enabled) {
+        bb_fdp_gc_levels(ssd->n, ssd->ns, ssd->rg[0].tt_nru, &lv);
+        return g_strdup_printf("%s %" PRIu64 " %" PRIu64 " %" PRId64 " %d",
+                               lv.spare ? "spare" : "raw",
+                               ssd->rg[0].ru_mgmt->gc_thres_rus_high,
+                               ssd->rg[0].ru_mgmt->gc_thres_rus, lv.avail,
+                               lv.open);
+    }
     bb_gc_levels(ssd->n, ssd->ns, &lv);
     return g_strdup_printf("%s %d %d %" PRId64 " %d",
                            lv.spare ? "spare" : "raw",
@@ -342,12 +352,68 @@ uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units)
  * (the initially isolated handle collects into its open one), and the free
  * units forced collection keeps. @units is the group's pool.
  */
-uint64_t bb_fdp_reserve_units(FemuCtrl *n, uint64_t units)
+uint64_t bb_fdp_reserve_units(FemuCtrl *n, NvmeNamespace *ns,
+                              uint64_t units)
 {
-    uint64_t nruh = n->subsys->endgrp.fdp.nruh;
+    BbGcLevels lv;
 
-    return nruh + nruh - (n->subsys->params.fdp.isolation_mode ? 1 : 0) +
-           bb_fdp_forced_units(n, units);
+    bb_fdp_gc_levels(n, ns, units, &lv);
+    return lv.open + lv.hi;
+}
+
+/*
+ * bb_fdp_gc_levels - the GC levels of one reclaim group, in free units
+ * @units: the group's pool
+ *
+ * The rule of bb_gc_levels() for units. A host may place every namespace
+ * in one group (Base 2.3, 8.1.11), so the spare of a group is its pool
+ * less the units that hold all of them. The forced level keeps a unit per
+ * handle, since each handle's open unit can roll over once. auto keeps
+ * the raw levels when the spare is too small, as bb_gc_levels() does.
+ */
+void bb_fdp_gc_levels(FemuCtrl *n, NvmeNamespace *ns, uint64_t units,
+                      BbGcLevels *lv)
+{
+    const BbCtrlParams *p = &n->bb_params;
+    uint64_t nruh = n->subsys->endgrp.fdp.nruh;
+    uint64_t page = (uint64_t)p->secs_per_pg * p->secsz;
+    uint64_t unit = (uint64_t)p->nchs * p->luns_per_ch * p->pls_per_lun *
+                    p->pgs_per_blk / MAX(n->subsys->endgrp.fdp.nrg, 1);
+    int64_t user = 0;
+    int64_t hi = 0;
+
+    if (page && unit) {
+        user = DIV_ROUND_UP(DIV_ROUND_UP(bb_ftl_bytes(n, ns), page), unit);
+    }
+    lv->spare = bb_gc_base_spare(n);
+    lv->fallback = false;
+    lv->need = 0;
+    lv->open = nruh + nruh - (n->subsys->params.fdp.isolation_mode ? 1 : 0);
+    lv->avail = (int64_t)units - (int64_t)bb_fdp_eol_reserve(n) -
+                (int64_t)bb_fdp_slc_units(n) - user;
+    if (lv->spare) {
+        /*
+         * nruh, not open: forced collection runs before each host page
+         * that may take a unit, and one pass relocates one victim, so it
+         * opens at most one collect unit before its erase frees one.
+         */
+        hi = MAX(bb_gc_spare_share(lv->avail, p->gc_thres_pcent_high),
+                 (int64_t)nruh);
+        lv->need = hi + lv->open + 2;
+        if (lv->avail < lv->need && !bb_gc_base_named_spare(n)) {
+            lv->spare = false;
+            lv->fallback = true;
+        }
+    }
+    if (!lv->spare) {
+        lv->hi = bb_fdp_forced_units(n, units);
+        lv->bg = (uint64_t)((1 - p->gc_thres_pcent / 100.0) * units);
+        lv->idle = lv->bg;
+        return;
+    }
+    lv->hi = hi;
+    lv->bg = MAX(bb_gc_spare_share(lv->avail, p->gc_thres_pcent), hi + 1);
+    lv->idle = lv->bg;
 }
 
 /*

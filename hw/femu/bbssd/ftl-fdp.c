@@ -2842,6 +2842,16 @@ bool femu_fdp_ssd_init_reclaim_group(FemuCtrl *n, struct ssd *ssd)
                            rg->tt_nru);
             rg->ru_mgmt->gc_thres_rus_high =
                 bb_fdp_forced_units(n, rg->tt_nru);
+            /* the spare levels: the spare units of the group */
+            if (bb_gc_base_spare(n)) {
+                BbGcLevels lv;
+
+                bb_fdp_gc_levels(n, ssd->ns, rg->tt_nru, &lv);
+                if (lv.spare) {
+                    rg->ru_mgmt->gc_thres_rus = lv.bg;
+                    rg->ru_mgmt->gc_thres_rus_high = lv.hi;
+                }
+            }
             ftl_log("rg[%d] gc threshold (%d%%) %lu/%d RU\n",
                     i, n->bb_params.gc_thres_pcent,
                     rg->ru_mgmt->gc_thres_rus, rg->tt_nru);

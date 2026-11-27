@@ -120,7 +120,7 @@ static void ssd_init_wear(struct ssd *ssd, FemuCtrl *n, NvmeNamespace *ns)
                                       (uint64_t)spp->secsz * spp->secs_per_pg);
 
         ssd->wear_floor_lines = DIV_ROUND_UP(pages, unit) +
-                                bb_fdp_reserve_units(n, pool) + 1;
+                                bb_fdp_reserve_units(n, ns, pool) + 1;
         return;
     }
     /*

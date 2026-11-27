@@ -220,7 +220,7 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
          * group (Base 2.3, 8.1.11), and a write within the namespace
          * capacity must not fail, so one group must hold every namespace.
          */
-        reserve = bb_fdp_reserve_units(n, pool);
+        reserve = bb_fdp_reserve_units(n, ns, pool);
         /*
          * eol_read_only holds erased units in every group for the writes in
          * flight at the end of life, and counts their pages in 31 bits.
@@ -268,6 +268,22 @@ int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp)
                        "blks_per_pl, or raise op_pcent", ns->id,
                        ns->size >> 10, reserve, pool, endgrp->fdp.nruh, eol,
                        (usable_pgs * page_bytes) >> 10);
+            return -1;
+        }
+        /*
+         * The spare base keeps two units of each group for invalid pages
+         * beyond the forced level and the open units, as for lines.
+         */
+        bb_fdp_gc_levels(n, ns, pool, &lv);
+        if (lv.spare && lv.avail < (int64_t)lv.hi + lv.open + 2) {
+            error_setg(errp, "FEMU bbssd: the namespaces leave %" PRId64
+                       " spare reclaim units in a group, and "
+                       "gc_thres_base=spare needs %d: %d free for forced "
+                       "collection, %d open for %u handles and 2 for invalid "
+                       "pages; raise op_pcent or blks_per_pl, lower devsz_mb "
+                       "or fdp.nruh, or set gc_thres_base=raw",
+                       MAX(lv.avail, 0), lv.hi + lv.open + 2, lv.hi, lv.open,
+                       endgrp->fdp.nruh);
             return -1;
         }
         return 0;
@@ -671,8 +687,21 @@ void bb_warn_gc_levels(FemuCtrl *n, NvmeNamespace *ns)
     BbGcLevels lv;
     int64_t room;
 
-    /* FDP collects reclaim units; bb_check_capacity() sizes those */
+    /* FDP collects reclaim units: the levels of a group */
     if (n->subsys && n->subsys->endgrp.fdp.enabled) {
+        const BbCtrlParams *p = &n->bb_params;
+        uint64_t nru = n->subsys->endgrp.fdp.nru;
+        uint64_t lines = (uint64_t)p->blks_per_pl -
+                         (n->blk_pe_limit ? n->spare_lines : 0);
+
+        bb_fdp_gc_levels(n, ns, nru ? MIN(lines, nru) : lines, &lv);
+        if (lv.fallback) {
+            warn_report("FEMU bbssd: the namespaces leave %" PRId64 " spare "
+                        "reclaim units in a group and the spare GC levels "
+                        "need %d, so gc_thres_base=auto kept the raw levels; "
+                        "victims are nearly full and the WAF is high",
+                        MAX(lv.avail, 0), lv.need);
+        }
         return;
     }
     bb_gc_levels(n, ns, &lv);

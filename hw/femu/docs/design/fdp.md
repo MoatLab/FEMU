@@ -107,6 +107,26 @@ namespace as for a bbssd one, since CSD runs the same FTL
   unit free, even where the percentage rounds to none, unless
   `gc_thres_pcent_high` is 100 (`bb_fdp_forced_units()`): a pass can fill its
   destination part way through a victim and needs a free unit to go on.
+- With `gc_thres_base=spare` (the default with `op_pcent`), the two
+  percentages count the spare units of each group: the pool less the units
+  that hold every namespace. `bb_fdp_gc_levels()` then keeps at least
+  `fdp.nruh` units for forced GC. With `gc_thres_base=spare`, realize
+  refuses a group whose spare is under the forced level, the open units
+  and 2. `auto` keeps the raw levels for such a group and warns once per
+  namespace, so the old reserve then decides:
+
+  ```text
+  avail = units - eol and pSLC units - ceil(exposed pages / unit pages)
+  open  = 2 x fdp.nruh - 1 if the handles are Initially Isolated
+  hi    = max(avail x (100 - gc_thres_pcent_high) / 100, fdp.nruh)
+  bg    = max(avail x (100 - gc_thres_pcent) / 100, hi + 1)
+  need  = hi + open + 2
+  avail < need: refused with spare; raw levels and a warning with auto
+  ```
+
+  The forced level counts `fdp.nruh`, not `open`. Forced GC runs before
+  each host page that may take a unit. One pass moves one victim, so it
+  opens at most one collect unit before its erase frees one.
 - The namespace must fit in the units left after the reserve
   (`bb_check_capacity()`), or the controller is refused at realize:
 

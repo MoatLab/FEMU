@@ -5309,6 +5309,51 @@ static void femu_register_nodes(void)
     qos_add_test("fdp-capacity-refused", "femu",
                  femu_test_fdp_capacity_refused, NULL);
     qos_add_test("fdp-single-pool", "femu", femu_test_fdp_single_pool, NULL);
+    /* gc_thres_base: 64 units of 16 pages, op_pcent=30 leaves 14 spare */
+    qos_add_test("fdp-gc-spare", "femu", femu_test_fdp_gc_spare,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "op_pcent=30,subsys=fdpsub",
+        .arg = (void *)"spare 4 5 14 8",
+    });
+    qos_add_test("fdp-gc-spare-raw", "femu", femu_test_fdp_gc_spare,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "op_pcent=30,gc_thres_base=raw,subsys=fdpsub",
+        .arg = (void *)"raw 3 16 14 8",
+    });
+    qos_add_test("fdp-gc-spare-refused", "femu",
+                 femu_test_fdp_gc_spare_refused, NULL);
+    /*
+     * auto at op_pcent=25: 12 spare units, and the spare levels need 4
+     * forced, 8 open and 2. The raw levels stay, as before gc_thres_base.
+     */
+    qos_add_test("fdp-gc-auto-raw", "femu", femu_test_gc_lines_warned,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "op_pcent=25,subsys=fdpsub",
+        .before = femu_csd_warn_before,
+        .arg = (void *)"raw 3 16 12 8",
+    });
+    /*
+     * Initially Isolated: the last handle collects into its open unit, so
+     * 2 x 4 - 1 = 7 units are open. op_pcent=26 leaves 13 spare units,
+     * just the 4 + 7 + 2 the spare levels need.
+     */
+    qos_add_test("fdp-gc-spare-ii", "femu", femu_test_gc_lines,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=gc-test,femu_mode=1,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=4,blks_per_pl=64,pls_per_lun=1,luns_per_ch=2,nchs=2,"
+            "op_pcent=26,subsys=fdpsub-ii",
+        .arg = (void *)"spare 4 5 13 7",
+    });
     qos_add_test("fdp-ns-phl", "femu", femu_test_fdp_ns_phl,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =

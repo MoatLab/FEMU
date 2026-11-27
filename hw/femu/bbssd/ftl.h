@@ -1148,7 +1148,10 @@ void bb_tier_upkeep(FemuCtrl *n);
 char *ssd_tier_report(struct ssd *ssd);
 int bb_tp_reserve_lines(FemuCtrl *n, NvmeNamespace *ns);
 uint64_t bb_fdp_forced_units(FemuCtrl *n, uint64_t units);
-uint64_t bb_fdp_reserve_units(FemuCtrl *n, uint64_t units);
+uint64_t bb_fdp_reserve_units(FemuCtrl *n, NvmeNamespace *ns,
+                              uint64_t units);
+void bb_fdp_gc_levels(FemuCtrl *n, NvmeNamespace *ns, uint64_t units,
+                      BbGcLevels *lv);
 /* the reserve the collector needs; computational storage runs the same FTL */
 int bb_check_capacity(FemuCtrl *n, NvmeNamespace *ns, Error **errp);
 uint64_t bb_ftl_bytes(FemuCtrl *n, NvmeNamespace *ns);

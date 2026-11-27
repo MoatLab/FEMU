@@ -1415,6 +1415,9 @@ void femu_test_g1_ring_full(void *obj, void *data, QGuestAllocator *alloc);
 /* femu-test-fdp.c */
 void femu_test_fdp_events(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_fdp_gc_handles(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fdp_gc_spare(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_fdp_gc_spare_refused(void *obj, void *data,
+                                    QGuestAllocator *alloc);
 void femu_test_fdp_gc_recover(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_fdp_capacity_refused(void *obj, void *data,
                                     QGuestAllocator *alloc);

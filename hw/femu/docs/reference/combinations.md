@@ -690,6 +690,7 @@ own description allows. A message keeps its format directives (`%s`,
 - FEMU bbssd: hmb_mb is at most 65536 and needs mapping=dftl without FDP, KV or shared namespaces; hmb_ns must not be negative
 - FEMU bbssd: the %u namespaces expose %
 - FEMU bbssd: the %u namespaces share one FTL and expose %
+- FEMU bbssd: the namespaces leave %
 - FEMU: gc_idle_ms is not supported with shared namespaces
 - a rotational subsystem needs NVM namespaces; namespace %d is %s
 - bbssd_ns_limit must be between 1 and %u and cover the boot namespaces
