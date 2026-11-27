@@ -1699,6 +1699,23 @@ static int64_t femu_lsm_timed(FemuCtrlState *c, uint8_t opcode, uint64_t i,
 }
 
 /*
+ * The least wall time of @tries runs of a KV command that reads no flash.
+ * A host delay adds time to one run only; a flash read adds it to each.
+ */
+static int64_t femu_lsm_timed_min(FemuCtrlState *c, uint8_t opcode,
+                                  uint64_t i, uint64_t buf, uint32_t len,
+                                  uint16_t want, int tries)
+{
+    int64_t best = INT64_MAX;
+    int t;
+
+    for (t = 0; t < tries; t++) {
+        best = MIN(best, femu_lsm_timed(c, opcode, i, buf, len, want));
+    }
+    return best;
+}
+
+/*
  * A lookup reads the meta page of each unpinned level whose key range
  * holds the key, one after the other, and then the value. With 25 ms
  * reads, a key found after k meta pages takes (k + 1) reads; a key in the
@@ -1758,12 +1775,14 @@ void femu_test_kv_lsm_probe_time(void *obj, void *data,
      */
     g_usleep(3 * FEMU_LSM_READ_US);
     reads = femu_lsm_stat(qts, "probe-read-pages");
-    us = femu_lsm_timed(&c, FEMU_KV_CMD_EXIST, 5000, buf, 0, 0x87);
+    us = femu_lsm_timed_min(&c, FEMU_KV_CMD_EXIST, 5000, buf, 0, 0x87, 5);
     g_assert_cmpint(femu_lsm_stat(qts, "probe-read-pages"), ==, reads);
+    g_test_message("miss: least of 5 runs %" PRId64 " us", us);
     g_assert_cmpint(us, <, FEMU_LSM_READ_US / 2);
     /* an Exist that the memtable answers costs no flash either */
-    us = femu_lsm_timed(&c, FEMU_KV_CMD_EXIST, (135 * 53) % 136, buf, 0,
-                        NVME_SUCCESS);
+    us = femu_lsm_timed_min(&c, FEMU_KV_CMD_EXIST, (135 * 53) % 136, buf, 0,
+                            NVME_SUCCESS, 5);
+    g_test_message("memtable Exist: least of 5 runs %" PRId64 " us", us);
     g_assert_cmpint(us, <, FEMU_LSM_READ_US / 2);
 
     femu_disable(&c);
