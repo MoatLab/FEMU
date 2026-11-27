@@ -736,6 +736,13 @@ struct ssd {
     uint64_t plm_pace_wake; /* no step before this: no LUN has room */
     uint64_t plm_pace_waits; /* qtest: steps that copied nothing */
     /*
+     * The open victim came from the background band (target met,
+     * should_gc()), so the hold does not wait for it.
+     */
+    bool plm_pace_band;
+    /* no band victim before plm_wr_total + plm_trim_pages reach this */
+    uint64_t plm_band_mark;
+    /*
      * The hold of a Set 14h reads these from the main loop with no pause:
      * the target is met with no paced victim open, and the latest end of
      * any GC booking. A host booking never sets plm_gc_end, but a GC

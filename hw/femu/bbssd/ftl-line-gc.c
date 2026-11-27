@@ -3578,11 +3578,21 @@ static bool plm_pace_empty(struct ssd *ssd)
  * Paced GC takes the place of background GC, so it also runs where
  * background GC would: below the NDWIN target, or at gc_thres_lines and
  * under when the target is lower. Else no GC would run in that band
- * until forced GC.
+ * until forced GC. In the band it takes victims as background GC does,
+ * and after a band with no such victim it waits for a host write or a
+ * deallocate, which alone can make one.
+ *
+ *   free < plm_ndwin_lines --------------> forced victim (target work)
+ *   else should_gc(), past plm_band_mark --> background victim or none
+ *   else ---------------------------------> no step
  */
 static bool plm_pace_short(struct ssd *ssd)
 {
-    return ssd->lm.free_line_cnt < ssd->plm_lines || should_gc(ssd);
+    if (ssd->lm.free_line_cnt < ssd->plm_lines) {
+        return true;
+    }
+    return should_gc(ssd) &&
+           ssd->plm_wr_total + ssd->plm_trim_pages >= ssd->plm_band_mark;
 }
 
 /*
@@ -3605,15 +3615,23 @@ static void plm_pace_mark(struct ssd *ssd)
     ssd->plm_pace_v0 = ssd->plm_pace_victims;
 }
 
-/* open a victim as a forced pass takes one; false when there is none */
+/*
+ * Open a victim: below the target as a forced pass takes one, in the
+ * band as background GC takes one. False when there is none.
+ */
 static bool plm_pace_open(struct ssd *ssd)
 {
     int nl = ssd->sp.nchs * ssd->sp.luns_per_ch;
-    struct line *victim = ssd->policy->select_victim_line(ssd, true);
+    bool force = ssd->lm.free_line_cnt < ssd->plm_lines;
+    struct line *victim = ssd->policy->select_victim_line(ssd, force);
 
     if (!victim) {
+        if (!force) {
+            ssd->plm_band_mark = ssd->plm_wr_total + ssd->plm_trim_pages + 1;
+        }
         return false;
     }
+    ssd->plm_pace_band = !force;
     victim = ssd_rain_fit_victim(ssd, victim);
     trace_femu_gc_victim(victim->id, victim->vpc, victim->ipc);
     ftl_note_victim(ssd, victim->id);
@@ -3718,7 +3736,10 @@ void ssd_plm_pace_step(struct ssd *ssd)
             return;
         }
         if (!plm_pace_open(ssd)) {
-            plm_pace_stall(ssd);
+            /* only a target with no victim is a stall */
+            if (ssd->lm.free_line_cnt < ssd->plm_lines) {
+                plm_pace_stall(ssd);
+            }
             return;
         }
     }

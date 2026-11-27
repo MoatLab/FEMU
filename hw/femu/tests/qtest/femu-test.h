@@ -1324,6 +1324,8 @@ void femu_test_plm_pace_cap_min(void *obj, void *data,
                                 QGuestAllocator *alloc);
 void femu_test_plm_pace_spin(void *obj, void *data, QGuestAllocator *alloc);
 void femu_test_plm_pace_band(void *obj, void *data, QGuestAllocator *alloc);
+void femu_test_plm_pace_band_valid(void *obj, void *data,
+                                   QGuestAllocator *alloc);
 void femu_test_plm_gc_record_2pl(void *obj, void *data,
                                  QGuestAllocator *alloc);
 void femu_test_rber_disturb(void *obj, void *data, QGuestAllocator *alloc);

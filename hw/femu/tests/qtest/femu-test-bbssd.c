@@ -23343,6 +23343,62 @@ void femu_test_plm_pace_band(void *obj, void *data, QGuestAllocator *alloc)
 }
 
 /*
+ * In the band, paced GC takes victims as background GC does. 27 user
+ * lines of 32 leave about 5 free lines. The debt to 3 free lines writes
+ * at most one chunk in each user line, so each victim has 32 of 256
+ * pages invalid: 12.5 %, under gc_bg_invalid_pcent=20. The target (2) is
+ * met and should_gc() holds, so this is the band.
+ *
+ *   forced choice --> a victim with 224 valid pages --> copies > 0
+ *   background choice --> no victim --> 0 copies, no victim open,
+ *   the hold may end (READY)
+ *
+ * It catches paced GC that copies nearly full lines without end in the
+ * band and holds each Set 14h to the cap.
+ */
+void femu_test_plm_pace_band_valid(void *obj, void *data,
+                                   QGuestAllocator *alloc)
+{
+    QFemu *femu = obj;
+    QTestState *qts = femu->dev.bus->qts;
+    FemuCtrlState c = { 0 };
+    uint64_t buf = guest_alloc(alloc, FEMU_DATA_SIZE);
+    uint64_t list = guest_alloc(alloc, 4096);
+    int64_t v0[FEMU_PLMF_N];
+    int64_t v[FEMU_PLMF_N];
+    int64_t p[FEMU_PACE_N];
+
+    femu_enable(&c, &femu->dev, alloc);
+    femu_create_io_queues(&c);
+    femu_plm_dtwwt(qts, "plmv", 1000000);
+    femu_plm_start(&c, list, 1);
+    femu_pace_debt(&c, "plmv", buf, list, 27 * 256, 256, 32, 3, NULL);
+    femu_plm_ftl(qts, "plmv", v0);
+    g_assert_cmpint(v0[FEMU_PLMF_TARGET], ==, 2);
+    g_assert_cmpint(v0[FEMU_PLMF_FREE], ==, 3);
+    femu_plm_win(&c, list, 2);
+    /* the forced choice opens a victim in the first idle pass */
+    g_usleep(300 * 1000);
+    femu_plm_ftl(qts, "plmv", v);
+    femu_pace_get(qts, "plmv", p);
+    g_test_message("free %" PRId64 " --> %" PRId64 ", %" PRId64
+                   " copies, open %" PRId64 ", ready %" PRId64,
+                   v0[FEMU_PLMF_FREE], v[FEMU_PLMF_FREE],
+                   v[FEMU_PLMF_COPIES] - v0[FEMU_PLMF_COPIES],
+                   p[FEMU_PACE_OPEN], p[FEMU_PACE_READY]);
+    g_assert_cmpint(v[FEMU_PLMF_COPIES], ==, v0[FEMU_PLMF_COPIES]);
+    g_assert_cmpint(v[FEMU_PLMF_FREE], ==, 3);
+    g_assert_cmpint(p[FEMU_PACE_OPEN], ==, 0);
+    g_assert_cmpint(p[FEMU_PACE_READY], ==, 1);
+    g_assert_cmpint(p[FEMU_PACE_STALLED], ==, 0);
+    femu_queue_free(&c, &c.io);
+    femu_disable(&c);
+    guest_free(alloc, list);
+    guest_free(alloc, buf);
+    qos_invalidate_command_line();
+}
+
+/*
  * The NDWIN record with two planes per LUN (pls_per_lun 2, 40 lines of
  * 32 pages, 24 of them user data, target 8, plm_ndwin_gc_us 0). The
  * victim erase is one multi-plane operation of tBERS on the LUN:

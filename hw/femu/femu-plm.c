@@ -326,7 +326,7 @@ static void femu_plm_snap(FemuCtrl *n, bool entry)
     /* for the hold: the GC bookings, and plm_gc_end, came before this */
     qatomic_store_release(&ssd->plm_ready,
                           ssd->lm.free_line_cnt >= ssd->plm_lines &&
-                          !ssd->pace_line);
+                          (!ssd->pace_line || ssd->plm_pace_band));
 }
 
 void femu_plm_publish(FemuCtrl *n)
@@ -635,8 +635,14 @@ static void femu_plm_window(FemuCtrl *n, uint8_t w)
 
     femu_plm_nd_edge(n, qatomic_read(&pl->window), w);
     femu_plm_flags(n, w);
-    /* no window runs paced GC now: an open victim goes back */
-    if (w == FEMU_PLMW_OFF) {
+    /*
+     * No window runs paced GC now: an open victim goes back. A band
+     * victim goes back at DTWIN too, so a forced pass there takes the
+     * best victim, not a partly copied band victim.
+     */
+    if (w == FEMU_PLMW_OFF ||
+        (w == FEMU_PLMW_DTWIN && n->ssd && n->ssd->pace_line &&
+         n->ssd->plm_pace_band)) {
         ssd_plm_pace_release(n->ssd);
     }
     qatomic_set(&pl->ndwin_dtwte, pl->dtwin_ms);
@@ -710,7 +716,8 @@ static bool femu_plm_paced(FemuCtrl *n)
  * NTWTML, ready or stalled ends it too:
  *
  *   cap      hold_cap_ms after the Set 14h arrived
- *   ready    free >= plm_ndwin_lines, no paced victim, GC end <= now
+ *   ready    free >= plm_ndwin_lines, no paced victim of the target
+ *            (a band victim does not count), GC end <= now
  *   stalled  plm_stalled: no victim, no gain, no room, read-only media
  *
  * Host bookings never move the GC end, but a GC booking behind host

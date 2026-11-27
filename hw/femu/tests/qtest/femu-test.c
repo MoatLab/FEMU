@@ -2589,6 +2589,17 @@ static void femu_register_nodes(void)
             "plm=on,subsys=plmsub,plm_dtwin_ms=3600000,plm_ndwin_lines=2",
         .before = femu_plm_before,
     });
+    qos_add_test("plm-pace-band-valid", "femu",
+                 femu_test_plm_pace_band_valid,
+                 &(QOSGraphTestOptions) {
+        .edge.extra_device_opts =
+            "id=plmv,femu_mode=1,devsz_mb=27,secsz=512,secs_per_pg=8,"
+            "pgs_per_blk=64,blks_per_pl=32,pls_per_lun=1,luns_per_ch=2,"
+            "nchs=2,gc_thres_pcent=90,gc_thres_pcent_high=95,"
+            "gc_bg_invalid_pcent=20,rrl=on,plm=on,subsys=plmsub,"
+            "plm_dtwin_ms=3600000,plm_ndwin_lines=2",
+        .before = femu_plm_before,
+    });
     qos_add_test("plm-gc-record-2pl", "femu", femu_test_plm_gc_record_2pl,
                  &(QOSGraphTestOptions) {
         .edge.extra_device_opts =
